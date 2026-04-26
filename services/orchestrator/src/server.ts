@@ -22,7 +22,8 @@ import { unsealSessionFromCookieHeader, type AuthKitSession } from "./auth/worko
 import { ensureBucket } from "./storage/client.js";
 import { getTracker } from "./storage/sync.js";
 
-const PORT = Number(process.env.ORCHESTRATOR_PORT ?? 8787);
+// Railway/Fly inject PORT; local dev sets ORCHESTRATOR_PORT or falls back to 8787.
+const PORT = Number(process.env.PORT ?? process.env.ORCHESTRATOR_PORT ?? 8787);
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const SANDBOX_ROOT = path.resolve(REPO_ROOT, ".sandbox");
 

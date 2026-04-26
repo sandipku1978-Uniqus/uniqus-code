@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "dev": "turbo run dev --parallel",
-    "agent": "npm --workspace=@uniqus/orchestrator run start --",
+    "agent": "npm --workspace=@uniqus/orchestrator run cli --",
     "typecheck": "turbo run typecheck"
   },
   "devDependencies": {
