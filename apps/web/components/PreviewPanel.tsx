@@ -3,10 +3,15 @@
 import { useState } from "react";
 import type { PreviewServer } from "@uniqus/api-types";
 
+const ORCHESTRATOR_URL =
+  process.env.NEXT_PUBLIC_ORCHESTRATOR_URL ??
+  (typeof window !== "undefined" ? `http://${window.location.hostname}:8787` : "");
+
 export default function PreviewPanel({ server }: { server: PreviewServer }) {
   const [reloadKey, setReloadKey] = useState(0);
-  const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
-  const url = `http://${host}:${server.port}`;
+  // Route through the orchestrator's preview proxy so the iframe works in
+  // production (Vercel + Railway) where the dev server isn't on a public port.
+  const url = `${ORCHESTRATOR_URL}/preview/${server.id}/`;
 
   return (
     <div className="preview-wrap">

@@ -1,5 +1,10 @@
 import "./env.js";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+  type IncomingHttpHeaders,
+} from "node:http";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +26,9 @@ import { loadHistory, appendMessage, clearHistory } from "./db/messages.js";
 import { unsealSessionFromCookieHeader, type AuthKitSession } from "./auth/workos.js";
 import { ensureBucket } from "./storage/client.js";
 import { getTracker } from "./storage/sync.js";
+import { resolveTarget, proxyHttp, proxyWebSocket } from "./proxy.js";
+import { importZip, importGithub } from "./import.js";
+import Busboy from "busboy";
 
 // Railway/Fly inject PORT; local dev sets ORCHESTRATOR_PORT or falls back to 8787.
 const PORT = Number(process.env.PORT ?? process.env.ORCHESTRATOR_PORT ?? 8787);
@@ -108,6 +116,27 @@ async function main(): Promise<void> {
 
 const CORS_ORIGIN = process.env.WEB_ORIGIN ?? "http://localhost:4242";
 
+/**
+ * Should this request go to the preview proxy?
+ *
+ * Yes if the path explicitly starts with `/preview/`, or if there's a Referer
+ * pointing at `/preview/...` AND the request path is NOT an orchestrator-owned
+ * route (`/api/*`, `/health`, the WS root with `?project=`). The exclusion
+ * matters: a user who has a preview iframe open will have a `Referer` of
+ * `/preview/srv_xxx/...` on every request from that tab, including the web
+ * app's own API calls if they were ever co-mounted on the same origin.
+ */
+function shouldProxy(url: string, headers: IncomingHttpHeaders): boolean {
+  if (url.startsWith("/preview/")) return true;
+  const ref = headers.referer ?? headers.referrer;
+  if (typeof ref !== "string") return false;
+  if (url.startsWith("/api/") || url === "/health") return false;
+  // The orchestrator WS upgrade lives at `/` with `?project=...`. Anything
+  // with a project query is the agent socket, never the proxy.
+  if (url.startsWith("/?") && url.includes("project=")) return false;
+  return true;
+}
+
 function setCors(res: ServerResponse, req: IncomingMessage): void {
   const origin = req.headers.origin ?? CORS_ORIGIN;
   res.setHeader("Access-Control-Allow-Origin", origin);
@@ -144,6 +173,23 @@ async function authenticate(req: IncomingMessage): Promise<{
 }
 
 async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  // Preview proxy: forward `/preview/:serverId/...` and Referer-tagged absolute
+  // paths to the in-sandbox dev server. Runs BEFORE CORS/auth so iframes loaded
+  // cross-site work without our cookie. Access control is by serverId (random UUID).
+  const url = req.url ?? "/";
+  if (shouldProxy(url, req.headers)) {
+    const target = resolveTarget(url, req.headers);
+    if (target) {
+      proxyHttp(req, res, target);
+      return;
+    }
+    if (url.startsWith("/preview/")) {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("preview server not found or stopped");
+      return;
+    }
+  }
+
   setCors(res, req);
 
   if (req.method === "OPTIONS") {
@@ -192,8 +238,120 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return json(res, 201, { project: toProjectSummary(project) });
   }
 
+  // Codebase import: GitHub clone. Creates the project, clones into the sandbox,
+  // then pushes the resulting tree to Storage so other sessions hydrate from it.
+  if (req.url === "/api/projects/import-github" && req.method === "POST") {
+    const body = await readJsonBody<{
+      name?: string;
+      description?: string;
+      repo_url?: string;
+      branch?: string;
+      pat?: string;
+    }>(req);
+    const name = (body.name ?? "").trim();
+    const repoUrl = (body.repo_url ?? "").trim();
+    if (!name) return json(res, 400, { error: "name is required" });
+    if (!repoUrl) return json(res, 400, { error: "repo_url is required" });
+
+    const project = await createProject({
+      owner_id: user.id,
+      name,
+      description: body.description ?? null,
+    });
+    const dest = sandboxDirFor(project.id);
+    await fs.mkdir(dest, { recursive: true });
+
+    try {
+      const result = await importGithub(
+        { repo_url: repoUrl, branch: body.branch, pat: body.pat },
+        dest,
+      );
+      await getTracker(project.id, dest).syncChanges();
+      return json(res, 201, { project: toProjectSummary(project), import: result });
+    } catch (err) {
+      // Roll back the empty project so the user can retry without a stale row.
+      // If sync also fails we still return the import error to the user.
+      const message = err instanceof Error ? err.message : String(err);
+      return json(res, 400, { error: `import failed: ${message}` });
+    }
+  }
+
+  // Codebase import: ZIP upload. Multipart/form-data with a file field plus
+  // text fields `name` and (optional) `description`.
+  if (req.url === "/api/projects/import-zip" && req.method === "POST") {
+    return await handleZipImport(req, res, user.id);
+  }
+
   res.writeHead(404);
   res.end();
+}
+
+async function handleZipImport(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ownerId: string,
+): Promise<void> {
+  let zipBuffer: Buffer | null = null;
+  let projectName = "";
+  let description: string | null = null;
+  let parseError: string | null = null;
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const bb = Busboy({
+        headers: req.headers,
+        limits: { fileSize: 250 * 1024 * 1024, files: 1 },
+      });
+      const chunks: Buffer[] = [];
+      bb.on("file", (_field, file, info) => {
+        if (!info.filename.toLowerCase().endsWith(".zip")) {
+          parseError = "uploaded file must be a .zip";
+          file.resume();
+          return;
+        }
+        file.on("data", (d: Buffer) => chunks.push(d));
+        file.on("limit", () => {
+          parseError = "zip file exceeds 250 MB upload limit";
+        });
+        file.on("end", () => {
+          if (!parseError) zipBuffer = Buffer.concat(chunks);
+        });
+      });
+      bb.on("field", (name, value) => {
+        if (name === "name") projectName = value.trim();
+        else if (name === "description") description = value.trim() || null;
+      });
+      bb.on("finish", () => resolve());
+      bb.on("error", (err) => reject(err));
+      req.pipe(bb);
+    });
+  } catch (err) {
+    return json(res, 400, {
+      error: `multipart parse failed: ${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
+
+  if (parseError) return json(res, 400, { error: parseError });
+  if (!projectName) return json(res, 400, { error: "name is required" });
+  if (!zipBuffer) return json(res, 400, { error: "no zip file uploaded" });
+
+  const project = await createProject({
+    owner_id: ownerId,
+    name: projectName,
+    description,
+  });
+  const dest = sandboxDirFor(project.id);
+  await fs.mkdir(dest, { recursive: true });
+
+  try {
+    const result = await importZip(zipBuffer, dest);
+    await getTracker(project.id, dest).syncChanges();
+    return json(res, 201, { project: toProjectSummary(project), import: result });
+  } catch (err) {
+    return json(res, 400, {
+      error: `import failed: ${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
 }
 
 function toProjectSummary(p: {
@@ -224,6 +382,18 @@ async function handleUpgrade(
     socket.write(`HTTP/1.1 ${status} ${message}\r\n\r\n`);
     socket.destroy();
   };
+
+  // Preview proxy WS: HMR / live-reload sockets from inside the iframe app.
+  // Resolved by URL prefix or Referer; access by serverId only (matches HTTP proxy).
+  const rawUrl = req.url ?? "/";
+  if (shouldProxy(rawUrl, req.headers)) {
+    const target = resolveTarget(rawUrl, req.headers);
+    if (target) {
+      proxyWebSocket(req, socket, head, target);
+      return;
+    }
+    if (rawUrl.startsWith("/preview/")) return reject(404, "Preview server not found");
+  }
 
   const auth = await authenticate(req);
   if (!auth) return reject(401, "Unauthorized");

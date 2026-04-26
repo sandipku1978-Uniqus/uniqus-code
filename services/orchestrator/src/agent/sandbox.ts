@@ -285,6 +285,14 @@ export function listServers(projectId?: string | null): ServerInfo[] {
   }));
 }
 
+export function getServer(
+  id: string,
+): { id: string; command: string; port: number; project_id: string | null } | null {
+  const s = servers.get(id);
+  if (!s) return null;
+  return { id: s.id, command: s.command, port: s.port, project_id: s.project_id };
+}
+
 export function readServerLog(id: string, maxBytes = 8000): string {
   const server = servers.get(id);
   if (!server) throw new Error(`No server with id ${id}`);

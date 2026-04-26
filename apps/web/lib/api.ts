@@ -32,3 +32,47 @@ export const createProjectApi = (
     method: "POST",
     body: JSON.stringify({ name, description }),
   });
+
+export interface ImportResultMeta {
+  files_imported: number;
+  total_bytes: number;
+  stripped_root: string | null;
+}
+
+export const importGithubApi = (input: {
+  name: string;
+  description?: string;
+  repo_url: string;
+  branch?: string;
+  pat?: string;
+}): Promise<{ project: ProjectSummary; import: ImportResultMeta }> =>
+  api("/api/projects/import-github", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+
+/**
+ * Upload a zip via multipart/form-data. Doesn't go through the JSON `api()` helper
+ * because we mustn't set Content-Type — the browser writes the boundary itself.
+ */
+export async function importZipApi(input: {
+  name: string;
+  description?: string;
+  file: File;
+}): Promise<{ project: ProjectSummary; import: ImportResultMeta }> {
+  const fd = new FormData();
+  fd.append("name", input.name);
+  if (input.description) fd.append("description", input.description);
+  fd.append("file", input.file);
+
+  const res = await fetch(`${API_BASE}/api/projects/import-zip`, {
+    method: "POST",
+    credentials: "include",
+    body: fd,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`API ${res.status}: ${body || res.statusText}`);
+  }
+  return (await res.json()) as { project: ProjectSummary; import: ImportResultMeta };
+}
