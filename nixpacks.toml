@@ -1,0 +1,15 @@
+# Railway/Nixpacks build config.
+#
+# Adds the system binaries the orchestrator needs at runtime:
+#   - git: for the codebase-import "Clone GitHub" path (`git clone`)
+#   - ca-certificates: HTTPS roots so git/fetch can verify github.com
+#   - psmisc: provides `fuser`, used by startServer to clear a port held by
+#     a zombie process before binding (otherwise dev-server restarts hit
+#     EADDRINUSE for tens of seconds while the kernel releases the socket).
+#   - lsof: secondary fallback alongside fuser for finding port holders.
+#
+# Without these, you get cryptic ENOENTs in /api/projects/import-github and
+# in startServer's port-clear path.
+
+[phases.setup]
+aptPkgs = ["git", "ca-certificates", "psmisc", "lsof"]

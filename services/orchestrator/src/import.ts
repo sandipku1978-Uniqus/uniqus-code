@@ -173,7 +173,21 @@ function runGit(args: string[]): Promise<void> {
     child.stderr.on("data", (d) => {
       stderr += d.toString();
     });
-    child.on("error", (err) => reject(err));
+    child.on("error", (err) => {
+      // ENOENT means git isn't installed on the orchestrator host. Without
+      // a clear message users see "spawn git ENOENT" which doesn't tell
+      // them what to do — the fix is on the build side (nixpacks.toml /
+      // Dockerfile aptPkgs), not in the request.
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        reject(
+          new Error(
+            "git is not installed on the orchestrator host. Add it to the build image (nixpacks.toml: aptPkgs = [\"git\", ...]) and redeploy.",
+          ),
+        );
+      } else {
+        reject(err);
+      }
+    });
     child.on("close", (code) => {
       if (code === 0) return resolve();
       // Scrub PAT from any error surface, just in case.
