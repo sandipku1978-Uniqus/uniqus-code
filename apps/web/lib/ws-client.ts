@@ -117,8 +117,10 @@ function handleEvent(event: ServerEvent): void {
       if (event.content !== null) {
         s.setFile(event.path, event.content);
         // Server is the source of truth post-load — clear any stale dirty
-        // marker so the status footer doesn't lie.
+        // marker so the status footer doesn't lie. Also drop any pending
+        // edit since it's been overwritten by the server's content.
         s.setSaveStatus(event.path, { kind: "idle" });
+        s.clearPendingEdit(event.path);
       }
       break;
     case "file_changed":

@@ -1,6 +1,7 @@
 "use client";
 
-import { useStore, fileTabId, previewTabId } from "@/lib/store";
+import { useStore, fileTabId, previewTabId, flushSave } from "@/lib/store";
+import { stopServerApi } from "@/lib/api";
 import CodeEditor from "./CodeEditor";
 import PreviewPanel from "./PreviewPanel";
 
@@ -10,6 +11,8 @@ export default function EditorPreviewArea() {
   const editorTab = useStore((s) => s.editorTab);
   const setEditorTab = useStore((s) => s.setEditorTab);
   const closeOpenFile = useStore((s) => s.closeOpenFile);
+  const saveStatus = useStore((s) => s.saveStatus);
+  const project = useStore((s) => s.project);
 
   const hasAnyTabs = openFiles.length > 0 || previews.length > 0;
 
@@ -29,6 +32,8 @@ export default function EditorPreviewArea() {
         <div className="tab-strip">
           {openFiles.map((path) => {
             const tabId = fileTabId(path);
+            const status = saveStatus[path]?.kind;
+            const isDirty = status === "dirty" || status === "saving";
             return (
               <button
                 key={tabId}
@@ -39,16 +44,38 @@ export default function EditorPreviewArea() {
                 <span style={{ fontFamily: "var(--font-mono-stack)" }}>
                   {path.split("/").pop() ?? path}
                 </span>
-                <span
-                  className="x"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    closeOpenFile(path);
-                  }}
-                  title="Close"
-                >
-                  ×
-                </span>
+                {isDirty ? (
+                  <span
+                    className="x"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      // Fire-and-forget; flushSave handles dedup + agent-busy backoff.
+                      flushSave(path).catch(() => {});
+                    }}
+                    title={status === "saving" ? "saving…" : "Save now (⌘S)"}
+                    style={{
+                      color:
+                        status === "saving"
+                          ? "var(--text-muted)"
+                          : "var(--accent-primary, #fbbf24)",
+                      fontSize: 14,
+                      lineHeight: 1,
+                    }}
+                  >
+                    •
+                  </span>
+                ) : (
+                  <span
+                    className="x"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      closeOpenFile(path);
+                    }}
+                    title="Close"
+                  >
+                    ×
+                  </span>
+                )}
               </button>
             );
           })}
@@ -74,6 +101,24 @@ export default function EditorPreviewArea() {
                   <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
                 </svg>
                 <span>preview :{p.port}</span>
+                <span
+                  className="x"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!project) return;
+                    // Closing the tab kills the underlying dev server.
+                    // Without this, the server keeps running on the
+                    // orchestrator host and the user can't get rid of it
+                    // without restarting Railway. The store will drop the
+                    // tab when the orchestrator broadcasts server_stopped.
+                    stopServerApi(project.id, p.id).catch((err) => {
+                      console.error("stopServer failed:", err);
+                    });
+                  }}
+                  title="Stop server and close tab"
+                >
+                  ×
+                </span>
               </button>
             );
           })}

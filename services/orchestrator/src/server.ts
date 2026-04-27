@@ -24,8 +24,10 @@ import {
   listServers,
   sandboxEvents,
   startServer as sandboxStartServer,
+  stopServer as sandboxStopServer,
   writeFile as sandboxWriteFile,
 } from "./agent/sandbox.js";
+import { readRunConfig, writeRunConfig, detectRunConfig } from "./runConfig.js";
 import { upsertUser, type UserRecord } from "./db/users.js";
 import { listProjects, createProject, getProject, touchProject } from "./db/projects.js";
 import { loadHistory, appendMessage, clearHistory } from "./db/messages.js";
@@ -293,51 +295,106 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return await handleZipImport(req, res, user.id);
   }
 
-  // Manual start-server: lets the user fire up a dev server from the IDE
-  // toolbar without prompting the agent. URL: /api/projects/{id}/start-server
-  const startServerMatch = req.url?.match(
-    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/start-server$/,
+  // Stop a specific server: DELETE /api/projects/{projectId}/servers/{serverId}
+  // The user closing the preview tab needs to kill the underlying process,
+  // not just hide the iframe.
+  const stopMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/servers\/(srv_[0-9a-fA-F]+)$/,
   );
-  if (startServerMatch && req.method === "POST") {
-    const projectId = startServerMatch[1];
+  if (stopMatch && req.method === "DELETE") {
+    const projectId = stopMatch[1];
+    const serverId = stopMatch[2];
     const project = await getProject(projectId, user.id);
     if (!project) return json(res, 403, { error: "project not found or access denied" });
-
-    const body = await readJsonBody<{
-      command?: string;
-      port?: number;
-      ready_timeout_ms?: number;
-    }>(req);
-    const command = (body.command ?? "").trim();
-    const port = Number(body.port);
-    if (!command) return json(res, 400, { error: "command is required" });
-    if (!Number.isFinite(port) || port <= 0 || port > 65535) {
-      return json(res, 400, { error: "port must be a number 1-65535" });
+    // Verify the server belongs to this project before killing it (defense
+    // in depth — listServers + getProject already gate access).
+    const owned = listServers(projectId).some((s) => s.id === serverId);
+    if (!owned) return json(res, 404, { error: "server not found in this project" });
+    try {
+      sandboxStopServer(serverId);
+      broadcastToProject(projectId, { type: "server_stopped", id: serverId });
+      return json(res, 200, { ok: true });
+    } catch (err) {
+      return json(res, 400, {
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
+  }
+
+  // One-click Run: stop any existing servers for this project, then start
+  // (or restart) using the project's stored config (or auto-detect from
+  // package.json/requirements.txt). URL: /api/projects/{id}/run
+  const runMatch = req.url?.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/run$/);
+  if (runMatch && req.method === "POST") {
+    const projectId = runMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 403, { error: "project not found or access denied" });
 
     const dest = sandboxDirFor(projectId);
     await fs.mkdir(dest, { recursive: true });
 
+    // Optional override body — `command` and `port` only used if provided.
+    // Empty body means "use whatever's stored or auto-detected".
+    type RunBody = { command?: string; port?: number };
+    const body = await readJsonBody<RunBody>(req).catch<RunBody>(() => ({}));
+
+    const config = body.command && body.port
+      ? {
+          command: body.command.trim(),
+          port: Number(body.port),
+          source: "user" as const,
+        }
+      : (await readRunConfig(dest)) ?? (await detectRunConfig(dest));
+
+    if (!config) {
+      return json(res, 400, {
+        error:
+          "No run config and we couldn't detect one (no package.json `dev`/`start` script, no app.py / main.py). Ask the agent to scaffold the project, or pass {command, port} in the body.",
+      });
+    }
+
+    // Stop any servers currently running for this project — both agent-started
+    // and previous manual ones. Restart-on-click is what users expect.
+    for (const s of listServers(projectId)) {
+      try {
+        sandboxStopServer(s.id);
+        broadcastToProject(projectId, { type: "server_stopped", id: s.id });
+      } catch (err) {
+        console.error(`failed to stop ${s.id}:`, err);
+      }
+    }
+
     try {
       const info = await sandboxStartServer(
         { rootDir: dest },
-        command,
-        port,
-        body.ready_timeout_ms ?? 60_000,
+        config.command,
+        config.port,
+        60_000,
         projectId,
       );
-      // Tell every connected session for this project that the server is up,
-      // so the preview tab opens for everyone (including this caller).
       broadcastToProject(projectId, {
         type: "server_started",
         id: info.id,
         command: info.command,
         port: info.port,
       });
+      // Persist whatever we just used so subsequent clicks reuse it (and so
+      // the agent and user converge on the same config).
+      await writeRunConfig(dest, {
+        command: config.command,
+        port: config.port,
+        source: config.source ?? "user",
+      }).catch((err) => console.error("writeRunConfig failed:", err));
+      getTracker(projectId, dest)
+        .syncFile(".uniqus-run.json")
+        .then(() => broadcastToProject(projectId, { type: "storage_synced", at: Date.now() }))
+        .catch(() => {});
       return json(res, 200, {
         id: info.id,
         port: info.port,
+        command: info.command,
         public_url: `${PREVIEW_BASE_URL.replace(/\/$/, "")}/preview/${info.id}/`,
+        config_source: config.source ?? "user",
       });
     } catch (err) {
       return json(res, 400, {
@@ -818,6 +875,22 @@ async function runSession(
             command,
             port: parsed.port,
           });
+          // Save the agent's choice as the project's default "Run" config so
+          // the user's one-click Run button reuses it next time. Background;
+          // failures here are non-fatal — the agent's server is already up.
+          if (command && Number.isFinite(parsed.port)) {
+            writeRunConfig(sandboxDir, {
+              command,
+              port: parsed.port,
+              source: "agent",
+            })
+              .then(() =>
+                getTracker(projectId, sandboxDir)
+                  .syncFile(".uniqus-run.json")
+                  .then(() => emitSynced()),
+              )
+              .catch((err) => console.error("writeRunConfig failed:", err));
+          }
         } catch {}
         return;
       }

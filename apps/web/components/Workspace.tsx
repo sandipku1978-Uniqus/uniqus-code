@@ -9,7 +9,7 @@ import {
 } from "react-resizable-panels";
 import { connect, disconnect } from "@/lib/ws-client";
 import { useStore } from "@/lib/store";
-import { startServerApi } from "@/lib/api";
+import { runProjectApi } from "@/lib/api";
 import ChatPanel from "./ChatPanel";
 import FileExplorer from "./FileExplorer";
 import EditorPreviewArea from "./EditorPreviewArea";
@@ -186,24 +186,25 @@ function relativeAge(epochMs: number): string {
 }
 
 function RunButton({ projectId }: { projectId: string }) {
-  const [open, setOpen] = useState(false);
-  const [command, setCommand] = useState("npm run dev -- -H 0.0.0.0");
-  const [port, setPort] = useState("3000");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const addSystem = useStore((s) => s.addSystem);
 
-  const submit = async () => {
+  // Auto-clear the error toast after a few seconds so a stale message
+  // doesn't sit above the topbar forever.
+  useEffect(() => {
+    if (!error) return;
+    const t = setTimeout(() => setError(null), 6000);
+    return () => clearTimeout(t);
+  }, [error]);
+
+  const onClick = async () => {
     if (busy) return;
-    const portNum = Number(port);
-    if (!Number.isFinite(portNum) || portNum <= 0 || portNum > 65535) {
-      setError("port must be 1–65535");
-      return;
-    }
     setBusy(true);
     setError(null);
     try {
-      await startServerApi(projectId, { command: command.trim(), port: portNum });
-      setOpen(false);
+      const r = await runProjectApi(projectId);
+      addSystem(`server up · ${r.command} :${r.port} (config: ${r.config_source})`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -215,10 +216,10 @@ function RunButton({ projectId }: { projectId: string }) {
     <div style={{ position: "relative" }}>
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={onClick}
+        disabled={busy}
         className="toggle-btn"
-        data-on={open}
-        title="Start a dev server (without prompting the agent)"
+        title="Stop any running server, then start (or restart) the project's dev server"
       >
         <svg
           width="14"
@@ -230,9 +231,9 @@ function RunButton({ projectId }: { projectId: string }) {
         >
           <polygon points="5 3 19 12 5 21 5 3" />
         </svg>
-        <span>Run</span>
+        <span>{busy ? "Starting…" : "Run"}</span>
       </button>
-      {open && (
+      {error && (
         <div
           style={{
             position: "absolute",
@@ -240,85 +241,21 @@ function RunButton({ projectId }: { projectId: string }) {
             right: 0,
             zIndex: 50,
             background: "var(--bg-elev, #16161e)",
-            border: "1px solid var(--border-default)",
-            borderRadius: 8,
-            padding: 12,
-            minWidth: 280,
+            border: "1px solid var(--conf-low, #c0392b)",
+            borderRadius: 6,
+            padding: "8px 10px",
+            fontSize: 11,
+            color: "var(--text-primary)",
+            maxWidth: 360,
             boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
           }}
         >
-          <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>
-            Command
-          </div>
-          <input
-            value={command}
-            onChange={(e) => setCommand(e.target.value)}
-            disabled={busy}
-            style={inputStyle}
-            placeholder="npm run dev -- -H 0.0.0.0"
-          />
-          <div
-            style={{ fontSize: 11, color: "var(--text-muted)", margin: "8px 0 6px" }}
-          >
-            Port
-          </div>
-          <input
-            value={port}
-            onChange={(e) => setPort(e.target.value)}
-            disabled={busy}
-            style={inputStyle}
-            placeholder="3000"
-          />
-          {error && (
-            <div style={{ color: "var(--conf-low)", fontSize: 11, marginTop: 8 }}>
-              {error}
-            </div>
-          )}
-          <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              className="icon-btn-sm"
-              style={{ width: "auto", padding: "4px 10px", fontSize: 11 }}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={submit}
-              disabled={busy || !command.trim()}
-              className="send-btn"
-              style={{ flex: 1 }}
-            >
-              {busy ? "Starting…" : "Start"}
-            </button>
-          </div>
-          <p
-            style={{
-              fontSize: 10,
-              color: "var(--text-muted)",
-              marginTop: 8,
-              marginBottom: 0,
-            }}
-          >
-            Bind to 0.0.0.0 — the proxy can&apos;t reach 127.0.0.1-only servers.
-          </p>
+          {error}
         </div>
       )}
     </div>
   );
 }
-
-const inputStyle: React.CSSProperties = {
-  width: "100%",
-  background: "var(--bg-base, #0c0c11)",
-  border: "1px solid var(--border-default)",
-  borderRadius: 6,
-  padding: "6px 8px",
-  color: "var(--text-primary)",
-  fontSize: 12,
-  fontFamily: "JetBrains Mono, ui-monospace, monospace",
-};
 
 function ToggleButton({
   on,

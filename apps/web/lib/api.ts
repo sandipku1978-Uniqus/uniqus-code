@@ -77,11 +77,22 @@ export async function importZipApi(input: {
   return (await res.json()) as { project: ProjectSummary; import: ImportResultMeta };
 }
 
-export const startServerApi = (
+export const runProjectApi = (
   projectId: string,
-  input: { command: string; port: number; ready_timeout_ms?: number },
-): Promise<{ id: string; port: number; public_url: string }> =>
-  api(`/api/projects/${projectId}/start-server`, {
+): Promise<{
+  id: string;
+  port: number;
+  command: string;
+  public_url: string;
+  config_source: "agent" | "user" | "detected";
+}> =>
+  api(`/api/projects/${projectId}/run`, {
     method: "POST",
-    body: JSON.stringify(input),
+    body: "{}",
   });
+
+export const stopServerApi = (
+  projectId: string,
+  serverId: string,
+): Promise<{ ok: true }> =>
+  api(`/api/projects/${projectId}/servers/${serverId}`, { method: "DELETE" });

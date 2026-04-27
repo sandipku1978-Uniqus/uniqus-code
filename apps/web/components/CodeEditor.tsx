@@ -2,8 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { useEffect, useRef } from "react";
-import { useStore, type SaveStatus } from "@/lib/store";
-import { send } from "@/lib/ws-client";
+import { useStore, flushSave, type SaveStatus } from "@/lib/store";
 
 const Monaco = dynamic(() => import("@monaco-editor/react"), { ssr: false });
 
@@ -88,18 +87,12 @@ export default function CodeEditor() {
   const path = useStore((s) => s.selectedFile);
   const content = useStore((s) => s.fileContent);
   const busy = useStore((s) => s.busy);
-  // Read just the per-path entry (returns the same reference until that
-  // entry is set/replaced); fall back to a stable sentinel afterwards so the
-  // selector never returns a new object literal.
   const rawSaveStatus = useStore((s) => (path ? s.saveStatus[path] : undefined));
   const saveStatus: SaveStatus = rawSaveStatus ?? IDLE_STATUS;
   const setSaveStatus = useStore((s) => s.setSaveStatus);
+  const setPendingEdit = useStore((s) => s.setPendingEdit);
 
-  // Save debounce. We keep a single timer per editor instance — if the user
-  // switches files mid-edit, we flush the pending save first.
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingPathRef = useRef<string | null>(null);
-  const pendingContentRef = useRef<string>("");
 
   // Flush any in-flight save when the open file changes — the user almost
   // always wants their last typed bytes to land before they navigate away.
@@ -108,15 +101,31 @@ export default function CodeEditor() {
       if (saveTimer.current) {
         clearTimeout(saveTimer.current);
         saveTimer.current = null;
-        if (pendingPathRef.current) {
-          send({
-            type: "client_write_file",
-            path: pendingPathRef.current,
-            content: pendingContentRef.current,
-          });
-        }
+      }
+      if (path) {
+        // Fire and forget; flushSave is a no-op if nothing's pending.
+        flushSave(path).catch(() => {});
       }
     };
+  }, [path]);
+
+  // Cmd/Ctrl-S → flush save now. Browsers default this to "Save Page As…",
+  // which is never what a developer wants in a code editor. We capture at
+  // window scope so it works even when Monaco doesn't have keyboard focus.
+  useEffect(() => {
+    if (!path) return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        if (saveTimer.current) {
+          clearTimeout(saveTimer.current);
+          saveTimer.current = null;
+        }
+        flushSave(path).catch(() => {});
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, [path]);
 
   if (!path) {
@@ -131,36 +140,11 @@ export default function CodeEditor() {
   const onChange = (value: string | undefined) => {
     if (value === undefined || value === content) return;
     setSaveStatus(path, { kind: "dirty" });
-    pendingPathRef.current = path;
-    pendingContentRef.current = value;
+    setPendingEdit(path, value);
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
       saveTimer.current = null;
-      // Don't fight the agent: if it's mid-turn, hold the save until it
-      // finishes. The pending content stays buffered and re-arms when the
-      // user types again or when busy clears (we re-check on the next tick).
-      if (useStore.getState().busy) {
-        setSaveStatus(path, { kind: "dirty" });
-        // Re-schedule a short retry so the save lands shortly after the
-        // agent goes idle.
-        saveTimer.current = setTimeout(() => {
-          saveTimer.current = null;
-          if (useStore.getState().busy) return; // try again on next change
-          setSaveStatus(path, { kind: "saving" });
-          send({
-            type: "client_write_file",
-            path,
-            content: pendingContentRef.current,
-          });
-        }, 800);
-        return;
-      }
-      setSaveStatus(path, { kind: "saving" });
-      send({
-        type: "client_write_file",
-        path,
-        content: pendingContentRef.current,
-      });
+      flushSave(path).catch(() => {});
     }, SAVE_DEBOUNCE_MS);
   };
 
@@ -210,19 +194,16 @@ export default function CodeEditor() {
   );
 }
 
-function describeSave(
-  status: { kind: string; at?: number; message?: string },
-  agentBusy: boolean,
-): string {
+function describeSave(status: SaveStatus, agentBusy: boolean): string {
   switch (status.kind) {
     case "saving":
       return "saving…";
     case "dirty":
-      return agentBusy ? "edits queued (agent running)" : "unsaved";
+      return agentBusy ? "edits queued (agent running)" : "unsaved · ⌘S to save";
     case "saved":
       return "saved";
     case "error":
-      return `save failed: ${status.message ?? ""}`;
+      return `save failed: ${status.message}`;
     default:
       return "";
   }

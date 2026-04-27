@@ -74,6 +74,12 @@ interface State {
   /** Per-path save status for the user-edit auto-save flow. */
   saveStatus: Record<string, SaveStatus>;
   /**
+   * Holds the user's typed-but-not-yet-saved content per file. Lives at the
+   * store level (not inside the editor) so the tab strip can flush a pending
+   * edit from outside the editor — the dirty-dot save button reads this.
+   */
+  pendingEdits: Record<string, string>;
+  /**
    * Whether the user has expanded a previously completed turn. Keyed by the
    * `complete` chat item id. Default = collapsed once the turn is done.
    */
@@ -104,6 +110,8 @@ interface State {
   setProject(p: ProjectSummary | null): void;
   setLastSyncedAt(at: number): void;
   setSaveStatus(path: string, status: SaveStatus): void;
+  setPendingEdit(path: string, content: string): void;
+  clearPendingEdit(path: string): void;
   toggleTurn(completeItemId: string): void;
   resetChat(): void;
   reset(): void;
@@ -133,6 +141,7 @@ export const useStore = create<State>((set, get) => ({
   project: null,
   lastSyncedAt: null,
   saveStatus: {},
+  pendingEdits: {},
   expandedTurns: {},
 
   setConnected: (c) => set({ connected: c }),
@@ -280,6 +289,15 @@ export const useStore = create<State>((set, get) => ({
   setLastSyncedAt: (at) => set({ lastSyncedAt: at }),
   setSaveStatus: (path, status) =>
     set((s) => ({ saveStatus: { ...s.saveStatus, [path]: status } })),
+  setPendingEdit: (path, content) =>
+    set((s) => ({ pendingEdits: { ...s.pendingEdits, [path]: content } })),
+  clearPendingEdit: (path) =>
+    set((s) => {
+      if (!(path in s.pendingEdits)) return {};
+      const next = { ...s.pendingEdits };
+      delete next[path];
+      return { pendingEdits: next };
+    }),
   toggleTurn: (completeItemId) =>
     set((s) => ({
       expandedTurns: {
@@ -310,6 +328,33 @@ export const useStore = create<State>((set, get) => ({
       project: null,
       lastSyncedAt: null,
       saveStatus: {},
+      pendingEdits: {},
       expandedTurns: {},
     }),
 }));
+
+/**
+ * Send the most recent buffered content for `path` to the orchestrator now,
+ * skipping any pending debounce. Safe to call when there's nothing buffered
+ * (it's a no-op). Defers if the agent is mid-turn — the file_changed flow
+ * will pick the edit back up once the agent goes idle.
+ *
+ * Lives outside the store so it can `import { send }` from ws-client without
+ * creating a circular dep through the store module.
+ */
+export async function flushSave(path: string): Promise<void> {
+  const { pendingEdits, busy, setSaveStatus, clearPendingEdit } = useStore.getState();
+  const content = pendingEdits[path];
+  if (content === undefined) return;
+  if (busy) {
+    // Agent is running — leave it dirty and let the editor's retry timer
+    // pick it up. Don't fight the agent mid-write.
+    setSaveStatus(path, { kind: "dirty" });
+    return;
+  }
+  setSaveStatus(path, { kind: "saving" });
+  // Lazy import keeps the store module free of WS deps.
+  const { send } = await import("./ws-client");
+  send({ type: "client_write_file", path, content });
+  clearPendingEdit(path);
+}
