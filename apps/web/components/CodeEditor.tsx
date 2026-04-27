@@ -2,12 +2,16 @@
 
 import dynamic from "next/dynamic";
 import { useEffect, useRef } from "react";
-import { useStore } from "@/lib/store";
+import { useStore, type SaveStatus } from "@/lib/store";
 import { send } from "@/lib/ws-client";
 
 const Monaco = dynamic(() => import("@monaco-editor/react"), { ssr: false });
 
 const SAVE_DEBOUNCE_MS = 600;
+// Module-scoped sentinel so the "no status" case returns a stable reference
+// across renders. A fresh object literal inside a Zustand selector causes an
+// infinite render loop (React #185) — Object.is sees a new ref every tick.
+const IDLE_STATUS: SaveStatus = { kind: "idle" };
 
 function languageFor(path: string): string {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
@@ -84,9 +88,11 @@ export default function CodeEditor() {
   const path = useStore((s) => s.selectedFile);
   const content = useStore((s) => s.fileContent);
   const busy = useStore((s) => s.busy);
-  const saveStatus = useStore((s) =>
-    path ? s.saveStatus[path] ?? { kind: "idle" } : { kind: "idle" },
-  );
+  // Read just the per-path entry (returns the same reference until that
+  // entry is set/replaced); fall back to a stable sentinel afterwards so the
+  // selector never returns a new object literal.
+  const rawSaveStatus = useStore((s) => (path ? s.saveStatus[path] : undefined));
+  const saveStatus: SaveStatus = rawSaveStatus ?? IDLE_STATUS;
   const setSaveStatus = useStore((s) => s.setSaveStatus);
 
   // Save debounce. We keep a single timer per editor instance — if the user
