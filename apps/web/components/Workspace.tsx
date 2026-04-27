@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   Panel,
@@ -9,6 +9,7 @@ import {
 } from "react-resizable-panels";
 import { connect, disconnect } from "@/lib/ws-client";
 import { useStore } from "@/lib/store";
+import { startServerApi } from "@/lib/api";
 import ChatPanel from "./ChatPanel";
 import FileExplorer from "./FileExplorer";
 import EditorPreviewArea from "./EditorPreviewArea";
@@ -26,6 +27,15 @@ export default function Workspace({
   const togglePanel = useStore((s) => s.togglePanel);
   const project = useStore((s) => s.project);
   const reset = useStore((s) => s.reset);
+  const lastSyncedAt = useStore((s) => s.lastSyncedAt);
+
+  // Tick so the "synced 12s ago" label increments without waiting for the
+  // next sync event. 10s cadence is plenty — the label rounds to seconds/min.
+  const [, setNow] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setNow((n) => n + 1), 10_000);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     reset();
@@ -64,6 +74,7 @@ export default function Workspace({
         </div>
 
         <div className="actions">
+          <RunButton projectId={projectId} />
           <ToggleButton
             on={panels.files}
             onClick={() => togglePanel("files")}
@@ -154,6 +165,9 @@ export default function Workspace({
           {connected ? "online" : "connecting…"}
         </span>
         <span className="seg">{project?.name ?? "—"}</span>
+        <span className="seg" title="Files synced to Supabase Storage">
+          {lastSyncedAt ? `synced ${relativeAge(lastSyncedAt)}` : "not synced yet"}
+        </span>
         <div className="right">
           <span className="seg">main</span>
           <span className="seg">utf-8</span>
@@ -162,6 +176,149 @@ export default function Workspace({
     </div>
   );
 }
+
+function relativeAge(epochMs: number): string {
+  const sec = Math.max(0, Math.floor((Date.now() - epochMs) / 1000));
+  if (sec < 5) return "just now";
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  return `${Math.floor(sec / 3600)}h ago`;
+}
+
+function RunButton({ projectId }: { projectId: string }) {
+  const [open, setOpen] = useState(false);
+  const [command, setCommand] = useState("npm run dev -- -H 0.0.0.0");
+  const [port, setPort] = useState("3000");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    if (busy) return;
+    const portNum = Number(port);
+    if (!Number.isFinite(portNum) || portNum <= 0 || portNum > 65535) {
+      setError("port must be 1–65535");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await startServerApi(projectId, { command: command.trim(), port: portNum });
+      setOpen(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ position: "relative" }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="toggle-btn"
+        data-on={open}
+        title="Start a dev server (without prompting the agent)"
+      >
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+        >
+          <polygon points="5 3 19 12 5 21 5 3" />
+        </svg>
+        <span>Run</span>
+      </button>
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            top: "calc(100% + 6px)",
+            right: 0,
+            zIndex: 50,
+            background: "var(--bg-elev, #16161e)",
+            border: "1px solid var(--border-default)",
+            borderRadius: 8,
+            padding: 12,
+            minWidth: 280,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+          }}
+        >
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>
+            Command
+          </div>
+          <input
+            value={command}
+            onChange={(e) => setCommand(e.target.value)}
+            disabled={busy}
+            style={inputStyle}
+            placeholder="npm run dev -- -H 0.0.0.0"
+          />
+          <div
+            style={{ fontSize: 11, color: "var(--text-muted)", margin: "8px 0 6px" }}
+          >
+            Port
+          </div>
+          <input
+            value={port}
+            onChange={(e) => setPort(e.target.value)}
+            disabled={busy}
+            style={inputStyle}
+            placeholder="3000"
+          />
+          {error && (
+            <div style={{ color: "var(--conf-low)", fontSize: 11, marginTop: 8 }}>
+              {error}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              className="icon-btn-sm"
+              style={{ width: "auto", padding: "4px 10px", fontSize: 11 }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={submit}
+              disabled={busy || !command.trim()}
+              className="send-btn"
+              style={{ flex: 1 }}
+            >
+              {busy ? "Starting…" : "Start"}
+            </button>
+          </div>
+          <p
+            style={{
+              fontSize: 10,
+              color: "var(--text-muted)",
+              marginTop: 8,
+              marginBottom: 0,
+            }}
+          >
+            Bind to 0.0.0.0 — the proxy can&apos;t reach 127.0.0.1-only servers.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const inputStyle: React.CSSProperties = {
+  width: "100%",
+  background: "var(--bg-base, #0c0c11)",
+  border: "1px solid var(--border-default)",
+  borderRadius: 6,
+  padding: "6px 8px",
+  color: "var(--text-primary)",
+  fontSize: 12,
+  fontFamily: "JetBrains Mono, ui-monospace, monospace",
+};
 
 function ToggleButton({
   on,

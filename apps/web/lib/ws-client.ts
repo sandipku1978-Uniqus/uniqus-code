@@ -114,11 +114,24 @@ function handleEvent(event: ServerEvent): void {
       s.setTree(event.entries);
       break;
     case "file_content":
-      if (event.content !== null) s.setFile(event.path, event.content);
+      if (event.content !== null) {
+        s.setFile(event.path, event.content);
+        // Server is the source of truth post-load — clear any stale dirty
+        // marker so the status footer doesn't lie.
+        s.setSaveStatus(event.path, { kind: "idle" });
+      }
       break;
     case "file_changed":
       send({ type: "request_tree" });
-      if (s.selectedFile === event.path) send({ type: "request_file", path: event.path });
+      // Don't clobber local edits the user has in flight — if the editor is
+      // dirty/saving on this same path, leave the buffer alone. The user's
+      // save will land shortly and become the new authoritative version.
+      if (s.selectedFile === event.path) {
+        const status = s.saveStatus[event.path]?.kind;
+        if (status !== "dirty" && status !== "saving") {
+          send({ type: "request_file", path: event.path });
+        }
+      }
       break;
     case "server_started":
       s.addPreview({ id: event.id, command: event.command, port: event.port });
@@ -129,14 +142,23 @@ function handleEvent(event: ServerEvent): void {
       s.addSystem(`server stopped`);
       break;
     case "complete":
-      s.addSystem(
-        `done · ${event.tool_calls} tool calls · ${(event.elapsed_ms / 1000).toFixed(1)}s`,
-      );
+      s.addCompleteMarker(event.tool_calls, event.elapsed_ms, event.aborted === true);
       s.setBusy(false);
       send({ type: "request_tree" });
       break;
     case "session_reset":
       s.resetChat();
+      break;
+    case "storage_synced":
+      s.setLastSyncedAt(event.at);
+      break;
+    case "client_write_ack":
+      s.setSaveStatus(
+        event.path,
+        event.ok
+          ? { kind: "saved", at: Date.now() }
+          : { kind: "error", message: event.error ?? "save failed" },
+      );
       break;
     case "error":
       s.addSystem(`error: ${event.message}`);

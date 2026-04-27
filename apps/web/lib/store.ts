@@ -22,7 +22,21 @@ export type ChatItem =
       is_error?: boolean;
     }
   | { kind: "plan_proposal"; id: string; plan: Plan; status: "pending" | "approved" }
-  | { kind: "system"; id: string; content: string };
+  | { kind: "system"; id: string; content: string }
+  /**
+   * Marks the end of a "turn" — everything between two `complete` markers (or
+   * between a user message and the next complete) is foldable in the UI.
+   * Inserted client-side when the `complete` server event fires.
+   */
+  | { kind: "complete"; id: string; tool_calls: number; elapsed_ms: number; aborted: boolean };
+
+/** Per-file save status for the user-edit auto-save flow. */
+export type SaveStatus =
+  | { kind: "idle" }
+  | { kind: "dirty" }
+  | { kind: "saving" }
+  | { kind: "saved"; at: number }
+  | { kind: "error"; message: string };
 
 /**
  * Optional panels in the IDE. Default both off — the IDE is chat-centric and
@@ -55,6 +69,15 @@ interface State {
   panels: PanelVisibility;
   user: CurrentUser | null;
   project: ProjectSummary | null;
+  /** Epoch ms of the last storage_synced event we received, or null. */
+  lastSyncedAt: number | null;
+  /** Per-path save status for the user-edit auto-save flow. */
+  saveStatus: Record<string, SaveStatus>;
+  /**
+   * Whether the user has expanded a previously completed turn. Keyed by the
+   * `complete` chat item id. Default = collapsed once the turn is done.
+   */
+  expandedTurns: Record<string, boolean>;
 
   setConnected(c: boolean): void;
   setBusy(b: boolean): void;
@@ -66,6 +89,7 @@ interface State {
   addPlanProposal(plan: Plan): void;
   approvePendingPlan(plan: Plan): void;
   addSystem(content: string): void;
+  addCompleteMarker(toolCalls: number, elapsedMs: number, aborted: boolean): void;
   setTree(entries: TreeEntry[]): void;
   setFile(path: string | null, content: string): void;
   appendTerminalLine(line: string): void;
@@ -78,6 +102,9 @@ interface State {
   setPanel(name: keyof PanelVisibility, value: boolean): void;
   setUser(u: CurrentUser | null): void;
   setProject(p: ProjectSummary | null): void;
+  setLastSyncedAt(at: number): void;
+  setSaveStatus(path: string, status: SaveStatus): void;
+  toggleTurn(completeItemId: string): void;
   resetChat(): void;
   reset(): void;
 }
@@ -104,6 +131,9 @@ export const useStore = create<State>((set, get) => ({
   panels: { files: false, terminal: false },
   user: null,
   project: null,
+  lastSyncedAt: null,
+  saveStatus: {},
+  expandedTurns: {},
 
   setConnected: (c) => set({ connected: c }),
   setBusy: (b) => set({ busy: b }),
@@ -124,9 +154,23 @@ export const useStore = create<State>((set, get) => ({
     }),
 
   addToolCall: (callId, name, input) =>
-    set((s) => ({
-      chat: [...s.chat, { kind: "tool", id: id(), call_id: callId, name, input }],
-    })),
+    set((s) => {
+      // Streaming flow: the orchestrator sends `tool_call` once with empty
+      // input the moment the model starts emitting the tool block, then again
+      // with the full input when streaming finishes. Dedupe on call_id and
+      // upgrade the existing row in place rather than appending a duplicate.
+      const idx = s.chat.findIndex(
+        (item) => item.kind === "tool" && item.call_id === callId,
+      );
+      if (idx >= 0) {
+        const existing = s.chat[idx] as Extract<ChatItem, { kind: "tool" }>;
+        const next: ChatItem = { ...existing, name, input };
+        return { chat: [...s.chat.slice(0, idx), next, ...s.chat.slice(idx + 1)] };
+      }
+      return {
+        chat: [...s.chat, { kind: "tool", id: id(), call_id: callId, name, input }],
+      };
+    }),
 
   setToolResult: (callId, result, isError) => {
     set((s) => ({
@@ -164,6 +208,20 @@ export const useStore = create<State>((set, get) => ({
 
   addSystem: (content) =>
     set((s) => ({ chat: [...s.chat, { kind: "system", id: id(), content }] })),
+
+  addCompleteMarker: (toolCalls, elapsedMs, aborted) =>
+    set((s) => ({
+      chat: [
+        ...s.chat,
+        {
+          kind: "complete",
+          id: id(),
+          tool_calls: toolCalls,
+          elapsed_ms: elapsedMs,
+          aborted,
+        },
+      ],
+    })),
 
   setTree: (entries) => set({ tree: entries }),
   setFile: (path, content) => set({ selectedFile: path, fileContent: content }),
@@ -219,11 +277,22 @@ export const useStore = create<State>((set, get) => ({
 
   setUser: (u) => set({ user: u }),
   setProject: (p) => set({ project: p }),
+  setLastSyncedAt: (at) => set({ lastSyncedAt: at }),
+  setSaveStatus: (path, status) =>
+    set((s) => ({ saveStatus: { ...s.saveStatus, [path]: status } })),
+  toggleTurn: (completeItemId) =>
+    set((s) => ({
+      expandedTurns: {
+        ...s.expandedTurns,
+        [completeItemId]: !s.expandedTurns[completeItemId],
+      },
+    })),
   resetChat: () =>
     set({
       chat: [],
       pendingPlanItemId: null,
       terminalLines: [],
+      expandedTurns: {},
     }),
   reset: () =>
     set({
@@ -239,5 +308,8 @@ export const useStore = create<State>((set, get) => ({
       panels: { files: false, terminal: false },
       user: null,
       project: null,
+      lastSyncedAt: null,
+      saveStatus: {},
+      expandedTurns: {},
     }),
 }));

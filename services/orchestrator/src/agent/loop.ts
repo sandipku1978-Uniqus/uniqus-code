@@ -27,7 +27,7 @@ Environment:
 Tools you have:
 - read_file / write_file / edit_file / list_dir / grep — file ops in the sandbox.
 - run_command — short-lived shell commands (default timeout 60s; use 120000–300000 ms for installs/builds). stdin is closed.
-- start_server / stop_server / list_servers / read_server_log — long-running dev servers (Next.js, Flask, Express, etc.). The user sees a live preview when you start one.
+- start_server / stop_server / list_servers / read_server_log — long-running dev servers (Next.js, Flask, Express, etc.). The user sees a live preview when you start one. The tool result includes a "public_url" — this is the URL the user actually opens in their browser. ALWAYS quote that URL to the user; do NOT mention localhost (the dev server is not reachable on localhost from the user's machine).
 - wait_for_port — wait for a TCP port on localhost.
 - web_search — search the web for current info, recent docs, library versions, error messages, or anything you don't already know. Use sparingly (each call is billed); prefer it over guessing when you need facts that may have changed since training.
 
@@ -39,12 +39,13 @@ Conventions:
 5. Use longer timeout_ms (120000–300000) for npm/yarn/pnpm install, builds, and Docker pulls.
 6. After a non-zero exit, read the error and fix the root cause before retrying. Do not retry blindly — if the same command fails twice, change your approach.
 7. Use list_dir or grep to verify state when you're unsure (e.g., after a scaffold) instead of guessing paths.
-8. When the task is complete, briefly summarize what you built, the URL/port to access it, and how to use it. If you started a server, mention its port so the user knows where to look.
+8. When the task is complete, briefly summarize what you built, the public URL to access it (from start_server's "public_url" field), and how to use it.
 9. File size: write_file content is part of your output token budget (~16k tokens). For files larger than ~500 lines, write a smaller version first then grow it with edit_file or additional write_file calls — do NOT try to dump 1000+ lines in a single tool call, the response will be truncated and the tool input will arrive without the content field. If that happens you'll see "write_file requires 'content' as a string" — split the work and retry.`;
 }
 
 export interface LoopHooks {
   onText?: (text: string) => void;
+  onToolCallStarted?: (callId: string, name: string) => void;
   onToolCall?: (callId: string, name: string, input: unknown) => void;
   onToolResult?: (
     callId: string,
@@ -65,33 +66,96 @@ export interface LoopOptions extends LoopHooks {
    * Caller retains the reference to use across multiple turns.
    */
   messages?: Anthropic.MessageParam[];
+  /**
+   * Aborts the current Anthropic stream and any in-flight tool execution.
+   * The loop returns normally (no throw) when aborted, so the caller can
+   * decide how to record the partial turn.
+   */
+  signal?: AbortSignal;
+  /**
+   * Public base URL the user should open to reach the agent's dev servers
+   * (e.g. https://api.example.com — the orchestrator host). Embedded in the
+   * start_server tool result so the agent quotes the right URL to the user.
+   */
+  previewBaseUrl?: string;
 }
 
-export async function runAgentLoop(userMessage: string, opts: LoopOptions): Promise<void> {
+export interface LoopResult {
+  aborted: boolean;
+}
+
+export async function runAgentLoop(
+  userMessage: string,
+  opts: LoopOptions,
+): Promise<LoopResult> {
   const client = new Anthropic({ apiKey: opts.apiKey });
   const systemPrompt = buildSystemPrompt();
   const messages = opts.messages ?? [];
   messages.push({ role: "user", content: userMessage });
 
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
+    if (opts.signal?.aborted) return { aborted: true };
     opts.onIteration?.(iter);
 
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: MAX_TOKENS,
-      system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
-      tools: [...TOOLS, WEB_SEARCH_TOOL] as Anthropic.MessageCreateParams["tools"],
-      messages,
+    // Stream the assistant response so the user sees text + tool starts as
+    // they arrive. Without this, large write_file calls look like a black
+    // hole — the tool input is the file content and arrives as a single
+    // delayed block.
+    let stream;
+    try {
+      stream = client.messages.stream(
+        {
+          model: MODEL,
+          max_tokens: MAX_TOKENS,
+          system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
+          tools: [...TOOLS, WEB_SEARCH_TOOL] as Anthropic.MessageCreateParams["tools"],
+          messages,
+        },
+        opts.signal ? { signal: opts.signal } : undefined,
+      );
+    } catch (err) {
+      if (isAbortError(err)) return { aborted: true };
+      throw err;
+    }
+
+    // Track which tool_use blocks we've already announced via onToolCallStarted
+    // — content_block_start fires once per block, but be defensive against duplicates.
+    const announcedTools = new Set<string>();
+
+    stream.on("streamEvent", (event) => {
+      if (event.type === "content_block_start") {
+        const block = event.content_block;
+        if (block.type === "tool_use" && !announcedTools.has(block.id)) {
+          announcedTools.add(block.id);
+          opts.onToolCallStarted?.(block.id, block.name);
+        }
+      } else if (event.type === "content_block_delta") {
+        const delta = event.delta;
+        if (delta.type === "text_delta") {
+          opts.onText?.(delta.text);
+        }
+        // Tool input deltas accumulate inside the SDK; we surface the full
+        // parsed input on content_block_stop below. Streaming partial JSON
+        // to the UI is more cost than payoff right now.
+      }
     });
 
+    let finalMessage: Anthropic.Message;
+    try {
+      finalMessage = await stream.finalMessage();
+    } catch (err) {
+      if (isAbortError(err)) return { aborted: true };
+      throw err;
+    }
+
     const toolCalls: Array<{ id: string; name: string; input: unknown }> = [];
-    for (const block of response.content) {
-      if (block.type === "text") {
-        opts.onText?.(block.text);
-      } else if (block.type === "tool_use") {
+    for (const block of finalMessage.content) {
+      if (block.type === "tool_use") {
         toolCalls.push({ id: block.id, name: block.name, input: block.input });
+        // Emit the final, parsed tool_use *after* streaming so the UI has the
+        // full input. onToolCallStarted already created the row.
         opts.onToolCall?.(block.id, block.name, block.input);
-      } else {
+      } else if (block.type !== "text") {
         // Server-side tool blocks (web_search). Anthropic ran the search;
         // we just surface the activity in the UI — no execution needed.
         const b = block as unknown as {
@@ -103,6 +167,9 @@ export async function runAgentLoop(userMessage: string, opts: LoopOptions): Prom
           content?: unknown;
         };
         if (b.type === "server_tool_use") {
+          if (b.id && !announcedTools.has(b.id)) {
+            opts.onToolCallStarted?.(b.id, b.name ?? "web_search");
+          }
           opts.onToolCall?.(b.id ?? "", b.name ?? "web_search", b.input);
         } else if (b.type === "web_search_tool_result") {
           opts.onToolResult?.(
@@ -116,20 +183,37 @@ export async function runAgentLoop(userMessage: string, opts: LoopOptions): Prom
       }
     }
 
-    messages.push({ role: "assistant", content: response.content });
+    messages.push({ role: "assistant", content: finalMessage.content });
 
-    if (response.stop_reason === "end_turn" || toolCalls.length === 0) {
-      return;
+    if (finalMessage.stop_reason === "end_turn" || toolCalls.length === 0) {
+      return { aborted: false };
     }
+
+    if (opts.signal?.aborted) return { aborted: true };
 
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
     for (const call of toolCalls) {
+      if (opts.signal?.aborted) {
+        // Synthesize a tool_result so the conversation history is well-formed
+        // even if we bail mid-batch — Anthropic rejects messages where a
+        // tool_use has no matching tool_result.
+        opts.onToolResult?.(call.id, call.name, call.input, "(aborted by user)", true);
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: call.id,
+          content: "Aborted by user before this tool ran.",
+          is_error: true,
+        });
+        continue;
+      }
       try {
         const result = await executeTool(
           opts.sandbox,
           call.name,
           call.input,
           opts.projectId ?? null,
+          opts.previewBaseUrl,
+          opts.signal,
         );
         opts.onToolResult?.(call.id, call.name, call.input, result, false);
         toolResults.push({
@@ -157,11 +241,20 @@ export async function runAgentLoop(userMessage: string, opts: LoopOptions): Prom
   );
 }
 
+function isAbortError(err: unknown): boolean {
+  if (err instanceof Error) {
+    return err.name === "AbortError" || /aborted/i.test(err.message);
+  }
+  return false;
+}
+
 async function executeTool(
   sandbox: Sandbox,
   name: string,
   input: unknown,
   projectId: string | null,
+  previewBaseUrl: string | undefined,
+  signal: AbortSignal | undefined,
 ): Promise<string> {
   const args = input as Record<string, any>;
   switch (name) {
@@ -194,7 +287,7 @@ async function executeTool(
       await sb.editFile(sandbox, args.path, args.old_string, args.new_string);
       return `Edited ${args.path}`;
     case "run_command": {
-      const r = await sb.runCommand(sandbox, args.command, args.timeout_ms);
+      const r = await sb.runCommand(sandbox, args.command, args.timeout_ms, signal);
       return `exit_code: ${r.exitCode}\n--- stdout ---\n${r.stdout}\n--- stderr ---\n${r.stderr}`;
     }
     case "list_dir": {
@@ -215,11 +308,17 @@ async function executeTool(
         args.ready_timeout_ms,
         projectId,
       );
+      const publicUrl = previewBaseUrl
+        ? `${previewBaseUrl.replace(/\/$/, "")}/preview/${info.id}/`
+        : `http://localhost:${info.port}`;
       return JSON.stringify({
         server_id: info.id,
         port: info.port,
         pid: info.pid,
-        url: `http://localhost:${info.port}`,
+        public_url: publicUrl,
+        note: previewBaseUrl
+          ? "public_url is the URL the user should open. Do NOT tell them to use localhost — the dev server is only reachable through the proxy."
+          : undefined,
       });
     }
     case "stop_server":

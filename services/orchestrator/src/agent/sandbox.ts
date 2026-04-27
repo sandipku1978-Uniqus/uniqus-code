@@ -132,6 +132,7 @@ export async function runCommand(
   sandbox: Sandbox,
   command: string,
   timeoutMs = 60_000,
+  signal?: AbortSignal,
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
     const choice = pickShell();
@@ -143,11 +144,25 @@ export async function runCommand(
     let stdout = "";
     let stderr = "";
     let killed = false;
+    let abortedByUser = false;
 
     const timer = setTimeout(() => {
       killed = true;
       if (child.pid) treeKill(child.pid, "SIGKILL");
     }, timeoutMs);
+
+    const onAbort = (): void => {
+      abortedByUser = true;
+      killed = true;
+      if (child.pid) treeKill(child.pid, "SIGKILL");
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
 
     child.stdout.on("data", (d) => {
       stdout += d.toString();
@@ -158,11 +173,14 @@ export async function runCommand(
 
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (killed) stderr += `\n[killed: timeout after ${timeoutMs}ms]`;
+      if (signal) signal.removeEventListener("abort", onAbort);
+      if (abortedByUser) stderr += `\n[killed: aborted by user]`;
+      else if (killed) stderr += `\n[killed: timeout after ${timeoutMs}ms]`;
       resolve({ stdout: truncate(stdout), stderr: truncate(stderr), exitCode: code });
     });
     child.on("error", (err) => {
       clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", onAbort);
       resolve({ stdout: "", stderr: `[spawn error] ${err.message}`, exitCode: 1 });
     });
   });

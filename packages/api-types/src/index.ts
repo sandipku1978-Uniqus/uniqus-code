@@ -16,7 +16,9 @@ export type ClientEvent =
   | { type: "plan_approved"; plan: Plan }
   | { type: "request_tree" }
   | { type: "request_file"; path: string }
-  | { type: "reset_session" };
+  | { type: "reset_session" }
+  | { type: "abort" }
+  | { type: "client_write_file"; path: string; content: string };
 
 export interface ProjectSummary {
   id: string;
@@ -53,7 +55,9 @@ export type ServerEvent =
   | { type: "server_started"; id: string; command: string; port: number }
   | { type: "server_stopped"; id: string }
   | { type: "session_reset" }
-  | { type: "complete"; tool_calls: number; elapsed_ms: number }
+  | { type: "complete"; tool_calls: number; elapsed_ms: number; aborted?: boolean }
+  | { type: "storage_synced"; at: number }
+  | { type: "client_write_ack"; path: string; ok: boolean; error?: string }
   | { type: "error"; message: string };
 
 export interface PreviewServer {

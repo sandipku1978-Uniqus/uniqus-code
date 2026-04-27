@@ -19,7 +19,13 @@ import type {
 } from "@uniqus/api-types";
 import { runAgentLoop } from "./agent/loop.js";
 import { proposePlan, formatPlanForExecution } from "./agent/plan.js";
-import { shellInfo, listServers, sandboxEvents } from "./agent/sandbox.js";
+import {
+  shellInfo,
+  listServers,
+  sandboxEvents,
+  startServer as sandboxStartServer,
+  writeFile as sandboxWriteFile,
+} from "./agent/sandbox.js";
 import { upsertUser, type UserRecord } from "./db/users.js";
 import { listProjects, createProject, getProject, touchProject } from "./db/projects.js";
 import { loadHistory, appendMessage, clearHistory } from "./db/messages.js";
@@ -34,6 +40,11 @@ import Busboy from "busboy";
 const PORT = Number(process.env.PORT ?? process.env.ORCHESTRATOR_PORT ?? 8787);
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const SANDBOX_ROOT = path.resolve(REPO_ROOT, ".sandbox");
+// Public URL for the orchestrator itself, used to build preview URLs the agent
+// quotes back to the user (e.g. https://api.example.com). Falls back to
+// http://localhost:{PORT} for local dev.
+const PREVIEW_BASE_URL =
+  process.env.PREVIEW_BASE_URL ?? process.env.PUBLIC_BASE_URL ?? `http://localhost:${PORT}`;
 
 function sandboxDirFor(projectId: string): string {
   return path.resolve(SANDBOX_ROOT, projectId);
@@ -282,6 +293,59 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return await handleZipImport(req, res, user.id);
   }
 
+  // Manual start-server: lets the user fire up a dev server from the IDE
+  // toolbar without prompting the agent. URL: /api/projects/{id}/start-server
+  const startServerMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/start-server$/,
+  );
+  if (startServerMatch && req.method === "POST") {
+    const projectId = startServerMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 403, { error: "project not found or access denied" });
+
+    const body = await readJsonBody<{
+      command?: string;
+      port?: number;
+      ready_timeout_ms?: number;
+    }>(req);
+    const command = (body.command ?? "").trim();
+    const port = Number(body.port);
+    if (!command) return json(res, 400, { error: "command is required" });
+    if (!Number.isFinite(port) || port <= 0 || port > 65535) {
+      return json(res, 400, { error: "port must be a number 1-65535" });
+    }
+
+    const dest = sandboxDirFor(projectId);
+    await fs.mkdir(dest, { recursive: true });
+
+    try {
+      const info = await sandboxStartServer(
+        { rootDir: dest },
+        command,
+        port,
+        body.ready_timeout_ms ?? 60_000,
+        projectId,
+      );
+      // Tell every connected session for this project that the server is up,
+      // so the preview tab opens for everyone (including this caller).
+      broadcastToProject(projectId, {
+        type: "server_started",
+        id: info.id,
+        command: info.command,
+        port: info.port,
+      });
+      return json(res, 200, {
+        id: info.id,
+        port: info.port,
+        public_url: `${PREVIEW_BASE_URL.replace(/\/$/, "")}/preview/${info.id}/`,
+      });
+    } catch (err) {
+      return json(res, 400, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   res.writeHead(404);
   res.end();
 }
@@ -445,6 +509,9 @@ async function handleConnection(
   let pendingPlanResolve: ((plan: Plan) => void) | null = null;
   let busy = false;
   let ready = false;
+  // Per-session abort controller. Replaced for each user_message turn; the
+  // current one is what the `abort` event triggers.
+  let currentAbort: AbortController | null = null;
 
   // Attach handlers SYNCHRONOUSLY before any async work.
   // Otherwise messages that arrive during hydration (especially the
@@ -491,6 +558,52 @@ async function handleConnection(
         return;
       }
 
+      if (event.type === "abort") {
+        // User clicked Stop. Cancel the in-flight Anthropic stream and any
+        // running run_command. The loop returns with aborted=true and we
+        // record the partial turn to history (handled in runSession).
+        if (currentAbort && !currentAbort.signal.aborted) {
+          currentAbort.abort();
+        } else {
+          // Nothing running — also clear a pending plan approval if any, so
+          // the user isn't stuck waiting on a plan they no longer want.
+          if (pendingPlanResolve) {
+            pendingPlanResolve = null;
+            send({ type: "session_reset" });
+          }
+        }
+        return;
+      }
+
+      if (event.type === "client_write_file") {
+        // User edited a file in the IDE. Persist + sync to Storage. Always ack
+        // back so the editor can show "saved" / "save failed" state.
+        try {
+          await sandboxWriteFile({ rootDir: sandboxDir }, event.path, event.content);
+          send({ type: "client_write_ack", path: event.path, ok: true });
+          // Tell other sessions on this project that the file changed (their
+          // editor will refresh if they have it open). Skip our own session
+          // — the user already has the latest content locally.
+          for (const s of sessions) {
+            if (s.projectId === project.id && s !== ctx) {
+              s.send({ type: "file_changed", path: event.path });
+            }
+          }
+          getTracker(project.id, sandboxDir)
+            .syncFile(event.path)
+            .then(() => broadcastToProject(project.id, { type: "storage_synced", at: Date.now() }))
+            .catch((err) => console.error(`client write syncFile ${event.path} failed:`, err));
+        } catch (err) {
+          send({
+            type: "client_write_ack",
+            path: event.path,
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        return;
+      }
+
       if (event.type === "user_message") {
         if (!ready) {
           send({ type: "error", message: "session is still loading, try again in a moment" });
@@ -501,6 +614,7 @@ async function handleConnection(
           return;
         }
         busy = true;
+        currentAbort = new AbortController();
         try {
           await runSession(
             event.content,
@@ -514,16 +628,19 @@ async function handleConnection(
               new Promise<Plan>((resolve) => {
                 pendingPlanResolve = resolve;
               }),
+            currentAbort.signal,
           );
           await touchProject(project.id);
         } finally {
           busy = false;
+          currentAbort = null;
         }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       send({ type: "error", message });
       busy = false;
+      currentAbort = null;
     }
   });
 
@@ -612,6 +729,7 @@ async function runSession(
   projectId: string,
   sandboxDir: string,
   awaitPlanApproval: () => Promise<Plan>,
+  signal: AbortSignal,
 ): Promise<void> {
   const start = Date.now();
   let toolCalls = 0;
@@ -619,50 +737,80 @@ async function runSession(
 
   if (mode === "plan-then-execute") {
     const plan = await proposePlan(userMessage, apiKey, history);
+    if (signal.aborted) {
+      send({ type: "complete", tool_calls: 0, elapsed_ms: Date.now() - start, aborted: true });
+      return;
+    }
     send({ type: "plan_proposed", plan });
     const approved = await awaitPlanApproval();
+    if (signal.aborted) {
+      send({ type: "complete", tool_calls: 0, elapsed_ms: Date.now() - start, aborted: true });
+      return;
+    }
     send({ type: "plan_running" });
     finalMessage = `${userMessage}\n\n${formatPlanForExecution(approved)}`;
   }
 
   const turnStartLength = history.length;
 
-  await runAgentLoop(finalMessage, {
+  // Coalesce storage_synced broadcasts so we don't flood the UI on
+  // back-to-back writes — emit at most once per ~500ms window.
+  let syncEmitTimer: NodeJS.Timeout | null = null;
+  const emitSynced = (): void => {
+    if (syncEmitTimer) return;
+    syncEmitTimer = setTimeout(() => {
+      syncEmitTimer = null;
+      broadcastToProject(projectId, { type: "storage_synced", at: Date.now() });
+    }, 500);
+  };
+
+  const result = await runAgentLoop(finalMessage, {
     sandbox: { rootDir: sandboxDir },
     apiKey,
     projectId,
     messages: history,
+    signal,
+    previewBaseUrl: PREVIEW_BASE_URL,
     onText: (content) => send({ type: "text", content }),
     onIteration: (iter) => send({ type: "iteration", iter }),
-    onToolCall: (callId, name, input) => {
+    onToolCallStarted: (callId, name) => {
       toolCalls++;
+      // Emit tool_call with empty input so the UI can render a "running…" row
+      // immediately, before the model has finished generating the input. The
+      // final tool_call event below will replace the input once it's known.
+      send({ type: "tool_call", call_id: callId, name, input: {} });
+    },
+    onToolCall: (callId, name, input) => {
+      // Re-emit with the full input now that streaming finished. The UI
+      // dedupes on call_id and updates the existing row in place.
       send({ type: "tool_call", call_id: callId, name, input });
     },
-    onToolResult: (callId, name, input, result, isError) => {
-      send({ type: "tool_result", call_id: callId, result, is_error: isError });
+    onToolResult: (callId, name, input, toolResult, isError) => {
+      send({ type: "tool_result", call_id: callId, result: toolResult, is_error: isError });
       if (isError) return;
       if (name === "write_file" || name === "edit_file") {
         const p = (input as { path?: unknown })?.path;
         if (typeof p === "string") {
           send({ type: "file_changed", path: p });
-          // Background push to Storage; don't block the agent loop.
           getTracker(projectId, sandboxDir)
             .syncFile(p)
+            .then(() => emitSynced())
             .catch((err) => console.error(`syncFile ${p} failed:`, err));
         }
         return;
       }
       if (name === "run_command") {
-        // run_command may have created/modified arbitrary files (e.g. npm
-        // init, scaffolders). Background-walk and push anything new.
+        // run_command may have created/modified arbitrary files. Background
+        // walk + push.
         getTracker(projectId, sandboxDir)
           .syncChanges()
+          .then(() => emitSynced())
           .catch((err) => console.error("syncChanges failed:", err));
         return;
       }
       if (name === "start_server") {
         try {
-          const parsed = JSON.parse(result) as { server_id: string; port: number };
+          const parsed = JSON.parse(toolResult) as { server_id: string; port: number };
           const command = String((input as { command?: unknown })?.command ?? "");
           broadcastToProject(projectId, {
             type: "server_started",
@@ -680,14 +828,21 @@ async function runSession(
     },
   });
 
-  // Persist any new messages added during this turn.
+  // Persist any new messages added during this turn — even if aborted, the
+  // partial assistant message + synthesized tool_results need to survive so
+  // the next turn's history is a valid sequence.
   for (let i = turnStartLength; i < history.length; i++) {
     await appendMessage(projectId, history[i]).catch((err) =>
       console.error("appendMessage failed:", err),
     );
   }
 
-  send({ type: "complete", tool_calls: toolCalls, elapsed_ms: Date.now() - start });
+  send({
+    type: "complete",
+    tool_calls: toolCalls,
+    elapsed_ms: Date.now() - start,
+    aborted: result.aborted || undefined,
+  });
 }
 
 // ── Filesystem helpers ────────────────────────────────────────────────────────

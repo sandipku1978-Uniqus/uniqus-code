@@ -76,3 +76,12 @@ export async function importZipApi(input: {
   }
   return (await res.json()) as { project: ProjectSummary; import: ImportResultMeta };
 }
+
+export const startServerApi = (
+  projectId: string,
+  input: { command: string; port: number; ready_timeout_ms?: number },
+): Promise<{ id: string; port: number; public_url: string }> =>
+  api(`/api/projects/${projectId}/start-server`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
