@@ -34,7 +34,12 @@ Tools you have:
 Conventions:
 1. Use write_file (full content) when creating new files. Use edit_file only for surgical changes to existing files; old_string must be unique.
 2. Each run_command invocation is a fresh shell — cd, env vars, and background jobs do NOT persist. Chain with && in a single command, or pass absolute paths.
-3. For long-running dev servers: ALWAYS use start_server, never run_command. start_server backgrounds the process, waits for the port, and surfaces the preview to the user. Bind dev servers to 0.0.0.0 (not the default 127.0.0.1) so previews work from any device on the LAN — e.g. \`next dev -H 0.0.0.0\`, \`flask run --host=0.0.0.0\`, \`uvicorn main:app --host 0.0.0.0\`, \`app.listen(port, '0.0.0.0')\` for express.
+3. For long-running dev servers: ALWAYS use start_server, never run_command — and that includes ANY command that ends up running a dev server, like \`npm run dev\`, \`next dev\`, \`vite\`, \`flask run\`, \`python app.py\`, \`uvicorn ...\`, etc. Reasons:
+   (a) run_command holds the port for its FULL timeout (default 60s). Even if the dev server starts successfully and you read its output, the port stays bound by your child process, and any subsequent start_server on the same port will fail with EADDRINUSE.
+   (b) run_command kills the child on timeout, but the kernel can hold the socket briefly afterward — start_server has logic to clear the port before binding (fuser -k + lsof fallback), but you'll still spend 5–60s of every turn waiting on it.
+   (c) The user only sees a preview tab when start_server succeeds; run_command output is ephemeral and not interactive.
+   If you need to debug why a dev server fails to start, use start_server then read_server_log — do NOT re-run \`npm run dev\` via run_command to "see what happens", that creates the very zombie state you'd then have to clean up.
+   Bind dev servers to 0.0.0.0 (not the default 127.0.0.1) so previews work from any device on the LAN — e.g. \`next dev -H 0.0.0.0\`, \`flask run --host=0.0.0.0\`, \`uvicorn main:app --host 0.0.0.0\`, \`app.listen(port, '0.0.0.0')\` for express.
 4. For interactive scaffolders (create-next-app, create-vite, etc.): always pass non-interactive flags (--yes, -y, --typescript, --tailwind, --no-git, --use-npm). stdin is closed in the sandbox — any prompt will block until timeout. If a scaffolder is too prompt-heavy, write the project files yourself with write_file.
 5. Use longer timeout_ms (120000–300000) for npm/yarn/pnpm install, builds, and Docker pulls.
 6. After a non-zero exit, read the error and fix the root cause before retrying. Do not retry blindly — if the same command fails twice, change your approach.
@@ -114,7 +119,10 @@ export async function runAgentLoop(
         opts.signal ? { signal: opts.signal } : undefined,
       );
     } catch (err) {
-      if (isAbortError(err)) return { aborted: true };
+      // Treat any error as "aborted" if the user has actually pressed Stop.
+      // The SDK's abort error class isn't always named the way our matcher
+      // expects, so checking the signal directly is more reliable.
+      if (opts.signal?.aborted || isAbortError(err)) return { aborted: true };
       throw err;
     }
 
@@ -144,7 +152,7 @@ export async function runAgentLoop(
     try {
       finalMessage = await stream.finalMessage();
     } catch (err) {
-      if (isAbortError(err)) return { aborted: true };
+      if (opts.signal?.aborted || isAbortError(err)) return { aborted: true };
       throw err;
     }
 

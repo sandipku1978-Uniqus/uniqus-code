@@ -210,6 +210,78 @@ export async function waitForPort(port: number, timeoutMs = 30_000): Promise<boo
   return false;
 }
 
+/**
+ * One-shot check: is anyone accepting connections on this port? Single TCP
+ * probe with a ~30ms ceiling — used to decide whether we need to clear the
+ * port before binding.
+ */
+async function isPortOpen(port: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const sock = net.createConnection({ port, host: "127.0.0.1" });
+    const done = (open: boolean): void => {
+      try {
+        sock.end();
+      } catch {}
+      resolve(open);
+    };
+    sock.once("connect", () => done(true));
+    sock.once("error", () => done(false));
+    setTimeout(() => done(false), 100);
+  });
+}
+
+/**
+ * Wait until a port is NOT listening (i.e. no one accepts connections on it).
+ * Used after we kill a previous dev server to make sure the OS has released
+ * the socket before we spawn the next one — without this we hit EADDRINUSE.
+ */
+export async function waitForPortClosed(port: number, timeoutMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const open = await new Promise<boolean>((resolve) => {
+      const sock = net.createConnection({ port, host: "127.0.0.1" });
+      sock.once("connect", () => {
+        sock.end();
+        resolve(true);
+      });
+      sock.once("error", () => resolve(false));
+    });
+    if (!open) return true;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return false;
+}
+
+/**
+ * Best-effort kill of any process currently holding `port`. Used before
+ * spawning a new server so we don't trip on EADDRINUSE from a zombie process
+ * (e.g. a `npm run dev` the agent ran via run_command earlier — that holds
+ * the port until run_command's 60s timeout). Tries `fuser` first because it's
+ * the most common on Linux containers; falls back to `lsof` then a /proc walk.
+ *
+ * Resolves regardless of success — the caller should poll the port afterwards
+ * to verify it's actually free.
+ */
+export async function killPortHolder(port: number): Promise<void> {
+  if (process.platform === "win32") return; // Windows: skip; users dev locally
+  // 1. fuser -k -n tcp <port>
+  await new Promise<void>((resolve) => {
+    const p = spawn("fuser", ["-k", "-n", "tcp", String(port)], {
+      stdio: "ignore",
+    });
+    p.once("error", () => resolve());
+    p.once("close", () => resolve());
+  });
+  // 2. lsof -ti:<port> | xargs -r kill -9
+  await new Promise<void>((resolve) => {
+    const p = spawn("/bin/sh", ["-c", `lsof -ti:${port} | xargs -r kill -9`], {
+      stdio: "ignore",
+    });
+    p.once("error", () => resolve());
+    p.once("close", () => resolve());
+  });
+}
+
 // ── server management ────────────────────────────────────────────────────────
 
 export interface ServerInfo {
@@ -235,6 +307,21 @@ export async function startServer(
   readyTimeoutMs = 60_000,
   projectId: string | null = null,
 ): Promise<ServerInfo> {
+  // Pre-clear the port. Fast path: if it's already free, this is two
+  // ~10ms TCP probes. Slow path: a zombie (often `npm run dev` ran via
+  // run_command which holds the port for the full timeout) gets killed
+  // and we wait briefly for the kernel to release the socket.
+  const portOpenBefore = await isPortOpen(port);
+  if (portOpenBefore) {
+    await killPortHolder(port);
+    const closed = await waitForPortClosed(port, 5_000);
+    if (!closed) {
+      throw new Error(
+        `Port ${port} is held by a process we couldn't kill (tried fuser + lsof). Try a different port, or restart the orchestrator.`,
+      );
+    }
+  }
+
   const id = `srv_${randomUUID().slice(0, 8)}`;
   const choice = pickShell();
   const proc = spawn(choice.shell, [...choice.prefix, command], {
