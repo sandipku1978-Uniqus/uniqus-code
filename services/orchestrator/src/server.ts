@@ -28,6 +28,7 @@ import {
   writeFile as sandboxWriteFile,
 } from "./agent/sandbox.js";
 import { readRunConfig, writeRunConfig, detectRunConfig } from "./runConfig.js";
+import { needsInstall, runInstall } from "./ensureDeps.js";
 import { upsertUser, type UserRecord } from "./db/users.js";
 import { listProjects, createProject, getProject, touchProject } from "./db/projects.js";
 import { loadHistory, appendMessage, clearHistory } from "./db/messages.js";
@@ -372,6 +373,27 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       } catch (err) {
         console.error(`failed to stop ${s.id}:`, err);
       }
+    }
+
+    // node_modules disappears every Railway redeploy because Storage sync
+    // skips it (size). If we have a package.json with no node_modules, npm
+    // run dev will fail with "<binary>: not found". Install first.
+    const installer = await needsInstall(dest);
+    if (installer) {
+      broadcastToProject(projectId, {
+        type: "text",
+        content: `\n[run] installing dependencies (${installer} install) — this can take a minute…\n`,
+      });
+      const result = await runInstall(dest, installer);
+      if (!result.ok) {
+        return json(res, 400, {
+          error: `${installer} install failed (${Math.round(result.durationMs / 1000)}s):\n${result.stderr.slice(-2000)}`,
+        });
+      }
+      broadcastToProject(projectId, {
+        type: "text",
+        content: `[run] dependencies installed in ${(result.durationMs / 1000).toFixed(1)}s\n`,
+      });
     }
 
     try {
@@ -755,6 +777,51 @@ async function handleConnection(
   }
 
   ready = true;
+
+  // Background dep install. node_modules isn't synced (size), so after every
+  // Railway redeploy we land with package.json but no deps and any Run click
+  // would fail with "<binary>: not found". Kick off install now so the user
+  // doesn't have to eat the latency on first Run. Throttled per-project so
+  // multiple sessions on the same project don't double-install.
+  void maybeAutoInstall(project.id, sandboxDir, send);
+}
+
+const installInFlight = new Set<string>();
+
+async function maybeAutoInstall(
+  projectId: string,
+  sandboxDir: string,
+  send: Sender,
+): Promise<void> {
+  if (installInFlight.has(projectId)) return;
+  let manager;
+  try {
+    manager = await needsInstall(sandboxDir);
+  } catch {
+    return;
+  }
+  if (!manager) return;
+  installInFlight.add(projectId);
+  send({
+    type: "text",
+    content: `\n[setup] installing dependencies (${manager} install) — Railway redeploys wipe node_modules, this only runs once per session…\n`,
+  });
+  try {
+    const result = await runInstall(sandboxDir, manager);
+    if (result.ok) {
+      send({
+        type: "text",
+        content: `[setup] dependencies installed in ${(result.durationMs / 1000).toFixed(1)}s — Run is ready.\n`,
+      });
+    } else {
+      send({
+        type: "text",
+        content: `[setup] ${manager} install FAILED in ${(result.durationMs / 1000).toFixed(1)}s — ask the agent to fix package.json:\n${result.stderr.slice(-1500)}\n`,
+      });
+    }
+  } finally {
+    installInFlight.delete(projectId);
+  }
 }
 
 function replayMessage(send: Sender, msg: Anthropic.MessageParam): void {
