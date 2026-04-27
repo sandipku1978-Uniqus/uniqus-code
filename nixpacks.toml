@@ -1,15 +1,20 @@
-# Railway/Nixpacks build config.
+# Railway / Nixpacks build config.
 #
 # Adds the system binaries the orchestrator needs at runtime:
 #   - git: for the codebase-import "Clone GitHub" path (`git clone`)
-#   - ca-certificates: HTTPS roots so git/fetch can verify github.com
-#   - psmisc: provides `fuser`, used by startServer to clear a port held by
-#     a zombie process before binding (otherwise dev-server restarts hit
-#     EADDRINUSE for tens of seconds while the kernel releases the socket).
-#   - lsof: secondary fallback alongside fuser for finding port holders.
+#   - cacert: HTTPS roots so git/fetch can verify github.com
+#   - psmisc: provides `fuser`, used by startServer's port-clear logic
+#     before binding (without this, EADDRINUSE recovery silently no-ops)
+#   - lsof: secondary fallback alongside fuser for finding port holders
 #
-# Without these, you get cryptic ENOENTs in /api/projects/import-github and
-# in startServer's port-clear path.
+# IMPORTANT: must use `nixPkgs` (not `aptPkgs`). Railway's nixpacks runtime
+# image is Nix-based — apt packages install during build but aren't present
+# at runtime, which is why our previous aptPkgs entry silently failed.
+# `nixPkgs` packages are bundled into the runtime via the Nix store.
+#
+# The `"..."` entry preserves nixpacks's auto-detected packages (node, npm,
+# etc.) — without it, this list REPLACES the inherited set, which would
+# break the build.
 
 [phases.setup]
-aptPkgs = ["git", "ca-certificates", "psmisc", "lsof"]
+nixPkgs = ["...", "git", "cacert", "psmisc", "lsof"]
