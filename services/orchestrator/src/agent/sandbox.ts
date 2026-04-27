@@ -242,8 +242,26 @@ export async function startServer(
     stdio: ["ignore", "pipe", "pipe"],
   });
 
+  // Attach an `error` listener IMMEDIATELY. Without it, Node treats a spawn
+  // failure (binary missing, EAGAIN, ENOMEM, etc.) as an uncaught exception
+  // and kills the orchestrator process — which was crashing Railway every
+  // time the Run button or agent tried to start something the host couldn't
+  // launch. We capture the error and surface it through the awaited promise
+  // below instead.
+  // Use a holder object so TS doesn't narrow the variable to `null` after
+  // initialization — the listener mutates it asynchronously.
+  const errorBox: { err: Error | null } = { err: null };
+  proc.once("error", (err) => {
+    errorBox.err = err;
+  });
+
   if (!proc.pid) {
-    throw new Error("Failed to spawn server process");
+    // Give Node a tick to emit the deferred 'error' event so we have its
+    // message rather than a generic "Failed to spawn".
+    await new Promise((r) => setImmediate(r));
+    throw new Error(
+      `Failed to spawn server process${errorBox.err ? `: ${errorBox.err.message}` : ""}`,
+    );
   }
 
   const log = { value: "" };
@@ -272,6 +290,10 @@ export async function startServer(
   });
 
   const ok = await waitForPort(port, readyTimeoutMs);
+  if (errorBox.err) {
+    servers.delete(id);
+    throw new Error(`Server spawn failed: ${errorBox.err.message}`);
+  }
   if (!ok) {
     treeKill(proc.pid, "SIGKILL");
     servers.delete(id);

@@ -68,6 +68,16 @@ sandboxEvents.on("server_exit", (id: string, projectId: string | null) => {
   if (projectId) broadcastToProject(projectId, { type: "server_stopped", id });
 });
 
+// Last-resort safety net: a stray async error somewhere in the agent loop or
+// in a spawned child should NOT take the orchestrator down. We log loudly so
+// we still notice in Railway logs, but the process keeps serving other users.
+process.on("uncaughtException", (err) => {
+  console.error("uncaughtException — process kept alive:", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("unhandledRejection — process kept alive:", reason);
+});
+
 async function main(): Promise<void> {
   const required = [
     "ANTHROPIC_API_KEY",

@@ -163,6 +163,30 @@ export default function CodeEditor() {
         language={languageFor(path)}
         value={content}
         beforeMount={(monaco) => defineUniqusTheme(monaco)}
+        onMount={(editor, monaco) => {
+          // Lock down VSCode-flavored features that aren't appropriate inside
+          // an embedded sandbox editor — the Quick Command palette would
+          // expose actions the user can't actually use here, and Goto Symbol /
+          // Peek work against a phantom workspace that doesn't match what's
+          // really on disk. Override the keybindings to no-ops; combined with
+          // `contextmenu: false` below this removes all the obvious entry
+          // points. We keep Find (Ctrl/Cmd-F) — it's useful and harmless.
+          const NOOP = (): void => {};
+          // F1 — Quick Command
+          editor.addCommand(monaco.KeyCode.F1, NOOP);
+          // Cmd/Ctrl + Shift + P — Quick Command
+          editor.addCommand(
+            monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyP,
+            NOOP,
+          );
+          // Cmd/Ctrl + P — Go to file (no file picker here)
+          editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyP, NOOP);
+          // Cmd/Ctrl + Shift + O — Go to symbol
+          editor.addCommand(
+            monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyO,
+            NOOP,
+          );
+        }}
         onChange={onChange}
         options={{
           readOnly: false,
@@ -174,6 +198,14 @@ export default function CodeEditor() {
           padding: { top: 8 },
           renderLineHighlight: "line",
           smoothScrolling: true,
+          // Lockdown: no right-click menu, no peek/goto symbol UIs, no
+          // command palette button in the bottom-right.
+          contextmenu: false,
+          links: false,
+          quickSuggestions: false,
+          parameterHints: { enabled: false },
+          codeLens: false,
+          lightbulb: { enabled: false as unknown as never },
         }}
       />
       <div

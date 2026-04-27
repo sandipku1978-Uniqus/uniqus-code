@@ -1,7 +1,6 @@
 "use client";
 
 import { useStore, fileTabId, previewTabId, flushSave } from "@/lib/store";
-import { stopServerApi } from "@/lib/api";
 import CodeEditor from "./CodeEditor";
 import PreviewPanel from "./PreviewPanel";
 
@@ -11,8 +10,8 @@ export default function EditorPreviewArea() {
   const editorTab = useStore((s) => s.editorTab);
   const setEditorTab = useStore((s) => s.setEditorTab);
   const closeOpenFile = useStore((s) => s.closeOpenFile);
+  const removePreview = useStore((s) => s.removePreview);
   const saveStatus = useStore((s) => s.saveStatus);
-  const project = useStore((s) => s.project);
 
   const hasAnyTabs = openFiles.length > 0 || previews.length > 0;
 
@@ -105,17 +104,13 @@ export default function EditorPreviewArea() {
                   className="x"
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (!project) return;
-                    // Closing the tab kills the underlying dev server.
-                    // Without this, the server keeps running on the
-                    // orchestrator host and the user can't get rid of it
-                    // without restarting Railway. The store will drop the
-                    // tab when the orchestrator broadcasts server_stopped.
-                    stopServerApi(project.id, p.id).catch((err) => {
-                      console.error("stopServer failed:", err);
-                    });
+                    // Local-only close: the dev server keeps running so the
+                    // user can re-open the URL or have the agent keep
+                    // working with it. Hit the Run button to actually
+                    // stop+restart, or ask the agent to stop_server.
+                    removePreview(p.id);
                   }}
-                  title="Stop server and close tab"
+                  title="Close tab (server keeps running)"
                 >
                   ×
                 </span>
