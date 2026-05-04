@@ -205,8 +205,13 @@ export async function runAgentLoop(
       return { aborted: false };
     }
 
-    if (opts.signal?.aborted) return { aborted: true };
-
+    // NOTE: do NOT short-circuit here on signal.aborted. The assistant
+    // message above contains tool_use blocks; if we return without pushing
+    // matching tool_result blocks, the persisted history becomes malformed
+    // and every future turn 400s with "tool_use ids were found without
+    // tool_result blocks immediately after". Fall through to the loop —
+    // it synthesizes "(aborted by user)" results for each call and we
+    // record the abort verdict at the bottom of the iteration instead.
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
     for (const call of toolCalls) {
       if (opts.signal?.aborted) {
