@@ -3,11 +3,19 @@
 import { create } from "zustand";
 import type {
   CurrentUser,
+  DeploymentState,
   Plan,
   PreviewServer,
   ProjectSummary,
   TreeEntry,
 } from "@uniqus/api-types";
+
+export interface DeploymentLive {
+  id: string;
+  state: DeploymentState;
+  vercel_url: string | null;
+  error_message: string | null;
+}
 
 export type ChatItem =
   | { kind: "user"; id: string; content: string }
@@ -84,6 +92,12 @@ interface State {
    * `complete` chat item id. Default = collapsed once the turn is done.
    */
   expandedTurns: Record<string, boolean>;
+  /**
+   * Live state of the current/most-recent deploy for this project. Updated
+   * by the WS `deploy_state_changed` event so the Deploy button can show
+   * "Deploying…" / "Live at xyz.vercel.app" without polling.
+   */
+  deployment: DeploymentLive | null;
 
   setConnected(c: boolean): void;
   setBusy(b: boolean): void;
@@ -113,6 +127,7 @@ interface State {
   setPendingEdit(path: string, content: string): void;
   clearPendingEdit(path: string): void;
   toggleTurn(completeItemId: string): void;
+  setDeployment(d: DeploymentLive | null): void;
   resetChat(): void;
   reset(): void;
 }
@@ -146,6 +161,7 @@ export const useStore = create<State>((set, get) => ({
   saveStatus: {},
   pendingEdits: {},
   expandedTurns: {},
+  deployment: null,
 
   setConnected: (c) => set({ connected: c }),
   setBusy: (b) => set({ busy: b }),
@@ -308,6 +324,7 @@ export const useStore = create<State>((set, get) => ({
         [completeItemId]: !s.expandedTurns[completeItemId],
       },
     })),
+  setDeployment: (d) => set({ deployment: d }),
   resetChat: () =>
     set({
       chat: [],
@@ -333,6 +350,7 @@ export const useStore = create<State>((set, get) => ({
       saveStatus: {},
       pendingEdits: {},
       expandedTurns: {},
+      deployment: null,
     }),
 }));
 

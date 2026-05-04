@@ -1,6 +1,6 @@
 "use client";
 
-import type { CurrentUser, ProjectSummary } from "@uniqus/api-types";
+import type { CurrentUser, DeploymentState, ProjectSummary } from "@uniqus/api-types";
 
 // Production deployments must set NEXT_PUBLIC_ORCHESTRATOR_URL — the
 // orchestrator usually runs on a different hostname (Railway etc.) than the
@@ -60,11 +60,104 @@ export const importGithubApi = (input: {
   repo_url: string;
   branch?: string;
   pat?: string;
+  use_oauth?: boolean;
 }): Promise<{ project: ProjectSummary; import: ImportResultMeta }> =>
   api("/api/projects/import-github", {
     method: "POST",
     body: JSON.stringify(input),
   });
+
+export interface GithubStatus {
+  connected: boolean;
+  login: string | null;
+  connected_at: string | null;
+}
+
+export interface GithubRepoSummary {
+  name: string;
+  full_name: string;
+  private: boolean;
+  default_branch: string;
+  clone_url: string;
+  updated_at: string;
+}
+
+export const fetchGithubStatus = (): Promise<GithubStatus> =>
+  api("/api/github/status");
+
+export const fetchGithubRepos = (): Promise<{ repos: GithubRepoSummary[] }> =>
+  api("/api/github/repos");
+
+export const disconnectGithubApi = (): Promise<{ ok: true }> =>
+  api("/api/github/disconnect", { method: "POST" });
+
+/**
+ * Build the absolute URL the user's browser navigates to when starting the
+ * GitHub OAuth dance. Top-level navigation (not fetch) — the orchestrator
+ * 302s to github.com, then back to /api/github/callback, then back to
+ * `returnTo` (which we set to the current page so the user lands where they
+ * started).
+ */
+export function githubOauthStartUrl(returnTo: string): string {
+  const u = new URL(`${API_BASE}/api/github/start`);
+  u.searchParams.set("return", returnTo);
+  return u.toString();
+}
+
+// ── Vercel ────────────────────────────────────────────────────────────────────
+
+export interface VercelStatus {
+  connected: boolean;
+  user_login: string | null;
+  team_id: string | null;
+  connected_at: string | null;
+}
+
+export const fetchVercelStatus = (): Promise<VercelStatus> =>
+  api("/api/vercel/status");
+
+export const disconnectVercelApi = (): Promise<{ ok: true }> =>
+  api("/api/vercel/disconnect", { method: "POST" });
+
+export function vercelOauthStartUrl(returnTo: string): string {
+  const u = new URL(`${API_BASE}/api/vercel/start`);
+  u.searchParams.set("return", returnTo);
+  return u.toString();
+}
+
+// ── Deployments ───────────────────────────────────────────────────────────────
+
+export interface DeploymentSummary {
+  id: string;
+  vercel_deployment_id: string;
+  vercel_url: string | null;
+  state: DeploymentState;
+  error_message: string | null;
+  target: "production" | "preview";
+  created_at: string;
+}
+
+export interface DeployStartResponse {
+  deployment_id: string;
+  vercel_deployment_id: string;
+  vercel_url: string;
+  inspector_url: string;
+  state: DeploymentState;
+}
+
+export const deployProjectApi = (
+  projectId: string,
+  body: { env: Record<string, string>; target?: "production" | "preview" },
+): Promise<DeployStartResponse> =>
+  api(`/api/projects/${projectId}/deploy`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const listDeploymentsApi = (
+  projectId: string,
+): Promise<{ deployments: DeploymentSummary[] }> =>
+  api(`/api/projects/${projectId}/deployments`);
 
 /**
  * Upload a zip via multipart/form-data. Doesn't go through the JSON `api()` helper

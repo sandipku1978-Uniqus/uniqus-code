@@ -14,6 +14,7 @@ import ChatPanel from "./ChatPanel";
 import FileExplorer from "./FileExplorer";
 import EditorPreviewArea from "./EditorPreviewArea";
 import TerminalPanel from "./TerminalPanel";
+import DeployButton from "./DeployButton";
 
 export default function Workspace({
   projectId,
@@ -75,6 +76,7 @@ export default function Workspace({
 
         <div className="actions">
           <RunButton projectId={projectId} />
+          <DeployButton projectId={projectId} />
           <ToggleButton
             on={panels.files}
             onClick={() => togglePanel("files")}

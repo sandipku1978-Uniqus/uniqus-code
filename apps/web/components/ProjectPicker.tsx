@@ -2,16 +2,23 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import type { ProjectSummary } from "@uniqus/api-types";
 import {
   fetchProjects,
   createProjectApi,
   importGithubApi,
   importZipApi,
+  fetchGithubStatus,
+  fetchGithubRepos,
+  disconnectGithubApi,
+  githubOauthStartUrl,
+  type GithubStatus,
+  type GithubRepoSummary,
 } from "@/lib/api";
 
 type Mode = "blank" | "zip" | "github";
+type GithubAuthMode = "oauth" | "pat";
 
 export default function ProjectPicker({
   userEmail,
@@ -23,6 +30,7 @@ export default function ProjectPicker({
   signOutUrl: string;
 }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -35,11 +43,70 @@ export default function ProjectPicker({
   const [pat, setPat] = useState("");
   const [zipFile, setZipFile] = useState<File | null>(null);
 
+  // GitHub OAuth state
+  const [github, setGithub] = useState<GithubStatus | null>(null);
+  const [githubAuthMode, setGithubAuthMode] = useState<GithubAuthMode>("oauth");
+  const [repos, setRepos] = useState<GithubRepoSummary[] | null>(null);
+  const [reposError, setReposError] = useState<string | null>(null);
+  const [selectedRepo, setSelectedRepo] = useState<string>(""); // full_name
+
   useEffect(() => {
     fetchProjects()
       .then((r) => setProjects(r.projects))
       .catch((e) => setError(e.message));
   }, []);
+
+  // Pull GitHub connection state on mount, and again whenever the query
+  // string flips to `?github=connected` (the OAuth callback bounces the
+  // user back here). Picks up the new login without a manual refresh.
+  const githubFlag = searchParams?.get("github") ?? null;
+  useEffect(() => {
+    fetchGithubStatus()
+      .then((s) => setGithub(s))
+      .catch(() => setGithub({ connected: false, login: null, connected_at: null }));
+  }, [githubFlag]);
+
+  // When the user is connected, default to OAuth mode and fetch their
+  // repos so the dropdown is ready before they switch to "Clone GitHub".
+  useEffect(() => {
+    if (!github?.connected) return;
+    setGithubAuthMode("oauth");
+    setReposError(null);
+    fetchGithubRepos()
+      .then((r) => setRepos(r.repos))
+      .catch((err) => setReposError(err instanceof Error ? err.message : String(err)));
+  }, [github?.connected]);
+
+  // Surface OAuth callback failures in the UI; clear the param so a refresh
+  // doesn't replay the message.
+  useEffect(() => {
+    if (githubFlag === "error") {
+      const reason = searchParams?.get("reason") ?? "unknown";
+      setError(`GitHub connect failed: ${reason}`);
+      router.replace("/projects");
+    } else if (githubFlag === "connected") {
+      router.replace("/projects");
+    }
+  }, [githubFlag, router, searchParams]);
+
+  async function handleConnectGithub(): Promise<void> {
+    // Top-level nav so cookies for the orchestrator subdomain go with the
+    // request — fetch() would be useless here (the orchestrator 302s to
+    // github.com, which the browser would block as opaque-redirect).
+    window.location.href = githubOauthStartUrl(window.location.origin + "/projects");
+  }
+
+  async function handleDisconnectGithub(): Promise<void> {
+    try {
+      await disconnectGithubApi();
+      setGithub({ connected: false, login: null, connected_at: null });
+      setRepos(null);
+      setSelectedRepo("");
+      setGithubAuthMode("pat");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -54,16 +121,31 @@ export default function ProjectPicker({
         return;
       }
       if (mode === "github") {
-        if (!repoUrl.trim()) {
+        // Two paths: OAuth (user picked from their connected-account dropdown)
+        // or PAT/manual URL fallback. The OAuth path doesn't ask the user
+        // to type a URL — we resolve it from the selected repo's clone_url.
+        const useOauth = githubAuthMode === "oauth" && github?.connected;
+        let resolvedUrl = repoUrl.trim();
+        if (useOauth) {
+          const repo = repos?.find((r) => r.full_name === selectedRepo);
+          if (!repo) {
+            setError("pick a repository from the list");
+            setCreating(false);
+            return;
+          }
+          resolvedUrl = repo.clone_url;
+        }
+        if (!resolvedUrl) {
           setError("repo URL is required");
           setCreating(false);
           return;
         }
         const { project } = await importGithubApi({
           name: name.trim(),
-          repo_url: repoUrl.trim(),
+          repo_url: resolvedUrl,
           branch: branch.trim() || undefined,
-          pat: pat.trim() || undefined,
+          pat: !useOauth ? pat.trim() || undefined : undefined,
+          use_oauth: useOauth || undefined,
         });
         router.push(`/projects/${project.id}`);
         return;
@@ -284,7 +366,10 @@ export default function ProjectPicker({
                 disabled={
                   !name.trim() ||
                   creating ||
-                  (mode === "github" && !repoUrl.trim()) ||
+                  (mode === "github" &&
+                    (githubAuthMode === "oauth" && github?.connected
+                      ? !selectedRepo
+                      : !repoUrl.trim())) ||
                   (mode === "zip" && !zipFile)
                 }
               >
@@ -301,37 +386,174 @@ export default function ProjectPicker({
             </form>
 
             {mode === "github" && (
-              <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
-                <input
-                  className="newproj-input"
-                  value={repoUrl}
-                  onChange={(e) => setRepoUrl(e.target.value)}
-                  placeholder="https://github.com/owner/repo.git"
-                  disabled={creating}
-                  style={fieldStyle}
-                />
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input
-                    value={branch}
-                    onChange={(e) => setBranch(e.target.value)}
-                    placeholder="branch (optional, default = repo default)"
-                    disabled={creating}
-                    style={{ ...fieldStyle, flex: 1 }}
-                  />
-                  <input
-                    type="password"
-                    value={pat}
-                    onChange={(e) => setPat(e.target.value)}
-                    placeholder="GitHub PAT (only for private repos)"
-                    disabled={creating}
-                    autoComplete="off"
-                    style={{ ...fieldStyle, flex: 1 }}
-                  />
-                </div>
-                <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>
-                  PAT is used once to clone, never stored. Use a fine-scoped token
-                  with read access to the target repo only.
-                </p>
+              <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
+                {github === null ? (
+                  <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                    checking GitHub connection…
+                  </div>
+                ) : github.connected ? (
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "8px 10px",
+                      border: "1px solid var(--border-default)",
+                      borderRadius: 6,
+                      background: "var(--bg-elev)",
+                    }}
+                  >
+                    <span style={{ fontSize: 12, color: "var(--text-primary)" }}>
+                      Connected as <strong>@{github.login}</strong>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleDisconnectGithub}
+                      disabled={creating}
+                      className="btn-ghost"
+                      style={{ fontSize: 11 }}
+                    >
+                      Disconnect
+                    </button>
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "8px 10px",
+                      border: "1px dashed var(--border-default)",
+                      borderRadius: 6,
+                    }}
+                  >
+                    <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                      Connect your GitHub to pick a repo without pasting a URL or
+                      PAT.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleConnectGithub}
+                      disabled={creating}
+                      className="btn-primary"
+                      style={{ fontSize: 12, padding: "6px 10px" }}
+                    >
+                      Connect GitHub
+                    </button>
+                  </div>
+                )}
+
+                {github?.connected && (
+                  <div
+                    role="tablist"
+                    style={{ display: "flex", gap: 4, fontSize: 12 }}
+                  >
+                    {(
+                      [
+                        ["oauth", "Pick from my repos"],
+                        ["pat", "Paste URL / PAT"],
+                      ] as const
+                    ).map(([m, label]) => (
+                      <button
+                        key={m}
+                        type="button"
+                        role="tab"
+                        aria-selected={githubAuthMode === m}
+                        onClick={() => setGithubAuthMode(m)}
+                        style={{
+                          padding: "4px 8px",
+                          background:
+                            githubAuthMode === m
+                              ? "var(--bg-elev)"
+                              : "transparent",
+                          border: "1px solid var(--border-default)",
+                          borderRadius: 4,
+                          color:
+                            githubAuthMode === m
+                              ? "var(--text-primary)"
+                              : "var(--text-muted)",
+                          cursor: "pointer",
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {github?.connected && githubAuthMode === "oauth" ? (
+                  <>
+                    {reposError ? (
+                      <div style={{ color: "var(--conf-low)", fontSize: 12 }}>
+                        couldn’t load repos: {reposError}
+                      </div>
+                    ) : repos === null ? (
+                      <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                        loading repos…
+                      </div>
+                    ) : (
+                      <select
+                        value={selectedRepo}
+                        onChange={(e) => setSelectedRepo(e.target.value)}
+                        disabled={creating}
+                        style={fieldStyle}
+                      >
+                        <option value="">— select a repository —</option>
+                        {repos.map((r) => (
+                          <option key={r.full_name} value={r.full_name}>
+                            {r.full_name}
+                            {r.private ? " (private)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    <input
+                      value={branch}
+                      onChange={(e) => setBranch(e.target.value)}
+                      placeholder="branch (optional, default = repo default)"
+                      disabled={creating}
+                      style={fieldStyle}
+                    />
+                    <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>
+                      Cloned with your GitHub OAuth token. Token stays encrypted on
+                      our server; revoke any time from GitHub → Settings →
+                      Applications.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <input
+                      className="newproj-input"
+                      value={repoUrl}
+                      onChange={(e) => setRepoUrl(e.target.value)}
+                      placeholder="https://github.com/owner/repo.git"
+                      disabled={creating}
+                      style={fieldStyle}
+                    />
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <input
+                        value={branch}
+                        onChange={(e) => setBranch(e.target.value)}
+                        placeholder="branch (optional, default = repo default)"
+                        disabled={creating}
+                        style={{ ...fieldStyle, flex: 1 }}
+                      />
+                      <input
+                        type="password"
+                        value={pat}
+                        onChange={(e) => setPat(e.target.value)}
+                        placeholder="GitHub PAT (only for private repos)"
+                        disabled={creating}
+                        autoComplete="off"
+                        style={{ ...fieldStyle, flex: 1 }}
+                      />
+                    </div>
+                    <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>
+                      PAT is used once to clone, never stored. Use a fine-scoped
+                      token with read access to the target repo only.
+                    </p>
+                  </>
+                )}
               </div>
             )}
 

@@ -7,6 +7,8 @@ export interface ProjectRecord {
   description: string | null;
   created_at: string;
   updated_at: string;
+  vercel_project_id?: string | null;
+  vercel_project_name?: string | null;
 }
 
 export async function listProjects(ownerId: string): Promise<ProjectRecord[]> {
@@ -70,4 +72,26 @@ export async function deleteProject(id: string, ownerId: string): Promise<void> 
     .eq("id", id)
     .eq("owner_id", ownerId);
   if (error) throw new Error(`deleteProject failed: ${error.message}`);
+}
+
+/**
+ * Stamp the Vercel project link onto the row after the first successful deploy.
+ * Subsequent deploys hit the same project so the dashboard URL stays stable
+ * and Vercel doesn't create per-deploy projects.
+ */
+export async function setVercelProject(
+  id: string,
+  ownerId: string,
+  vercelProjectId: string,
+  vercelProjectName: string,
+): Promise<void> {
+  const { error } = await db()
+    .from("projects")
+    .update({
+      vercel_project_id: vercelProjectId,
+      vercel_project_name: vercelProjectName,
+    })
+    .eq("id", id)
+    .eq("owner_id", ownerId);
+  if (error) throw new Error(`setVercelProject failed: ${error.message}`);
 }

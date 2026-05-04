@@ -43,6 +43,27 @@ import { ensureBucket } from "./storage/client.js";
 import { getTracker } from "./storage/sync.js";
 import { resolveTarget, proxyHttp, proxyWebSocket } from "./proxy.js";
 import { importZip, importGithub } from "./import.js";
+import {
+  handleStart as githubStart,
+  handleCallback as githubCallback,
+  handleStatus as githubStatus,
+  handleDisconnect as githubDisconnect,
+  listUserRepos as githubListRepos,
+  getGithubToken,
+} from "./github.js";
+import {
+  handleStart as vercelStart,
+  handleCallback as vercelCallback,
+  handleStatus as vercelStatus,
+  handleDisconnect as vercelDisconnect,
+  getVercelAuth,
+} from "./vercel.js";
+import { startDeploy, pollUntilTerminal } from "./deploy.js";
+import {
+  listDeployments,
+  updateDeploymentState,
+  type DeploymentState,
+} from "./db/deployments.js";
 import Busboy from "busboy";
 
 // Railway/Fly inject PORT; local dev sets ORCHESTRATOR_PORT or falls back to 8787.
@@ -300,6 +321,27 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return json(res, 403, { error: "origin not allowed" });
   }
 
+  // GitHub OAuth callback: hit by github.com's redirect-back, not by our web
+  // app. We must NOT 401 here on a stale session — the handler resolves
+  // missing-auth into a friendly `?github=error` redirect back to the web
+  // app instead. Lives before the global authenticate gate for that reason.
+  if (req.url?.startsWith("/api/github/callback") && req.method === "GET") {
+    return await githubCallback(req, res, ALLOWED_ORIGINS, async (r) => {
+      const a = await authenticate(r);
+      return a ? { user: a.user } : null;
+    });
+  }
+
+  // Vercel OAuth callback (Vercel integration "Redirect URL"). Same reason
+  // it lives above the auth gate as the GitHub one — Vercel's redirect-back
+  // is a top-level navigation that may carry a stale session.
+  if (req.url?.startsWith("/api/vercel/callback") && req.method === "GET") {
+    return await vercelCallback(req, res, ALLOWED_ORIGINS, async (r) => {
+      const a = await authenticate(r);
+      return a ? { user: a.user } : null;
+    });
+  }
+
   const auth = await authenticate(req);
   if (!auth) {
     return json(res, 401, { error: "not authenticated" });
@@ -339,6 +381,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       repo_url?: string;
       branch?: string;
       pat?: string;
+      use_oauth?: boolean;
     }>(req);
     const name = (body.name ?? "").trim();
     const repoUrl = (body.repo_url ?? "").trim();
@@ -351,6 +394,22 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const urlError = validateCloneUrl(repoUrl);
     if (urlError) return json(res, 400, { error: urlError });
 
+    // Auth resolution order: explicit `use_oauth` pulls the stored OAuth
+    // token from the user row; otherwise fall back to the body's PAT (which
+    // may still be empty for public repos). Doing this before createProject
+    // means a user who's checked "use my GitHub" but isn't connected gets a
+    // clean 409 instead of a half-created project.
+    let authToken: string | undefined = body.pat?.trim() || undefined;
+    if (body.use_oauth) {
+      const stored = await getGithubToken(user.id);
+      if (!stored) {
+        return json(res, 409, {
+          error: "github_not_connected — connect GitHub from the project picker, or paste a PAT instead",
+        });
+      }
+      authToken = stored;
+    }
+
     const project = await createProject({
       owner_id: user.id,
       name,
@@ -361,7 +420,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
 
     try {
       const result = await importGithub(
-        { repo_url: repoUrl, branch: body.branch, pat: body.pat },
+        { repo_url: repoUrl, branch: body.branch, pat: authToken },
         dest,
       );
       await getTracker(project.id, dest).syncChanges();
@@ -380,6 +439,165 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // text fields `name` and (optional) `description`.
   if (req.url === "/api/projects/import-zip" && req.method === "POST") {
     return await handleZipImport(req, res, user.id);
+  }
+
+  // GitHub OAuth: status — { connected, login, connected_at }.
+  if (req.url === "/api/github/status" && req.method === "GET") {
+    return json(res, 200, await githubStatus(user));
+  }
+
+  // GitHub OAuth: kick off the dance. Redirects to github.com/login/oauth.
+  // Top-level nav from the web app — no Origin header in most browsers, which
+  // is why isOriginAllowed() returns true above.
+  if (req.url?.startsWith("/api/github/start") && req.method === "GET") {
+    return await githubStart(req, res, user, ALLOWED_ORIGINS);
+  }
+
+  // GitHub OAuth: list the user's repos for the import picker. Returns 409
+  // if the user hasn't connected yet so the UI can show "Connect GitHub".
+  if (req.url === "/api/github/repos" && req.method === "GET") {
+    try {
+      const repos = await githubListRepos(user);
+      return json(res, 200, { repos });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg === "github_not_connected") {
+        return json(res, 409, { error: "github_not_connected" });
+      }
+      return json(res, 502, { error: msg });
+    }
+  }
+
+  // GitHub OAuth: clear the stored token. Used by the "Disconnect GitHub"
+  // affordance in the UI; lets a user revoke without leaving our app.
+  if (req.url === "/api/github/disconnect" && req.method === "POST") {
+    await githubDisconnect(user);
+    return json(res, 200, { ok: true });
+  }
+
+  // ── Vercel OAuth ────────────────────────────────────────────────────────
+  if (req.url === "/api/vercel/status" && req.method === "GET") {
+    return json(res, 200, await vercelStatus(user));
+  }
+  if (req.url?.startsWith("/api/vercel/start") && req.method === "GET") {
+    return await vercelStart(req, res, user, ALLOWED_ORIGINS);
+  }
+  if (req.url === "/api/vercel/disconnect" && req.method === "POST") {
+    await vercelDisconnect(user);
+    return json(res, 200, { ok: true });
+  }
+
+  // ── Deployments ─────────────────────────────────────────────────────────
+  // List a project's recent deploys for the deploy modal's history panel.
+  const deployListMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/deployments$/,
+  );
+  if (deployListMatch && req.method === "GET") {
+    const projectId = deployListMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 403, { error: "project not found or access denied" });
+    const rows = await listDeployments(projectId);
+    return json(res, 200, { deployments: rows });
+  }
+
+  // Kick off a deploy. Body: { env: {KEY: VAL, ...}, target: "production"|"preview" }
+  // Returns the DB row immediately; subsequent state changes broadcast over
+  // the project's WS as `deploy_state_changed` events.
+  const deployStartMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/deploy$/,
+  );
+  if (deployStartMatch && req.method === "POST") {
+    const projectId = deployStartMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 403, { error: "project not found or access denied" });
+
+    const auth2 = await getVercelAuth(user);
+    if (!auth2) {
+      return json(res, 409, {
+        error: "vercel_not_connected — connect Vercel first to deploy",
+      });
+    }
+
+    type DeployBody = {
+      env?: Record<string, string>;
+      target?: "production" | "preview";
+    };
+    const body = await readJsonBody<DeployBody>(req).catch<DeployBody>(() => ({}));
+    const target = body.target === "preview" ? "preview" : "production";
+    const env = sanitizeEnv(body.env);
+
+    // Reuse the project's stored Vercel project name when available so
+    // re-deploys converge on the same project. First deploy slugifies the
+    // uniqus project name. We don't trust the user's freeform project name
+    // verbatim — Vercel rejects names with spaces / capitals.
+    const projectName =
+      project.vercel_project_name ?? slugifyForVercel(project.name) ?? `uniqus-${projectId.slice(0, 8)}`;
+
+    const dest = sandboxDirFor(projectId);
+
+    let result;
+    try {
+      result = await startDeploy(
+        {
+          uniqusProjectId: projectId,
+          ownerId: user.id,
+          vercelToken: auth2.token,
+          vercelTeamId: auth2.teamId,
+        },
+        { projectName, sandboxDir: dest, env, target },
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return json(res, 400, { error: `deploy failed: ${msg}` });
+    }
+
+    // Fire the initial event right away so the UI sees QUEUED before the
+    // first poll lands.
+    broadcastToProject(projectId, {
+      type: "deploy_state_changed",
+      deployment_id: result.deployment_id,
+      state: result.state,
+      vercel_url: result.vercel_url ?? null,
+      error_message: null,
+    });
+
+    // Background poll. Errors here can't reach the user via the response
+    // (already returned), so we log and update the row to ERROR so the
+    // UI's next refresh sees it.
+    void (async () => {
+      try {
+        await pollUntilTerminal(
+          { vercelToken: auth2.token, vercelTeamId: auth2.teamId },
+          result.deployment_id,
+          result.vercel_deployment_id,
+          (state, url, errMsg) => {
+            broadcastToProject(projectId, {
+              type: "deploy_state_changed",
+              deployment_id: result.deployment_id,
+              state,
+              vercel_url: url,
+              error_message: errMsg,
+            });
+          },
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[poll ${result.vercel_deployment_id}] crashed:`, err);
+        await updateDeploymentState(result.deployment_id, {
+          state: "ERROR" as DeploymentState,
+          error_message: msg,
+        }).catch(() => {});
+        broadcastToProject(projectId, {
+          type: "deploy_state_changed",
+          deployment_id: result.deployment_id,
+          state: "ERROR",
+          vercel_url: result.vercel_url ?? null,
+          error_message: msg,
+        });
+      }
+    })();
+
+    return json(res, 202, result);
   }
 
   // Stop a specific server: DELETE /api/projects/{projectId}/servers/{serverId}
@@ -630,6 +848,38 @@ function validateCloneUrl(repoUrl: string): string | null {
     return "repo_url is missing a hostname";
   }
   return null;
+}
+
+/**
+ * Drop env vars with non-string values or invalid keys before they reach
+ * Vercel's API. Vercel requires `[A-Za-z_][A-Za-z0-9_]*` and rejects empty
+ * values; pre-filtering gives the user a faster, clearer error path than
+ * a 400 round-trip from Vercel.
+ */
+function sanitizeEnv(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v !== "string") continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) continue;
+    if (v.length === 0) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Vercel project names: lowercase letters, digits, hyphens. Length 1–100.
+ * We slug the uniqus project name once on first deploy and persist the
+ * result (`projects.vercel_project_name`) so subsequent deploys converge.
+ */
+function slugifyForVercel(name: string): string | null {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 100);
+  return slug.length > 0 ? slug : null;
 }
 
 function toProjectSummary(p: {

@@ -34,6 +34,8 @@ export interface CurrentUser {
   display_name: string | null;
 }
 
+export type DeploymentState = "QUEUED" | "BUILDING" | "READY" | "ERROR" | "CANCELED";
+
 export type ServerEvent =
   | {
       type: "session_started";
@@ -58,6 +60,13 @@ export type ServerEvent =
   | { type: "complete"; tool_calls: number; elapsed_ms: number; aborted?: boolean }
   | { type: "storage_synced"; at: number }
   | { type: "client_write_ack"; path: string; ok: boolean; error?: string }
+  | {
+      type: "deploy_state_changed";
+      deployment_id: string;
+      state: DeploymentState;
+      vercel_url: string | null;
+      error_message: string | null;
+    }
   | { type: "error"; message: string };
 
 export interface PreviewServer {

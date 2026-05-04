@@ -180,6 +180,14 @@ function handleEvent(event: ServerEvent): void {
     case "storage_synced":
       s.setLastSyncedAt(event.at);
       break;
+    case "deploy_state_changed":
+      s.setDeployment({
+        id: event.deployment_id,
+        state: event.state,
+        vercel_url: event.vercel_url,
+        error_message: event.error_message,
+      });
+      break;
     case "client_write_ack":
       s.setSaveStatus(
         event.path,
