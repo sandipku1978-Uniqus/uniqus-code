@@ -496,7 +496,11 @@ export default function ProjectPicker({
                         value={selectedRepo}
                         onChange={(e) => setSelectedRepo(e.target.value)}
                         disabled={creating}
-                        style={fieldStyle}
+                        // colorScheme tells the browser to render the native
+                        // <option> popup in dark mode. Without it, options
+                        // render on a white system background regardless of
+                        // the <select>'s own styling.
+                        style={{ ...fieldStyle, colorScheme: "dark" }}
                       >
                         <option value="">— select a repository —</option>
                         {repos.map((r) => (
