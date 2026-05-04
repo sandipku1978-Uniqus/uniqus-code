@@ -165,17 +165,34 @@ function pickAllowedOrigin(reqOrigin: string | undefined): string | null {
 /**
  * Should this request go to the preview proxy?
  *
- * Yes if the path explicitly starts with `/preview/`, or if there's a Referer
- * pointing at `/preview/...` AND the request path is NOT an orchestrator-owned
- * route (`/api/*`, `/health`, the WS root with `?project=`). The exclusion
- * matters: a user who has a preview iframe open will have a `Referer` of
- * `/preview/srv_xxx/...` on every request from that tab, including the web
- * app's own API calls if they were ever co-mounted on the same origin.
+ * Yes if the path explicitly starts with `/preview/`, OR if the request
+ * carries a Referer pointing at `/preview/...`, OR if the request carries
+ * the `uniqus_preview` cookie that we set when an iframe initially loaded
+ * a preview path. In all three cases we still bail for orchestrator-owned
+ * routes (`/api/*`, `/health`, the agent WS at `/` with `?project=`) so
+ * those keep working when an iframe is open.
+ *
+ * The cookie tier is what makes Next.js / Vite client-side soft navigation
+ * survive: pushState rewrites the URL to `/about` (no preview prefix) AND
+ * subsequent fetch Referers also strip the prefix, so without the cookie
+ * the request would fall through to a 404. WebSocket upgrades for HMR
+ * also don't carry Referer at all in browsers, so the cookie is what makes
+ * them resolve too.
  */
 function shouldProxy(url: string, headers: IncomingHttpHeaders): boolean {
   if (url.startsWith("/preview/")) return true;
-  const ref = headers.referer ?? headers.referrer;
-  if (typeof ref !== "string") return false;
+  const refererPointsAtPreview = (() => {
+    const ref = headers.referer ?? headers.referrer;
+    if (typeof ref !== "string") return false;
+    try {
+      return new URL(ref).pathname.startsWith("/preview/");
+    } catch {
+      return false;
+    }
+  })();
+  const cookieHasPreview =
+    typeof headers.cookie === "string" && headers.cookie.includes("uniqus_preview=");
+  if (!refererPointsAtPreview && !cookieHasPreview) return false;
   if (url.startsWith("/api/") || url === "/health") return false;
   // The orchestrator WS upgrade lives at `/` with `?project=...`. Anything
   // with a project query is the agent socket, never the proxy.

@@ -11,6 +11,16 @@ import { getServer } from "./agent/sandbox.js";
 // by 8 hex chars. Keep this loose so future id formats work without code changes.
 const PREVIEW_PREFIX = /^\/preview\/([^/?#]+)(\/.*)?$/;
 
+/**
+ * Cookie name used to pin the iframe to its preview server. Set whenever we
+ * proxy a `/preview/{serverId}/...` request and read as a third-priority
+ * resolver after path and Referer. This is what makes client-side routing
+ * survive `history.pushState` — Next.js, Vite, etc. soft-navigate to bare
+ * paths like `/about`, dropping the `/preview/{id}/` prefix from both the
+ * URL and the Referer; the cookie keeps the routing sticky.
+ */
+const PREVIEW_COOKIE = "uniqus_preview";
+
 export interface ProxyTarget {
   serverId: string;
   port: number;
@@ -18,15 +28,48 @@ export interface ProxyTarget {
   innerPath: string;
 }
 
+function readPreviewCookie(headers: IncomingHttpHeaders): string | null {
+  const cookieHeader = headers.cookie;
+  if (typeof cookieHeader !== "string") return null;
+  for (const part of cookieHeader.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    const name = part.slice(0, eq).trim();
+    if (name !== PREVIEW_COOKIE) continue;
+    const value = part.slice(eq + 1).trim();
+    if (!value) return null;
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  }
+  return null;
+}
+
+function buildPreviewCookie(serverId: string): string {
+  // SameSite=None; Secure is required because the preview iframe is
+  // typically embedded in a different origin (the web app). Path=/ so the
+  // cookie covers `/about`, `/_next/...`, `/_next/webpack-hmr`, etc.
+  // Max-Age is short — preview ids are ephemeral, we don't want stale ones
+  // outliving their dev servers.
+  return `${PREVIEW_COOKIE}=${encodeURIComponent(serverId)}; Path=/; Max-Age=86400; SameSite=None; Secure; HttpOnly`;
+}
+
 /**
  * Resolve which sandboxed server a request belongs to.
  *
  * Priority:
  * 1. Path matches `/preview/{serverId}/...` → use that serverId, strip prefix.
- * 2. Otherwise, parse `Referer` for `/preview/{serverId}/`. Used for absolute-path
- *    asset requests like `/_next/static/main.js` that the iframe app emits.
+ * 2. Otherwise, parse `Referer` for `/preview/{serverId}/`. Used for
+ *    absolute-path asset requests like `/_next/static/main.js` that the
+ *    iframe app emits while the URL bar still shows the preview path.
+ * 3. Fall back to the `uniqus_preview` cookie. Catches the cases that 1 and 2
+ *    miss: client-side soft navigation (Next.js / Vite `pushState` strips
+ *    the `/preview/{id}/` prefix from the URL AND the Referer), and
+ *    WebSocket upgrades for HMR (browsers don't send Referer on WS).
  *
- * Returns null when neither matches or the server has stopped.
+ * Returns null when nothing matches or the server has stopped.
  */
 export function resolveTarget(
   url: string,
@@ -54,6 +97,12 @@ export function resolveTarget(
     } catch {
       // malformed referer, fall through
     }
+  }
+
+  const cookieId = readPreviewCookie(headers);
+  if (cookieId) {
+    const srv = getServer(cookieId);
+    if (srv) return { serverId: cookieId, port: srv.port, innerPath: url };
   }
 
   return null;
@@ -86,13 +135,25 @@ export function proxyHttp(
       headers,
     },
     (upRes) => {
-      // Pass through status + headers verbatim. Don't rewrite Location/Set-Cookie
-      // for now — most dev servers emit relative URLs; we'll revisit if needed.
+      // Pass through status + headers verbatim. Don't rewrite Location for
+      // now — most dev servers emit relative URLs; we'll revisit if needed.
       const outHeaders: Record<string, string | string[]> = {};
       for (const [k, v] of Object.entries(upRes.headers)) {
         if (v === undefined) continue;
         if (HOP_BY_HOP.has(k.toLowerCase())) continue;
         outHeaders[k] = v;
+      }
+      // Pin the iframe's browser to this preview server. We append rather
+      // than overwrite so any cookies the dev server itself set still pass
+      // through (Next.js auth flows, app-set session cookies, etc.).
+      const ourCookie = buildPreviewCookie(target.serverId);
+      const existing = outHeaders["set-cookie"];
+      if (Array.isArray(existing)) {
+        outHeaders["set-cookie"] = [...existing, ourCookie];
+      } else if (typeof existing === "string") {
+        outHeaders["set-cookie"] = [existing, ourCookie];
+      } else {
+        outHeaders["set-cookie"] = ourCookie;
       }
       res.writeHead(upRes.statusCode ?? 502, outHeaders);
       upRes.pipe(res);
