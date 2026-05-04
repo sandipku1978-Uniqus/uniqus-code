@@ -193,9 +193,14 @@ function truncate(s: string): string {
   return `${head}\n\n[... truncated ${s.length - HALF_MAX * 2} bytes ...]\n\n${tail}`;
 }
 
-export async function waitForPort(port: number, timeoutMs = 30_000): Promise<boolean> {
+export async function waitForPort(
+  port: number,
+  timeoutMs = 30_000,
+  signal?: AbortSignal,
+): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (signal?.aborted) return false;
     const ok = await new Promise<boolean>((resolve) => {
       const sock = net.createConnection({ port, host: "127.0.0.1" });
       sock.once("connect", () => {
@@ -205,7 +210,19 @@ export async function waitForPort(port: number, timeoutMs = 30_000): Promise<boo
       sock.once("error", () => resolve(false));
     });
     if (ok) return true;
-    await new Promise((r) => setTimeout(r, 250));
+    // Abort-aware sleep so Stop responds within ~250ms instead of waiting
+    // out the full timeout.
+    const aborted = await new Promise<boolean>((resolve) => {
+      const t = setTimeout(() => resolve(false), 250);
+      if (signal) {
+        const onAbort = (): void => {
+          clearTimeout(t);
+          resolve(true);
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    });
+    if (aborted) return false;
   }
   return false;
 }
@@ -306,7 +323,13 @@ export async function startServer(
   port: number,
   readyTimeoutMs = 60_000,
   projectId: string | null = null,
+  signal?: AbortSignal,
 ): Promise<ServerInfo> {
+  // Honor an already-aborted signal up front so a queued Stop doesn't get
+  // swallowed by a fresh spawn.
+  if (signal?.aborted) {
+    throw new Error("start_server aborted before spawn");
+  }
   // Pre-clear the port. Fast path: if it's already free, this is two
   // ~10ms TCP probes. Slow path: a zombie (often `npm run dev` ran via
   // run_command which holds the port for the full timeout) gets killed
@@ -376,10 +399,17 @@ export async function startServer(
     }
   });
 
-  const ok = await waitForPort(port, readyTimeoutMs);
+  const ok = await waitForPort(port, readyTimeoutMs, signal);
   if (errorBox.err) {
     servers.delete(id);
     throw new Error(`Server spawn failed: ${errorBox.err.message}`);
+  }
+  if (signal?.aborted) {
+    // User clicked Stop while we were waiting for the port. Kill the spawn
+    // and surface a clean abort error so the agent loop drops the turn.
+    treeKill(proc.pid, "SIGKILL");
+    servers.delete(id);
+    throw new Error("start_server aborted by user");
   }
   if (!ok) {
     treeKill(proc.pid, "SIGKILL");

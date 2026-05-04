@@ -54,3 +54,20 @@ export async function getProject(
 export async function touchProject(id: string): Promise<void> {
   await db().from("projects").update({}).eq("id", id);
 }
+
+/**
+ * Hard-delete a project row. Used to roll back an import (GitHub or zip) that
+ * failed after the row was created — without this, the user is left with an
+ * empty project they have to manually delete before they can retry.
+ *
+ * The schema has ON DELETE CASCADE on messages/projects, so this also clears
+ * any messages that may have been seeded for the doomed project.
+ */
+export async function deleteProject(id: string, ownerId: string): Promise<void> {
+  const { error } = await db()
+    .from("projects")
+    .delete()
+    .eq("id", id)
+    .eq("owner_id", ownerId);
+  if (error) throw new Error(`deleteProject failed: ${error.message}`);
+}

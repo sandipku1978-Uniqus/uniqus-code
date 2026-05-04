@@ -2,10 +2,11 @@ import Anthropic from "@anthropic-ai/sdk";
 import { TOOLS, WEB_SEARCH_TOOL } from "./tools.js";
 import * as sb from "./sandbox.js";
 import type { Sandbox } from "./sandbox.js";
+import { needsInstall, runInstall } from "../ensureDeps.js";
 
-const MODEL = "claude-sonnet-4-6";
-const MAX_ITERATIONS = 75;
-const MAX_TOKENS = 16384;
+const MODEL = "claude-opus-4-7";
+const MAX_ITERATIONS = 125;
+const MAX_TOKENS = 16384*2;
 
 function buildSystemPrompt(): string {
   const { name: shellName, isUnixLike } = sb.shellInfo();
@@ -40,6 +41,13 @@ Conventions:
    (c) The user only sees a preview tab when start_server succeeds; run_command output is ephemeral and not interactive.
    If you need to debug why a dev server fails to start, use start_server then read_server_log — do NOT re-run \`npm run dev\` via run_command to "see what happens", that creates the very zombie state you'd then have to clean up.
    Bind dev servers to 0.0.0.0 (not the default 127.0.0.1) so previews work from any device on the LAN — e.g. \`next dev -H 0.0.0.0\`, \`flask run --host=0.0.0.0\`, \`uvicorn main:app --host 0.0.0.0\`, \`app.listen(port, '0.0.0.0')\` for express.
+
+   Preview-server reliability checklist — go through this BEFORE the first start_server call, not after it fails:
+   • Pass the SAME port the framework actually listens on. The default ports differ: Next.js → 3000, Vite → 5173, Astro → 4321, Nuxt → 3000, SvelteKit dev → 5173, Remix → 3000, Flask → 5000, Django → 8000, FastAPI/uvicorn → 8000, Streamlit → 8501, Express convention → 3000. If you're not sure, read the framework's config (vite.config.* / next.config.* / astro.config.* / package.json scripts) instead of guessing.
+   • If the project uses a non-default port, either pass that exact port to start_server, or pin the port via a CLI flag (\`vite --port 3000\`, \`next dev -p 3000\`, \`uvicorn ... --port 3000\`).
+   • Use ready_timeout_ms = 120000 (or 180000 for Next.js + TypeScript on a cold cache). The default 60000 is tight for first-run compilation and you'll get a "did not open port" error on a server that just needed another 10s.
+   • If start_server fails: call read_server_log on the returned id (or list_servers to find recent ids). 90% of the time the log shows the real reason (missing dep, port already in use, syntax error, EACCES on a privileged port). Fix the root cause; do NOT retry the same command twice.
+   • Do NOT call start_server back-to-back on the same port — the second call will pre-kill the first. If you want to restart, call stop_server explicitly, then start_server with the new args.
 4. For interactive scaffolders (create-next-app, create-vite, etc.): always pass non-interactive flags (--yes, -y, --typescript, --tailwind, --no-git, --use-npm). stdin is closed in the sandbox — any prompt will block until timeout. If a scaffolder is too prompt-heavy, write the project files yourself with write_file.
 5. Use longer timeout_ms (120000–300000) for npm/yarn/pnpm install, builds, and Docker pulls.
 6. After a non-zero exit, read the error and fix the root cause before retrying. Do not retry blindly — if the same command fails twice, change your approach.
@@ -305,16 +313,45 @@ async function executeTool(
     case "grep":
       return await sb.grep(sandbox, args.pattern, args.path);
     case "wait_for_port": {
-      const ok = await sb.waitForPort(args.port, args.timeout_ms);
+      const ok = await sb.waitForPort(args.port, args.timeout_ms, signal);
+      if (signal?.aborted) throw new Error("wait_for_port aborted by user");
       return ok ? `port ${args.port} is open` : `timeout waiting for port ${args.port}`;
     }
     case "start_server": {
+      // Auto-install missing deps. The most common preview-server failure is
+      // "<binary>: not found" when the agent calls start_server before
+      // node_modules exists — this lifts that footgun off the agent so
+      // start_server is reliably "press go and a server appears".
+      let installNote: string | undefined;
+      try {
+        const manager = await needsInstall(sandbox.rootDir);
+        if (manager) {
+          const result = await runInstall(sandbox.rootDir, manager, undefined, signal);
+          if (signal?.aborted) {
+            throw new Error("start_server aborted by user during install");
+          }
+          if (!result.ok) {
+            throw new Error(
+              `auto-install (${manager}) failed in ${(result.durationMs / 1000).toFixed(1)}s — fix package.json before calling start_server again:\n${result.stderr.slice(-1500)}`,
+            );
+          }
+          installNote = `auto-installed deps with ${manager} in ${(result.durationMs / 1000).toFixed(1)}s before starting the server`;
+        }
+      } catch (err) {
+        // Re-throw so the agent sees the install failure as a tool error,
+        // not a confusing "port did not open" message later.
+        throw err instanceof Error ? err : new Error(String(err));
+      }
       const info = await sb.startServer(
         sandbox,
         args.command,
         args.port,
-        args.ready_timeout_ms,
+        // Default to 120s instead of the sandbox-level 60s default — most
+        // first-run dev-server failures are slow cold compiles, not real
+        // failures. Agent can still override via ready_timeout_ms.
+        args.ready_timeout_ms ?? 120_000,
         projectId,
+        signal,
       );
       const publicUrl = previewBaseUrl
         ? `${previewBaseUrl.replace(/\/$/, "")}/preview/${info.id}/`
@@ -324,6 +361,7 @@ async function executeTool(
         port: info.port,
         pid: info.pid,
         public_url: publicUrl,
+        install_note: installNote,
         note: previewBaseUrl
           ? "public_url is the URL the user should open. Do NOT tell them to use localhost — the dev server is only reachable through the proxy."
           : undefined,

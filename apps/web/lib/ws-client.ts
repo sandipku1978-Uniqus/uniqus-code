@@ -1,12 +1,24 @@
 "use client";
 
 import type { ClientEvent, ServerEvent } from "@uniqus/api-types";
-import { useStore } from "./store";
+import { useStore, flushAllPendingEdits } from "./store";
 
 function defaultWsUrl(projectId: string): string {
-  const host = typeof window !== "undefined" ? window.location.hostname : "localhost";
-  const base = process.env.NEXT_PUBLIC_WS_URL ?? `ws://${host}:8787`;
-  return `${base}?project=${encodeURIComponent(projectId)}`;
+  const explicit = process.env.NEXT_PUBLIC_WS_URL;
+  if (explicit) {
+    return `${explicit}?project=${encodeURIComponent(projectId)}`;
+  }
+  // Match the page's TLS state so the browser doesn't refuse a `ws://`
+  // upgrade from an `https://` origin (mixed content). Falls back to
+  // `ws://localhost:8787` only when there's no window (SSR build) or when
+  // the page is itself plain http.
+  if (typeof window !== "undefined") {
+    const proto = window.location.protocol === "https:" ? "wss" : "ws";
+    const host = window.location.hostname;
+    const port = window.location.protocol === "https:" ? "" : ":8787";
+    return `${proto}://${host}${port}?project=${encodeURIComponent(projectId)}`;
+  }
+  return `ws://localhost:8787?project=${encodeURIComponent(projectId)}`;
 }
 
 let socket: WebSocket | null = null;
@@ -35,6 +47,9 @@ export function connect(projectId: string): void {
   ws.onopen = () => {
     useStore.getState().setConnected(true);
     send({ type: "request_tree" });
+    // Replay any edits the user made while the socket was down. Without this
+    // a flaky network leaves dirty buffers stranded only in client state.
+    flushAllPendingEdits().catch(() => {});
   };
 
   ws.onclose = () => {
@@ -74,10 +89,17 @@ export function disconnect(): void {
   }
 }
 
-export function send(event: ClientEvent): void {
+/**
+ * Send a client event. Returns true if it actually went out, false if the
+ * socket isn't open. Callers that need user-visible failure handling (chat,
+ * file save) should branch on the return value rather than fire-and-forget.
+ */
+export function send(event: ClientEvent): boolean {
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(event));
+    return true;
   }
+  return false;
 }
 
 function handleEvent(event: ServerEvent): void {
@@ -147,6 +169,10 @@ function handleEvent(event: ServerEvent): void {
       s.addCompleteMarker(event.tool_calls, event.elapsed_ms, event.aborted === true);
       s.setBusy(false);
       send({ type: "request_tree" });
+      // Agent just went idle — drain any user edits that were deferred while
+      // it was running. Without this, edits made during the agent's turn
+      // sit in pendingEdits forever (or until the user types again).
+      flushAllPendingEdits().catch(() => {});
       break;
     case "session_reset":
       s.resetChat();

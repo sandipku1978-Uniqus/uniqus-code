@@ -1,6 +1,9 @@
 "use client";
 
+import { useEffect } from "react";
 import { useStore, fileTabId, previewTabId, flushSave } from "@/lib/store";
+import { send } from "@/lib/ws-client";
+import { stopServerApi } from "@/lib/api";
 import CodeEditor from "./CodeEditor";
 import PreviewPanel from "./PreviewPanel";
 
@@ -12,6 +15,8 @@ export default function EditorPreviewArea() {
   const closeOpenFile = useStore((s) => s.closeOpenFile);
   const removePreview = useStore((s) => s.removePreview);
   const saveStatus = useStore((s) => s.saveStatus);
+  const selectedFile = useStore((s) => s.selectedFile);
+  const projectId = useStore((s) => s.project?.id ?? null);
 
   const hasAnyTabs = openFiles.length > 0 || previews.length > 0;
 
@@ -24,6 +29,16 @@ export default function EditorPreviewArea() {
     activeTab.startsWith("preview:") &&
     previews.find((p) => previewTabId(p.id) === activeTab);
   const activeFilePath = activeTab.startsWith("file:") ? activeTab.slice(5) : null;
+
+  // Drive the editor's loaded file from the active tab. Without this, clicking
+  // an already-open tab updated `editorTab` (and the active styling) but did
+  // not re-issue request_file, so the editor kept showing whichever file was
+  // most recently loaded rather than the one the tab points at.
+  useEffect(() => {
+    if (!activeFilePath) return;
+    if (selectedFile === activeFilePath) return;
+    send({ type: "request_file", path: activeFilePath });
+  }, [activeFilePath, selectedFile]);
 
   return (
     <div className="editor-area">
@@ -104,13 +119,19 @@ export default function EditorPreviewArea() {
                   className="x"
                   onClick={(e) => {
                     e.stopPropagation();
-                    // Local-only close: the dev server keeps running so the
-                    // user can re-open the URL or have the agent keep
-                    // working with it. Hit the Run button to actually
-                    // stop+restart, or ask the agent to stop_server.
+                    // Closing the tab also stops the dev server. Otherwise
+                    // dev servers leak across runs and tie up ports until the
+                    // orchestrator restarts. The DELETE call is best-effort —
+                    // we remove the tab locally regardless so the UI stays
+                    // responsive even if the API is briefly down. The
+                    // `server_stopped` broadcast that follows the kill is a
+                    // no-op for this client (preview already removed).
                     removePreview(p.id);
+                    if (projectId) {
+                      stopServerApi(projectId, p.id).catch(() => {});
+                    }
                   }}
-                  title="Close tab (server keeps running)"
+                  title="Close tab and stop the dev server"
                 >
                   ×
                 </span>

@@ -13,12 +13,23 @@ export default function ChatPanel() {
   const mode = useStore((s) => s.mode);
   const setMode = useStore((s) => s.setMode);
   const addUserMessage = useStore((s) => s.addUserMessage);
+  const addSystem = useStore((s) => s.addSystem);
   const setBusy = useStore((s) => s.setBusy);
   const project = useStore((s) => s.project);
+  const connected = useStore((s) => s.connected);
   const expandedTurns = useStore((s) => s.expandedTurns);
   const toggleTurn = useStore((s) => s.toggleTurn);
   const [input, setInput] = useState("");
+  // True from the moment the user clicks Stop until the server's `complete`
+  // event lands. Without this, a click that the server is slow to act on
+  // looks like a no-op — the button just keeps saying "Stop" until something
+  // happens. Reset whenever `busy` flips (i.e. a turn ends or a new one starts).
+  const [stopping, setStopping] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setStopping(false);
+  }, [busy]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({
@@ -35,13 +46,31 @@ export default function ChatPanel() {
     if (!trimmed || busy) return;
     addUserMessage(trimmed);
     setBusy(true);
-    send({ type: "user_message", content: trimmed, mode });
+    const ok = send({ type: "user_message", content: trimmed, mode });
+    if (!ok) {
+      // Socket is closed — the message never left the browser. Surface that
+      // instead of leaving the UI stuck on "Codex is running…" forever, and
+      // unblock the composer so the user can retry once we reconnect.
+      setBusy(false);
+      addSystem(
+        "disconnected — message not sent. We'll reconnect automatically; try again in a moment.",
+      );
+    }
     setInput("");
   };
 
   const handleStop = () => {
     if (!busy) return;
-    send({ type: "abort" });
+    setStopping(true);
+    const ok = send({ type: "abort" });
+    if (!ok) {
+      // Socket dropped right when the user clicked Stop. Bail out locally so
+      // the UI doesn't sit on "Stopping…" forever — when we reconnect, the
+      // session will be in a fresh state anyway.
+      setBusy(false);
+      setStopping(false);
+      addSystem("disconnected — stop request not sent.");
+    }
   };
 
   const resetChat = () => {
@@ -105,10 +134,12 @@ export default function ChatPanel() {
                 handleSubmit(e);
               }
             }}
-            disabled={busy || !project}
+            disabled={busy || !project || !connected}
             placeholder={
               busy
                 ? "Codex is running…"
+                : !connected
+                ? "Reconnecting…"
                 : project
                 ? "Brief Codex — describe what to build…"
                 : "Connecting…"
@@ -133,14 +164,21 @@ export default function ChatPanel() {
               <button
                 type="button"
                 onClick={handleStop}
+                disabled={stopping}
                 className="send-btn"
                 style={{
                   background: "var(--conf-low, #c0392b)",
                   borderColor: "var(--conf-low, #c0392b)",
+                  opacity: stopping ? 0.7 : 1,
+                  cursor: stopping ? "default" : "pointer",
                 }}
-                title="Stop the agent (cancels current turn)"
+                title={
+                  stopping
+                    ? "Stopping… (waiting for the agent to finish its current step)"
+                    : "Stop the agent (cancels current turn)"
+                }
               >
-                Stop
+                {stopping ? "Stopping…" : "Stop"}
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
                   <rect x="6" y="6" width="12" height="12" rx="1" />
                 </svg>

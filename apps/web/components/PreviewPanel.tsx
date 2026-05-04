@@ -3,9 +3,16 @@
 import { useState } from "react";
 import type { PreviewServer } from "@uniqus/api-types";
 
+// Match the page's TLS state for the dev fallback so the iframe doesn't get
+// mixed-content blocked when the app is loaded over HTTPS. Production should
+// always set NEXT_PUBLIC_ORCHESTRATOR_URL explicitly.
 const ORCHESTRATOR_URL =
   process.env.NEXT_PUBLIC_ORCHESTRATOR_URL ??
-  (typeof window !== "undefined" ? `http://${window.location.hostname}:8787` : "");
+  (typeof window !== "undefined"
+    ? window.location.protocol === "https:"
+      ? `https://${window.location.hostname}`
+      : `http://${window.location.hostname}:8787`
+    : "");
 
 export default function PreviewPanel({ server }: { server: PreviewServer }) {
   const [reloadKey, setReloadKey] = useState(0);

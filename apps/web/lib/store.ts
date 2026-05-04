@@ -136,7 +136,10 @@ export const useStore = create<State>((set, get) => ({
   previews: [],
   openFiles: [],
   editorTab: "",
-  panels: { files: false, terminal: false },
+  // Files panel defaults ON: a builder shell with no visible file tree on
+  // first paint feels empty even when the project has hundreds of files.
+  // Terminal stays opt-in (it's currently a log viewer, not a real shell).
+  panels: { files: true, terminal: false },
   user: null,
   project: null,
   lastSyncedAt: null,
@@ -323,7 +326,7 @@ export const useStore = create<State>((set, get) => ({
       previews: [],
       openFiles: [],
       editorTab: "",
-      panels: { files: false, terminal: false },
+      panels: { files: true, terminal: false },
       user: null,
       project: null,
       lastSyncedAt: null,
@@ -336,25 +339,54 @@ export const useStore = create<State>((set, get) => ({
 /**
  * Send the most recent buffered content for `path` to the orchestrator now,
  * skipping any pending debounce. Safe to call when there's nothing buffered
- * (it's a no-op). Defers if the agent is mid-turn — the file_changed flow
- * will pick the edit back up once the agent goes idle.
+ * (it's a no-op). Defers if the agent is mid-turn — `flushAllPendingEdits`
+ * runs when the agent goes idle and replays whatever's still dirty.
  *
  * Lives outside the store so it can `import { send }` from ws-client without
  * creating a circular dep through the store module.
  */
 export async function flushSave(path: string): Promise<void> {
-  const { pendingEdits, busy, setSaveStatus, clearPendingEdit } = useStore.getState();
+  const { pendingEdits, busy, connected, setSaveStatus, clearPendingEdit } =
+    useStore.getState();
   const content = pendingEdits[path];
   if (content === undefined) return;
   if (busy) {
-    // Agent is running — leave it dirty and let the editor's retry timer
-    // pick it up. Don't fight the agent mid-write.
+    // Agent is running — leave it dirty. flushAllPendingEdits picks it up
+    // when busy flips to false.
     setSaveStatus(path, { kind: "dirty" });
+    return;
+  }
+  if (!connected) {
+    // Socket is down. Surface the failure so the user knows their edit
+    // didn't land instead of letting it sit silently in pendingEdits.
+    setSaveStatus(path, {
+      kind: "error",
+      message: "disconnected — edit not saved (will retry when reconnected)",
+    });
     return;
   }
   setSaveStatus(path, { kind: "saving" });
   // Lazy import keeps the store module free of WS deps.
   const { send } = await import("./ws-client");
-  send({ type: "client_write_file", path, content });
+  const ok = send({ type: "client_write_file", path, content });
+  if (!ok) {
+    setSaveStatus(path, {
+      kind: "error",
+      message: "send failed — edit not saved",
+    });
+    return;
+  }
   clearPendingEdit(path);
+}
+
+/**
+ * Flush every dirty buffer through the saver. Called when the agent finishes
+ * a turn (busy → false) and when the socket reconnects, so edits the user
+ * made during downtime aren't stranded only in client state.
+ */
+export async function flushAllPendingEdits(): Promise<void> {
+  const paths = Object.keys(useStore.getState().pendingEdits);
+  for (const p of paths) {
+    await flushSave(p).catch(() => {});
+  }
 }

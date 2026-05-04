@@ -30,7 +30,13 @@ import {
 import { readRunConfig, writeRunConfig, detectRunConfig } from "./runConfig.js";
 import { needsInstall, runInstall } from "./ensureDeps.js";
 import { upsertUser, type UserRecord } from "./db/users.js";
-import { listProjects, createProject, getProject, touchProject } from "./db/projects.js";
+import {
+  listProjects,
+  createProject,
+  getProject,
+  touchProject,
+  deleteProject,
+} from "./db/projects.js";
 import { loadHistory, appendMessage, clearHistory } from "./db/messages.js";
 import { unsealSessionFromCookieHeader, type AuthKitSession } from "./auth/workos.js";
 import { ensureBucket } from "./storage/client.js";
@@ -107,9 +113,7 @@ async function main(): Promise<void> {
       console.error("HTTP handler crashed:", err);
       try {
         if (!res.headersSent) {
-          const origin = req.headers.origin ?? CORS_ORIGIN;
-          res.setHeader("Access-Control-Allow-Origin", origin);
-          res.setHeader("Access-Control-Allow-Credentials", "true");
+          setCors(res, req);
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
@@ -138,7 +142,25 @@ async function main(): Promise<void> {
 
 // ── HTTP ──────────────────────────────────────────────────────────────────────
 
-const CORS_ORIGIN = process.env.WEB_ORIGIN ?? "http://localhost:4242";
+// Allowlist of origins permitted to make credentialed requests. Built from
+// WEB_ORIGIN (comma-separated list supported) plus a localhost fallback for
+// dev. We never reflect arbitrary `Origin` headers — combined with cookie
+// auth that turns every state-changing endpoint into a CSRF target.
+const ALLOWED_ORIGINS: ReadonlySet<string> = new Set(
+  (process.env.WEB_ORIGIN ?? "http://localhost:4242")
+    .split(",")
+    .map((o) => o.trim())
+    .filter((o) => o.length > 0),
+);
+// First entry is the canonical origin returned when the request had no
+// Origin header (e.g. server-to-server, curl) — needed so error responses
+// still carry a valid Access-Control-Allow-Origin if the browser ever sees them.
+const CORS_ORIGIN = [...ALLOWED_ORIGINS][0] ?? "http://localhost:4242";
+
+function pickAllowedOrigin(reqOrigin: string | undefined): string | null {
+  if (!reqOrigin) return null;
+  return ALLOWED_ORIGINS.has(reqOrigin) ? reqOrigin : null;
+}
 
 /**
  * Should this request go to the preview proxy?
@@ -162,11 +184,32 @@ function shouldProxy(url: string, headers: IncomingHttpHeaders): boolean {
 }
 
 function setCors(res: ServerResponse, req: IncomingMessage): void {
-  const origin = req.headers.origin ?? CORS_ORIGIN;
-  res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Access-Control-Allow-Credentials", "true");
+  const reqOrigin =
+    typeof req.headers.origin === "string" ? req.headers.origin : undefined;
+  const allowed = pickAllowedOrigin(reqOrigin);
+  // Only echo Origin if it's on the allowlist. Same-origin / non-browser
+  // callers won't have an Origin header — skip CORS entirely for those.
+  if (allowed) {
+    res.setHeader("Access-Control-Allow-Origin", allowed);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    // Vary on Origin so any cache understands the response is origin-specific.
+    res.setHeader("Vary", "Origin");
+  }
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
+/**
+ * Block credentialed cross-origin requests whose Origin is not on the
+ * allowlist. Origin checks are sufficient for CSRF defense for fetch/XHR —
+ * forms can't set Content-Type: application/json without preflight, which
+ * also enforces the allowlist. Rejecting here means even GETs with cookies
+ * never run for a malicious origin.
+ */
+function isOriginAllowed(req: IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  if (typeof origin !== "string") return true; // same-origin / curl / server-side
+  return ALLOWED_ORIGINS.has(origin);
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -232,6 +275,14 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return;
   }
 
+  // CSRF/origin gate. The previous CORS block reflected any Origin while
+  // allowing credentials, which left state-changing endpoints exposed to any
+  // page that could fetch with cookies. Enforce the allowlist on every
+  // /api/* request now that we no longer reflect Origin.
+  if (!isOriginAllowed(req)) {
+    return json(res, 403, { error: "origin not allowed" });
+  }
+
   const auth = await authenticate(req);
   if (!auth) {
     return json(res, 401, { error: "not authenticated" });
@@ -277,6 +328,12 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (!name) return json(res, 400, { error: "name is required" });
     if (!repoUrl) return json(res, 400, { error: "repo_url is required" });
 
+    // Reject obviously unsafe URLs before creating the project. Without this,
+    // the clone tool happily accepts file:// and arbitrary http(s) hosts,
+    // which is an SSRF / local-file-read footgun on a multi-tenant host.
+    const urlError = validateCloneUrl(repoUrl);
+    if (urlError) return json(res, 400, { error: urlError });
+
     const project = await createProject({
       owner_id: user.id,
       name,
@@ -293,8 +350,10 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       await getTracker(project.id, dest).syncChanges();
       return json(res, 201, { project: toProjectSummary(project), import: result });
     } catch (err) {
-      // Roll back the empty project so the user can retry without a stale row.
-      // If sync also fails we still return the import error to the user.
+      // Roll back the empty project + sandbox dir so the user can retry
+      // cleanly. Best-effort: a deleteProject failure is logged but doesn't
+      // mask the original import error the user actually needs to see.
+      await rollbackImport(project.id, user.id, dest, "github");
       const message = err instanceof Error ? err.message : String(err);
       return json(res, 400, { error: `import failed: ${message}` });
     }
@@ -501,10 +560,59 @@ async function handleZipImport(
     await getTracker(project.id, dest).syncChanges();
     return json(res, 201, { project: toProjectSummary(project), import: result });
   } catch (err) {
+    await rollbackImport(project.id, ownerId, dest, "zip");
     return json(res, 400, {
       error: `import failed: ${err instanceof Error ? err.message : String(err)}`,
     });
   }
+}
+
+/**
+ * Best-effort cleanup after a failed import. Removes the project row and the
+ * partially-populated sandbox directory so a retry doesn't trip on
+ * `import target is not empty`. Errors are logged, never thrown, so the
+ * caller's response carries the original failure reason.
+ */
+async function rollbackImport(
+  projectId: string,
+  ownerId: string,
+  dest: string,
+  source: string,
+): Promise<void> {
+  try {
+    await deleteProject(projectId, ownerId);
+  } catch (err) {
+    console.error(`[${source} import rollback] deleteProject(${projectId}) failed:`, err);
+  }
+  try {
+    await fs.rm(dest, { recursive: true, force: true });
+  } catch (err) {
+    console.error(`[${source} import rollback] rm ${dest} failed:`, err);
+  }
+}
+
+/**
+ * Reject clone URLs that aren't a public https:// git host. We don't try to
+ * be cute about hostname allowlists — the practical risk is `file://`,
+ * `git://localhost`, or other local schemes letting a user read the
+ * orchestrator's filesystem or hit private network services. https-only
+ * also means PAT-injection (which only runs for https URLs) covers every
+ * code path that reaches `git clone`.
+ */
+function validateCloneUrl(repoUrl: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(repoUrl);
+  } catch {
+    return "repo_url must be a valid https:// URL (e.g. https://github.com/owner/repo.git)";
+  }
+  if (parsed.protocol !== "https:") {
+    return `repo_url scheme '${parsed.protocol}' is not allowed — use https://`;
+  }
+  if (!parsed.hostname) {
+    return "repo_url is missing a hostname";
+  }
+  return null;
 }
 
 function toProjectSummary(p: {
@@ -547,6 +655,11 @@ async function handleUpgrade(
     }
     if (rawUrl.startsWith("/preview/")) return reject(404, "Preview server not found");
   }
+
+  // Same origin allowlist applies to the agent WebSocket upgrade — without
+  // this, any page with the user's cookie could open the socket and drive
+  // the agent. Browsers always send Origin on WS upgrades.
+  if (!isOriginAllowed(req)) return reject(403, "Forbidden origin");
 
   const auth = await authenticate(req);
   if (!auth) return reject(401, "Unauthorized");
@@ -649,17 +762,20 @@ async function handleConnection(
 
       if (event.type === "abort") {
         // User clicked Stop. Cancel the in-flight Anthropic stream and any
-        // running run_command. The loop returns with aborted=true and we
-        // record the partial turn to history (handled in runSession).
+        // running tool. The loop returns with aborted=true and we record
+        // the partial turn to history (handled in runSession).
         if (currentAbort && !currentAbort.signal.aborted) {
           currentAbort.abort();
-        } else {
-          // Nothing running — also clear a pending plan approval if any, so
-          // the user isn't stuck waiting on a plan they no longer want.
-          if (pendingPlanResolve) {
-            pendingPlanResolve = null;
-            send({ type: "session_reset" });
-          }
+        }
+        // If a plan is awaiting approval, abort the AbortController alone
+        // does NOT wake the Promise — it just sets the flag. Resolve the
+        // pending Promise here so runSession can see signal.aborted and
+        // unwind. Without this, hitting Stop during plan review used to
+        // freeze the turn until the user clicked Approve anyway.
+        if (pendingPlanResolve) {
+          const resolver = pendingPlanResolve;
+          pendingPlanResolve = null;
+          resolver({ summary: "(aborted by user)", steps: [] });
         }
         return;
       }
@@ -1019,8 +1135,11 @@ async function walkSandbox(rootDir: string): Promise<TreeEntry[]> {
 
 async function readSandboxFile(rootDir: string, p: string): Promise<string | null> {
   try {
-    const full = path.resolve(rootDir, p);
-    if (!full.startsWith(rootDir)) return null;
+    const root = path.resolve(rootDir);
+    const full = path.resolve(root, p);
+    // `startsWith(root)` alone is bypassable: `/foo/bar-evil` startsWith `/foo/bar`.
+    // Require an exact match or a path-separator boundary so siblings can't sneak in.
+    if (full !== root && !full.startsWith(root + path.sep)) return null;
     return await fs.readFile(full, "utf-8");
   } catch {
     return null;

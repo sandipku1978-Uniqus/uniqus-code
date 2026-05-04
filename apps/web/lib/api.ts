@@ -2,9 +2,24 @@
 
 import type { CurrentUser, ProjectSummary } from "@uniqus/api-types";
 
-const API_BASE =
-  process.env.NEXT_PUBLIC_ORCHESTRATOR_URL ??
-  (typeof window !== "undefined" ? `http://${window.location.hostname}:8787` : "http://localhost:8787");
+// Production deployments must set NEXT_PUBLIC_ORCHESTRATOR_URL — the
+// orchestrator usually runs on a different hostname (Railway etc.) than the
+// web app (Vercel). The window-derived fallback is for local dev only and
+// matches the page's TLS state so we don't trigger mixed-content blocks.
+function defaultApiBase(): string {
+  if (process.env.NEXT_PUBLIC_ORCHESTRATOR_URL) {
+    return process.env.NEXT_PUBLIC_ORCHESTRATOR_URL;
+  }
+  if (typeof window !== "undefined") {
+    const isHttps = window.location.protocol === "https:";
+    const proto = isHttps ? "https" : "http";
+    const port = isHttps ? "" : ":8787";
+    return `${proto}://${window.location.hostname}${port}`;
+  }
+  return "http://localhost:8787";
+}
+
+const API_BASE = defaultApiBase();
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {

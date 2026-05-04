@@ -40,12 +40,14 @@ export interface InstallResult {
 /**
  * Run the install command. Single-shot, with stderr captured for surfacing
  * to the user. 5-minute hard cap so a runaway install doesn't pin the
- * orchestrator forever.
+ * orchestrator forever. Honors `signal` so a user clicking Stop while an
+ * install is in flight kills it within ~10ms instead of waiting it out.
  */
 export async function runInstall(
   sandboxDir: string,
   manager: "npm" | "pnpm" | "yarn",
   onStderr?: (chunk: string) => void,
+  signal?: AbortSignal,
 ): Promise<InstallResult> {
   const args =
     manager === "pnpm"
@@ -64,6 +66,7 @@ export async function runInstall(
       // base image.
     });
     let stderr = "";
+    let abortedByUser = false;
     child.stderr?.on("data", (d) => {
       const s = d.toString();
       stderr += s;
@@ -74,8 +77,22 @@ export async function runInstall(
         child.kill("SIGKILL");
       } catch {}
     }, 5 * 60 * 1000);
+    const onAbort = (): void => {
+      abortedByUser = true;
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
     child.once("error", (err) => {
       clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", onAbort);
       resolve({
         ok: false,
         stderr: `[spawn ${manager}] ${err.message}\n${stderr}`,
@@ -84,7 +101,13 @@ export async function runInstall(
     });
     child.once("close", (code) => {
       clearTimeout(timer);
-      resolve({ ok: code === 0, stderr, durationMs: Date.now() - start });
+      if (signal) signal.removeEventListener("abort", onAbort);
+      const trailer = abortedByUser ? "\n[killed: aborted by user]" : "";
+      resolve({
+        ok: code === 0 && !abortedByUser,
+        stderr: stderr + trailer,
+        durationMs: Date.now() - start,
+      });
     });
   });
 }

@@ -7,6 +7,11 @@ import AdmZip from "adm-zip";
 const MAX_TOTAL_SIZE = 200 * 1024 * 1024;
 // Cap per-file size (50 MB).
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
+// Cap on cloned repo size (500 MB). Without this, a malicious or accidental
+// large repo (game assets, datasets, monorepos) can fill the sandbox disk and
+// take down the orchestrator for everyone. Checked post-clone; we delete the
+// directory and reject if exceeded.
+const MAX_CLONE_SIZE = 500 * 1024 * 1024;
 
 const SKIP_TOP_DIRS = new Set([".git", "node_modules", ".next", "dist", "build"]);
 
@@ -136,7 +141,9 @@ export async function importGithub(
   // Drop .git so the sandbox tree matches a clean export.
   await fs.rm(path.join(destDir, ".git"), { recursive: true, force: true });
 
-  // Walk to count files + bytes for the response.
+  // Walk to count files + bytes for the response. Bail with a hard error if
+  // the clone exceeds MAX_CLONE_SIZE so callers can roll back the project
+  // instead of leaving a giant tree on disk.
   let count = 0;
   let bytes = 0;
   await walk(destDir, async (full) => {
@@ -146,6 +153,13 @@ export async function importGithub(
       bytes += stat.size;
     }
   });
+
+  if (bytes > MAX_CLONE_SIZE) {
+    throw new Error(
+      `cloned repo is too large: ${(bytes / (1024 * 1024)).toFixed(1)} MB ` +
+        `(limit ${MAX_CLONE_SIZE / (1024 * 1024)} MB). Try a smaller repo or import a subdirectory.`,
+    );
+  }
 
   return { files_imported: count, total_bytes: bytes, stripped_root: null };
 }
