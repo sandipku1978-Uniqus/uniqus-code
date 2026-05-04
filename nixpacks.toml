@@ -2,7 +2,6 @@
 #
 # Adds the system binaries the orchestrator needs at runtime:
 #   - git: for the codebase-import "Clone GitHub" path (`git clone`)
-#   - cacert: HTTPS roots so git/fetch can verify github.com
 #   - psmisc: provides `fuser`, used by startServer's port-clear logic
 #     before binding (without this, EADDRINUSE recovery silently no-ops)
 #   - lsof: secondary fallback alongside fuser for finding port holders
@@ -15,6 +14,12 @@
 # The `"..."` entry preserves nixpacks's auto-detected packages (node, npm,
 # etc.) — without it, this list REPLACES the inherited set, which would
 # break the build.
+#
+# We deliberately don't list `cacert` here. Git already depends on it
+# transitively, and listing it explicitly drags in a SECOND nss-cacert
+# derivation (different store hash). The Nix profile builder then fails
+# with "conflict for ca-no-trust-rules-bundle.crt" and the build dies
+# halfway through `nix-env -if`.
 
 [phases.setup]
-nixPkgs = ["...", "git", "cacert", "psmisc", "lsof"]
+nixPkgs = ["...", "git", "psmisc", "lsof"]
