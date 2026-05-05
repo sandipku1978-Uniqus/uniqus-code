@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Plan } from "@uniqus/api-types";
+import { normalizeMessageHistory } from "./messageHistory.js";
 
 const PLAN_MODEL = "claude-opus-4-7";
 
@@ -10,7 +11,7 @@ Use the submit_plan tool to return:
 - A list of concrete steps. Each step should be small enough to verify on its own — typically one file created, one command run, or one integration completed. Aim for 4–10 steps.
 - For each step, list the files it will touch (if any) and a one-line success criterion (how the agent will know the step worked).
 
-Be specific about file names, frameworks, and commands. Do not include exploratory or "investigate X" steps — those belong in the execution phase.`;
+Be specific about file names, frameworks, and commands when the existing context supports it. For an existing or imported project where structure is unclear, include one bounded discovery step first (for example: inspect package.json and the relevant source tree), then concrete implementation steps.`;
 
 const SUBMIT_PLAN_TOOL: Anthropic.Tool = {
   name: "submit_plan",
@@ -58,7 +59,7 @@ export async function proposePlan(
     system: PLAN_SYSTEM_PROMPT,
     tools: [SUBMIT_PLAN_TOOL],
     tool_choice: { type: "tool", name: "submit_plan" },
-    messages: [...history, { role: "user", content: userMessage }],
+    messages: normalizeMessageHistory([...history, { role: "user", content: userMessage }]),
   });
 
   const block = response.content.find((b) => b.type === "tool_use");

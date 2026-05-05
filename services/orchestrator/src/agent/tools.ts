@@ -152,4 +152,30 @@ export const TOOLS: Anthropic.Tool[] = [
       required: ["server_id"],
     },
   },
+  {
+    name: "ask_user",
+    description:
+      "Pause execution and ask the user a clarifying question. Use ONLY when intent is genuinely ambiguous and the answer materially changes what you'll build (e.g. \"Should this run on a schedule, on demand, or both?\", \"Postgres or SQLite?\"). Do NOT use for trivial confirmations, status updates, or anything you can decide yourself by reading the code or running a command. Provide structured options when the answer is one of a small set; allow_free_text=true (the default) lets the user type something else if their answer doesn't fit. Returns the user's answer as a string. The loop blocks until they respond; do not call this tool more than once per turn.",
+    input_schema: {
+      type: "object",
+      properties: {
+        question: {
+          type: "string",
+          description: "The question to ask. One sentence. Plain text — no markdown.",
+        },
+        options: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional. Up to ~5 short option labels rendered as buttons. Omit when the answer is open-ended.",
+        },
+        allow_free_text: {
+          type: "boolean",
+          description:
+            "Optional, default true. When false, the user can ONLY pick one of the options. Do not set false unless the options truly cover the answer space.",
+        },
+      },
+      required: ["question"],
+    },
+  },
 ];

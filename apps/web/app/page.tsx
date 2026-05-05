@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { withAuth } from "@workos-inc/authkit-nextjs";
+import BrandLockup from "@/components/BrandLockup";
 
 export default async function MarketingPage() {
   // Auth-aware CTAs: signed-in visitors get sent to their dashboard, not the
@@ -14,11 +15,8 @@ export default async function MarketingPage() {
     <div className="marketing-shell">
       {/* Topnav */}
       <nav className="topnav">
-        <Link href="/" className="lockup">
-          <span className="mark">u</span>
-          <span>uniqus</span>
-          <span className="slash">/</span>
-          <span className="code">code</span>
+        <Link href="/" style={{ textDecoration: "none" }}>
+          <BrandLockup />
         </Link>
         <div className="links">
           <a href="#how">How it works</a>
@@ -253,14 +251,7 @@ export default async function MarketingPage() {
       <footer className="site-footer">
         <div className="row">
           <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
-            <span className="lockup" style={{ fontSize: 14 }}>
-              <span className="mark" style={{ width: 18, height: 18, fontSize: 11 }}>
-                u
-              </span>
-              <span>uniqus</span>
-              <span className="slash">/</span>
-              <span className="code">code</span>
-            </span>
+            <BrandLockup style={{ fontSize: 14 }} />
             <span style={{ color: "var(--text-dim)" }}>© 2026 Uniqus Consultech</span>
           </div>
           <div className="links">

@@ -8,6 +8,7 @@ import type {
   PreviewServer,
   ProjectSummary,
   TreeEntry,
+  UploadedFileSummary,
 } from "@uniqus/api-types";
 
 export interface DeploymentLive {
@@ -18,7 +19,13 @@ export interface DeploymentLive {
 }
 
 export type ChatItem =
-  | { kind: "user"; id: string; content: string }
+  | {
+      kind: "user";
+      id: string;
+      content: string;
+      attachments?: UploadedFileSummary[];
+      fileRefs?: string[];
+    }
   | { kind: "assistant_text"; id: string; content: string }
   | {
       kind: "tool";
@@ -28,6 +35,21 @@ export type ChatItem =
       input: unknown;
       result?: string;
       is_error?: boolean;
+    }
+  | {
+      /**
+       * Agent paused via the `ask_user` tool. Renders inline in the chat
+       * with the question + options + free-text. Resolved by sending a
+       * `user_question_answered` ClientEvent with the chosen answer; the
+       * matching tool_result lands as a normal `tool` item afterward.
+       */
+      kind: "user_question";
+      id: string;
+      call_id: string;
+      question: string;
+      options?: string[];
+      allow_free_text: boolean;
+      answer?: string;
     }
   | { kind: "plan_proposal"; id: string; plan: Plan; status: "pending" | "approved" }
   | { kind: "system"; id: string; content: string }
@@ -98,14 +120,26 @@ interface State {
    * "Deploying…" / "Live at xyz.vercel.app" without polling.
    */
   deployment: DeploymentLive | null;
+  redeploySuggested: boolean;
 
   setConnected(c: boolean): void;
   setBusy(b: boolean): void;
   setMode(m: "plan-then-execute" | "execute-only"): void;
-  addUserMessage(content: string): void;
+  addUserMessage(
+    content: string,
+    attachments?: UploadedFileSummary[],
+    fileRefs?: string[],
+  ): void;
   appendText(content: string): void;
   addToolCall(callId: string, name: string, input: unknown): void;
   setToolResult(callId: string, result: string, isError: boolean): void;
+  addUserQuestion(
+    callId: string,
+    question: string,
+    options: string[] | undefined,
+    allowFreeText: boolean,
+  ): void;
+  resolveUserQuestion(callId: string, answer: string): void;
   addPlanProposal(plan: Plan): void;
   approvePendingPlan(plan: Plan): void;
   addSystem(content: string): void;
@@ -128,6 +162,7 @@ interface State {
   clearPendingEdit(path: string): void;
   toggleTurn(completeItemId: string): void;
   setDeployment(d: DeploymentLive | null): void;
+  setRedeploySuggested(value: boolean): void;
   resetChat(): void;
   reset(): void;
 }
@@ -162,23 +197,42 @@ export const useStore = create<State>((set, get) => ({
   pendingEdits: {},
   expandedTurns: {},
   deployment: null,
+  redeploySuggested: false,
 
   setConnected: (c) => set({ connected: c }),
   setBusy: (b) => set({ busy: b }),
   setMode: (m) => set({ mode: m }),
 
-  addUserMessage: (content) =>
-    set((s) => ({ chat: [...s.chat, { kind: "user", id: id(), content }] })),
+  addUserMessage: (content, attachments, fileRefs) =>
+    set((s) => ({
+      chat: [
+        ...s.chat,
+        {
+          kind: "user",
+          id: id(),
+          content,
+          attachments: attachments && attachments.length > 0 ? attachments : undefined,
+          fileRefs: fileRefs && fileRefs.length > 0 ? fileRefs : undefined,
+        },
+      ],
+    })),
 
   appendText: (content) =>
     set((s) => {
       const last = s.chat[s.chat.length - 1];
       if (last && last.kind === "assistant_text") {
+        const nextContent = last.content + content;
         return {
-          chat: [...s.chat.slice(0, -1), { ...last, content: last.content + content }],
+          chat: [...s.chat.slice(0, -1), { ...last, content: nextContent }],
+          redeploySuggested:
+            s.redeploySuggested || /\bredeploy\b|\bdeploy again\b/i.test(nextContent),
         };
       }
-      return { chat: [...s.chat, { kind: "assistant_text", id: id(), content }] };
+      return {
+        chat: [...s.chat, { kind: "assistant_text", id: id(), content }],
+        redeploySuggested:
+          s.redeploySuggested || /\bredeploy\b|\bdeploy again\b/i.test(content),
+      };
     }),
 
   addToolCall: (callId, name, input) =>
@@ -215,6 +269,37 @@ export const useStore = create<State>((set, get) => ({
       get().appendTerminalLine("");
     }
   },
+
+  addUserQuestion: (callId, question, options, allowFreeText) =>
+    set((s) => {
+      // Dedupe on call_id — the loop sends one `user_question_asked` per
+      // ask_user call but defensive against retries / replays.
+      if (s.chat.some((i) => i.kind === "user_question" && i.call_id === callId)) {
+        return {};
+      }
+      return {
+        chat: [
+          ...s.chat,
+          {
+            kind: "user_question",
+            id: id(),
+            call_id: callId,
+            question,
+            options: options && options.length > 0 ? options : undefined,
+            allow_free_text: allowFreeText,
+          },
+        ],
+      };
+    }),
+
+  resolveUserQuestion: (callId, answer) =>
+    set((s) => ({
+      chat: s.chat.map((item) =>
+        item.kind === "user_question" && item.call_id === callId
+          ? { ...item, answer }
+          : item,
+      ),
+    })),
 
   addPlanProposal: (plan) => {
     const itemId = id();
@@ -325,12 +410,14 @@ export const useStore = create<State>((set, get) => ({
       },
     })),
   setDeployment: (d) => set({ deployment: d }),
+  setRedeploySuggested: (value) => set({ redeploySuggested: value }),
   resetChat: () =>
     set({
       chat: [],
       pendingPlanItemId: null,
       terminalLines: [],
       expandedTurns: {},
+      redeploySuggested: false,
     }),
   reset: () =>
     set({
@@ -351,6 +438,7 @@ export const useStore = create<State>((set, get) => ({
       pendingEdits: {},
       expandedTurns: {},
       deployment: null,
+      redeploySuggested: false,
     }),
 }));
 

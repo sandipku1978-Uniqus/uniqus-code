@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import type { UploadedFileSummary } from "@uniqus/api-types";
+import { uploadProjectFilesApi } from "@/lib/api";
 import { useStore, type ChatItem } from "@/lib/store";
 import { send } from "@/lib/ws-client";
 import PlanReview from "./PlanReview";
@@ -20,6 +22,9 @@ export default function ChatPanel() {
   const expandedTurns = useStore((s) => s.expandedTurns);
   const toggleTurn = useStore((s) => s.toggleTurn);
   const [input, setInput] = useState("");
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   // True from the moment the user clicks Stop until the server's `complete`
   // event lands. Without this, a click that the server is slow to act on
   // looks like a no-op — the button just keeps saying "Stop" until something
@@ -39,14 +44,55 @@ export default function ChatPanel() {
   }, [chat]);
 
   const turns = useMemo(() => buildTurns(chat), [chat]);
+  const tree = useStore((s) => s.tree);
+  const validFilePaths = useMemo(() => {
+    const set = new Set<string>();
+    for (const entry of tree) {
+      if (!entry.is_dir) set.add(entry.path);
+    }
+    return set;
+  }, [tree]);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (e?: React.FormEvent) => {
+    e?.preventDefault();
     const trimmed = input.trim();
-    if (!trimmed || busy) return;
-    addUserMessage(trimmed);
+    if (
+      (!trimmed && pendingFiles.length === 0) ||
+      busy ||
+      uploading ||
+      !project ||
+      !connected
+    ) {
+      return;
+    }
+
+    setUploading(true);
+    let attachments: UploadedFileSummary[] = [];
+    try {
+      if (pendingFiles.length > 0) {
+        const result = await uploadProjectFilesApi({
+          projectId: project.id,
+          files: pendingFiles,
+        });
+        attachments = result.files;
+      }
+    } catch (err) {
+      addSystem(`upload failed: ${err instanceof Error ? err.message : String(err)}`);
+      setUploading(false);
+      return;
+    }
+
+    const content = trimmed || "Use the attached file(s).";
+    const fileRefs = extractFileRefs(content, validFilePaths);
+    addUserMessage(content, attachments, fileRefs);
     setBusy(true);
-    const ok = send({ type: "user_message", content: trimmed, mode });
+    const ok = send({
+      type: "user_message",
+      content,
+      mode,
+      attachments,
+      file_refs: fileRefs.length > 0 ? fileRefs : undefined,
+    });
     if (!ok) {
       // Socket is closed — the message never left the browser. Surface that
       // instead of leaving the UI stuck on "Codex is running…" forever, and
@@ -57,6 +103,8 @@ export default function ChatPanel() {
       );
     }
     setInput("");
+    setPendingFiles([]);
+    setUploading(false);
   };
 
   const handleStop = () => {
@@ -78,6 +126,28 @@ export default function ChatPanel() {
     if (confirm("Clear chat history? Sandbox files are kept.")) {
       send({ type: "reset_session" });
     }
+  };
+
+  const addFiles = (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setPendingFiles((current) => {
+      const next = [...current];
+      for (const file of Array.from(files)) {
+        const duplicate = next.some(
+          (existing) =>
+            existing.name === file.name &&
+            existing.size === file.size &&
+            existing.lastModified === file.lastModified,
+        );
+        if (!duplicate) next.push(file);
+      }
+      return next;
+    });
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const removePendingFile = (index: number) => {
+    setPendingFiles((current) => current.filter((_, i) => i !== index));
   };
 
   return (
@@ -131,10 +201,10 @@ export default function ChatPanel() {
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                handleSubmit(e);
+                void handleSubmit();
               }
             }}
-            disabled={busy || !project || !connected}
+            disabled={busy || uploading || !project || !connected}
             placeholder={
               busy
                 ? "Codex is running…"
@@ -146,7 +216,49 @@ export default function ChatPanel() {
             }
             rows={2}
           />
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            hidden
+            onChange={(e) => addFiles(e.target.files)}
+          />
+          {pendingFiles.length > 0 && (
+            <div className="composer-attachments">
+              {pendingFiles.map((file, index) => (
+                <span
+                  key={`${file.name}-${file.size}-${file.lastModified}`}
+                  className="attachment-chip"
+                >
+                  <span className="attachment-name" title={file.name}>
+                    {file.name}
+                  </span>
+                  <span className="attachment-size">{formatFileSize(file.size)}</span>
+                  <button
+                    type="button"
+                    onClick={() => removePendingFile(index)}
+                    disabled={uploading}
+                    title={`Remove ${file.name}`}
+                  >
+                    x
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
           <div className="controls">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={busy || uploading || !project}
+              className="attach-btn"
+              title="Attach files to this agent turn"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21.4 11.6 12 21a6 6 0 0 1-8.5-8.5l9.9-9.9a4 4 0 0 1 5.7 5.7l-9.9 9.9a2 2 0 0 1-2.8-2.8l9.4-9.4" />
+              </svg>
+              Files
+            </button>
             <button
               type="button"
               onClick={() =>
@@ -186,11 +298,16 @@ export default function ChatPanel() {
             ) : (
               <button
                 type="button"
-                onClick={handleSubmit}
-                disabled={!input.trim()}
+                onClick={() => void handleSubmit()}
+                disabled={
+                  uploading ||
+                  (!input.trim() && pendingFiles.length === 0) ||
+                  !project ||
+                  !connected
+                }
                 className="send-btn"
               >
-                Send
+                {uploading ? "Uploading..." : "Send"}
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <line x1="5" y1="12" x2="19" y2="12" />
                   <polyline points="12 5 19 12 12 19" />
@@ -308,6 +425,36 @@ function Turn({
   );
 }
 
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+const FILE_REF_PATTERN = /(?:^|\s)@([\w./-][\w./-]*)/g;
+
+/**
+ * Extract `@path/to/file.ts` references from composer text and resolve
+ * them against the current file tree. Returns sandbox-relative paths only
+ * for tokens that match an existing file — unknown @-tokens are silently
+ * dropped so a stray @username doesn't fire spurious file reads.
+ */
+function extractFileRefs(content: string, validPaths: Set<string>): string[] {
+  if (!content || validPaths.size === 0) return [];
+  const found = new Set<string>();
+  let match: RegExpExecArray | null;
+  FILE_REF_PATTERN.lastIndex = 0;
+  while ((match = FILE_REF_PATTERN.exec(content)) !== null) {
+    const candidate = match[1];
+    if (!candidate) continue;
+    if (validPaths.has(candidate)) {
+      found.add(candidate);
+    }
+  }
+  return Array.from(found);
+}
+
 function ChatItemView({ item }: { item: ChatItem }) {
   if (item.kind === "user") {
     return (
@@ -316,7 +463,32 @@ function ChatItemView({ item }: { item: ChatItem }) {
           <span className="av">Y</span>
           <span className="name">You</span>
         </div>
-        <div className="msg-body user">{item.content}</div>
+        <div className="msg-body user">
+          {item.content}
+          {item.attachments && item.attachments.length > 0 && (
+            <div className="message-attachments">
+              {item.attachments.map((file) => (
+                <span key={file.path} className="message-attachment">
+                  <span className="attachment-name" title={file.path}>
+                    {file.name}
+                  </span>
+                  <code>{file.path}</code>
+                  <span>{formatFileSize(file.size)}</span>
+                </span>
+              ))}
+            </div>
+          )}
+          {item.fileRefs && item.fileRefs.length > 0 && (
+            <div className="message-file-refs">
+              <span className="message-file-refs-label">included:</span>
+              {item.fileRefs.map((ref) => (
+                <code key={ref} className="message-file-ref" title={ref}>
+                  @{ref}
+                </code>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     );
   }
@@ -346,6 +518,9 @@ function ChatItemView({ item }: { item: ChatItem }) {
   if (item.kind === "tool") {
     return <ToolCard item={item} />;
   }
+  if (item.kind === "user_question") {
+    return <UserQuestionCard item={item} />;
+  }
   if (item.kind === "plan_proposal") {
     return <PlanReview item={item} />;
   }
@@ -353,6 +528,89 @@ function ChatItemView({ item }: { item: ChatItem }) {
     return <div className="msg-system">{item.content}</div>;
   }
   return null;
+}
+
+function UserQuestionCard({
+  item,
+}: {
+  item: Extract<ChatItem, { kind: "user_question" }>;
+}) {
+  const resolveUserQuestion = useStore((s) => s.resolveUserQuestion);
+  const [freeText, setFreeText] = useState("");
+  const answered = item.answer !== undefined;
+
+  const submit = (answer: string) => {
+    const trimmed = answer.trim();
+    if (!trimmed || answered) return;
+    const ok = send({
+      type: "user_question_answered",
+      call_id: item.call_id,
+      answer: trimmed,
+    });
+    if (ok) resolveUserQuestion(item.call_id, trimmed);
+  };
+
+  return (
+    <div className="msg">
+      <div className="head">
+        <span className="av agent">?</span>
+        <span className="name">Codex is asking</span>
+        <span className="frame">needs your input</span>
+      </div>
+      <div className="msg-body" style={{ paddingLeft: 30 }}>
+        <div className="ask-user-card">
+          <div className="ask-user-question">{item.question}</div>
+          {answered ? (
+            <div className="ask-user-answer">
+              <span className="ask-user-answer-label">You answered:</span>{" "}
+              <span className="ask-user-answer-text">{item.answer}</span>
+            </div>
+          ) : (
+            <>
+              {item.options && item.options.length > 0 && (
+                <div className="ask-user-options">
+                  {item.options.map((opt) => (
+                    <button
+                      key={opt}
+                      type="button"
+                      onClick={() => submit(opt)}
+                      className="ask-user-option"
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {item.allow_free_text && (
+                <form
+                  className="ask-user-free"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    submit(freeText);
+                  }}
+                >
+                  <input
+                    type="text"
+                    value={freeText}
+                    onChange={(e) => setFreeText(e.target.value)}
+                    placeholder={
+                      item.options && item.options.length > 0
+                        ? "Or type your own answer…"
+                        : "Type your answer…"
+                    }
+                    autoFocus
+                  />
+                  <button type="submit" disabled={!freeText.trim()}>
+                    Answer
+                  </button>
+                </form>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function CompleteRow({

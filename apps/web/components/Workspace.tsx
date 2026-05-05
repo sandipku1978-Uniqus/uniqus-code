@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Panel,
   PanelGroup,
   PanelResizeHandle,
 } from "react-resizable-panels";
-import { connect, disconnect } from "@/lib/ws-client";
+import { connect, disconnect, send } from "@/lib/ws-client";
 import { useStore } from "@/lib/store";
 import { runProjectApi } from "@/lib/api";
 import ChatPanel from "./ChatPanel";
@@ -15,6 +16,7 @@ import FileExplorer from "./FileExplorer";
 import EditorPreviewArea from "./EditorPreviewArea";
 import TerminalPanel from "./TerminalPanel";
 import DeployButton from "./DeployButton";
+import BrandLockup from "./BrandLockup";
 
 export default function Workspace({
   projectId,
@@ -29,6 +31,14 @@ export default function Workspace({
   const project = useStore((s) => s.project);
   const reset = useStore((s) => s.reset);
   const lastSyncedAt = useStore((s) => s.lastSyncedAt);
+  const chatLength = useStore((s) => s.chat.length);
+  const mode = useStore((s) => s.mode);
+  const addUserMessage = useStore((s) => s.addUserMessage);
+  const setBusy = useStore((s) => s.setBusy);
+
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const briefParam = searchParams?.get("brief") ?? null;
 
   // Tick so the "synced 12s ago" label increments without waiting for the
   // next sync event. 10s cadence is plenty — the label rounds to seconds/min.
@@ -46,18 +56,51 @@ export default function Workspace({
     };
   }, [projectId, reset]);
 
+  // One-sentence project creation: the picker passes the brief through
+  // ?brief=…; once the WS is up, the project loaded, and the chat is
+  // still empty (i.e. no replayed history), fire it as the first turn.
+  // Tracked in a ref so a chat update mid-fire doesn't double-send.
+  const briefFiredRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!briefParam) return;
+    if (!connected || !project) return;
+    if (chatLength > 0) {
+      // History exists — strip the param without firing. Avoids
+      // surprise-re-running an old brief on re-open.
+      router.replace(`/projects/${projectId}`);
+      return;
+    }
+    if (briefFiredRef.current === briefParam) return;
+    briefFiredRef.current = briefParam;
+    addUserMessage(briefParam);
+    setBusy(true);
+    const ok = send({ type: "user_message", content: briefParam, mode });
+    if (!ok) {
+      setBusy(false);
+      // Leave the param in place so a reconnect retries the fire.
+      briefFiredRef.current = null;
+      return;
+    }
+    router.replace(`/projects/${projectId}`);
+  }, [
+    briefParam,
+    connected,
+    project,
+    chatLength,
+    mode,
+    addUserMessage,
+    setBusy,
+    projectId,
+    router,
+  ]);
+
   return (
     <div className="ide-shell">
       {/* Topbar */}
       <div className="ide-topbar">
         <div className="crumbs">
-          <Link href="/" className="lockup" style={{ fontSize: 14 }}>
-            <span className="mark" style={{ width: 18, height: 18, fontSize: 11 }}>
-              u
-            </span>
-            <span>uniqus</span>
-            <span className="slash">/</span>
-            <span className="code">code</span>
+          <Link href="/" style={{ textDecoration: "none" }}>
+            <BrandLockup style={{ fontSize: 14 }} />
           </Link>
           <span className="sep">/</span>
           <Link href="/projects" className="proj" style={{ color: "var(--text-primary)" }}>

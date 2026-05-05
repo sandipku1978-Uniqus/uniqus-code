@@ -35,6 +35,10 @@ alter table users add column if not exists vercel_connected_at timestamptz;
 alter table projects add column if not exists vercel_project_id text;
 alter table projects add column if not exists vercel_project_name text;
 
+-- Phase 1.x project lifecycle UX: optional emoji/letter for visual ID in
+-- the picker grid and topbar. Null = render the auto-derived hash tile.
+alter table projects add column if not exists icon text;
+
 -- Deploys: one row per attempted deployment. Lets the UI show history and
 -- lets the orchestrator poll status without re-asking Vercel for everything.
 create table if not exists deployments (

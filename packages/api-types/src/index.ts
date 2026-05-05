@@ -11,19 +11,41 @@ export interface Plan {
 
 export type RunMode = "plan-then-execute" | "execute-only";
 
+export interface UploadedFileSummary {
+  name: string;
+  path: string;
+  size: number;
+  mime_type: string;
+}
+
 export type ClientEvent =
-  | { type: "user_message"; content: string; mode: RunMode }
+  | {
+      type: "user_message";
+      content: string;
+      mode: RunMode;
+      attachments?: UploadedFileSummary[];
+      /**
+       * Sandbox-relative paths the user explicitly @-referenced in the
+       * composer. The orchestrator reads each file (with size caps) and
+       * inlines the contents into the agent's user message so the agent
+       * doesn't have to spend a `read_file` tool round-trip.
+       */
+      file_refs?: string[];
+    }
   | { type: "plan_approved"; plan: Plan }
   | { type: "request_tree" }
   | { type: "request_file"; path: string }
   | { type: "reset_session" }
   | { type: "abort" }
-  | { type: "client_write_file"; path: string; content: string };
+  | { type: "client_write_file"; path: string; content: string }
+  | { type: "user_question_answered"; call_id: string; answer: string };
 
 export interface ProjectSummary {
   id: string;
   name: string;
   description: string | null;
+  /** Optional emoji or short visual ID. Null = picker renders an auto-derived hash tile. */
+  icon: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -66,6 +88,25 @@ export type ServerEvent =
       state: DeploymentState;
       vercel_url: string | null;
       error_message: string | null;
+    }
+  | {
+      /**
+       * Agent invoked the `ask_user` tool. UI renders the question + options
+       * inline in the chat; the matching `user_question_answered` ClientEvent
+       * resumes the agent loop.
+       */
+      type: "user_question_asked";
+      call_id: string;
+      question: string;
+      options?: string[];
+      allow_free_text: boolean;
+    }
+  | {
+      /** Agent loop summarized older turns to fit the context window. */
+      type: "history_compacted";
+      removed_messages: number;
+      before_tokens: number;
+      after_tokens: number;
     }
   | { type: "error"; message: string };
 

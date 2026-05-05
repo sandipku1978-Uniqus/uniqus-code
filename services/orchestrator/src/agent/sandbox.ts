@@ -5,6 +5,7 @@ import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import treeKill from "tree-kill";
+import { safeChildEnv } from "../safeEnv.js";
 
 export const sandboxEvents = new EventEmitter();
 
@@ -138,6 +139,7 @@ export async function runCommand(
     const choice = pickShell();
     const child = spawn(choice.shell, [...choice.prefix, command], {
       cwd: sandbox.rootDir,
+      env: safeChildEnv(),
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -284,6 +286,7 @@ export async function killPortHolder(port: number): Promise<void> {
   // 1. fuser -k -n tcp <port>
   await new Promise<void>((resolve) => {
     const p = spawn("fuser", ["-k", "-n", "tcp", String(port)], {
+      env: safeChildEnv(),
       stdio: "ignore",
     });
     p.once("error", () => resolve());
@@ -292,6 +295,7 @@ export async function killPortHolder(port: number): Promise<void> {
   // 2. lsof -ti:<port> | xargs -r kill -9
   await new Promise<void>((resolve) => {
     const p = spawn("/bin/sh", ["-c", `lsof -ti:${port} | xargs -r kill -9`], {
+      env: safeChildEnv(),
       stdio: "ignore",
     });
     p.once("error", () => resolve());
@@ -349,6 +353,7 @@ export async function startServer(
   const choice = pickShell();
   const proc = spawn(choice.shell, [...choice.prefix, command], {
     cwd: sandbox.rootDir,
+    env: safeChildEnv(),
     stdio: ["ignore", "pipe", "pipe"],
   });
 

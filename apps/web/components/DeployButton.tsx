@@ -19,11 +19,13 @@ let envIdSeq = 1;
 
 export default function DeployButton({ projectId }: { projectId: string }) {
   const live = useStore((s) => s.deployment);
+  const redeploySuggested = useStore((s) => s.redeploySuggested);
+  const setRedeploySuggested = useStore((s) => s.setRedeploySuggested);
   const [open, setOpen] = useState(false);
 
   const label = useMemo(() => {
     if (!live) return "Deploy";
-    if (live.state === "READY") return "Live";
+    if (live.state === "READY") return "Redeploy";
     if (live.state === "ERROR") return "Failed";
     if (live.state === "CANCELED") return "Canceled";
     return "Deploying…";
@@ -33,10 +35,14 @@ export default function DeployButton({ projectId }: { projectId: string }) {
     <>
       <button
         type="button"
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          setRedeploySuggested(false);
+          setOpen(true);
+        }}
         className="toggle-btn"
         title="Deploy this project to Vercel"
         data-on={live?.state === "READY"}
+        data-suggested={redeploySuggested || undefined}
       >
         <svg
           width="14"
@@ -64,6 +70,7 @@ function DeployModal({
 }) {
   const live = useStore((s) => s.deployment);
   const setDeployment = useStore((s) => s.setDeployment);
+  const setRedeploySuggested = useStore((s) => s.setRedeploySuggested);
   const project = useStore((s) => s.project);
   const searchParams = useSearchParams();
 
@@ -141,6 +148,7 @@ function DeployModal({
     setBusy(true);
     try {
       const r = await deployProjectApi(projectId, { env, target });
+      setRedeploySuggested(false);
       setDeployment({
         id: r.deployment_id,
         state: r.state,

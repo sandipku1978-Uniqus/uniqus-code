@@ -5,6 +5,7 @@ export interface ProjectRecord {
   owner_id: string;
   name: string;
   description: string | null;
+  icon: string | null;
   created_at: string;
   updated_at: string;
   vercel_project_id?: string | null;
@@ -55,6 +56,38 @@ export async function getProject(
 
 export async function touchProject(id: string): Promise<void> {
   await db().from("projects").update({}).eq("id", id);
+}
+
+/**
+ * Patch any subset of user-editable project fields. Only `name`,
+ * `description`, and `icon` are mutable here; `owner_id`, timestamps, and
+ * the Vercel link are managed by their own code paths.
+ *
+ * Validates ownership server-side via the chained `.eq("owner_id", ...)`
+ * — without that, a user could rename someone else's project by guessing
+ * the UUID.
+ */
+export async function updateProject(
+  id: string,
+  ownerId: string,
+  patch: { name?: string; description?: string | null; icon?: string | null },
+): Promise<ProjectRecord> {
+  const update: Record<string, unknown> = {};
+  if (patch.name !== undefined) update.name = patch.name;
+  if (patch.description !== undefined) update.description = patch.description;
+  if (patch.icon !== undefined) update.icon = patch.icon;
+  if (Object.keys(update).length === 0) {
+    throw new Error("updateProject called with no patch fields");
+  }
+  const { data, error } = await db()
+    .from("projects")
+    .update(update)
+    .eq("id", id)
+    .eq("owner_id", ownerId)
+    .select("*")
+    .single();
+  if (error || !data) throw new Error(`updateProject failed: ${error?.message}`);
+  return data as ProjectRecord;
 }
 
 /**

@@ -5,6 +5,13 @@
 #   - psmisc: provides `fuser`, used by startServer's port-clear logic
 #     before binding (without this, EADDRINUSE recovery silently no-ops)
 #   - lsof: secondary fallback alongside fuser for finding port holders
+#   - python311 + python311Packages.pip: Phase 1.x polyglot bridge — ops
+#     wedge tools (Slack bots, Snowflake queries, ETL scripts) are
+#     Python-shaped. Without this `start_server` for `python app.py`
+#     fails with "python: command not found" on the runtime image.
+#   - go_1_22: same rationale for Go projects (CLI tools, small
+#     long-running services). Java/C/Ruby deferred per plan §1.x — add
+#     on customer-driven demand only.
 #
 # IMPORTANT: must use `nixPkgs` (not `aptPkgs`). Railway's nixpacks runtime
 # image is Nix-based — apt packages install during build but aren't present
@@ -22,4 +29,12 @@
 # halfway through `nix-env -if`.
 
 [phases.setup]
-nixPkgs = ["...", "git", "psmisc", "lsof"]
+nixPkgs = [
+  "...",
+  "git",
+  "psmisc",
+  "lsof",
+  "python311",
+  "python311Packages.pip",
+  "go_1_22",
+]

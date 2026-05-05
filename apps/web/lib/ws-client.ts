@@ -188,6 +188,21 @@ function handleEvent(event: ServerEvent): void {
         error_message: event.error_message,
       });
       break;
+    case "user_question_asked":
+      s.addUserQuestion(
+        event.call_id,
+        event.question,
+        event.options,
+        event.allow_free_text,
+      );
+      break;
+    case "history_compacted":
+      s.addSystem(
+        `compacted ${event.removed_messages} earlier turns (~${Math.round(
+          (event.before_tokens - event.after_tokens) / 1000,
+        )}k tokens reclaimed) to keep the session alive`,
+      );
+      break;
     case "client_write_ack":
       s.setSaveStatus(
         event.path,

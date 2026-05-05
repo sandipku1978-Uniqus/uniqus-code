@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { safeChildEnv } from "./safeEnv.js";
 
 /**
  * Whether the project's dependencies need to be installed before its dev
@@ -60,6 +61,7 @@ export async function runInstall(
   return new Promise((resolve) => {
     const child = spawn(manager, args, {
       cwd: sandboxDir,
+      env: safeChildEnv(),
       stdio: ["ignore", "ignore", "pipe"],
       // npm script PATH munging is irrelevant here — we're invoking the
       // package manager itself, which lives in the system PATH on Railway's

@@ -68,6 +68,20 @@ export async function listDeployments(
   return (data ?? []) as DeploymentRecord[];
 }
 
+export async function getLatestDeployment(
+  projectId: string,
+): Promise<DeploymentRecord | null> {
+  const { data, error } = await db()
+    .from("deployments")
+    .select("*")
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`getLatestDeployment failed: ${error.message}`);
+  return (data ?? null) as DeploymentRecord | null;
+}
+
 export async function getDeployment(id: string): Promise<DeploymentRecord | null> {
   const { data, error } = await db()
     .from("deployments")

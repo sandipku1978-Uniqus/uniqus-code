@@ -1,6 +1,11 @@
 "use client";
 
-import type { CurrentUser, DeploymentState, ProjectSummary } from "@uniqus/api-types";
+import type {
+  CurrentUser,
+  DeploymentState,
+  ProjectSummary,
+  UploadedFileSummary,
+} from "@uniqus/api-types";
 
 // Production deployments must set NEXT_PUBLIC_ORCHESTRATOR_URL — the
 // orchestrator usually runs on a different hostname (Railway etc.) than the
@@ -46,6 +51,32 @@ export const createProjectApi = (
   api("/api/projects", {
     method: "POST",
     body: JSON.stringify({ name, description }),
+  });
+
+export const updateProjectApi = (
+  projectId: string,
+  patch: { name?: string; description?: string | null; icon?: string | null },
+): Promise<{ project: ProjectSummary }> =>
+  api(`/api/projects/${projectId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+
+export const deleteProjectApi = (
+  projectId: string,
+): Promise<{ ok: true }> =>
+  api(`/api/projects/${projectId}`, { method: "DELETE" });
+
+export const fileOpApi = (
+  projectId: string,
+  body:
+    | { op: "create_dir"; path: string }
+    | { op: "rename"; from: string; to: string }
+    | { op: "delete"; path: string },
+): Promise<{ ok: true }> =>
+  api(`/api/projects/${projectId}/files`, {
+    method: "POST",
+    body: JSON.stringify(body),
   });
 
 export interface ImportResultMeta {
@@ -204,3 +235,22 @@ export const stopServerApi = (
   serverId: string,
 ): Promise<{ ok: true }> =>
   api(`/api/projects/${projectId}/servers/${serverId}`, { method: "DELETE" });
+
+export async function uploadProjectFilesApi(input: {
+  projectId: string;
+  files: File[];
+}): Promise<{ files: UploadedFileSummary[] }> {
+  const fd = new FormData();
+  input.files.forEach((file) => fd.append("files", file));
+
+  const res = await fetch(`${API_BASE}/api/projects/${input.projectId}/uploads`, {
+    method: "POST",
+    credentials: "include",
+    body: fd,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`API ${res.status}: ${body || res.statusText}`);
+  }
+  return (await res.json()) as { files: UploadedFileSummary[] };
+}

@@ -20,8 +20,7 @@ export const metadata: Metadata = {
   title: "Uniqus Code — Engineering, on demand.",
   description: "AI engineering workbench from Uniqus.",
   icons: {
-    icon:
-      "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' rx='5' fill='%23482879'/><text x='12' y='17' font-family='monospace' font-size='14' font-weight='700' text-anchor='middle' fill='white'>u</text></svg>",
+    icon: "/brand/uniqus-small-logo-color.png",
   },
 };
 

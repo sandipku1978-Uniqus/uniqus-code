@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import AdmZip from "adm-zip";
+import { safeChildEnv } from "./safeEnv.js";
 
 // Cap on uncompressed extracted size (200 MB) to prevent zip-bomb DoS.
 const MAX_TOTAL_SIZE = 200 * 1024 * 1024;
@@ -182,7 +183,10 @@ function buildCloneUrl(repoUrl: string, pat?: string): string {
 
 function runGit(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn("git", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn("git", args, {
+      env: safeChildEnv(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     let stderr = "";
     child.stderr.on("data", (d) => {
       stderr += d.toString();

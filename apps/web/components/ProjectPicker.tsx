@@ -1,14 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { ProjectSummary } from "@uniqus/api-types";
+import BrandLockup from "./BrandLockup";
 import {
   fetchProjects,
   createProjectApi,
   importGithubApi,
   importZipApi,
+  updateProjectApi,
+  deleteProjectApi,
   fetchGithubStatus,
   fetchGithubRepos,
   disconnectGithubApi,
@@ -16,6 +19,43 @@ import {
   type GithubStatus,
   type GithubRepoSummary,
 } from "@/lib/api";
+
+const ICON_CHOICES = [
+  "🚀", "✨", "📊", "📈", "🤖", "⚡",
+  "💼", "🛠️", "🧪", "📝", "📦", "🎯",
+];
+
+/**
+ * Auto-derive a short display name from a free-form brief. Takes the
+ * first ~5 words, lowercases, and joins with hyphens — close to how a
+ * dev would name a repo. Caps at 40 chars; if the brief is too short
+ * to derive anything, falls back to "untitled-project-<short id>".
+ */
+function deriveNameFromBrief(brief: string): string {
+  const words = brief
+    .toLowerCase()
+    .replace(/[^\w\s-]+/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 0 && !STOP_WORDS.has(w));
+  const head = words.slice(0, 5).join("-");
+  const trimmed = head.slice(0, 40).replace(/-+$/, "");
+  if (trimmed.length >= 3) return trimmed;
+  return `untitled-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+const STOP_WORDS = new Set([
+  "a", "an", "the", "i", "want", "need", "build", "make", "create", "to", "for",
+  "with", "and", "or", "of", "in", "on", "that", "this", "it", "is", "are",
+]);
+
+function fallbackTileColor(projectId: string): string {
+  let hash = 0;
+  for (let i = 0; i < projectId.length; i++) {
+    hash = (hash * 31 + projectId.charCodeAt(i)) | 0;
+  }
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${hue} 55% 28%)`;
+}
 
 type Mode = "blank" | "zip" | "github";
 type GithubAuthMode = "oauth" | "pat";
@@ -36,6 +76,21 @@ export default function ProjectPicker({
   const [creating, setCreating] = useState(false);
   const [mode, setMode] = useState<Mode>("blank");
   const [name, setName] = useState("");
+
+  // One-sentence project creation: blank mode collapses name+brief into
+  // a single textarea. The user types what they want; we derive a name
+  // and pass the brief through ?brief= so the workspace fires it as the
+  // first turn once the WS connects.
+  const [brief, setBrief] = useState("");
+  const [showNameOverride, setShowNameOverride] = useState(false);
+
+  // Per-project menu state. Tracks which tile's dropdown is open so
+  // clicking elsewhere closes it; rename/icon dialogs are inline modals.
+  const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{
+    project: ProjectSummary;
+    field: "rename" | "icon" | "delete";
+  } | null>(null);
 
   // Import form state
   const [repoUrl, setRepoUrl] = useState("");
@@ -111,15 +166,36 @@ export default function ProjectPicker({
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     if (creating) return;
+
+    // Blank mode now leads with a brief. Either (a) brief alone — derive
+    // the name from it; (b) brief + manual name override; (c) name only
+    // (legacy path, still supported by toggling "Set name manually").
+    if (mode === "blank") {
+      const trimmedBrief = brief.trim();
+      const trimmedName = name.trim();
+      if (!trimmedBrief && !trimmedName) return;
+      const finalName = trimmedName || deriveNameFromBrief(trimmedBrief);
+      setCreating(true);
+      setError(null);
+      try {
+        const { project } = await createProjectApi(finalName);
+        const target = trimmedBrief
+          ? `/projects/${project.id}?brief=${encodeURIComponent(trimmedBrief)}`
+          : `/projects/${project.id}`;
+        router.push(target);
+        return;
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        setCreating(false);
+        return;
+      }
+    }
+
+    // Import flows still require a manual project name.
     if (!name.trim()) return;
     setCreating(true);
     setError(null);
     try {
-      if (mode === "blank") {
-        const { project } = await createProjectApi(name.trim());
-        router.push(`/projects/${project.id}`);
-        return;
-      }
       if (mode === "github") {
         // Two paths: OAuth (user picked from their connected-account dropdown)
         // or PAT/manual URL fallback. The OAuth path doesn't ask the user
@@ -169,15 +245,54 @@ export default function ProjectPicker({
     }
   }
 
+  async function handleRename(project: ProjectSummary, newName: string): Promise<void> {
+    try {
+      const r = await updateProjectApi(project.id, { name: newName });
+      setProjects((current) =>
+        (current ?? []).map((p) => (p.id === project.id ? r.project : p)),
+      );
+      setEditing(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleSetIcon(project: ProjectSummary, icon: string | null): Promise<void> {
+    try {
+      const r = await updateProjectApi(project.id, { icon });
+      setProjects((current) =>
+        (current ?? []).map((p) => (p.id === project.id ? r.project : p)),
+      );
+      setEditing(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleDelete(project: ProjectSummary): Promise<void> {
+    try {
+      await deleteProjectApi(project.id);
+      setProjects((current) => (current ?? []).filter((p) => p.id !== project.id));
+      setEditing(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  // Close any open per-tile menu when the user clicks outside the picker.
+  useEffect(() => {
+    if (!menuFor) return;
+    const close = (): void => setMenuFor(null);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [menuFor]);
+
   return (
     <>
       <nav className="topnav">
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-          <Link href="/" className="lockup">
-            <span className="mark">u</span>
-            <span>uniqus</span>
-            <span className="slash">/</span>
-            <span className="code">code</span>
+          <Link href="/" style={{ textDecoration: "none" }}>
+            <BrandLockup />
           </Link>
         </div>
         <div className="right">
@@ -353,36 +468,88 @@ export default function ProjectPicker({
             </div>
 
             <form onSubmit={handleCreate} className="newproj-form">
-              <input
-                autoFocus
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Project name — e.g. acme-billing-portal"
-                disabled={creating}
-              />
-              <button
-                type="submit"
-                className="btn-primary"
-                disabled={
-                  !name.trim() ||
-                  creating ||
-                  (mode === "github" &&
-                    (githubAuthMode === "oauth" && github?.connected
-                      ? !selectedRepo
-                      : !repoUrl.trim())) ||
-                  (mode === "zip" && !zipFile)
-                }
-              >
-                {creating
-                  ? mode === "blank"
-                    ? "Creating…"
-                    : "Importing…"
-                  : mode === "blank"
-                  ? "+ New project"
-                  : mode === "zip"
-                  ? "Upload & import"
-                  : "Clone & import"}
-              </button>
+              {mode === "blank" ? (
+                <div className="newproj-blank">
+                  <textarea
+                    autoFocus
+                    value={brief}
+                    onChange={(e) => setBrief(e.target.value)}
+                    placeholder="Describe what you want — e.g. a Slack bot that posts new HubSpot deals to #revenue every Monday."
+                    disabled={creating}
+                    rows={3}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                        e.preventDefault();
+                        void handleCreate(e as unknown as React.FormEvent);
+                      }
+                    }}
+                  />
+                  <div className="newproj-blank-row">
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      onClick={() => setShowNameOverride((v) => !v)}
+                      disabled={creating}
+                      style={{ fontSize: 11 }}
+                    >
+                      {showNameOverride ? "Hide name override" : "Set name manually"}
+                    </button>
+                    <button
+                      type="submit"
+                      className="btn-primary"
+                      disabled={
+                        creating ||
+                        (!brief.trim() && !name.trim())
+                      }
+                    >
+                      {creating ? "Creating…" : "Brief Codex →"}
+                    </button>
+                  </div>
+                  {showNameOverride && (
+                    <input
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      placeholder="Project name (auto-derived from brief if blank)"
+                      disabled={creating}
+                      style={fieldStyle}
+                    />
+                  )}
+                  <p className="newproj-hint">
+                    {brief.trim()
+                      ? `Codex will run this as your first turn. Project name will be "${name.trim() || deriveNameFromBrief(brief)}".`
+                      : "Press ⌘/Ctrl + Enter to submit. Codex picks up from your brief on the next screen."}
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <input
+                    autoFocus
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="Project name — e.g. acme-billing-portal"
+                    disabled={creating}
+                  />
+                  <button
+                    type="submit"
+                    className="btn-primary"
+                    disabled={
+                      !name.trim() ||
+                      creating ||
+                      (mode === "github" &&
+                        (githubAuthMode === "oauth" && github?.connected
+                          ? !selectedRepo
+                          : !repoUrl.trim())) ||
+                      (mode === "zip" && !zipFile)
+                    }
+                  >
+                    {creating
+                      ? "Importing…"
+                      : mode === "zip"
+                        ? "Upload & import"
+                        : "Clone & import"}
+                  </button>
+                </>
+              )}
             </form>
 
             {mode === "github" && (
@@ -601,26 +768,274 @@ export default function ProjectPicker({
           {projects !== null && projects.length > 0 && (
             <div className="proj-grid">
               {projects.map((p) => (
-                <Link key={p.id} href={`/projects/${p.id}`} className="proj">
-                  <h3>{p.name}</h3>
-                  <p className="desc">{p.description ?? "No description"}</p>
-                  <div className="meta">
-                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                      <span className="status">
-                        <span className="d" /> Idle
-                      </span>
-                    </div>
-                    <span>{relativeTime(p.updated_at)}</span>
-                  </div>
-                </Link>
+                <ProjectTile
+                  key={p.id}
+                  project={p}
+                  menuOpen={menuFor === p.id}
+                  onOpenMenu={(open) => setMenuFor(open ? p.id : null)}
+                  onEdit={(field) => setEditing({ project: p, field })}
+                />
               ))}
             </div>
+          )}
+
+          {editing && editing.field === "rename" && (
+            <RenameDialog
+              project={editing.project}
+              onCancel={() => setEditing(null)}
+              onSubmit={(name) => handleRename(editing.project, name)}
+            />
+          )}
+
+          {editing && editing.field === "icon" && (
+            <IconDialog
+              project={editing.project}
+              onCancel={() => setEditing(null)}
+              onPick={(icon) => handleSetIcon(editing.project, icon)}
+            />
+          )}
+
+          {editing && editing.field === "delete" && (
+            <DeleteDialog
+              project={editing.project}
+              onCancel={() => setEditing(null)}
+              onConfirm={() => handleDelete(editing.project)}
+            />
           )}
         </main>
       </div>
     </>
   );
 }
+
+function ProjectTile({
+  project,
+  menuOpen,
+  onOpenMenu,
+  onEdit,
+}: {
+  project: ProjectSummary;
+  menuOpen: boolean;
+  onOpenMenu: (open: boolean) => void;
+  onEdit: (field: "rename" | "icon" | "delete") => void;
+}) {
+  return (
+    <div className="proj proj-tile">
+      <div className="proj-tile-head">
+        <ProjectAvatar project={project} />
+        <button
+          type="button"
+          className="proj-menu-btn"
+          aria-label="Project actions"
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            onOpenMenu(!menuOpen);
+          }}
+        >
+          ⋯
+        </button>
+        {menuOpen && (
+          <div
+            className="proj-menu"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                onOpenMenu(false);
+                onEdit("rename");
+              }}
+            >
+              Rename
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                onOpenMenu(false);
+                onEdit("icon");
+              }}
+            >
+              Change icon
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => {
+                onOpenMenu(false);
+                onEdit("delete");
+              }}
+            >
+              Delete
+            </button>
+          </div>
+        )}
+      </div>
+      <Link href={`/projects/${project.id}`} className="proj-tile-link">
+        <h3>{project.name}</h3>
+        <p className="desc">{project.description ?? "No description"}</p>
+        <div className="meta">
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span className="status">
+              <span className="d" /> Idle
+            </span>
+          </div>
+          <span>{relativeTime(project.updated_at)}</span>
+        </div>
+      </Link>
+    </div>
+  );
+}
+
+function ProjectAvatar({ project }: { project: ProjectSummary }) {
+  if (project.icon) {
+    return <span className="proj-avatar emoji">{project.icon}</span>;
+  }
+  return (
+    <span
+      className="proj-avatar"
+      style={{ background: fallbackTileColor(project.id) }}
+    >
+      {project.name.trim().charAt(0).toUpperCase() || "·"}
+    </span>
+  );
+}
+
+function RenameDialog({
+  project,
+  onCancel,
+  onSubmit,
+}: {
+  project: ProjectSummary;
+  onCancel: () => void;
+  onSubmit: (name: string) => void;
+}) {
+  const [value, setValue] = useState(project.name);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+  return (
+    <div className="proj-dialog-overlay" onClick={onCancel}>
+      <div className="proj-dialog" onClick={(e) => e.stopPropagation()}>
+        <h3>Rename project</h3>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            const trimmed = value.trim();
+            if (trimmed && trimmed !== project.name) onSubmit(trimmed);
+            else onCancel();
+          }}
+        >
+          <input
+            ref={inputRef}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            style={fieldStyle}
+            maxLength={80}
+          />
+          <div className="proj-dialog-actions">
+            <button type="button" onClick={onCancel} className="btn-ghost">
+              Cancel
+            </button>
+            <button type="submit" className="btn-primary" disabled={!value.trim()}>
+              Save
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function IconDialog({
+  project,
+  onCancel,
+  onPick,
+}: {
+  project: ProjectSummary;
+  onCancel: () => void;
+  onPick: (icon: string | null) => void;
+}) {
+  return (
+    <div className="proj-dialog-overlay" onClick={onCancel}>
+      <div className="proj-dialog" onClick={(e) => e.stopPropagation()}>
+        <h3>Pick an icon for "{project.name}"</h3>
+        <div className="proj-icon-grid">
+          {ICON_CHOICES.map((icon) => (
+            <button
+              key={icon}
+              type="button"
+              onClick={() => onPick(icon)}
+              className={`proj-icon-choice ${project.icon === icon ? "selected" : ""}`}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+        <div className="proj-dialog-actions">
+          <button type="button" onClick={onCancel} className="btn-ghost">
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => onPick(null)}
+            className="btn-ghost"
+            disabled={!project.icon}
+          >
+            Clear
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeleteDialog({
+  project,
+  onCancel,
+  onConfirm,
+}: {
+  project: ProjectSummary;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const [confirmName, setConfirmName] = useState("");
+  const matches = confirmName.trim() === project.name;
+  return (
+    <div className="proj-dialog-overlay" onClick={onCancel}>
+      <div className="proj-dialog" onClick={(e) => e.stopPropagation()}>
+        <h3>Delete "{project.name}"?</h3>
+        <p className="proj-dialog-warn">
+          This permanently removes the project, its files, its chat history,
+          and any deployments tracked by Uniqus. The action cannot be undone.
+        </p>
+        <input
+          value={confirmName}
+          onChange={(e) => setConfirmName(e.target.value)}
+          placeholder={`Type "${project.name}" to confirm`}
+          style={fieldStyle}
+          autoFocus
+        />
+        <div className="proj-dialog-actions">
+          <button type="button" onClick={onCancel} className="btn-ghost">
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={!matches}
+            className="btn-danger"
+          >
+            Delete project
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 const fieldStyle: React.CSSProperties = {
   background: "var(--bg-elev)",
