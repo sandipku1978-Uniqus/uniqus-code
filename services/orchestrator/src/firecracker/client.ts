@@ -169,9 +169,23 @@ export async function spawnFirecracker(opts: {
     errorBox.err = err;
     console.error(`[firecracker] spawn '${binaryPath}' failed:`, err.message);
   });
+  // Pipe firecracker's stdout/stderr to the orchestrator's journal with a
+  // [fc:<pid>] tag. With `console=ttyS0` in the kernel boot args, this
+  // includes the entire guest serial console: kernel boot, OpenRC startup,
+  // and the in-VM agent's stdout. Critical for diagnosing boot hangs.
   let stderrTail = "";
+  const tag = `[fc:${proc.pid ?? "?"}]`;
+  proc.stdout?.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString().split(/\r?\n/)) {
+      if (line.length > 0) console.log(`${tag} ${line}`);
+    }
+  });
   proc.stderr?.on("data", (chunk: Buffer) => {
-    stderrTail = (stderrTail + chunk.toString()).slice(-2000);
+    const s = chunk.toString();
+    stderrTail = (stderrTail + s).slice(-2000);
+    for (const line of s.split(/\r?\n/)) {
+      if (line.length > 0) console.error(`${tag} ${line}`);
+    }
   });
 
   if (!proc.pid) {

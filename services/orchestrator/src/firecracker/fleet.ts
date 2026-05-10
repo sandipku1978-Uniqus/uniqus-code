@@ -183,9 +183,29 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
   }
   if (!healthy) {
     console.error(`[fleet ${id}] agent /health unreachable after ${pingAttempts} attempts`);
-    fc.close();
+    // Keep the VM alive briefly so the operator can debug from the host:
+    //   ping ${ip}
+    //   curl http://${ip}:${agentPort}/health
+    // Set FIRECRACKER_KEEP_FAILED_VMS=1 to leave failed VMs running
+    // indefinitely (you'll have to clean them up by hand). Default: tear
+    // down after 30s so we don't leak processes.
+    const keepIndefinitely = process.env.FIRECRACKER_KEEP_FAILED_VMS === "1";
+    if (keepIndefinitely) {
+      console.error(
+        `[fleet ${id}] FIRECRACKER_KEEP_FAILED_VMS=1 — VM left running. ` +
+          `Probe with: ping ${ip} ; curl http://${ip}:${agentPort}/health . ` +
+          `Stop with: kill ${fc.pid}`,
+      );
+    } else {
+      setTimeout(() => fc.close(), 30_000);
+      console.error(
+        `[fleet ${id}] VM kept alive for 30s for manual probing (ip=${ip}). ` +
+          `Set FIRECRACKER_KEEP_FAILED_VMS=1 to keep failed VMs indefinitely.`,
+      );
+    }
     throw new Error(
-      `[vm ${id}] agent did not answer /health within 10s — check the rootfs init script and that vsock is enabled in the kernel`,
+      `[vm ${id}] agent did not answer /health within 10s at ${ip}:${agentPort} — ` +
+        `try: ping ${ip} (kernel network up?) and curl http://${ip}:${agentPort}/health (in-VM agent running?)`,
     );
   }
   console.log(`[fleet ${id}] in-VM agent healthy after ${pingAttempts} ping attempts`);
