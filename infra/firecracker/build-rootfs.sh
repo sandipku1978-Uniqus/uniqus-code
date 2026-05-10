@@ -34,9 +34,19 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 AGENT_SRC="${REPO_ROOT}/services/sandbox-agent"
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "${WORK}"' EXIT
 MNT="${WORK}/mnt"
 mkdir -p "${MNT}"
+
+# Robust cleanup: lazy-unmount the bind mounts AND the loop mount before
+# rm'ing the temp dir, otherwise the dir is "busy" and the rootfs.ext4.new
+# image stays loop-mounted across runs.
+cleanup() {
+  for m in "${MNT}/dev/pts" "${MNT}/dev" "${MNT}/sys" "${MNT}/proc" "${MNT}"; do
+    umount -lR "${m}" 2>/dev/null || true
+  done
+  rm -rf "${WORK}"
+}
+trap cleanup EXIT
 
 echo "[1/5] Creating ext4 image (${ROOTFS_SIZE_MB} MB)…"
 truncate -s "${ROOTFS_SIZE_MB}M" "${ROOTFS}.new"
@@ -52,6 +62,16 @@ echo "[3/5] Adding packages…"
 mkdir -p "${MNT}/etc/apk"
 echo "${ALPINE_MIRROR}/v${ALPINE_VERSION}/main"      > "${MNT}/etc/apk/repositories"
 echo "${ALPINE_MIRROR}/v${ALPINE_VERSION}/community" >> "${MNT}/etc/apk/repositories"
+
+# Bind-mount kernel filesystems + provide DNS so the chroot can reach the
+# Alpine mirrors. Without these, `apk update` fails with "temporary error"
+# because the chroot has no resolver and no /proc.
+mount --bind /proc   "${MNT}/proc"
+mount --bind /sys    "${MNT}/sys"
+mount --bind /dev    "${MNT}/dev"
+mount --bind /dev/pts "${MNT}/dev/pts" 2>/dev/null || true
+cp /etc/resolv.conf "${MNT}/etc/resolv.conf"
+
 chroot "${MNT}" /sbin/apk update
 chroot "${MNT}" /sbin/apk add --no-cache \
   bash coreutils util-linux openrc \
@@ -137,6 +157,12 @@ chroot "${MNT}" /bin/sh -c "passwd -d root || true"
 
 echo "[5/5] Unmounting + finalizing…"
 sync
+# Unwind in reverse order: pts → dev → sys → proc → loop. Lazy umount in
+# case a process inside the chroot is still holding something open.
+umount -lR "${MNT}/dev/pts" 2>/dev/null || true
+umount -lR "${MNT}/dev"     2>/dev/null || true
+umount -lR "${MNT}/sys"     2>/dev/null || true
+umount -lR "${MNT}/proc"    2>/dev/null || true
 umount "${MNT}"
 mv "${ROOTFS}.new" "${ROOTFS}"
 chmod 0644 "${ROOTFS}"
