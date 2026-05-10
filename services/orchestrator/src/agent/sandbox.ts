@@ -6,11 +6,25 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import treeKill from "tree-kill";
 import { safeChildEnv } from "../safeEnv.js";
+import type { VmHandle } from "../firecracker/types.js";
+import * as fcAgent from "../firecracker/agentRpc.js";
 
 export const sandboxEvents = new EventEmitter();
 
+/**
+ * Sandbox handle. Two backends:
+ *
+ * - **process** (default): `rootDir` is a host-fs path; ops happen in the
+ *   orchestrator's process tree (`spawn`, `fs.*`).
+ * - **firecracker**: `vm` is set, and every op is RPC'd to the in-VM
+ *   sandbox-agent over vsock. `rootDir` is still set so callers that need
+ *   a host-side path for storage sync / uploads / ZIP import keep working
+ *   (the orchestrator stages files at `rootDir` and the fleet manager
+ *   syncs them into the VM at boot + on demand).
+ */
 export interface Sandbox {
   rootDir: string;
+  vm?: VmHandle;
 }
 
 const HALF_MAX = 8 * 1024;
@@ -61,10 +75,22 @@ function resolvePath(sandbox: Sandbox, p: string): string {
 }
 
 export async function readFile(sandbox: Sandbox, p: string): Promise<string> {
+  if (sandbox.vm) return await fcAgent.readFile(sandbox.vm, p);
   return await fs.readFile(resolvePath(sandbox, p), "utf-8");
 }
 
 export async function writeFile(sandbox: Sandbox, p: string, content: string): Promise<void> {
+  if (sandbox.vm) {
+    await fcAgent.writeFile(sandbox.vm, p, content);
+    // Mirror host-side so the existing storage sync / file tree walker still
+    // surfaces the change. Best-effort — the VM is the authoritative copy.
+    try {
+      const full = resolvePath(sandbox, p);
+      await fs.mkdir(path.dirname(full), { recursive: true });
+      await fs.writeFile(full, content, "utf-8");
+    } catch {}
+    return;
+  }
   const full = resolvePath(sandbox, p);
   await fs.mkdir(path.dirname(full), { recursive: true });
   await fs.writeFile(full, content, "utf-8");
@@ -76,6 +102,21 @@ export async function editFile(
   oldString: string,
   newString: string,
 ): Promise<void> {
+  if (sandbox.vm) {
+    await fcAgent.editFile(sandbox.vm, p, oldString, newString);
+    // Best-effort host mirror — match writeFile.
+    try {
+      const full = resolvePath(sandbox, p);
+      const content = await fs.readFile(full, "utf-8").catch(() => null);
+      if (content !== null) {
+        const occurrences = content.split(oldString).length - 1;
+        if (occurrences === 1) {
+          await fs.writeFile(full, content.replace(oldString, newString), "utf-8");
+        }
+      }
+    } catch {}
+    return;
+  }
   const full = resolvePath(sandbox, p);
   const content = await fs.readFile(full, "utf-8");
   const occurrences = content.split(oldString).length - 1;
@@ -85,12 +126,14 @@ export async function editFile(
 }
 
 export async function listDir(sandbox: Sandbox, p?: string): Promise<string[]> {
+  if (sandbox.vm) return await fcAgent.listDir(sandbox.vm, p);
   const target = p ? resolvePath(sandbox, p) : path.resolve(sandbox.rootDir);
   const entries = await fs.readdir(target, { withFileTypes: true });
   return entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name));
 }
 
 export async function grep(sandbox: Sandbox, pattern: string, p?: string): Promise<string> {
+  if (sandbox.vm) return await fcAgent.grep(sandbox.vm, pattern, p);
   const target = p ? resolvePath(sandbox, p) : path.resolve(sandbox.rootDir);
   const regex = new RegExp(pattern);
   const results: string[] = [];
@@ -135,6 +178,9 @@ export async function runCommand(
   timeoutMs = 60_000,
   signal?: AbortSignal,
 ): Promise<CommandResult> {
+  if (sandbox.vm) {
+    return await fcAgent.runCommand(sandbox.vm, command, timeoutMs, signal);
+  }
   return new Promise((resolve) => {
     const choice = pickShell();
     const child = spawn(choice.shell, [...choice.prefix, command], {
@@ -317,6 +363,8 @@ interface ManagedServer extends ServerInfo {
   proc: ChildProcess;
   log: { value: string };
   project_id: string | null;
+  /** Set when the server runs inside a Firecracker VM. */
+  vm?: VmHandle;
 }
 
 const servers = new Map<string, ManagedServer>();
@@ -333,6 +381,29 @@ export async function startServer(
   // swallowed by a fresh spawn.
   if (signal?.aborted) {
     throw new Error("start_server aborted before spawn");
+  }
+  if (sandbox.vm) {
+    // In Firecracker mode the dev server runs inside the VM. The in-VM
+    // agent supervises it; we get back a server id + the in-VM port. The
+    // preview proxy must learn how to reach the VM (per-VM TAP IP) — see
+    // proxy.ts; until that's wired the preview won't render but the
+    // server starts cleanly.
+    const r = await fcAgent.startServer(sandbox.vm, command, port, readyTimeoutMs, signal);
+    const id = r.id;
+    // Track in the host-side servers map so list_servers / stop_server work.
+    const server: ManagedServer = {
+      id,
+      command,
+      port: r.port,
+      pid: r.pid,
+      started_at: Date.now(),
+      proc: { kill: () => {} } as unknown as ChildProcess,
+      log: { value: "" },
+      project_id: projectId,
+      vm: sandbox.vm,
+    };
+    servers.set(id, server);
+    return { id, command, port: r.port, pid: r.pid, started_at: server.started_at };
   }
   // Pre-clear the port. Fast path: if it's already free, this is two
   // ~10ms TCP probes. Slow path: a zombie (often `npm run dev` ran via
@@ -430,7 +501,12 @@ export async function startServer(
 export function stopServer(id: string): void {
   const server = servers.get(id);
   if (!server) throw new Error(`No server with id ${id}`);
-  treeKill(server.pid, "SIGKILL");
+  if (server.vm) {
+    // Fire-and-forget — the in-VM agent kills the process tree inside the VM.
+    void fcAgent.stopServer(server.vm, id).catch(() => {});
+  } else {
+    treeKill(server.pid, "SIGKILL");
+  }
   servers.delete(id);
 }
 
@@ -449,15 +525,39 @@ export function listServers(projectId?: string | null): ServerInfo[] {
 
 export function getServer(
   id: string,
-): { id: string; command: string; port: number; project_id: string | null } | null {
+): {
+  id: string;
+  command: string;
+  port: number;
+  project_id: string | null;
+  /** Host to dial when proxying to this server. "127.0.0.1" for process-backed; the VM's IP for VM-backed. */
+  host: string;
+} | null {
   const s = servers.get(id);
   if (!s) return null;
-  return { id: s.id, command: s.command, port: s.port, project_id: s.project_id };
+  const host = s.vm?.ip ?? "127.0.0.1";
+  return { id: s.id, command: s.command, port: s.port, project_id: s.project_id, host };
 }
 
 export function readServerLog(id: string, maxBytes = 8000): string {
   const server = servers.get(id);
   if (!server) throw new Error(`No server with id ${id}`);
+  // For VM-backed servers we don't tail synchronously today — the in-VM
+  // agent buffers log lines and exposes them via a separate RPC; callers
+  // that want a live tail use readServerLogAsync below.
+  return server.log.value.slice(-maxBytes);
+}
+
+/**
+ * Async variant that fetches the log from the in-VM agent for VM-backed
+ * servers. Process-backed servers fall through to the in-memory buffer.
+ */
+export async function readServerLogAsync(id: string, maxBytes = 8000): Promise<string> {
+  const server = servers.get(id);
+  if (!server) throw new Error(`No server with id ${id}`);
+  if (server.vm) {
+    return await fcAgent.readServerLog(server.vm, id, maxBytes);
+  }
   return server.log.value.slice(-maxBytes);
 }
 

@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { ensureAnthropic } from "./router.js";
 
 /**
  * Context-window compaction (Plan §3.6).
@@ -28,8 +29,6 @@ import Anthropic from "@anthropic-ai/sdk";
  *   COMPACT_THRESHOLD_TOKENS  (default 150_000)
  *   COMPACT_KEEP_TOKENS       (default 80_000)
  */
-
-const COMPACT_MODEL = "claude-haiku-4-5-20251001";
 
 const COMPACT_THRESHOLD_TOKENS = numEnv("COMPACT_THRESHOLD_TOKENS", 150_000);
 const COMPACT_KEEP_TOKENS = numEnv("COMPACT_KEEP_TOKENS", 80_000);
@@ -224,7 +223,7 @@ async function summarizeOlderPortion(
   const client = new Anthropic({ apiKey });
   const response = await client.messages.create(
     {
-      model: COMPACT_MODEL,
+      model: ensureAnthropic("compact"),
       max_tokens: MAX_SUMMARY_TOKENS,
       system: SUMMARY_SYSTEM_PROMPT,
       messages: [

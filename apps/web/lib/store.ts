@@ -7,6 +7,7 @@ import type {
   Plan,
   PreviewServer,
   ProjectSummary,
+  TodoItem,
   TreeEntry,
   UploadedFileSummary,
 } from "@uniqus/api-types";
@@ -75,6 +76,8 @@ export type SaveStatus =
 export interface PanelVisibility {
   files: boolean;
   terminal: boolean;
+  /** Tasks pane (Plan §5 — Artifact panes UI). Renders the agent's todo_write list. */
+  tasks: boolean;
 }
 
 interface State {
@@ -121,6 +124,8 @@ interface State {
    */
   deployment: DeploymentLive | null;
   redeploySuggested: boolean;
+  /** Agent-maintained todo list (Plan §5). Updated via `todos_updated` WS events. */
+  todos: TodoItem[];
 
   setConnected(c: boolean): void;
   setBusy(b: boolean): void;
@@ -163,6 +168,7 @@ interface State {
   toggleTurn(completeItemId: string): void;
   setDeployment(d: DeploymentLive | null): void;
   setRedeploySuggested(value: boolean): void;
+  setTodos(items: TodoItem[]): void;
   resetChat(): void;
   reset(): void;
 }
@@ -189,7 +195,8 @@ export const useStore = create<State>((set, get) => ({
   // Files panel defaults ON: a builder shell with no visible file tree on
   // first paint feels empty even when the project has hundreds of files.
   // Terminal stays opt-in (it's currently a log viewer, not a real shell).
-  panels: { files: true, terminal: false },
+  // Tasks pane auto-pops the first time the agent calls todo_write.
+  panels: { files: true, terminal: false, tasks: false },
   user: null,
   project: null,
   lastSyncedAt: null,
@@ -198,6 +205,7 @@ export const useStore = create<State>((set, get) => ({
   expandedTurns: {},
   deployment: null,
   redeploySuggested: false,
+  todos: [],
 
   setConnected: (c) => set({ connected: c }),
   setBusy: (b) => set({ busy: b }),
@@ -411,6 +419,7 @@ export const useStore = create<State>((set, get) => ({
     })),
   setDeployment: (d) => set({ deployment: d }),
   setRedeploySuggested: (value) => set({ redeploySuggested: value }),
+  setTodos: (items) => set({ todos: items }),
   resetChat: () =>
     set({
       chat: [],
@@ -430,7 +439,7 @@ export const useStore = create<State>((set, get) => ({
       previews: [],
       openFiles: [],
       editorTab: "",
-      panels: { files: true, terminal: false },
+      panels: { files: true, terminal: false, tasks: false },
       user: null,
       project: null,
       lastSyncedAt: null,
@@ -439,6 +448,7 @@ export const useStore = create<State>((set, get) => ({
       expandedTurns: {},
       deployment: null,
       redeploySuggested: false,
+      todos: [],
     }),
 }));
 

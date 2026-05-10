@@ -1,10 +1,10 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Plan } from "@uniqus/api-types";
 import { normalizeMessageHistory } from "./messageHistory.js";
+import { formatSkillsForPrompt } from "./skills.js";
+import { ensureAnthropic } from "./router.js";
 
-const PLAN_MODEL = "claude-opus-4-7";
-
-const PLAN_SYSTEM_PROMPT = `You are an AI software engineer in plan mode. The user has described what they want built; your job is to produce a structured plan, NOT to execute it.
+const PLAN_SYSTEM_PROMPT_BASE = `You are an AI software engineer in plan mode. The user has described what they want built; your job is to produce a structured plan, NOT to execute it.
 
 Use the submit_plan tool to return:
 - A one-paragraph summary of what will be built and how it will work.
@@ -51,12 +51,16 @@ export async function proposePlan(
   userMessage: string,
   apiKey: string,
   history: Anthropic.MessageParam[] = [],
+  skills: string | null = null,
 ): Promise<Plan> {
   const client = new Anthropic({ apiKey });
+  const system = skills
+    ? `${PLAN_SYSTEM_PROMPT_BASE}${formatSkillsForPrompt(skills)}`
+    : PLAN_SYSTEM_PROMPT_BASE;
   const response = await client.messages.create({
-    model: PLAN_MODEL,
+    model: ensureAnthropic("plan"),
     max_tokens: 4096,
-    system: PLAN_SYSTEM_PROMPT,
+    system,
     tools: [SUBMIT_PLAN_TOOL],
     tool_choice: { type: "tool", name: "submit_plan" },
     messages: normalizeMessageHistory([...history, { role: "user", content: userMessage }]),

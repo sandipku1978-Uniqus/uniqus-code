@@ -14,12 +14,14 @@
     "@anthropic-ai/sdk": "^0.39.0",
     "@supabase/supabase-js": "^2.47.10",
     "@uniqus/api-types": "*",
-    "@workos-inc/node": "^7.41.0",
+    "@workos-inc/node": "^9.2.0",
     "adm-zip": "^0.5.17",
     "busboy": "^1.6.0",
     "cookie": "^1.0.2",
     "dotenv": "^16.4.7",
     "iron-session": "^8.0.4",
+    "pg": "^8.13.1",
+    "playwright": "^1.59.1",
     "tree-kill": "^1.2.2",
     "ws": "^8.18.0"
   },
@@ -28,6 +30,7 @@
     "@types/busboy": "^1.5.4",
     "@types/cookie": "^0.6.0",
     "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
     "@types/ws": "^8.5.13",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"

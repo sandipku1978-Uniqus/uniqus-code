@@ -30,6 +30,25 @@ alter table users add column if not exists vercel_user_login text;
 alter table users add column if not exists vercel_team_id text;
 alter table users add column if not exists vercel_connected_at timestamptz;
 
+create table if not exists projects (
+  id uuid primary key default gen_random_uuid(),
+  owner_id uuid not null references users(id) on delete cascade,
+  name text not null,
+  description text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists projects_owner_idx on projects (owner_id, updated_at desc);
+
+-- Touch updated_at on every row that owns an updated_at column.
+create or replace function touch_project_updated_at() returns trigger as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$ language plpgsql;
+
 -- Per-project Vercel project ID. Populated on first successful deploy so
 -- subsequent deploys hit the same project and the dashboard URL is stable.
 alter table projects add column if not exists vercel_project_id text;
@@ -109,3 +128,54 @@ create trigger projects_updated_at
 alter table users enable row level security;
 alter table projects enable row level security;
 alter table messages enable row level security;
+
+-- Per-project encrypted secrets (Plan §1, §6).
+-- Values are AES-256-GCM encrypted with OAUTH_TOKEN_ENCRYPTION_KEY (same key
+-- as third-party OAuth tokens; see auth/encrypt.ts). Never log or surface
+-- plaintext values to the agent — connectors read them server-side and
+-- pass ephemeral handles to the agent loop.
+create table if not exists project_secrets (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references projects(id) on delete cascade,
+  name text not null,
+  encrypted_value text not null,
+  description text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (project_id, name)
+);
+
+create index if not exists project_secrets_project_idx
+  on project_secrets (project_id, name);
+
+drop trigger if exists project_secrets_updated_at on project_secrets;
+create trigger project_secrets_updated_at
+  before update on project_secrets
+  for each row execute function touch_project_updated_at();
+
+alter table project_secrets enable row level security;
+
+-- Audit log for every secret access + every connector invocation
+-- (Plan §1.6, §6 — "every connector invocation emits a tenant-scoped audit
+-- event"). Actor is the user_id when the request originated from the web
+-- app, or null when it was a scheduled-job runner (Phase 3+).
+create table if not exists audit_events (
+  id bigserial primary key,
+  project_id uuid references projects(id) on delete cascade,
+  user_id uuid references users(id) on delete set null,
+  kind text not null check (
+    kind in (
+      'secret_read', 'secret_write', 'secret_delete',
+      'connector_invoke', 'connector_invoke_error',
+      'checkpoint_create', 'checkpoint_restore'
+    )
+  ),
+  target text not null,         -- secret name / connector method / commit ref
+  metadata jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists audit_project_idx
+  on audit_events (project_id, created_at desc);
+
+alter table audit_events enable row level security;

@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.6.0",
+    "monaco-editor": "0.53.0",
     "@uniqus/api-types": "*",
     "@workos-inc/authkit-nextjs": "^2.0.0",
     "autoprefixer": "^10.4.20",

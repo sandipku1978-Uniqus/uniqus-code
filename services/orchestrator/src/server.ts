@@ -21,6 +21,33 @@ import type {
 } from "@uniqus/api-types";
 import { runAgentLoop } from "./agent/loop.js";
 import { proposePlan, formatPlanForExecution } from "./agent/plan.js";
+import { getTodos, clearTodos } from "./agent/todos.js";
+import {
+  readSkills,
+  writeSkills,
+  skillsRelPath,
+  SKILL_PACKS,
+  findPackById,
+} from "./agent/skills.js";
+import { expandSlashCommand, listSlashCommands } from "./agent/slashCommands.js";
+import { listSecrets, upsertSecret, deleteSecret } from "./db/secrets.js";
+import { audit, listAudit } from "./db/audit.js";
+import { listProjectConnectors } from "./connectors/index.js";
+import {
+  commitCheckpoint,
+  listCheckpoints,
+  restoreCheckpoint,
+} from "./agent/checkpoints.js";
+import { detectShape, flyDeploy } from "./flyDeploy.js";
+import {
+  isFirecrackerEnabled,
+  ensureVm,
+  destroy as destroyVm,
+  startIdleSweeper,
+  touch as touchVm,
+  shutdownAll as shutdownAllVms,
+} from "./firecracker/index.js";
+import type { VmHandle } from "./firecracker/types.js";
 import {
   shellInfo,
   listServers,
@@ -131,6 +158,21 @@ async function main(): Promise<void> {
     await ensureBucket();
   } catch (err) {
     console.error("ensureBucket failed (Storage sync may not work):", err);
+  }
+
+  if (isFirecrackerEnabled()) {
+    startIdleSweeper();
+    process.once("SIGTERM", () => {
+      void shutdownAllVms().catch((err) =>
+        console.error("Firecracker shutdownAll failed:", err),
+      );
+    });
+    process.once("SIGINT", () => {
+      void shutdownAllVms().catch((err) =>
+        console.error("Firecracker shutdownAll failed:", err),
+      );
+    });
+    console.log("[firecracker] enabled — VMs boot lazily on first user_message");
   }
 
   const httpServer = createServer((req, res) => {
@@ -463,6 +505,283 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   const fileOpMatch = req.url?.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/files$/);
   if (fileOpMatch && req.method === "POST") {
     return await handleFileOp(req, res, user, fileOpMatch[1]);
+  }
+
+  // ── Skills (Plan §3.8) — per-project markdown that prepends to the system
+  //    prompt. Stored at `<sandbox>/.uniqus/skills.md`; this just exposes a
+  //    convenient direct read/write that the Skills modal in the UI uses.
+  const skillsMatch = req.url?.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/skills$/);
+  if (skillsMatch && req.method === "GET") {
+    const projectId = skillsMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const dest = sandboxDirFor(projectId);
+    const content = await readSkills(dest);
+    return json(res, 200, { content: content ?? "", path: skillsRelPath() });
+  }
+  if (skillsMatch && req.method === "PUT") {
+    const projectId = skillsMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const body = await readJsonBody<{ content?: string }>(req);
+    if (typeof body.content !== "string") {
+      return json(res, 400, { error: "content must be a string" });
+    }
+    const dest = sandboxDirFor(projectId);
+    await writeSkills(dest, body.content);
+    const rel = skillsRelPath();
+    getTracker(projectId, dest)
+      .syncFile(rel)
+      .then(() => broadcastToProject(projectId, { type: "storage_synced", at: Date.now() }))
+      .catch((err) => console.error(`syncFile ${rel} failed:`, err));
+    broadcastToProject(projectId, { type: "file_changed", path: rel });
+    return json(res, 200, { ok: true });
+  }
+
+  // List connectors available across the platform. Pure metadata —
+  // doesn't touch any per-project secrets.
+  if (req.url === "/api/connectors" && req.method === "GET") {
+    return json(res, 200, { connectors: listProjectConnectors() });
+  }
+
+  // ── Fly.io deploy (Plan §5 — multi-target deploy adapter) ──────────────
+  // Detect project shape so the deploy modal can recommend Vercel vs Fly.
+  const flyShapeMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/deploy-target$/,
+  );
+  if (flyShapeMatch && req.method === "GET") {
+    const projectId = flyShapeMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const sandbox = sandboxDirFor(projectId);
+    const shape = await detectShape(sandbox);
+    const recommended =
+      shape === "node" || shape === "static" ? "vercel" : shape === "unknown" ? null : "fly";
+    return json(res, 200, { shape, recommended });
+  }
+  // POST /api/projects/:id/fly-deploy { app_name, region?, env_vars? }
+  const flyDeployMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/fly-deploy$/,
+  );
+  if (flyDeployMatch && req.method === "POST") {
+    const projectId = flyDeployMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const body = await readJsonBody<{
+      app_name?: string;
+      region?: string;
+      env_vars?: Record<string, string>;
+    }>(req);
+    const appName = (body.app_name ?? "").trim();
+    if (!/^[a-z0-9-]{2,30}$/.test(appName)) {
+      return json(res, 400, {
+        error: "app_name must be 2-30 chars, [a-z0-9-]",
+      });
+    }
+    try {
+      const result = await flyDeploy({
+        sandboxDir: sandboxDirFor(projectId),
+        appName,
+        projectId,
+        region: body.region,
+        envVars: sanitizeEnv(body.env_vars),
+        onLog: (chunk) => broadcastToProject(projectId, { type: "text", content: chunk }),
+      });
+      return json(res, 200, result);
+    } catch (err) {
+      return json(res, 400, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // ── Checkpoints (Plan §3.5) ────────────────────────────────────────────
+  const checkpointsListMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/checkpoints$/,
+  );
+  if (checkpointsListMatch && req.method === "GET") {
+    const projectId = checkpointsListMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const sandbox = sandboxDirFor(projectId);
+    const checkpoints = await listCheckpoints(sandbox, projectId, 100);
+    return json(res, 200, { checkpoints });
+  }
+  const checkpointRestoreMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/checkpoints\/([0-9a-f]{6,40})\/restore$/,
+  );
+  if (checkpointRestoreMatch && req.method === "POST") {
+    const projectId = checkpointRestoreMatch[1];
+    const sha = checkpointRestoreMatch[2];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const sandbox = sandboxDirFor(projectId);
+    const result = await restoreCheckpoint(sandbox, projectId, sha);
+    if (!result.ok) return json(res, 400, { error: result.error });
+    void audit({
+      project_id: projectId,
+      user_id: user.id,
+      kind: "checkpoint_restore",
+      target: sha,
+      metadata: null,
+    });
+    // Push restored files to Storage so other sessions see them.
+    void getTracker(projectId, sandbox).syncChanges().catch(() => {});
+    broadcastToProject(projectId, { type: "session_reset" });
+    return json(res, 200, { ok: true, restored_to: result.restored_to });
+  }
+
+  // ── Secrets (Plan §6) ──────────────────────────────────────────────────
+  // List secret NAMES (never values) for the secrets pane.
+  const secretsListMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/secrets$/,
+  );
+  if (secretsListMatch && req.method === "GET") {
+    const projectId = secretsListMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const rows = await listSecrets(projectId);
+    return json(res, 200, {
+      secrets: rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        updated_at: r.updated_at,
+      })),
+    });
+  }
+  // Create / update a secret. Body: { name, value, description? }.
+  if (secretsListMatch && req.method === "POST") {
+    const projectId = secretsListMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const body = await readJsonBody<{
+      name?: string;
+      value?: string;
+      description?: string | null;
+    }>(req);
+    const name = String(body.name ?? "").trim();
+    const value = body.value;
+    if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) {
+      return json(res, 400, {
+        error: "name must match [A-Z_][A-Z0-9_]* (env-var convention)",
+      });
+    }
+    if (typeof value !== "string" || value.length === 0) {
+      return json(res, 400, { error: "value must be a non-empty string" });
+    }
+    if (value.length > 32_768) {
+      return json(res, 400, { error: "value exceeds 32 KB cap" });
+    }
+    const row = await upsertSecret({
+      project_id: projectId,
+      name,
+      value,
+      description: body.description ?? null,
+    });
+    void audit({
+      project_id: projectId,
+      user_id: user.id,
+      kind: "secret_write",
+      target: name,
+      metadata: null,
+    });
+    return json(res, 200, {
+      secret: {
+        id: row.id,
+        name: row.name,
+        description: row.description,
+        updated_at: row.updated_at,
+      },
+    });
+  }
+  // Delete a secret by name.
+  const secretDeleteMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/secrets\/([A-Z_][A-Z0-9_]*)$/,
+  );
+  if (secretDeleteMatch && req.method === "DELETE") {
+    const projectId = secretDeleteMatch[1];
+    const name = secretDeleteMatch[2];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    await deleteSecret(projectId, name);
+    void audit({
+      project_id: projectId,
+      user_id: user.id,
+      kind: "secret_delete",
+      target: name,
+      metadata: null,
+    });
+    return json(res, 200, { ok: true });
+  }
+  // Audit log (recent events for a project).
+  const auditMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/audit$/,
+  );
+  if (auditMatch && req.method === "GET") {
+    const projectId = auditMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const events = await listAudit(projectId, 200);
+    return json(res, 200, { events });
+  }
+
+  // List slash commands available in this project — built-ins + anything
+  // under <sandbox>/.uniqus/commands/<name>.md. Used by the chat composer to
+  // render a "/" palette.
+  const slashListMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/slash-commands$/,
+  );
+  if (slashListMatch && req.method === "GET") {
+    const projectId = slashListMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const dest = sandboxDirFor(projectId);
+    const commands = await listSlashCommands(dest);
+    return json(res, 200, { commands });
+  }
+
+  // List the curated design skill packs (Plan §5). Returns id/name/summary
+  // only — the body is fetched separately when the user previews a pack.
+  if (req.url === "/api/skill-packs" && req.method === "GET") {
+    const packs = SKILL_PACKS.map((p) => ({
+      id: p.id,
+      name: p.name,
+      summary: p.summary,
+    }));
+    return json(res, 200, { packs });
+  }
+
+  // Apply a curated pack: writes the body to <sandbox>/.uniqus/skills.md
+  // (mode=replace, default) or appends below existing skills (mode=append).
+  const applyPackMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/skill-packs\/([a-z0-9-]+)$/,
+  );
+  if (applyPackMatch && req.method === "POST") {
+    const projectId = applyPackMatch[1];
+    const packId = applyPackMatch[2];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const pack = findPackById(packId);
+    if (!pack) return json(res, 404, { error: "skill pack not found" });
+    const body = await readJsonBody<{ mode?: "replace" | "append" }>(req).catch(
+      () => ({}) as { mode?: "replace" | "append" },
+    );
+    const mode = body.mode === "append" ? "append" : "replace";
+    const dest = sandboxDirFor(projectId);
+    let content = pack.body;
+    if (mode === "append") {
+      const existing = await readSkills(dest);
+      content = existing && existing.trim() ? `${existing.trimEnd()}\n\n${pack.body}` : pack.body;
+    }
+    await writeSkills(dest, content);
+    const rel = skillsRelPath();
+    getTracker(projectId, dest)
+      .syncFile(rel)
+      .then(() => broadcastToProject(projectId, { type: "storage_synced", at: Date.now() }))
+      .catch((err) => console.error(`syncFile ${rel} failed:`, err));
+    broadcastToProject(projectId, { type: "file_changed", path: rel });
+    return json(res, 200, { ok: true, content });
   }
 
   // GitHub OAuth: status — { connected, login, connected_at }.
@@ -1037,6 +1356,12 @@ async function handleProjectDelete(
   } catch (err) {
     console.error(`storage cleanup for ${projectId} failed:`, err);
   }
+  // Tear down the project's Firecracker VM (no-op when disabled / not booted).
+  try {
+    await destroyVm(projectId);
+  } catch (err) {
+    console.error(`firecracker destroy for ${projectId} failed:`, err);
+  }
   try {
     await fs.rm(sandboxDirFor(projectId), { recursive: true, force: true });
   } catch (err) {
@@ -1374,6 +1699,10 @@ async function handleConnection(
   // Per-session abort controller. Replaced for each user_message turn; the
   // current one is what the `abort` event triggers.
   let currentAbort: AbortController | null = null;
+  // Firecracker VM handle. Booted lazily on the first user_message so a
+  // user who only opens the workspace to read files doesn't spin up a
+  // VM. Idle VMs auto-pause via the fleet's sweeper.
+  let vmHandle: VmHandle | null = null;
 
   // Attach handlers SYNCHRONOUSLY before any async work.
   // Otherwise messages that arrive during hydration (especially the
@@ -1425,6 +1754,8 @@ async function handleConnection(
       if (event.type === "reset_session") {
         await clearHistory(project.id);
         history.length = 0;
+        clearTodos(project.id);
+        broadcastToProject(project.id, { type: "todos_updated", todos: [] });
         send({ type: "session_reset" });
         return;
       }
@@ -1496,6 +1827,29 @@ async function handleConnection(
         }
         busy = true;
         currentAbort = new AbortController();
+        // Lazy VM boot. ensureVm is idempotent — same project id returns
+        // the same VM (and resumes if it was paused).
+        if (isFirecrackerEnabled() && !vmHandle) {
+          try {
+            vmHandle = await ensureVm({
+              projectId: project.id,
+              hostSandboxDir: sandboxDir,
+            });
+            send({
+              type: "text",
+              content: `\n[fleet] booted Firecracker VM ${vmHandle.id}\n`,
+            });
+          } catch (err) {
+            send({
+              type: "error",
+              message: `Firecracker boot failed: ${err instanceof Error ? err.message : String(err)}`,
+            });
+            busy = false;
+            currentAbort = null;
+            return;
+          }
+        }
+        if (vmHandle) touchVm(project.id);
         try {
           await runSession(
             event.content,
@@ -1507,6 +1861,8 @@ async function handleConnection(
             history,
             project.id,
             sandboxDir,
+            vmHandle,
+            user.id,
             () =>
               new Promise<Plan>((resolve) => {
                 pendingPlanResolve = resolve;
@@ -1582,6 +1938,12 @@ async function handleConnection(
 
   for (const s of listServers(project.id)) {
     send({ type: "server_started", id: s.id, command: s.command, port: s.port });
+  }
+
+  // Replay any existing todos so the Tasks pane survives reconnects.
+  const existingTodos = getTodos(project.id);
+  if (existingTodos.length > 0) {
+    send({ type: "todos_updated", todos: existingTodos });
   }
 
   try {
@@ -1793,6 +2155,8 @@ async function runSession(
   history: Anthropic.MessageParam[],
   projectId: string,
   sandboxDir: string,
+  vmHandle: VmHandle | null,
+  userId: string,
   awaitPlanApproval: () => Promise<Plan>,
   registerUserAnswer: (
     callId: string,
@@ -1802,12 +2166,22 @@ async function runSession(
 ): Promise<void> {
   const start = Date.now();
   let toolCalls = 0;
-  const messageWithUploads = formatUserMessageWithUploads(userMessage, attachments);
+  const slashed = await expandSlashCommand(sandboxDir, userMessage);
+  if (slashed.matched) {
+    send({
+      type: "text",
+      content: `\n[command] /${slashed.matched} expanded\n`,
+    });
+  }
+  const messageWithUploads = formatUserMessageWithUploads(slashed.expanded, attachments);
   const messageWithRefs = await inlineFileRefs(messageWithUploads, fileRefs, sandboxDir);
+  // Re-read skills every turn so edits during a long session take effect
+  // on the next iteration (rather than only after a session reset).
+  const skillsBody = await readSkills(sandboxDir);
   let finalMessage = messageWithRefs;
 
   if (mode === "plan-then-execute") {
-    const plan = await proposePlan(messageWithRefs, apiKey, history);
+    const plan = await proposePlan(messageWithRefs, apiKey, history, skillsBody);
     if (signal.aborted) {
       send({ type: "complete", tool_calls: 0, elapsed_ms: Date.now() - start, aborted: true });
       return;
@@ -1836,12 +2210,15 @@ async function runSession(
   };
 
   const result = await runAgentLoop(finalMessage, {
-    sandbox: { rootDir: sandboxDir },
+    sandbox: { rootDir: sandboxDir, vm: vmHandle ?? undefined },
     apiKey,
     projectId,
     messages: history,
     signal,
     previewBaseUrl: PREVIEW_BASE_URL,
+    skills: skillsBody,
+    userId,
+    onTodoWrite: (items) => broadcastToProject(projectId, { type: "todos_updated", todos: items }),
     requestUserAnswer: registerUserAnswer,
     onCompacted: (info) =>
       send({
@@ -1867,6 +2244,33 @@ async function runSession(
     onToolResult: (callId, name, input, toolResult, isError) => {
       send({ type: "tool_result", call_id: callId, result: toolResult, is_error: isError });
       if (isError) return;
+      // Per-tool-call checkpoint (Plan §3.5). Fires for tools that modified
+      // sandbox state. Background — never blocks the loop.
+      if (name === "write_file" || name === "edit_file" || name === "run_command") {
+        const summary = name === "run_command"
+          ? `run_command: ${String((input as { command?: unknown })?.command ?? "").slice(0, 80)}`
+          : `${name}: ${String((input as { path?: unknown })?.path ?? "")}`;
+        commitCheckpoint(sandboxDir, projectId, summary)
+          .then((meta) => {
+            if (meta) {
+              void audit({
+                project_id: projectId,
+                user_id: userId,
+                kind: "checkpoint_create",
+                target: meta.sha,
+                metadata: { tool: name, summary },
+              });
+              broadcastToProject(projectId, {
+                type: "checkpoint_created",
+                sha: meta.sha,
+                short_sha: meta.short_sha,
+                message: meta.message,
+                created_at: meta.created_at,
+              });
+            }
+          })
+          .catch((err) => console.error("commitCheckpoint failed:", err));
+      }
       if (name === "write_file" || name === "edit_file") {
         const p = (input as { path?: unknown })?.path;
         if (typeof p === "string") {

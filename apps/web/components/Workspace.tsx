@@ -17,6 +17,10 @@ import EditorPreviewArea from "./EditorPreviewArea";
 import TerminalPanel from "./TerminalPanel";
 import DeployButton from "./DeployButton";
 import BrandLockup from "./BrandLockup";
+import SkillsModal from "./SkillsModal";
+import SecretsModal from "./SecretsModal";
+import CheckpointsModal from "./CheckpointsModal";
+import TasksPane from "./TasksPane";
 
 export default function Workspace({
   projectId,
@@ -39,6 +43,9 @@ export default function Workspace({
   const router = useRouter();
   const searchParams = useSearchParams();
   const briefParam = searchParams?.get("brief") ?? null;
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [secretsOpen, setSecretsOpen] = useState(false);
+  const [checkpointsOpen, setCheckpointsOpen] = useState(false);
 
   // Tick so the "synced 12s ago" label increments without waiting for the
   // next sync event. 10s cadence is plenty — the label rounds to seconds/min.
@@ -120,6 +127,41 @@ export default function Workspace({
         <div className="actions">
           <RunButton projectId={projectId} />
           <DeployButton projectId={projectId} />
+          <button
+            onClick={() => setSkillsOpen(true)}
+            className="toggle-btn"
+            title="Edit project Skills (instructions prepended to the agent's system prompt)"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="9" y1="13" x2="15" y2="13" />
+              <line x1="9" y1="17" x2="15" y2="17" />
+            </svg>
+            <span>Skills</span>
+          </button>
+          <button
+            onClick={() => setSecretsOpen(true)}
+            className="toggle-btn"
+            title="Manage project secrets (encrypted at rest; the agent gets values via get_secret only)"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="11" width="18" height="11" rx="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+            <span>Secrets</span>
+          </button>
+          <button
+            onClick={() => setCheckpointsOpen(true)}
+            className="toggle-btn"
+            title="Browse + restore agent-made checkpoints"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="1 4 1 10 7 10" />
+              <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+            </svg>
+            <span>Rewind</span>
+          </button>
           <ToggleButton
             on={panels.files}
             onClick={() => togglePanel("files")}
@@ -127,6 +169,17 @@ export default function Workspace({
             icon={
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              </svg>
+            }
+          />
+          <ToggleButton
+            on={panels.tasks}
+            onClick={() => togglePanel("tasks")}
+            label="Tasks"
+            icon={
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="9 11 12 14 22 4" />
+                <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
               </svg>
             }
           />
@@ -178,15 +231,23 @@ export default function Workspace({
           <Panel id="main" defaultSize={panels.files ? 45 : 55} minSize={30} order={3}>
             <PanelGroup
               direction="vertical"
-              autoSaveId={`uniqus-v-${panels.terminal ? "t" : "nt"}`}
+              autoSaveId={`uniqus-v-${panels.terminal ? "t" : "nt"}-${panels.tasks ? "k" : "nk"}`}
             >
-              <Panel id="editor" defaultSize={panels.terminal ? 65 : 100} minSize={20} order={1}>
+              <Panel id="editor" defaultSize={panels.terminal || panels.tasks ? 60 : 100} minSize={20} order={1}>
                 <EditorPreviewArea />
               </Panel>
+              {panels.tasks && (
+                <>
+                  <PanelResizeHandle className="resize-handle-v" />
+                  <Panel id="tasks" defaultSize={25} minSize={12} order={2}>
+                    <TasksPane onClose={() => togglePanel("tasks")} />
+                  </Panel>
+                </>
+              )}
               {panels.terminal && (
                 <>
                   <PanelResizeHandle className="resize-handle-v" />
-                  <Panel id="terminal" defaultSize={35} minSize={15} order={2}>
+                  <Panel id="terminal" defaultSize={30} minSize={15} order={3}>
                     <TerminalPanel onClose={() => togglePanel("terminal")} />
                   </Panel>
                 </>
@@ -195,6 +256,16 @@ export default function Workspace({
           </Panel>
         </PanelGroup>
       </div>
+
+      {skillsOpen && (
+        <SkillsModal projectId={projectId} onClose={() => setSkillsOpen(false)} />
+      )}
+      {secretsOpen && (
+        <SecretsModal projectId={projectId} onClose={() => setSecretsOpen(false)} />
+      )}
+      {checkpointsOpen && (
+        <CheckpointsModal projectId={projectId} onClose={() => setCheckpointsOpen(false)} />
+      )}
 
       {/* Status bar */}
       <div className="status-bar">

@@ -5,12 +5,24 @@ import type { Sandbox } from "./sandbox.js";
 import { needsInstall, runInstall } from "../ensureDeps.js";
 import { normalizeMessageHistoryInPlace } from "./messageHistory.js";
 import { maybeCompact, type CompactionResult } from "./compact.js";
+import { formatSkillsForPrompt, readSkills } from "./skills.js";
+import { isImageAsset, listAssets, readAssetText } from "./assets.js";
+import {
+  startBackgroundJob,
+  readJobLog,
+  listJobs,
+  killJob,
+} from "./background.js";
+import { takeScreenshot } from "./screenshot.js";
+import { ensureAnthropic } from "./router.js";
+import { setTodos, type TodoItem } from "./todos.js";
+import { listProjectSecrets, plumbSecretToEnvFile } from "../secrets.js";
+import { callConnector, listProjectConnectors } from "../connectors/index.js";
 
-const MODEL = "claude-opus-4-7";
 const MAX_ITERATIONS = 125;
 const MAX_TOKENS = 16384*2;
 
-function buildSystemPrompt(): string {
+function buildSystemPrompt(skillsBody: string | null): string {
   const { name: shellName, isUnixLike } = sb.shellInfo();
   const platform = process.platform;
 
@@ -69,7 +81,7 @@ Conventions:
 6. After a non-zero exit, read the error and fix the root cause before retrying. Do not retry blindly — if the same command fails twice, change your approach.
 7. Use list_dir or grep to verify state when you're unsure (e.g., after a scaffold) instead of guessing paths.
 8. When the task is complete, briefly summarize what you built, include the public URL if you started a server, and describe how to use it inside Uniqus Code. Do not end by telling the user to run local terminal commands.
-9. File size: write_file content is part of your output token budget (~16k tokens). For files larger than ~500 lines, write a smaller version first then grow it with edit_file or additional write_file calls — do NOT try to dump 1000+ lines in a single tool call, the response will be truncated and the tool input will arrive without the content field. If that happens you'll see "write_file requires 'content' as a string" — split the work and retry.`;
+9. File size: write_file content is part of your output token budget (~16k tokens). For files larger than ~500 lines, write a smaller version first then grow it with edit_file or additional write_file calls — do NOT try to dump 1000+ lines in a single tool call, the response will be truncated and the tool input will arrive without the content field. If that happens you'll see "write_file requires 'content' as a string" — split the work and retry.${formatSkillsForPrompt(skillsBody)}`;
 }
 
 export interface LoopHooks {
@@ -103,6 +115,8 @@ export interface LoopHooks {
     callId: string,
     payload: { question: string; options?: string[]; allow_free_text: boolean },
   ) => Promise<string>;
+  /** Fires when the agent calls `todo_write`. UI rerenders the Tasks pane. */
+  onTodoWrite?: (items: TodoItem[]) => void;
 }
 
 export interface LoopOptions extends LoopHooks {
@@ -126,6 +140,22 @@ export interface LoopOptions extends LoopHooks {
    * start_server tool result so the agent quotes the right URL to the user.
    */
   previewBaseUrl?: string;
+  /**
+   * Per-project Skills body (Plan §3.8). Prepended to the system prompt at
+   * every turn so the agent picks up the user's project conventions
+   * without having to be reminded in every message.
+   *
+   * Resolved by the caller from `<sandbox>/.uniqus/skills.md` once per turn
+   * — re-read every turn so edits during a long session take effect on
+   * the next iteration.
+   */
+  skills?: string | null;
+  /**
+   * The acting user's id, used for audit-event attribution on
+   * secret_read / connector_invoke / checkpoint_create. Optional so CLI
+   * runs (no user context) still work.
+   */
+  userId?: string | null;
 }
 
 export interface LoopResult {
@@ -137,7 +167,9 @@ export async function runAgentLoop(
   opts: LoopOptions,
 ): Promise<LoopResult> {
   const client = new Anthropic({ apiKey: opts.apiKey });
-  const systemPrompt = buildSystemPrompt();
+  const skillsBody =
+    opts.skills !== undefined ? opts.skills : await readSkills(opts.sandbox.rootDir);
+  const systemPrompt = buildSystemPrompt(skillsBody);
   const messages = opts.messages ?? [];
   messages.push({ role: "user", content: userMessage });
   normalizeMessageHistoryInPlace(messages);
@@ -168,7 +200,7 @@ export async function runAgentLoop(
     try {
       stream = client.messages.stream(
         {
-          model: MODEL,
+          model: ensureAnthropic("agent"),
           max_tokens: MAX_TOKENS,
           system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
           tools: [...TOOLS, WEB_SEARCH_TOOL] as Anthropic.MessageCreateParams["tools"],
@@ -287,6 +319,8 @@ export async function runAgentLoop(
           opts.previewBaseUrl,
           opts.signal,
           opts.requestUserAnswer,
+          opts.onTodoWrite,
+          opts.userId ?? null,
         );
         opts.onToolResult?.(call.id, call.name, call.input, result, false);
         toolResults.push({
@@ -330,6 +364,8 @@ async function executeTool(
   previewBaseUrl: string | undefined,
   signal: AbortSignal | undefined,
   requestUserAnswer: LoopHooks["requestUserAnswer"],
+  onTodoWrite: LoopHooks["onTodoWrite"],
+  userId: string | null,
 ): Promise<string> {
   const args = input as Record<string, any>;
   switch (name) {
@@ -435,6 +471,147 @@ async function executeTool(
     }
     case "read_server_log":
       return sb.readServerLog(args.server_id, args.max_bytes);
+    case "todo_write": {
+      if (!Array.isArray(args.todos)) {
+        throw new Error("todo_write requires 'todos' as an array");
+      }
+      const items = args.todos as TodoItem[];
+      const stored = projectId ? setTodos(projectId, items) : items;
+      onTodoWrite?.(stored);
+      const summary = stored
+        .map((it) => `${{ pending: "·", in_progress: "▶", completed: "✓" }[it.status]} ${it.content}`)
+        .join("\n");
+      return `Tasks updated:\n${summary || "(empty)"}`;
+    }
+    case "screenshot_preview": {
+      const viewport =
+        args.viewport_width && args.viewport_height
+          ? { width: Number(args.viewport_width), height: Number(args.viewport_height) }
+          : undefined;
+      const result = await takeScreenshot({
+        sandboxRoot: sandbox.rootDir,
+        serverId: typeof args.server_id === "string" ? args.server_id : undefined,
+        url: typeof args.url === "string" ? args.url : undefined,
+        pathSuffix: typeof args.path === "string" ? args.path : undefined,
+        viewport,
+        full_page: !!args.full_page,
+        wait_ms: typeof args.wait_ms === "number" ? args.wait_ms : undefined,
+      });
+      return JSON.stringify(result);
+    }
+    case "run_in_background": {
+      if (typeof args.command !== "string" || !args.command.trim()) {
+        throw new Error("run_in_background requires 'command' as a non-empty string");
+      }
+      const info = startBackgroundJob(sandbox, args.command, projectId);
+      return JSON.stringify({
+        job_id: info.id,
+        command: info.command,
+        status: info.status,
+        note: "Use read_background_log({job_id}) to poll output and exit code. Use kill_background to stop early.",
+      });
+    }
+    case "read_background_log": {
+      if (typeof args.job_id !== "string") {
+        throw new Error("read_background_log requires 'job_id' as a string");
+      }
+      const r = readJobLog(args.job_id, args.max_bytes);
+      return `status: ${r.status}\nexit_code: ${r.exit_code ?? "null"}\n--- log ---\n${r.log}`;
+    }
+    case "list_background": {
+      const all = listJobs(projectId);
+      return all.length === 0 ? "(no background jobs)" : JSON.stringify(all, null, 2);
+    }
+    case "kill_background": {
+      if (typeof args.job_id !== "string") {
+        throw new Error("kill_background requires 'job_id' as a string");
+      }
+      killJob(args.job_id);
+      return `killed ${args.job_id}`;
+    }
+    case "list_connectors": {
+      const list = listProjectConnectors();
+      return JSON.stringify(list, null, 2);
+    }
+    case "call_connector": {
+      if (!projectId) {
+        throw new Error("call_connector requires a project session");
+      }
+      if (typeof args.connector !== "string" || typeof args.method !== "string") {
+        throw new Error("call_connector requires 'connector' and 'method' as strings");
+      }
+      const callArgs = (typeof args.args === "object" && args.args !== null
+        ? args.args
+        : {}) as Record<string, unknown>;
+      const result = await callConnector({
+        connector: args.connector,
+        method: args.method,
+        args: callArgs,
+        projectId,
+        userId,
+      });
+      if (!result.ok) {
+        throw new Error(result.error);
+      }
+      const json = JSON.stringify(result.result);
+      // Cap connector results to ~32 KB so the agent context doesn't balloon.
+      return json.length > 32_000
+        ? `${json.slice(0, 32_000)}\n[... truncated ${json.length - 32_000} bytes ...]`
+        : json;
+    }
+    case "list_secrets": {
+      if (!projectId) return "(secrets unavailable in non-project session)";
+      const rows = await listProjectSecrets(projectId);
+      if (rows.length === 0) return "(no secrets configured for this project)";
+      return rows
+        .map((r) => `${r.name}${r.description ? ` — ${r.description}` : ""}`)
+        .join("\n");
+    }
+    case "get_secret": {
+      if (!projectId) {
+        throw new Error("get_secret requires a project session");
+      }
+      if (typeof args.name !== "string" || !args.name.trim()) {
+        throw new Error("get_secret requires 'name' as a non-empty string");
+      }
+      const r = await plumbSecretToEnvFile({
+        sandboxDir: sandbox.rootDir,
+        projectId,
+        userId,
+        name: args.name.trim(),
+        envFile: typeof args.env_file === "string" ? args.env_file : undefined,
+      });
+      return JSON.stringify({
+        env_var: r.env_var,
+        env_file: r.env_file,
+        note: `The plaintext value was written to ${r.env_file}; read it from process.env.${r.env_var} (Node) or os.environ["${r.env_var}"] (Python). The value is NOT in the agent's tool-result context.`,
+      });
+    }
+    case "list_assets": {
+      const entries = await listAssets(sandbox.rootDir);
+      if (entries.length === 0) return "(no assets uploaded)";
+      return entries
+        .map((e) => `${e.path} (${e.mime_type}, ${e.size} bytes)`)
+        .join("\n");
+    }
+    case "read_asset": {
+      if (typeof args.name !== "string") {
+        throw new Error("read_asset requires 'name' as a string");
+      }
+      if (isImageAsset(args.name)) {
+        // Don't pump base64 image bytes into the tool channel — too large
+        // and they aren't viewable inline by the model from a tool result.
+        // The in-sandbox path can be referenced directly by generated code.
+        return `Asset is an image. Use it by referencing its sandbox path: assets/uploads/${args.name.replace(/^assets\/uploads\//, "")}. The user already attached it to a previous message if visual inspection was needed.`;
+      }
+      try {
+        return await readAssetText(sandbox.rootDir, args.name);
+      } catch (err) {
+        throw new Error(
+          `read_asset failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
     case "ask_user": {
       if (!requestUserAnswer) {
         throw new Error(

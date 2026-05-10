@@ -23,6 +23,8 @@ const PREVIEW_COOKIE = "uniqus_preview";
 
 export interface ProxyTarget {
   serverId: string;
+  /** Host to dial. "127.0.0.1" for process-backed servers, the VM IP for Firecracker-backed ones. */
+  host: string;
   port: number;
   /** The path inside the sandbox app (always starts with `/`). */
   innerPath: string;
@@ -81,7 +83,7 @@ export function resolveTarget(
     const innerPath = direct[2] ?? "/";
     const srv = getServer(serverId);
     if (!srv) return null;
-    return { serverId, port: srv.port, innerPath };
+    return { serverId, host: srv.host, port: srv.port, innerPath };
   }
 
   const referer = headers.referer ?? headers.referrer;
@@ -92,7 +94,7 @@ export function resolveTarget(
       if (m) {
         const serverId = m[1];
         const srv = getServer(serverId);
-        if (srv) return { serverId, port: srv.port, innerPath: url };
+        if (srv) return { serverId, host: srv.host, port: srv.port, innerPath: url };
       }
     } catch {
       // malformed referer, fall through
@@ -102,7 +104,7 @@ export function resolveTarget(
   const cookieId = readPreviewCookie(headers);
   if (cookieId) {
     const srv = getServer(cookieId);
-    if (srv) return { serverId: cookieId, port: srv.port, innerPath: url };
+    if (srv) return { serverId: cookieId, host: srv.host, port: srv.port, innerPath: url };
   }
 
   return null;
@@ -124,11 +126,11 @@ export function proxyHttp(
     if (HOP_BY_HOP.has(lower)) continue;
     headers[k] = v;
   }
-  headers.host = `127.0.0.1:${target.port}`;
+  headers.host = `${target.host}:${target.port}`;
 
   const upstream = http.request(
     {
-      hostname: "127.0.0.1",
+      hostname: target.host,
       port: target.port,
       method: req.method,
       path: target.innerPath,
@@ -187,10 +189,10 @@ export function proxyWebSocket(
     if (v === undefined) continue;
     headers[k] = v;
   }
-  headers.host = `127.0.0.1:${target.port}`;
+  headers.host = `${target.host}:${target.port}`;
 
   const upstream = http.request({
-    hostname: "127.0.0.1",
+    hostname: target.host,
     port: target.port,
     method: req.method,
     path: target.innerPath,

@@ -13,6 +13,7 @@
     "typecheck": "turbo run typecheck"
   },
   "devDependencies": {
+    "monaco-editor": "0.53.0",
     "turbo": "^2.3.3",
     "typescript": "^5.7.2"
   },

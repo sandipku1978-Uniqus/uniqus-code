@@ -108,7 +108,29 @@ export type ServerEvent =
       before_tokens: number;
       after_tokens: number;
     }
+  | {
+      /**
+       * Agent invoked the `todo_write` tool. UI rerenders the Tasks pane.
+       * Stored per-project on the orchestrator; survives across turns.
+       */
+      type: "todos_updated";
+      todos: TodoItem[];
+    }
+  | {
+      /** A new checkpoint was committed to the project's shadow git (Plan §3.5). */
+      type: "checkpoint_created";
+      sha: string;
+      short_sha: string;
+      message: string;
+      created_at: string;
+    }
   | { type: "error"; message: string };
+
+export interface TodoItem {
+  content: string;
+  activeForm: string;
+  status: "pending" | "in_progress" | "completed";
+}
 
 export interface PreviewServer {
   id: string;

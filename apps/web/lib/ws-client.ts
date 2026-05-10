@@ -24,6 +24,7 @@ function defaultWsUrl(projectId: string): string {
 let socket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let activeProjectId: string | null = null;
+const tasksAutoOpenedProjects = new Set<string>();
 
 export function connect(projectId: string): void {
   // If asked to connect to a different project, close the old one first.
@@ -176,6 +177,11 @@ function handleEvent(event: ServerEvent): void {
       break;
     case "session_reset":
       s.resetChat();
+      s.setTodos([]);
+      send({ type: "request_tree" });
+      if (s.selectedFile) {
+        send({ type: "request_file", path: s.selectedFile });
+      }
       break;
     case "storage_synced":
       s.setLastSyncedAt(event.at);
@@ -195,6 +201,23 @@ function handleEvent(event: ServerEvent): void {
         event.options,
         event.allow_free_text,
       );
+      break;
+    case "checkpoint_created":
+      // Quietly track — surface only when the user opens the Rewind modal,
+      // which fetches the full list. Suppress chat noise.
+      break;
+    case "todos_updated":
+      s.setTodos(event.todos);
+      // Auto-pop once per project so closing the pane stays respected.
+      if (
+        event.todos.length > 0 &&
+        !s.panels.tasks &&
+        activeProjectId &&
+        !tasksAutoOpenedProjects.has(activeProjectId)
+      ) {
+        tasksAutoOpenedProjects.add(activeProjectId);
+        s.setPanel("tasks", true);
+      }
       break;
     case "history_compacted":
       s.addSystem(

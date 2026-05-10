@@ -4,7 +4,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { UploadedFileSummary } from "@uniqus/api-types";
-import { uploadProjectFilesApi } from "@/lib/api";
+import {
+  fetchSlashCommandsApi,
+  uploadProjectFilesApi,
+  type SlashCommandSummary,
+} from "@/lib/api";
 import { useStore, type ChatItem } from "@/lib/store";
 import { send } from "@/lib/ws-client";
 import PlanReview from "./PlanReview";
@@ -25,6 +29,8 @@ export default function ChatPanel() {
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [slashCommands, setSlashCommands] = useState<SlashCommandSummary[]>([]);
+  const [slashIndex, setSlashIndex] = useState(0);
   // True from the moment the user clicks Stop until the server's `complete`
   // event lands. Without this, a click that the server is slow to act on
   // looks like a no-op — the button just keeps saying "Stop" until something
@@ -35,6 +41,35 @@ export default function ChatPanel() {
   useEffect(() => {
     setStopping(false);
   }, [busy]);
+
+  // Lazy-load slash commands once per project. The list is small and stable
+  // — built-ins never change at runtime, project commands change rarely.
+  useEffect(() => {
+    if (!project) return;
+    let abort = false;
+    fetchSlashCommandsApi(project.id)
+      .then((r) => {
+        if (!abort) setSlashCommands(r.commands);
+      })
+      .catch(() => {});
+    return () => {
+      abort = true;
+    };
+  }, [project]);
+
+  // Show palette when input begins with "/" and is one token wide
+  // ("/review" matches; "/review now" doesn't).
+  const slashFilter = useMemo(() => {
+    const m = input.match(/^\/([a-zA-Z0-9_-]*)$/);
+    return m ? m[1].toLowerCase() : null;
+  }, [input]);
+  const slashMatches = useMemo(() => {
+    if (slashFilter === null) return [];
+    return slashCommands.filter((c) => c.name.startsWith(slashFilter)).slice(0, 6);
+  }, [slashFilter, slashCommands]);
+  useEffect(() => {
+    setSlashIndex(0);
+  }, [slashFilter]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({
@@ -195,10 +230,68 @@ export default function ChatPanel() {
 
       <div className="composer">
         <div className="field">
+          {slashMatches.length > 0 && (
+            <div
+              style={{
+                marginBottom: 6,
+                border: "1px solid var(--border-default, #2a2a36)",
+                borderRadius: 6,
+                background: "var(--bg-elev, #1a1a22)",
+                overflow: "hidden",
+              }}
+            >
+              {slashMatches.map((c, i) => (
+                <button
+                  key={c.name}
+                  type="button"
+                  onClick={() => {
+                    setInput(`/${c.name} `);
+                  }}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "auto 1fr auto",
+                    gap: 8,
+                    width: "100%",
+                    textAlign: "left",
+                    padding: "6px 10px",
+                    fontSize: 12,
+                    background: i === slashIndex ? "rgba(255,255,255,0.05)" : "transparent",
+                    border: 0,
+                    color: "var(--text-primary)",
+                    cursor: "pointer",
+                  }}
+                >
+                  <code style={{ color: "var(--accent, #a78bfa)" }}>/{c.name}</code>
+                  <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{c.summary}</span>
+                  <span style={{ fontSize: 10, color: "var(--text-dim)" }}>
+                    {c.source === "project" ? "project" : "built-in"}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
+              if (slashMatches.length > 0) {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setSlashIndex((i) => (i + 1) % slashMatches.length);
+                  return;
+                }
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setSlashIndex((i) => (i - 1 + slashMatches.length) % slashMatches.length);
+                  return;
+                }
+                if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+                  e.preventDefault();
+                  const pick = slashMatches[slashIndex] ?? slashMatches[0];
+                  if (pick) setInput(`/${pick.name} `);
+                  return;
+                }
+              }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 void handleSubmit();

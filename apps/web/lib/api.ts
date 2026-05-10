@@ -236,6 +236,124 @@ export const stopServerApi = (
 ): Promise<{ ok: true }> =>
   api(`/api/projects/${projectId}/servers/${serverId}`, { method: "DELETE" });
 
+// ── Fly.io deploy ─────────────────────────────────────────────────────────────
+
+export interface DeployTargetSummary {
+  shape: "node" | "python" | "go" | "static" | "unknown";
+  recommended: "vercel" | "fly" | null;
+}
+
+export const fetchDeployTargetApi = (
+  projectId: string,
+): Promise<DeployTargetSummary> =>
+  api(`/api/projects/${projectId}/deploy-target`);
+
+export const flyDeployApi = (
+  projectId: string,
+  body: { app_name: string; region?: string; env_vars?: Record<string, string> },
+): Promise<{ ok: boolean; app: string; url: string; log: string }> =>
+  api(`/api/projects/${projectId}/fly-deploy`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+// ── Checkpoints ───────────────────────────────────────────────────────────────
+
+export interface CheckpointMeta {
+  sha: string;
+  short_sha: string;
+  message: string;
+  created_at: string;
+}
+
+export const fetchCheckpointsApi = (
+  projectId: string,
+): Promise<{ checkpoints: CheckpointMeta[] }> =>
+  api(`/api/projects/${projectId}/checkpoints`);
+
+export const restoreCheckpointApi = (
+  projectId: string,
+  sha: string,
+): Promise<{ ok: true; restored_to: string }> =>
+  api(`/api/projects/${projectId}/checkpoints/${sha}/restore`, { method: "POST" });
+
+// ── Secrets ───────────────────────────────────────────────────────────────────
+
+export interface SecretSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  updated_at: string;
+}
+
+export const fetchSecretsApi = (
+  projectId: string,
+): Promise<{ secrets: SecretSummary[] }> =>
+  api(`/api/projects/${projectId}/secrets`);
+
+export const upsertSecretApi = (
+  projectId: string,
+  body: { name: string; value: string; description?: string | null },
+): Promise<{ secret: SecretSummary }> =>
+  api(`/api/projects/${projectId}/secrets`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const deleteSecretApi = (
+  projectId: string,
+  name: string,
+): Promise<{ ok: true }> =>
+  api(`/api/projects/${projectId}/secrets/${name}`, { method: "DELETE" });
+
+// ── Slash commands ────────────────────────────────────────────────────────────
+
+export interface SlashCommandSummary {
+  name: string;
+  summary: string;
+  source: "builtin" | "project";
+}
+
+export const fetchSlashCommandsApi = (
+  projectId: string,
+): Promise<{ commands: SlashCommandSummary[] }> =>
+  api(`/api/projects/${projectId}/slash-commands`);
+
+// ── Skills ────────────────────────────────────────────────────────────────────
+
+export const fetchSkillsApi = (
+  projectId: string,
+): Promise<{ content: string; path: string }> =>
+  api(`/api/projects/${projectId}/skills`);
+
+export const writeSkillsApi = (
+  projectId: string,
+  content: string,
+): Promise<{ ok: true }> =>
+  api(`/api/projects/${projectId}/skills`, {
+    method: "PUT",
+    body: JSON.stringify({ content }),
+  });
+
+export interface SkillPackSummary {
+  id: string;
+  name: string;
+  summary: string;
+}
+
+export const fetchSkillPacksApi = (): Promise<{ packs: SkillPackSummary[] }> =>
+  api(`/api/skill-packs`);
+
+export const applySkillPackApi = (
+  projectId: string,
+  packId: string,
+  mode: "replace" | "append" = "replace",
+): Promise<{ ok: true; content: string }> =>
+  api(`/api/projects/${projectId}/skill-packs/${packId}`, {
+    method: "POST",
+    body: JSON.stringify({ mode }),
+  });
+
 export async function uploadProjectFilesApi(input: {
   projectId: string;
   files: File[];
