@@ -28,8 +28,9 @@
 import http from "node:http";
 import net from "node:net";
 import { promises as fs } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 const SANDBOX_DIR = process.env.UNIQUS_SANDBOX_DIR ?? "/sandbox";
@@ -39,6 +40,45 @@ const MAX_LOG = 64 * 1024;
 
 await fs.mkdir(SANDBOX_DIR, { recursive: true });
 process.chdir(SANDBOX_DIR);
+
+/**
+ * Bring up eth0 from /proc/cmdline before listening. Many Firecracker CI
+ * kernels are built without CONFIG_IP_PNP, so the kernel's `ip=` cmdline
+ * is silently ignored. We pass `uniqus_ip=<addr>/<prefix>` and
+ * `uniqus_gw=<addr>` instead and apply them ourselves via the iproute2
+ * binaries baked into the rootfs.
+ */
+function configureNetwork() {
+  let cmdline = "";
+  try {
+    cmdline = readFileSync("/proc/cmdline", "utf-8");
+  } catch (err) {
+    console.error("[uniqus-agent] could not read /proc/cmdline:", err.message);
+    return;
+  }
+  const ip = (cmdline.match(/(?:^|\s)uniqus_ip=([^\s]+)/) ?? [])[1];
+  const gw = (cmdline.match(/(?:^|\s)uniqus_gw=([^\s]+)/) ?? [])[1];
+  if (!ip || !gw) {
+    console.error(`[uniqus-agent] uniqus_ip/uniqus_gw missing from /proc/cmdline; eth0 will not be configured. cmdline=${cmdline.trim()}`);
+    return;
+  }
+  const run = (cmd, args) => {
+    const r = spawnSync(cmd, args, { encoding: "utf-8" });
+    if (r.status !== 0) {
+      console.error(`[uniqus-agent] ${cmd} ${args.join(" ")} → ${r.status} ${r.stderr?.trim() ?? ""}`);
+    } else {
+      console.log(`[uniqus-agent] ${cmd} ${args.join(" ")} ok`);
+    }
+    return r.status === 0;
+  };
+  run("ip", ["link", "set", "lo", "up"]);
+  run("ip", ["link", "set", "eth0", "up"]);
+  run("ip", ["addr", "add", ip, "dev", "eth0"]);
+  run("ip", ["route", "add", "default", "via", gw, "dev", "eth0"]);
+  console.log(`[uniqus-agent] eth0 configured: ip=${ip} gw=${gw}`);
+}
+
+configureNetwork();
 
 // ── server table for start-server / stop-server / log tail ─────────────────
 const servers = new Map();

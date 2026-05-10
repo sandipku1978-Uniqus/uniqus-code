@@ -106,16 +106,17 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
 
   try {
     await client.putMachineConfig({ vcpu_count: VM_VCPUS, mem_size_mib: VM_MEM_MIB });
-    // Pass the static IP via the kernel's `ip=` cmdline. Format:
-    //   ip=<client>:<server>:<gw>:<netmask>:<host>:<dev>:<auto>:<dns>
-    // We only need client/gw/netmask/dev. Linux configures eth0 in early
-    // boot — no DHCP server needed on the bridge.
-    const ipArg = `ip=${ip}::${gatewayIp}:${BRIDGE_NETMASK}::eth0:off:1.1.1.1`;
+    // Pass our IP + gw as custom cmdline tokens. The in-VM agent reads
+    // /proc/cmdline at boot and applies them via iproute2. (We deliberately
+    // don't use the kernel's IP_PNP `ip=` because most Firecracker CI
+    // kernels are built without CONFIG_IP_PNP — that arg is silently
+    // ignored and eth0 ends up unconfigured.)
+    const ipArg = `uniqus_ip=${ip}/16 uniqus_gw=${gatewayIp}`;
     await client.putBootSource({
       kernel_image_path: KERNEL_PATH,
       // Console, panic=1 so a kernel panic exits the firecracker process
       // (we restart cleanly instead of hanging). `random.trust_cpu=on`
-      // shaves boot time. The ip= arg drives static config.
+      // shaves boot time. uniqus_ip/uniqus_gw drive in-VM static config.
       boot_args:
         `console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on ${ipArg} i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd`,
     });
