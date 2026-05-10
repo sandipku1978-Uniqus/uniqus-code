@@ -21,7 +21,7 @@ set -euo pipefail
 
 EXT_IFACE="${EXT_IFACE:-eth0}"
 STATE_DIR="/var/lib/uniqus/firecracker"
-KERNEL_URL="${KERNEL_URL:-https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.225}"
+KERNEL_URL="${KERNEL_URL:-}"
 FIRECRACKER_VERSION="${FIRECRACKER_VERSION:-v1.10.1}"
 FIRECRACKER_URL="https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-x86_64.tgz"
 
@@ -56,6 +56,22 @@ firecracker --version
 echo "[3/6] State dir + kernel…"
 mkdir -p "${STATE_DIR}"
 if [[ ! -f "${STATE_DIR}/vmlinux" ]]; then
+  if [[ -z "${KERNEL_URL}" ]]; then
+    # The Firecracker CI bucket prunes old kernels, so we resolve the
+    # latest 5.10.x available at run time instead of hardcoding a patch
+    # level that may have aged out.
+    KERNEL_URL="$(curl -s 'https://s3.amazonaws.com/spec.ccfc.min/?list-type=2&prefix=firecracker-ci/v1.10/x86_64/' \
+      | grep -oE 'firecracker-ci/v1\.10/x86_64/vmlinux-5\.10\.[0-9]+' \
+      | sort -t. -k3,3n \
+      | tail -1 \
+      | sed 's|^|https://s3.amazonaws.com/spec.ccfc.min/|')"
+    if [[ -z "${KERNEL_URL}" ]]; then
+      echo "Could not auto-discover a kernel from the Firecracker CI bucket." >&2
+      echo "Set KERNEL_URL=... manually and re-run." >&2
+      exit 1
+    fi
+    echo "  resolved kernel: ${KERNEL_URL}"
+  fi
   curl -fSL "${KERNEL_URL}" -o "${STATE_DIR}/vmlinux"
 fi
 chmod 0644 "${STATE_DIR}/vmlinux"
