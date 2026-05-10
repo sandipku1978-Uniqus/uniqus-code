@@ -1817,11 +1817,14 @@ async function handleConnection(
       }
 
       if (event.type === "user_message") {
+        console.log(`[ws ${project.id}] user_message arrived (mode=${event.mode}, len=${event.content.length})`);
         if (!ready) {
+          console.log(`[ws ${project.id}] rejected: session not ready`);
           send({ type: "error", message: "session is still loading, try again in a moment" });
           return;
         }
         if (busy) {
+          console.log(`[ws ${project.id}] rejected: already busy`);
           send({ type: "error", message: "agent is already running" });
           return;
         }
@@ -1830,16 +1833,20 @@ async function handleConnection(
         // Lazy VM boot. ensureVm is idempotent — same project id returns
         // the same VM (and resumes if it was paused).
         if (isFirecrackerEnabled() && !vmHandle) {
+          console.log(`[ws ${project.id}] booting Firecracker VM…`);
+          const t0 = Date.now();
           try {
             vmHandle = await ensureVm({
               projectId: project.id,
               hostSandboxDir: sandboxDir,
             });
+            console.log(`[ws ${project.id}] VM ${vmHandle.id} ready in ${Date.now() - t0}ms (ip=${vmHandle.ip})`);
             send({
               type: "text",
               content: `\n[fleet] booted Firecracker VM ${vmHandle.id}\n`,
             });
           } catch (err) {
+            console.error(`[ws ${project.id}] VM boot failed after ${Date.now() - t0}ms:`, err);
             send({
               type: "error",
               message: `Firecracker boot failed: ${err instanceof Error ? err.message : String(err)}`,

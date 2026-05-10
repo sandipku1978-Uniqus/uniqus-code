@@ -156,16 +156,38 @@ export async function spawnFirecracker(opts: {
   const args = ["--api-sock", opts.socketPath];
   if (opts.logFifo) args.push("--log-path", opts.logFifo);
 
-  const proc = spawn(opts.binaryPath ?? process.env.FIRECRACKER_BIN ?? "firecracker", args, {
+  const binaryPath = opts.binaryPath ?? process.env.FIRECRACKER_BIN ?? "firecracker";
+  const proc = spawn(binaryPath, args, {
     stdio: ["ignore", "pipe", "pipe"],
   });
+  // Capture spawn errors (most commonly ENOENT when the binary isn't on PATH
+  // for systemd's stripped environment). Without this listener, the error
+  // lands as an uncaughtException AFTER our pid check passes, and the caller
+  // hangs waiting for a socket that will never appear.
+  const errorBox: { err: Error | null } = { err: null };
+  proc.once("error", (err) => {
+    errorBox.err = err;
+    console.error(`[firecracker] spawn '${binaryPath}' failed:`, err.message);
+  });
+  let stderrTail = "";
+  proc.stderr?.on("data", (chunk: Buffer) => {
+    stderrTail = (stderrTail + chunk.toString()).slice(-2000);
+  });
+
   if (!proc.pid) {
-    throw new Error("failed to spawn firecracker (binary not found?)");
+    throw new Error(`failed to spawn firecracker (binary='${binaryPath}', err=${errorBox.err?.message ?? "unknown"})`);
   }
 
   // Wait for the socket to exist + accept connections.
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
+    if (errorBox.err) {
+      throw new Error(
+        `firecracker spawn errored after pid was assigned: ${errorBox.err.message}. ` +
+          `If this says ENOENT, '${binaryPath}' is not in PATH for systemd. ` +
+          `Add: Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin to the unit override.`,
+      );
+    }
     try {
       await fs.access(opts.socketPath);
       const ok = await new Promise<boolean>((resolve) => {
@@ -184,6 +206,21 @@ export async function spawnFirecracker(opts: {
       // not yet
     }
     await new Promise((r) => setTimeout(r, 50));
+  }
+
+  if (errorBox.err) {
+    throw new Error(`firecracker spawn errored: ${errorBox.err.message}`);
+  }
+  // If the socket never appeared but no error fired, the binary started but
+  // exited fast (kernel/rootfs missing, --api-sock arg invalid, etc.).
+  // Surface stderr so the user sees the actual reason.
+  try {
+    await fs.access(opts.socketPath);
+  } catch {
+    throw new Error(
+      `firecracker did not create API socket at ${opts.socketPath} within 5s.\n` +
+        `firecracker stderr: ${stderrTail || "(empty)"}`,
+    );
   }
 
   return {

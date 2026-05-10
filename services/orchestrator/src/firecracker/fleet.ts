@@ -79,6 +79,7 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
   const vsockUds = path.join(STATE_DIR, `${id}.vsock`);
   const rootImagePath = path.join(STATE_DIR, `${id}.root.ext4`);
 
+  console.log(`[fleet ${id}] step 1/8: copy-on-write rootfs from ${ROOTFS_BASE_PATH}`);
   // Per-project overlay rootfs: copy the base rootfs once. Fast on most
   // Linux filesystems thanks to copy-on-write (XFS reflink, btrfs CoW,
   // ZFS clone). Falls back to plain copy when CoW isn't available.
@@ -88,11 +89,16 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
   // same project gets the same IP across orchestrator restarts. MAC is
   // a locally-administered prefix (02:fc:…) seeded from the same hash.
   const { ip, gatewayIp, mac, tapName } = allocateNetwork(opts.projectId, id);
+  console.log(`[fleet ${id}] step 2/8: allocated ip=${ip} mac=${mac} tap=${tapName}`);
   await ensureBridge();
+  console.log(`[fleet ${id}] step 3/8: bridge ${BRIDGE_NAME} verified`);
   await ensureTapDevice(tapName);
+  console.log(`[fleet ${id}] step 4/8: tap ${tapName} attached to bridge`);
 
   // Spawn firecracker bound to a fresh API socket.
+  console.log(`[fleet ${id}] step 5/8: spawning firecracker (socket=${apiSocket})`);
   const fc = await spawnFirecracker({ socketPath: apiSocket });
+  console.log(`[fleet ${id}] step 6/8: firecracker spawned (pid=${fc.pid})`);
   const client = new FirecrackerClient(apiSocket);
 
   const guestCid = ++cidSeq;
@@ -135,8 +141,11 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
       guest_mac: mac,
     });
     await client.putVsock({ guest_cid: guestCid, uds_path: vsockUds, vsock_id: "agent" });
+    console.log(`[fleet ${id}] step 7/8: VM configured, calling InstanceStart`);
     await client.startInstance();
+    console.log(`[fleet ${id}] step 8/8: VM started, waiting for in-VM agent…`);
   } catch (err) {
+    console.error(`[fleet ${id}] config failed:`, err instanceof Error ? err.message : err);
     fc.close();
     await teardownTap(tapName).catch(() => {});
     throw err;
@@ -163,7 +172,9 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
   // kernel + initrd are warm.
   const deadline = Date.now() + 10_000;
   let healthy = false;
+  let pingAttempts = 0;
   while (Date.now() < deadline) {
+    pingAttempts++;
     if (await ping(handle)) {
       healthy = true;
       break;
@@ -171,11 +182,13 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
     await new Promise((r) => setTimeout(r, 100));
   }
   if (!healthy) {
+    console.error(`[fleet ${id}] agent /health unreachable after ${pingAttempts} attempts`);
     fc.close();
     throw new Error(
       `[vm ${id}] agent did not answer /health within 10s — check the rootfs init script and that vsock is enabled in the kernel`,
     );
   }
+  console.log(`[fleet ${id}] in-VM agent healthy after ${pingAttempts} ping attempts`);
 
   // Initial hydration: push host-side project files into the VM. Cheap on
   // small projects; the in-VM agent acks each file. Cap so a runaway
