@@ -5,6 +5,7 @@ import http, {
 } from "node:http";
 import type { Duplex } from "node:stream";
 import { getServer } from "./agent/sandbox.js";
+import { touch as touchVm } from "./firecracker/index.js";
 
 // Match `/preview/{serverId}` optionally followed by `/...` rest.
 // The serverId starts with `srv_` (see startServer in sandbox.ts) and is followed
@@ -77,12 +78,21 @@ export function resolveTarget(
   url: string,
   headers: IncomingHttpHeaders,
 ): ProxyTarget | null {
+  // Mark the VM (if any) backing this server as "active" so the fleet's
+  // idle-pause sweeper doesn't freeze the VM while the user is actively
+  // poking at the preview iframe. Without this, sustained preview use
+  // with no agent activity hits a paused VM at the 5-minute mark.
+  const keepAlive = (srv: { project_id: string | null }) => {
+    if (srv.project_id) touchVm(srv.project_id);
+  };
+
   const direct = url.match(PREVIEW_PREFIX);
   if (direct) {
     const serverId = direct[1];
     const innerPath = direct[2] ?? "/";
     const srv = getServer(serverId);
     if (!srv) return null;
+    keepAlive(srv);
     return { serverId, host: srv.host, port: srv.port, innerPath };
   }
 
@@ -94,7 +104,10 @@ export function resolveTarget(
       if (m) {
         const serverId = m[1];
         const srv = getServer(serverId);
-        if (srv) return { serverId, host: srv.host, port: srv.port, innerPath: url };
+        if (srv) {
+          keepAlive(srv);
+          return { serverId, host: srv.host, port: srv.port, innerPath: url };
+        }
       }
     } catch {
       // malformed referer, fall through
@@ -104,7 +117,10 @@ export function resolveTarget(
   const cookieId = readPreviewCookie(headers);
   if (cookieId) {
     const srv = getServer(cookieId);
-    if (srv) return { serverId: cookieId, host: srv.host, port: srv.port, innerPath: url };
+    if (srv) {
+      keepAlive(srv);
+      return { serverId: cookieId, host: srv.host, port: srv.port, innerPath: url };
+    }
   }
 
   return null;
