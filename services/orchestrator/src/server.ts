@@ -279,7 +279,7 @@ function setCors(res: ServerResponse, req: IncomingMessage): void {
     // Vary on Origin so any cache understands the response is origin-specific.
     res.setHeader("Vary", "Origin");
   }
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 

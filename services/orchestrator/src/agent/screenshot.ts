@@ -91,7 +91,12 @@ function resolveUrl(opts: ShotOpts): string | null {
     if (!s) {
       throw new Error(`No running server with id ${opts.serverId}`);
     }
-    const base = `http://127.0.0.1:${s.port}`;
+    // Use the server's host — "127.0.0.1" for process-backed, the per-VM
+    // IP (e.g. 172.16.x.y) for Firecracker-backed. proxy.ts uses the
+    // same field to route preview iframes; without this, Playwright hits
+    // the orchestrator's loopback and finds nothing because the dev
+    // server lives inside the VM.
+    const base = `http://${s.host}:${s.port}`;
     return opts.pathSuffix ? `${base}${opts.pathSuffix.startsWith("/") ? "" : "/"}${opts.pathSuffix}` : base;
   }
   return null;
