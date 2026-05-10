@@ -1,15 +1,20 @@
 import http from "node:http";
-import net from "node:net";
 import type { VmHandle } from "./types.js";
 
 /**
  * Orchestrator → in-VM sandbox-agent RPC client.
  *
- * Transport: vsock. Firecracker exposes a host-side AF_UNIX endpoint for
- * each guest CID; connecting to that socket and writing `CONNECT <port>\n`
- * opens a stream to the guest's vsock listener. We frame plain HTTP/1.1
- * over that stream — keeps the in-VM agent dirt-simple (it's just a tiny
- * Node http.createServer bound on vsock-ssh — see services/sandbox-agent).
+ * Transport: plain HTTP/1.1 over the per-VM TAP network. Each VM gets a
+ * static IP on the fcbr0 bridge (assigned at boot via the kernel `ip=`
+ * cmdline); the in-VM agent listens on `0.0.0.0:agentPort`. The host
+ * routes to that IP through the bridge — no vsock, no Unix socket, no
+ * bridge daemon inside the VM.
+ *
+ * (Earlier revisions tried Firecracker's vsock CONNECT handshake to talk
+ * to a UDS on the host. That requires a vsock<->TCP shim inside the VM
+ * which we never wired up. TAP networking is simpler and we already have
+ * it — the fleet manager allocates an IP per project and stamps it on
+ * the VmHandle.)
  *
  * Every method here returns a clean Error on transport failure with the
  * VM id + RPC name so fleet-manager logs are immediately useful.
@@ -155,27 +160,26 @@ function rpc<T = void>(
   opts: RpcOpts = {},
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    // The vsock-bridged unix socket uses Firecracker's "CONNECT <port>\n"
-    // handshake. We open a raw socket, send the handshake, wait for the
-    // VM's "OK <buf_alloc>\n" reply, then framing HTTP over it.
-    const sock = net.createConnection(vm.vsockUds);
     const readTimeout = opts.readTimeoutMs ?? 30_000;
-
-    let phase: "handshake" | "http" = "handshake";
-    let buf = Buffer.alloc(0);
-    const cleanup = (): void => {
-      try {
-        sock.destroy();
-      } catch {}
-    };
+    const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
+    const req = http.request({
+      host: vm.ip,
+      port: vm.agentPort,
+      method,
+      path,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        ...(payload ? { "Content-Length": String(payload.length) } : {}),
+      },
+      timeout: readTimeout,
+    });
 
     const fail = (err: Error): void => {
-      cleanup();
-      reject(
-        new Error(
-          `[vm ${vm.id}] ${method} ${path}: ${err.message}`,
-        ),
-      );
+      try {
+        req.destroy();
+      } catch {}
+      reject(new Error(`[vm ${vm.id}] ${method} ${path}: ${err.message}`));
     };
 
     const onAbort = (): void => fail(new Error("aborted"));
@@ -187,84 +191,35 @@ function rpc<T = void>(
       opts.signal.addEventListener("abort", onAbort, { once: true });
     }
 
-    const deadline = setTimeout(() => fail(new Error(`read timeout (${readTimeout}ms)`)), readTimeout);
+    req.once("timeout", () => fail(new Error(`read timeout (${readTimeout}ms)`)));
+    req.once("error", fail);
 
-    sock.once("error", fail);
-
-    sock.once("connect", () => {
-      sock.write(`CONNECT ${vm.agentPort}\n`);
-    });
-
-    sock.on("data", (chunk: Buffer) => {
-      buf = Buffer.concat([buf, chunk]);
-      if (phase === "handshake") {
-        const nl = buf.indexOf(0x0a); // '\n'
-        if (nl < 0) return;
-        const line = buf.subarray(0, nl).toString("utf-8");
-        buf = buf.subarray(nl + 1);
-        if (!line.startsWith("OK")) {
-          fail(new Error(`vsock handshake refused: ${line}`));
+    req.once("response", (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (c: Buffer) => chunks.push(c));
+      res.on("end", () => {
+        if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
+        const text = Buffer.concat(chunks).toString("utf-8");
+        const status = res.statusCode ?? 0;
+        if (status >= 400 || status === 0) {
+          reject(
+            new Error(`[vm ${vm.id}] ${method} ${path}: HTTP ${status}: ${text.slice(0, 500)}`),
+          );
           return;
         }
-        phase = "http";
-
-        // Now send the HTTP request and capture response.
-        const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
-        const headers = [
-          `${method} ${path} HTTP/1.1`,
-          `Host: vm-${vm.id}`,
-          `Connection: close`,
-          ...(payload
-            ? [`Content-Type: application/json`, `Content-Length: ${payload.length}`]
-            : []),
-          ``,
-          ``,
-        ].join("\r\n");
-        sock.write(headers);
-        if (payload) sock.write(payload);
-        // From here, the next chunks are the HTTP response.
-      } else if (phase === "http") {
-        // accumulate; final assembly happens in 'end'
-      }
+        if (!text) {
+          resolve(undefined as unknown as T);
+          return;
+        }
+        try {
+          resolve(JSON.parse(text) as T);
+        } catch {
+          resolve(text as unknown as T);
+        }
+      });
     });
 
-    sock.once("end", () => {
-      clearTimeout(deadline);
-      if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
-      if (phase !== "http") return; // failed before request
-      // Parse HTTP/1.1 response.
-      const headerEnd = buf.indexOf("\r\n\r\n");
-      if (headerEnd < 0) {
-        reject(new Error(`[vm ${vm.id}] ${method} ${path}: no HTTP response`));
-        return;
-      }
-      const headerText = buf.subarray(0, headerEnd).toString("utf-8");
-      const bodyText = buf.subarray(headerEnd + 4).toString("utf-8");
-      const statusLine = headerText.split("\r\n")[0] ?? "";
-      const m = /^HTTP\/1\.[01] (\d{3})/.exec(statusLine);
-      const status = m ? Number(m[1]) : 0;
-      if (status >= 400 || status === 0) {
-        reject(
-          new Error(
-            `[vm ${vm.id}] ${method} ${path}: HTTP ${status}: ${bodyText.slice(0, 500)}`,
-          ),
-        );
-        return;
-      }
-      if (!bodyText) {
-        resolve(undefined as unknown as T);
-        return;
-      }
-      try {
-        resolve(JSON.parse(bodyText) as T);
-      } catch {
-        resolve(bodyText as unknown as T);
-      }
-    });
+    if (payload) req.write(payload);
+    req.end();
   });
 }
-
-// Force the Node.js HTTP type into TS scope so http.* references typecheck.
-// We don't actually use it at runtime — we hand-frame the request bytes
-// because the vsock CONNECT handshake doesn't fit Node's http module.
-void http;
