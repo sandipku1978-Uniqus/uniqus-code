@@ -2,6 +2,29 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 const BUCKET = "project_files";
 
+/**
+ * Supabase Storage rejects keys containing characters outside its
+ * "InvalidKey"-allowed set — notably brackets `[ ]` (Next.js dynamic
+ * route folders like `app/[slug]/page.tsx`), `?`, `#`, ` `, etc.
+ *
+ * Encode each path segment with encodeURIComponent. Slashes stay as
+ * separators. Dots/dashes/underscores are unaffected. Reverse with
+ * decodePath when reading from the bucket.
+ */
+function encodePath(relPath: string): string {
+  return relPath.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+}
+
+function decodePath(stored: string): string {
+  return stored.split("/").map((segment) => {
+    try {
+      return decodeURIComponent(segment);
+    } catch {
+      return segment;
+    }
+  }).join("/");
+}
+
 let client: SupabaseClient | null = null;
 
 function storage(): SupabaseClient {
@@ -38,7 +61,7 @@ export async function upload(
 ): Promise<void> {
   const { error } = await storage()
     .storage.from(BUCKET)
-    .upload(`${projectId}/${relPath}`, content, { upsert: true });
+    .upload(`${projectId}/${encodePath(relPath)}`, content, { upsert: true });
   if (error) throw new Error(`upload ${relPath}: ${error.message}`);
 }
 
@@ -48,7 +71,7 @@ export async function download(
 ): Promise<Buffer | null> {
   const { data, error } = await storage()
     .storage.from(BUCKET)
-    .download(`${projectId}/${relPath}`);
+    .download(`${projectId}/${encodePath(relPath)}`);
   if (error || !data) return null;
   return Buffer.from(await data.arrayBuffer());
 }
@@ -57,7 +80,7 @@ export async function remove(projectId: string, relPaths: string[]): Promise<voi
   if (relPaths.length === 0) return;
   const { error } = await storage()
     .storage.from(BUCKET)
-    .remove(relPaths.map((p) => `${projectId}/${p}`));
+    .remove(relPaths.map((p) => `${projectId}/${encodePath(p)}`));
   if (error) throw new Error(`remove: ${error.message}`);
 }
 
@@ -82,7 +105,9 @@ export async function listAll(projectId: string): Promise<string[]> {
         // folder
         await walk(fullPath);
       } else {
-        collected.push(fullPath.slice(projectId.length + 1));
+        // Decode the encoded segments back to the user-facing path
+        // (so callers see app/[slug]/page.tsx, not app/%5Bslug%5D/page.tsx).
+        collected.push(decodePath(fullPath.slice(projectId.length + 1)));
       }
     }
   }

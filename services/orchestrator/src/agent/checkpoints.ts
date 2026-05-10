@@ -116,7 +116,32 @@ export interface CheckpointMeta {
   created_at: string;
 }
 
+/**
+ * Per-project commit queue. Multiple parallel tool calls all want to
+ * checkpoint at once, and `git commit` takes an exclusive lock on
+ * `index.lock`. Without serialization they race and one of every two or
+ * three commits fails with "Unable to create '...index.lock': File exists".
+ *
+ * Chain commits per project on a Promise so they execute in order. A
+ * failure in one doesn't poison the queue.
+ */
+const commitQueues = new Map<string, Promise<unknown>>();
+
 export async function commitCheckpoint(
+  sandboxDir: string,
+  projectId: string,
+  message: string,
+): Promise<CheckpointMeta | null> {
+  const prev = commitQueues.get(projectId) ?? Promise.resolve();
+  const next = prev.then(() => doCommit(sandboxDir, projectId, message)).catch((err) => {
+    console.error(`[checkpoints] commit queue entry crashed:`, err);
+    return null;
+  });
+  commitQueues.set(projectId, next);
+  return next as Promise<CheckpointMeta | null>;
+}
+
+async function doCommit(
   sandboxDir: string,
   projectId: string,
   message: string,
@@ -130,6 +155,12 @@ export async function commitCheckpoint(
     sandboxDir,
     ...rest,
   ];
+  // Defensive: clear a stale index.lock left behind by a previous crash.
+  // (Normally serialization prevents conflicts, but a crashed prior
+  // orchestrator can leave one.)
+  try {
+    await fs.rm(path.join(ctx.gitDir, "index.lock"), { force: true });
+  } catch {}
   const add = await exec("git", gitArgs("add", "-A"), sandboxDir);
   if (!add.ok) {
     console.error(`[checkpoints] git add failed: ${add.stderr}`);

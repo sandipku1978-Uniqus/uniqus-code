@@ -1,5 +1,6 @@
 import http from "node:http";
 import type { VmHandle } from "./types.js";
+import { touch as touchVm } from "./fleet.js";
 
 /**
  * Orchestrator → in-VM sandbox-agent RPC client.
@@ -162,6 +163,12 @@ function rpc<T = void>(
   body?: unknown,
   opts: RpcOpts = {},
 ): Promise<T> {
+  // Mark this VM as recently active so the idle sweeper can't pause it
+  // mid-tool-call. Without this, only `user_message` arrival counted as
+  // "active", so a long npm install (which is many run_command RPCs but
+  // a single user message) would lose its VM at the 5-min mark and
+  // every subsequent RPC would EHOSTUNREACH.
+  touchVm(vm.projectId);
   return new Promise<T>((resolve, reject) => {
     const readTimeout = opts.readTimeoutMs ?? 30_000;
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
@@ -179,6 +186,9 @@ function rpc<T = void>(
     });
 
     const fail = (err: Error): void => {
+      // Always remove the abort listener — otherwise we leak one per RPC
+      // and trip MaxListenersExceededWarning after ~11 parallel calls.
+      if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
       try {
         req.destroy();
       } catch {}
