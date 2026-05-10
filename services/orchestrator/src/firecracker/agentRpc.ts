@@ -117,7 +117,10 @@ export async function readServerLog(vm: VmHandle, id: string, maxBytes: number):
 
 export async function ping(vm: VmHandle): Promise<boolean> {
   try {
-    await rpc<{ ok: true }>(vm, "GET", "/health", undefined, { readTimeoutMs: 1500 });
+    // Short timeout: while the VM is still booting, the kernel will RST
+    // (fast fail) or the route will timeout. Either way we want to retry
+    // quickly rather than blocking the boot loop on a dead probe.
+    await rpc<{ ok: true }>(vm, "GET", "/health", undefined, { readTimeoutMs: 500 });
     return true;
   } catch {
     return false;

@@ -168,10 +168,12 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
     lastUsedAt: Date.now(),
   };
 
-  // Wait until the in-VM agent answers /health. The rootfs's init script
-  // launches the agent on boot; this loop usually takes <300ms once the
-  // kernel + initrd are warm.
-  const deadline = Date.now() + 10_000;
+  // Wait until the in-VM agent answers /health. Alpine + OpenRC takes
+  // 10-20s on a cold-boot to finish sysinit + boot + default runlevels
+  // and start the uniqus-agent service, so 60s is a safe ceiling. Once
+  // the rootfs is warm in page cache, second-and-onwards boots are
+  // sub-5s.
+  const deadline = Date.now() + 60_000;
   let healthy = false;
   let pingAttempts = 0;
   while (Date.now() < deadline) {
@@ -180,10 +182,10 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
       healthy = true;
       break;
     }
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 250));
   }
   if (!healthy) {
-    console.error(`[fleet ${id}] agent /health unreachable after ${pingAttempts} attempts`);
+    console.error(`[fleet ${id}] agent /health unreachable after ${pingAttempts} attempts in 60s`);
     // Keep the VM alive briefly so the operator can debug from the host:
     //   ping ${ip}
     //   curl http://${ip}:${agentPort}/health
@@ -205,7 +207,7 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
       );
     }
     throw new Error(
-      `[vm ${id}] agent did not answer /health within 10s at ${ip}:${agentPort} — ` +
+      `[vm ${id}] agent did not answer /health within 60s at ${ip}:${agentPort} — ` +
         `try: ping ${ip} (kernel network up?) and curl http://${ip}:${agentPort}/health (in-VM agent running?)`,
     );
   }
