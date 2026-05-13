@@ -13,6 +13,7 @@ export {
   destroy,
   listVms,
   startIdleSweeper,
+  stopIdleSweeper,
   touch,
   shutdownAll,
 } from "./fleet.js";

@@ -1587,29 +1587,18 @@ section.band .sub {
 .tree-inline-input:focus {
   outline: none;
 }
-.file-glyph {
+/* File + folder glyphs are now SVG-based (VSCode-Seti style) — see
+   FileExplorer's FileGlyph + FolderGlyph. Wrappers just need consistent
+   sizing and centering; the SVG carries its own colors. */
+.file-glyph,
+.folder-glyph {
   width: 14px;
-  height: 14px;
-  border-radius: 3px;
+  height: 16px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 8px;
-  font-weight: 700;
-  font-family: var(--font-mono-stack);
-  color: rgba(0, 0, 0, 0.85);
   flex-shrink: 0;
   line-height: 1;
-  text-transform: uppercase;
-}
-.folder-glyph {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
-  color: var(--brand-purple);
-  flex-shrink: 0;
 }
 
 /* ── Quick-open palette (Cmd/Ctrl+P) ─────────────────────────────────────── */

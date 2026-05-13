@@ -6,11 +6,12 @@
 # Contents (Alpine-based for boot speed + small footprint):
 #   - openrc (init)
 #   - bash, coreutils, util-linux
-#   - node 20 (the in-VM agent runs on it; doubles as the user runtime)
+#   - node 20 (user runtime — the in-VM agent itself is now Rust, not Node)
 #   - python3 + pip
 #   - go 1.22
 #   - git, curl, ca-certificates
-#   - the @uniqus/sandbox-agent code under /opt/sandbox-agent
+#   - the Uniqus in-VM agent (statically-linked Rust musl binary) at
+#     /opt/sandbox-agent/uniqus-agent — Plan §1
 #   - an /etc/init.d/uniqus-agent service that mounts /sandbox + boots the agent
 #
 # Run on the same host as host-setup.sh, after that script. Idempotent: re-run
@@ -79,17 +80,56 @@ chroot "${MNT}" /sbin/apk add --no-cache \
   go git curl ca-certificates iproute2 \
   socat dropbear-ssh
 
-echo "[4/5] Installing the in-VM agent + init service…"
-mkdir -p "${MNT}/opt/sandbox-agent/src" "${MNT}/sandbox"
-install -m 0644 "${AGENT_SRC}/package.json"   "${MNT}/opt/sandbox-agent/package.json"
-install -m 0755 "${AGENT_SRC}/src/agent.mjs"  "${MNT}/opt/sandbox-agent/src/agent.mjs"
+echo "[4/5] Building + installing the in-VM agent (Rust, musl) + init service…"
+mkdir -p "${MNT}/opt/sandbox-agent" "${MNT}/sandbox"
 
-# Init: mount /sandbox from /dev/vdb (the per-project sandbox image), then
-# launch the agent. Alpine init system is OpenRC.
-cat > "${MNT}/etc/init.d/uniqus-agent" <<'EOF'
+# The agent is a statically-linked musl binary so it runs on Alpine without a
+# libc match. We compile on the host (faster than inside the chroot) targeting
+# x86_64-unknown-linux-musl. Cargo + the musl target must be installed once on
+# this build host:
+#   curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
+#   . "$HOME/.cargo/env"
+#   rustup target add x86_64-unknown-linux-musl
+#   apt-get install -y musl-tools  # provides musl-gcc for the linker
+#
+# If cargo is missing we fall back to the legacy Node agent — slower to boot
+# and larger memory footprint, but the rootfs still works while the operator
+# installs Rust.
+RUST_TARGET="x86_64-unknown-linux-musl"
+if command -v cargo >/dev/null 2>&1; then
+  echo "  → cargo build --release --target ${RUST_TARGET}"
+  ( cd "${AGENT_SRC}" && cargo build --release --target "${RUST_TARGET}" )
+  install -m 0755 \
+    "${AGENT_SRC}/target/${RUST_TARGET}/release/uniqus-agent" \
+    "${MNT}/opt/sandbox-agent/uniqus-agent"
+  cat > "${MNT}/etc/init.d/uniqus-agent" <<'EOF'
 #!/sbin/openrc-run
 
-description="Uniqus in-VM sandbox agent"
+description="Uniqus in-VM sandbox agent (Rust)"
+command="/opt/sandbox-agent/uniqus-agent"
+command_background=true
+pidfile="/run/uniqus-agent.pid"
+output_log="/var/log/uniqus-agent.log"
+error_log="/var/log/uniqus-agent.log"
+
+depend() {
+  need net localmount
+  after sandbox-mount
+}
+EOF
+else
+  echo "  ⚠ cargo not found — falling back to legacy Node agent."
+  echo "    To switch to the Rust agent (Plan §1), install rustup + the musl target on this host:"
+  echo "      curl https://sh.rustup.rs -sSf | sh -s -- -y && . \$HOME/.cargo/env"
+  echo "      rustup target add ${RUST_TARGET}"
+  echo "      apt-get install -y musl-tools"
+  mkdir -p "${MNT}/opt/sandbox-agent/src"
+  install -m 0644 "${AGENT_SRC}/package.json"  "${MNT}/opt/sandbox-agent/package.json"
+  install -m 0755 "${AGENT_SRC}/src/agent.mjs" "${MNT}/opt/sandbox-agent/src/agent.mjs"
+  cat > "${MNT}/etc/init.d/uniqus-agent" <<'EOF'
+#!/sbin/openrc-run
+
+description="Uniqus in-VM sandbox agent (Node fallback)"
 command="/usr/bin/node"
 command_args="/opt/sandbox-agent/src/agent.mjs"
 command_background=true
@@ -102,6 +142,7 @@ depend() {
   after sandbox-mount
 }
 EOF
+fi
 chmod 0755 "${MNT}/etc/init.d/uniqus-agent"
 
 cat > "${MNT}/etc/init.d/sandbox-mount" <<'EOF'

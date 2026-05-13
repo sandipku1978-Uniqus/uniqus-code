@@ -17,6 +17,8 @@ import EditorPreviewArea from "./EditorPreviewArea";
 import TerminalPanel from "./TerminalPanel";
 import DeployButton from "./DeployButton";
 import BrandLockup from "./BrandLockup";
+import GithubRepoButton from "./GithubRepoButton";
+import ChatSessionDropdown from "./ChatSessionDropdown";
 import SkillsModal from "./SkillsModal";
 import SecretsModal from "./SecretsModal";
 import CheckpointsModal from "./CheckpointsModal";
@@ -43,6 +45,10 @@ export default function Workspace({
   const router = useRouter();
   const searchParams = useSearchParams();
   const briefParam = searchParams?.get("brief") ?? null;
+  // Phase-2.x multi-session support: ?session=<uuid> binds the WS to a
+  // specific chat thread. Default (no param) resolves server-side to the
+  // project's default session.
+  const sessionParam = searchParams?.get("session") ?? null;
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [secretsOpen, setSecretsOpen] = useState(false);
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
@@ -57,11 +63,11 @@ export default function Workspace({
 
   useEffect(() => {
     reset();
-    connect(projectId);
+    connect(projectId, sessionParam);
     return () => {
       disconnect();
     };
-  }, [projectId, reset]);
+  }, [projectId, sessionParam, reset]);
 
   // One-sentence project creation: the picker passes the brief through
   // ?brief=…; once the WS is up, the project loaded, and the chat is
@@ -125,8 +131,10 @@ export default function Workspace({
         </div>
 
         <div className="actions">
+          <ChatSessionDropdown projectId={projectId} />
           <RunButton projectId={projectId} />
           <DeployButton projectId={projectId} />
+          <GithubRepoButton projectId={projectId} />
           <button
             onClick={() => setSkillsOpen(true)}
             className="toggle-btn"
@@ -186,7 +194,7 @@ export default function Workspace({
           <ToggleButton
             on={panels.terminal}
             onClick={() => togglePanel("terminal")}
-            label="Terminal"
+            label="Logs"
             icon={
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <polyline points="4 17 10 11 4 5" />

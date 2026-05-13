@@ -242,9 +242,6 @@ export default async function MarketingPage() {
           <Link href={ctaHref} className="btn-primary btn-lg">
             {ctaCta}
           </Link>
-          <a href="#" className="btn-secondary btn-lg">
-            Talk to sales
-          </a>
         </div>
       </div>
 
@@ -255,11 +252,6 @@ export default async function MarketingPage() {
             <span style={{ color: "var(--text-dim)" }}>© 2026 Uniqus Consultech</span>
           </div>
           <div className="links">
-            <a href="#">Status</a>
-            <a href="#">Changelog</a>
-            <a href="#">Security</a>
-            <a href="#">Terms</a>
-            <a href="#">Privacy</a>
             <a href="https://uniqus.com">uniqus.com ↗</a>
           </div>
         </div>

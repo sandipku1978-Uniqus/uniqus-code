@@ -29,8 +29,31 @@ export interface VmHandle {
   gatewayIp: string;
   /** MAC address handed to the guest interface. Stable per-project. */
   guestMac: string;
-  /** Status; pause/resume mutate this. */
-  state: "running" | "paused" | "stopped";
+  /**
+   * VM state. Lifecycle:
+   *   running   ─(idle FIRECRACKER_IDLE_PAUSE_MS)→        paused
+   *   paused    ─(idle FIRECRACKER_IDLE_SNAPSHOT_MS)→     snapshotted
+   *   any-live  ─(destroy)→                               stopped
+   *
+   * `paused` keeps the firecracker process alive — RAM is held, resume is
+   * sub-millisecond. `snapshotted` writes the VM state + memory to disk
+   * and kills the firecracker process — RAM is freed, resume is sub-second
+   * via `loadSnapshot`. The two-tier policy means a project tabbed away
+   * for a few minutes resumes instantly; one tabbed away for hours stops
+   * paying for RAM but still skips the ~15 s cold boot.
+   */
+  state: "running" | "paused" | "snapshotted" | "stopped";
   /** Last activity (ms since epoch). Drives the idle-pause sweeper. */
   lastUsedAt: number;
+  /** When the VM was last paused. Drives the snapshot-after-pause escalation. */
+  pausedAt?: number;
+  /**
+   * Which in-VM agent implementation answered /health when this VM came up.
+   * "rust" is the canonical agent (Plan §1); "node" is the legacy fallback
+   * build-rootfs.sh selects when the host lacks a Rust toolchain. We track
+   * it here so /health on the orchestrator can surface the per-VM breakdown
+   * — operationally important because a silent Rust→Node fallback regresses
+   * VM cold-start time without any obvious symptom.
+   */
+  agentKind?: "rust" | "node" | "unknown";
 }

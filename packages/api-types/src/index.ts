@@ -48,6 +48,12 @@ export interface ProjectSummary {
   icon: string | null;
   created_at: string;
   updated_at: string;
+  /** Web URL of the linked GitHub repo, if the user has clicked "Create GitHub repo". */
+  github_repo_url?: string | null;
+  /** "owner/name" form for compact display. */
+  github_repo_full_name?: string | null;
+  /** Vercel-side project name, populated after the first Vercel deploy. */
+  vercel_project_name?: string | null;
 }
 
 export interface CurrentUser {
@@ -66,9 +72,24 @@ export type ServerEvent =
       platform: string;
       project: ProjectSummary;
       user: CurrentUser;
+      /**
+       * Active chat session id (Phase 2.x). The workspace dropdown uses this
+       * to highlight which thread is currently bound; reconnect with
+       * `?session=<id>` to switch.
+       */
+      chat_session?: { id: string; title: string | null };
     }
   | { type: "iteration"; iter: number }
   | { type: "text"; content: string }
+  | {
+      /**
+       * Non-agent system message — VM lifecycle, storage sync notices, etc.
+       * Renders in muted/grey type so the user doesn't mistake it for agent
+       * output. Don't use for anything the agent itself "said".
+       */
+      type: "system";
+      content: string;
+    }
   | { type: "tool_call"; call_id: string; name: string; input: unknown }
   | { type: "tool_result"; call_id: string; result: string; is_error: boolean }
   | { type: "plan_proposed"; plan: Plan }

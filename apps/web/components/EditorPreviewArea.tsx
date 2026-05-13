@@ -146,10 +146,10 @@ export default function EditorPreviewArea() {
         {activeFilePath && <CodeEditor />}
         {!hasAnyTabs && (
           <div className="editor-empty">
-            <h3>Nothing here yet.</h3>
+            <h3>Your preview will show up here.</h3>
             <p>
-              Open a file from the file explorer, or have Codex start a dev server — it&apos;ll
-              appear as a preview tab here.
+              Once Codex starts the project, a live preview opens here as a tab. You can also
+              open a file from the explorer to see its code.
             </p>
           </div>
         )}

@@ -3,30 +3,35 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { FirecrackerClient, spawnFirecracker } from "./client.js";
-import { ping, pushFile } from "./agentRpc.js";
+import { pingAgent, pushFile } from "./agentRpc.js";
 import type { VmHandle } from "./types.js";
 
 /**
  * Firecracker fleet manager (Plan §1).
  *
- * Owns the per-project VM lifecycle:
- *   1. Boot a VM from a base rootfs + per-project overlay.
- *   2. Hand a `VmHandle` to the orchestrator's session (which threads it
- *      into the Sandbox).
- *   3. Pause idle VMs and resume them on demand (cheap warm pool).
- *   4. Destroy on project delete.
+ * Owns the per-project VM lifecycle through four states:
+ *   running     — firecracker process up, VM executing, agent reachable.
+ *   paused      — firecracker process up, VM frozen via PATCH /vm Paused.
+ *                 RAM held; resume is sub-millisecond.
+ *   snapshotted — firecracker process gone, VM state + memory on disk.
+ *                 RAM freed; resume costs one mmap of the memory file
+ *                 (typically sub-second). Reached by escalation from
+ *                 `paused` after FIRECRACKER_IDLE_SNAPSHOT_MS.
+ *   stopped     — destroyed; on-disk artifacts (rootfs, sandbox image,
+ *                 snapshot pair, tap device) cleaned up.
  *
- * Phase-2 substrate: minimal but real. Snapshot/restore for sub-second
- * cold-start (Plan §4) is plumbed into the API client but the fleet
- * manager wires up snapshots in a follow-up (Phase-3 polish).
+ * Cross-process restore: the rootfs path, sandbox image path, and tap name
+ * are all derived deterministically from projectId, so a snapshot taken in
+ * one orchestrator process can be loaded by the next one (`tryRehydrateSnapshot`).
+ * That's where the "sub-second cold start across restarts" promise from
+ * Plan §4 comes from.
  *
  * Hetzner notes:
- *   - We assume each VM gets its own TAP device (named `tap-<short-id>`).
- *     The per-host setup script in `infra/firecracker/host-setup.sh`
+ *   - The per-host setup script in `infra/firecracker/host-setup.sh`
  *     creates the bridge and iptables masquerade once at boot.
- *   - Each VM gets a /29 from the 172.16.0.0/12 private range. The fleet
- *     allocates from a free-list; collisions across orchestrator restarts
- *     are avoided by keying off the project id.
+ *   - Each VM gets a /16 host pair (a.b) from the 172.16.0.0/16 range,
+ *     hashed off projectId for stability across restarts. Collisions are
+ *     a Phase-3 problem (~256 projects/host birthday).
  */
 
 const STATE_DIR =
@@ -38,6 +43,25 @@ const ROOTFS_BASE_PATH =
 const VM_VCPUS = Number(process.env.FIRECRACKER_VCPUS ?? 2);
 const VM_MEM_MIB = Number(process.env.FIRECRACKER_MEM_MIB ?? 1024);
 const IDLE_PAUSE_MS = Number(process.env.FIRECRACKER_IDLE_PAUSE_MS ?? 5 * 60_000);
+/**
+ * After this much time *paused* (separate from total idle), escalate the VM
+ * from in-memory pause to a full snapshot-and-kill so its RAM is returned to
+ * the host. Default 30 min — balances "snapshots cost disk I/O equal to RAM
+ * size" against "a single 1 GiB VM tying up RAM for hours has a real cost on
+ * a 100-VM host".
+ */
+const IDLE_SNAPSHOT_AFTER_PAUSE_MS = Number(
+  process.env.FIRECRACKER_IDLE_SNAPSHOT_MS ?? 30 * 60_000,
+);
+/**
+ * Hard idle ceiling — after this much total inactivity, destroy the VM and
+ * its on-disk artifacts entirely. Without this, paused/snapshotted VMs
+ * accumulate forever and eat the host's disk. 24 h is the dogfood default;
+ * lower it for a small host.
+ */
+const VM_GC_MAX_IDLE_MS = Number(
+  process.env.FIRECRACKER_GC_MAX_IDLE_MS ?? 24 * 60 * 60_000,
+);
 const BRIDGE_NAME = process.env.FIRECRACKER_BRIDGE ?? "fcbr0";
 const BRIDGE_GATEWAY = process.env.FIRECRACKER_GATEWAY ?? "172.16.0.1";
 const BRIDGE_NETMASK = process.env.FIRECRACKER_NETMASK ?? "255.255.0.0";
@@ -45,9 +69,15 @@ const BRIDGE_NETMASK = process.env.FIRECRACKER_NETMASK ?? "255.255.0.0";
 interface ManagedVm {
   handle: VmHandle;
   client: FirecrackerClient;
-  /** firecracker process pid so we can SIGTERM on shutdown. */
+  /**
+   * firecracker process pid + close fn. Both are replaced when a VM is
+   * restored from a snapshot — the restored VM runs in a brand-new
+   * firecracker process bound to a brand-new API socket.
+   */
   fcPid: number;
   fcClose: () => void;
+  /** Where we hydrated host files from at boot — needed for re-hydration on restore. */
+  hostSandboxDir: string;
 }
 
 const vms = new Map<string, ManagedVm>();
@@ -62,12 +92,19 @@ export interface BootOpts {
 export async function ensureVm(opts: BootOpts): Promise<VmHandle> {
   const existing = vms.get(opts.projectId);
   if (existing) {
-    if (existing.handle.state === "paused") {
+    if (existing.handle.state === "snapshotted") {
+      await restoreFromSnapshot(opts.projectId);
+    } else if (existing.handle.state === "paused") {
       await resume(opts.projectId);
     }
     existing.handle.lastUsedAt = Date.now();
     return existing.handle;
   }
+  // No in-memory entry. Maybe a previous orchestrator process left a
+  // snapshot for this project on disk — rehydrate from it before paying
+  // a fresh ~15 s cold boot.
+  const rehydrated = await tryRehydrateSnapshot(opts);
+  if (rehydrated) return rehydrated;
   return await bootNew(opts);
 }
 
@@ -77,18 +114,25 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
   const id = `vm_${opts.projectId.slice(0, 8)}_${randomUUID().slice(0, 4)}`;
   const apiSocket = path.join(STATE_DIR, `${id}.api.sock`);
   const vsockUds = path.join(STATE_DIR, `${id}.vsock`);
-  const rootImagePath = path.join(STATE_DIR, `${id}.root.ext4`);
+  // Rootfs path is stable per-project (not per-vm-id) so a snapshot taken
+  // from one orchestrator process can find its drive when the next process
+  // rehydrates it. Same reason the tap name is project-deterministic.
+  const rootImagePath = projectRootImagePath(opts.projectId);
 
   console.log(`[fleet ${id}] step 1/8: copy-on-write rootfs from ${ROOTFS_BASE_PATH}`);
   // Per-project overlay rootfs: copy the base rootfs once. Fast on most
   // Linux filesystems thanks to copy-on-write (XFS reflink, btrfs CoW,
   // ZFS clone). Falls back to plain copy when CoW isn't available.
-  await copyOnWrite(ROOTFS_BASE_PATH, rootImagePath);
+  // Skip if the overlay already exists (e.g. left over from a snapshot
+  // that we couldn't rehydrate but whose drives are still on disk).
+  if (!(await pathExists(rootImagePath))) {
+    await copyOnWrite(ROOTFS_BASE_PATH, rootImagePath);
+  }
 
   // Allocate per-VM networking. Hash projectId → /16 host octets so the
   // same project gets the same IP across orchestrator restarts. MAC is
   // a locally-administered prefix (02:fc:…) seeded from the same hash.
-  const { ip, gatewayIp, mac, tapName } = allocateNetwork(opts.projectId, id);
+  const { ip, gatewayIp, mac, tapName } = allocateNetwork(opts.projectId);
   console.log(`[fleet ${id}] step 2/8: allocated ip=${ip} mac=${mac} tap=${tapName}`);
   await ensureBridge();
   console.log(`[fleet ${id}] step 3/8: bridge ${BRIDGE_NAME} verified`);
@@ -178,7 +222,9 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
   let pingAttempts = 0;
   while (Date.now() < deadline) {
     pingAttempts++;
-    if (await ping(handle)) {
+    const kind = await pingAgent(handle);
+    if (kind !== null) {
+      handle.agentKind = kind;
       healthy = true;
       break;
     }
@@ -211,7 +257,19 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
         `try: ping ${ip} (kernel network up?) and curl http://${ip}:${agentPort}/health (in-VM agent running?)`,
     );
   }
-  console.log(`[fleet ${id}] in-VM agent healthy after ${pingAttempts} ping attempts`);
+  console.log(
+    `[fleet ${id}] in-VM agent healthy after ${pingAttempts} ping attempts (kind=${handle.agentKind ?? "unknown"})`,
+  );
+  if (handle.agentKind === "node") {
+    // The Rust agent is meant to be canonical. A silent fallback to Node
+    // (e.g. build host without rustup) regresses cold-start time without
+    // any visible symptom. Warn so the operator sees it in logs even
+    // without scraping /health.
+    console.warn(
+      `[fleet ${id}] booted with Node fallback agent — install cargo + ` +
+        `musl-tools on the rootfs build host to switch to the Rust agent.`,
+    );
+  }
 
   // Initial hydration: push host-side project files into the VM. Cheap on
   // small projects; the in-VM agent acks each file. Cap so a runaway
@@ -220,7 +278,13 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
     console.error(`[vm ${id}] initial hydration failed:`, err);
   });
 
-  vms.set(opts.projectId, { handle, client, fcPid: fc.pid, fcClose: fc.close });
+  vms.set(opts.projectId, {
+    handle,
+    client,
+    fcPid: fc.pid,
+    fcClose: fc.close,
+    hostSandboxDir: opts.hostSandboxDir,
+  });
   return handle;
 }
 
@@ -264,6 +328,11 @@ export async function pause(projectId: string): Promise<void> {
   if (!vm || vm.handle.state !== "running") return;
   await vm.client.pauseInstance();
   vm.handle.state = "paused";
+  vm.handle.pausedAt = Date.now();
+  console.log(
+    `[fleet ${vm.handle.id}] paused — will snapshot if idle ` +
+      `${Math.round(IDLE_SNAPSHOT_AFTER_PAUSE_MS / 60_000)}m more`,
+  );
 }
 
 export async function resume(projectId: string): Promise<void> {
@@ -271,22 +340,190 @@ export async function resume(projectId: string): Promise<void> {
   if (!vm || vm.handle.state !== "paused") return;
   await vm.client.resumeInstance();
   vm.handle.state = "running";
+  vm.handle.pausedAt = undefined;
   vm.handle.lastUsedAt = Date.now();
+}
+
+/**
+ * Tier-2 idle escalation. The VM must already be `paused` — we ask
+ * firecracker to write its full state + memory to disk, then kill the
+ * firecracker process so the host gets that RAM back. The TAP device and
+ * drives stay in place so a subsequent `restoreFromSnapshot` can reattach
+ * without redoing host-side networking.
+ */
+async function snapshotPaused(projectId: string): Promise<void> {
+  const vm = vms.get(projectId);
+  if (!vm || vm.handle.state !== "paused") return;
+  const paths = snapshotPaths(vm.handle.projectId);
+  try {
+    // Snapshots can only be taken on a Paused VM. We're already there.
+    await vm.client.createSnapshot({
+      snapshot_path: paths.snapshot,
+      mem_file_path: paths.memory,
+      snapshot_type: "Full",
+    });
+  } catch (err) {
+    console.error(
+      `[fleet ${vm.handle.id}] snapshot failed; leaving VM paused:`,
+      err instanceof Error ? err.message : err,
+    );
+    return;
+  }
+  vm.fcClose();
+  // Drop the per-process artifacts. Drives + tap survive — the tap is reused
+  // when we spawn a fresh firecracker for the restore.
+  await fs.rm(vm.handle.apiSocket, { force: true }).catch(() => {});
+  await fs.rm(vm.handle.vsockUds, { force: true }).catch(() => {});
+  vm.handle.state = "snapshotted";
+  console.log(
+    `[fleet ${vm.handle.id}] snapshotted to ${paths.snapshot}; firecracker terminated, RAM freed`,
+  );
+}
+
+/**
+ * Resume a snapshotted VM in the same orchestrator process. Spawns a fresh
+ * firecracker, points it at the on-disk snapshot, and asks Firecracker to
+ * resume execution as part of the load. Cold path is bounded by the size of
+ * the memory dump (~mem_size_mib of mmap-backed I/O) — typically sub-second.
+ */
+async function restoreFromSnapshot(projectId: string): Promise<void> {
+  const vm = vms.get(projectId);
+  if (!vm || vm.handle.state !== "snapshotted") return;
+  const paths = snapshotPaths(vm.handle.projectId);
+  await fs.access(paths.snapshot);
+  await fs.access(paths.memory);
+  // Re-ensure the host-side bits the snapshot expects.
+  await ensureBridge();
+  await ensureTapDevice(vm.handle.tapDevice);
+  // Fresh API socket — the old one was unlinked when we snapshotted.
+  const fc = await spawnFirecracker({ socketPath: vm.handle.apiSocket });
+  const client = new FirecrackerClient(vm.handle.apiSocket);
+  await client.loadSnapshot({
+    snapshot_path: paths.snapshot,
+    mem_backend: { backend_type: "File", backend_path: paths.memory },
+    resume_vm: true,
+  });
+  vm.client = client;
+  vm.fcPid = fc.pid;
+  vm.fcClose = fc.close;
+  vm.handle.state = "running";
+  vm.handle.pausedAt = undefined;
+  vm.handle.lastUsedAt = Date.now();
+  console.log(`[fleet ${vm.handle.id}] restored from snapshot`);
+}
+
+/**
+ * Cross-process restore. Called when ensureVm is invoked for a project that
+ * has no in-memory entry, but a snapshot exists on disk from a prior
+ * orchestrator process. Reconstructs a `ManagedVm` from convention
+ * (deterministic IP/MAC/tap/rootfs paths) and loads the snapshot.
+ *
+ * Returns null (and the caller falls through to a fresh boot) if either
+ * snapshot artifact is missing or the load fails — we don't want a single
+ * corrupt snapshot to wedge the project forever.
+ */
+async function tryRehydrateSnapshot(opts: BootOpts): Promise<VmHandle | null> {
+  const paths = snapshotPaths(opts.projectId);
+  if (!(await pathExists(paths.snapshot)) || !(await pathExists(paths.memory))) {
+    return null;
+  }
+  const id = `vm_${opts.projectId.slice(0, 8)}_rehyd`;
+  const apiSocket = path.join(STATE_DIR, `${id}.api.sock`);
+  const vsockUds = path.join(STATE_DIR, `${id}.vsock`);
+  const { ip, gatewayIp, mac, tapName } = allocateNetwork(opts.projectId);
+  const rootImagePath = projectRootImagePath(opts.projectId);
+
+  console.log(`[fleet ${id}] rehydrating from on-disk snapshot for ${opts.projectId.slice(0, 8)}`);
+  const t0 = Date.now();
+  try {
+    await ensureBridge();
+    await ensureTapDevice(tapName);
+    const fc = await spawnFirecracker({ socketPath: apiSocket });
+    const client = new FirecrackerClient(apiSocket);
+    await client.loadSnapshot({
+      snapshot_path: paths.snapshot,
+      mem_backend: { backend_type: "File", backend_path: paths.memory },
+      resume_vm: true,
+    });
+    const handle: VmHandle = {
+      id,
+      projectId: opts.projectId,
+      rootImagePath,
+      guestCid: ++cidSeq,
+      agentPort: 51_000,
+      apiSocket,
+      vsockUds,
+      tapDevice: tapName,
+      ip,
+      gatewayIp,
+      guestMac: mac,
+      state: "running",
+      lastUsedAt: Date.now(),
+    };
+    vms.set(opts.projectId, {
+      handle,
+      client,
+      fcPid: fc.pid,
+      fcClose: fc.close,
+      hostSandboxDir: opts.hostSandboxDir,
+    });
+    console.log(`[fleet ${id}] rehydrated in ${Date.now() - t0}ms — skipped cold boot`);
+    return handle;
+  } catch (err) {
+    console.error(
+      `[fleet ${id}] rehydrate failed (${err instanceof Error ? err.message : err}); ` +
+        `discarding snapshot and falling back to cold boot`,
+    );
+    // Trash the snapshot so we don't loop on a corrupt one.
+    await fs.rm(paths.snapshot, { force: true }).catch(() => {});
+    await fs.rm(paths.memory, { force: true }).catch(() => {});
+    await teardownTap(tapName).catch(() => {});
+    return null;
+  }
 }
 
 export async function destroy(projectId: string): Promise<void> {
   const vm = vms.get(projectId);
-  if (!vm) return;
-  try {
-    await vm.client.ctrlAltDel();
-  } catch {}
-  vm.fcClose();
+  if (!vm) {
+    // No in-memory record but we may still own on-disk snapshot/rootfs/sandbox
+    // artifacts (orphan from a previous orchestrator process). Sweep them.
+    await destroyOnDiskArtifacts(projectId).catch(() => {});
+    return;
+  }
+  // Only ctrl-alt-del if the firecracker process is alive — for a snapshotted
+  // VM the process is already gone.
+  if (vm.handle.state === "running" || vm.handle.state === "paused") {
+    try {
+      await vm.client.ctrlAltDel();
+    } catch {}
+    vm.fcClose();
+  }
   await fs.rm(vm.handle.apiSocket, { force: true }).catch(() => {});
   await fs.rm(vm.handle.vsockUds, { force: true }).catch(() => {});
   await fs.rm(vm.handle.rootImagePath, { force: true }).catch(() => {});
+  const paths = snapshotPaths(vm.handle.projectId);
+  await fs.rm(paths.snapshot, { force: true }).catch(() => {});
+  await fs.rm(paths.memory, { force: true }).catch(() => {});
+  await fs
+    .rm(path.join(STATE_DIR, `${projectId}.sandbox.ext4`), { force: true })
+    .catch(() => {});
   await teardownTap(vm.handle.tapDevice).catch(() => {});
   vm.handle.state = "stopped";
   vms.delete(projectId);
+}
+
+/** Wipe everything we can name from a projectId without an in-memory record. */
+async function destroyOnDiskArtifacts(projectId: string): Promise<void> {
+  const paths = snapshotPaths(projectId);
+  await fs.rm(paths.snapshot, { force: true }).catch(() => {});
+  await fs.rm(paths.memory, { force: true }).catch(() => {});
+  await fs.rm(projectRootImagePath(projectId), { force: true }).catch(() => {});
+  await fs
+    .rm(path.join(STATE_DIR, `${projectId}.sandbox.ext4`), { force: true })
+    .catch(() => {});
+  // Tap device — we know its name by convention.
+  const { tapName } = allocateNetwork(projectId);
+  await teardownTap(tapName).catch(() => {});
 }
 
 export function listVms(): VmHandle[] {
@@ -339,21 +576,118 @@ function runCmd(cmd: string, args: string[]): Promise<void> {
   });
 }
 
-// Background sweep: pause VMs idle longer than IDLE_PAUSE_MS so a 100-VM
-// host doesn't pay full RAM for projects no one is touching. Cheap to
-// resume — Firecracker's pause is in-memory, sub-millisecond.
+/**
+ * Background sweep — three escalating actions per tick:
+ *   1. running   → paused        if idle > IDLE_PAUSE_MS
+ *   2. paused    → snapshotted   if paused > IDLE_SNAPSHOT_AFTER_PAUSE_MS
+ *      (frees RAM but keeps the cheap restore path)
+ *   3. snapshotted/paused → destroyed if total idle > VM_GC_MAX_IDLE_MS
+ *      (frees disk too — paid back on the next access via cold boot)
+ *
+ * Plus an opportunistic disk GC for orphan artifacts left behind by a
+ * previous orchestrator process whose project has since been deleted.
+ */
 let sweeperStarted = false;
+let sweeperTimer: ReturnType<typeof setInterval> | null = null;
 export function startIdleSweeper(): void {
   if (sweeperStarted) return;
   sweeperStarted = true;
-  setInterval(() => {
+  // First tick: clean up any orphan snapshot/sandbox files older than the GC
+  // ceiling. Cheap and bounded by directory size.
+  void gcOrphanedSnapshots().catch((err) =>
+    console.error(`[fleet] orphan GC failed:`, err instanceof Error ? err.message : err),
+  );
+  sweeperTimer = setInterval(() => {
     const now = Date.now();
     for (const [, vm] of vms) {
-      if (vm.handle.state === "running" && now - vm.handle.lastUsedAt > IDLE_PAUSE_MS) {
+      const idleMs = now - vm.handle.lastUsedAt;
+      if (idleMs > VM_GC_MAX_IDLE_MS && vm.handle.state !== "running") {
+        console.log(
+          `[fleet ${vm.handle.id}] idle ${Math.round(idleMs / 60_000)}m > GC ceiling, destroying`,
+        );
+        destroy(vm.handle.projectId).catch(() => {});
+        continue;
+      }
+      if (vm.handle.state === "running" && idleMs > IDLE_PAUSE_MS) {
         pause(vm.handle.projectId).catch(() => {});
+        continue;
+      }
+      if (
+        vm.handle.state === "paused" &&
+        vm.handle.pausedAt !== undefined &&
+        now - vm.handle.pausedAt > IDLE_SNAPSHOT_AFTER_PAUSE_MS
+      ) {
+        snapshotPaused(vm.handle.projectId).catch(() => {});
       }
     }
-  }, 30_000).unref();
+  }, 30_000);
+  // .unref() so a still-running sweeper doesn't keep the process alive past
+  // normal exit. Shutdown handlers call stopIdleSweeper() to clear cleanly.
+  sweeperTimer.unref();
+}
+
+/**
+ * Stop the idle sweeper so the orchestrator can finish a SIGTERM cleanly
+ * instead of waiting up to 30s for the next tick. Idempotent.
+ */
+export function stopIdleSweeper(): void {
+  if (sweeperTimer) {
+    clearInterval(sweeperTimer);
+    sweeperTimer = null;
+  }
+  sweeperStarted = false;
+}
+
+/**
+ * Walk STATE_DIR for `<projectId>.snapshot` files that aren't referenced by
+ * any in-memory VM and whose mtime is older than the GC ceiling. Delete the
+ * snapshot pair + the matching rootfs/sandbox images.
+ *
+ * This is the only path that frees disk for projects nobody is touching
+ * across orchestrator restarts. Without it, every paused-then-snapshotted
+ * VM accumulates ~mem-size of disk forever.
+ */
+async function gcOrphanedSnapshots(): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await fs.readdir(STATE_DIR);
+  } catch {
+    return;
+  }
+  const live = new Set<string>(Array.from(vms.keys()));
+  const cutoff = Date.now() - VM_GC_MAX_IDLE_MS;
+  for (const f of entries) {
+    if (!f.endsWith(".snapshot")) continue;
+    const projectId = f.slice(0, -".snapshot".length);
+    if (live.has(projectId)) continue;
+    const fullPath = path.join(STATE_DIR, f);
+    try {
+      const stat = await fs.stat(fullPath);
+      if (stat.mtimeMs > cutoff) continue;
+      await destroyOnDiskArtifacts(projectId);
+      console.log(`[fleet] GC removed orphan snapshot for ${projectId.slice(0, 8)}`);
+    } catch {}
+  }
+}
+
+function snapshotPaths(projectId: string): { snapshot: string; memory: string } {
+  return {
+    snapshot: path.join(STATE_DIR, `${projectId}.snapshot`),
+    memory: path.join(STATE_DIR, `${projectId}.memory`),
+  };
+}
+
+function projectRootImagePath(projectId: string): string {
+  return path.join(STATE_DIR, `${projectId}.root.ext4`);
+}
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Mark a VM as recently active (called on every sandbox op via fleet middleware). */
@@ -381,8 +715,13 @@ interface NetAlloc {
  * across restarts. Two projects collide once per ~256k pairs (birthday at
  * ~256 projects on a single host); collision retry would only matter at
  * thousands of VMs/host. Phase-3 problem if it shows up.
+ *
+ * The tap name is also derived from projectId (not the per-boot VM id), so
+ * a snapshot taken in one orchestrator process can be reattached to the
+ * same tap by the next process. Linux caps tap names at 15 chars — we use
+ * `tap-` (4) + 11 hex chars (44 bits of the project hash) to stay under it.
  */
-function allocateNetwork(projectId: string, vmId: string): NetAlloc {
+function allocateNetwork(projectId: string): NetAlloc {
   const h = createHash("sha256").update(projectId).digest();
   // Reserve .0 (network), .1 (gateway), .255 (broadcast). Skip 1..2.
   const a = h[0];
@@ -392,8 +731,8 @@ function allocateNetwork(projectId: string, vmId: string): NetAlloc {
   // Locally-administered MAC: 02:FC:<projectHash[2..6]>
   const hex = (n: number): string => n.toString(16).padStart(2, "0");
   const mac = `02:fc:${hex(h[2])}:${hex(h[3])}:${hex(h[4])}:${hex(h[5])}`;
-  // TAP names cap at 15 chars on Linux; keep our prefix short.
-  const tapName = `tap-${vmId.slice(-9)}`;
+  // Deterministic, ≤15 chars: "tap-" + 11 hex chars of project hash.
+  const tapName = `tap-${h.subarray(7, 13).toString("hex").slice(0, 11)}`;
   return { ip, gatewayIp: BRIDGE_GATEWAY, mac, tapName };
 }
 

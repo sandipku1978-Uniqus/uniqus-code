@@ -357,3 +357,73 @@ export async function listUserRepos(user: UserRecord): Promise<GithubRepo[]> {
 }
 
 export { getGithubToken };
+
+export interface CreatedRepo {
+  /** GitHub-canonical "owner/name". */
+  full_name: string;
+  /** Web URL (https://github.com/...) for the user-facing card. */
+  html_url: string;
+  /** Git clone URL for the initial push. */
+  clone_url: string;
+  /** Default branch name picked by GitHub (we requested "main"). */
+  default_branch: string;
+  /** Whether the repo was created private (always true today). */
+  private: boolean;
+}
+
+/**
+ * Create a fresh repo on the user's GitHub account using their stored OAuth
+ * token. Always private — promoting to public is a one-click action on
+ * github.com if the user wants it. `name` should already be GitHub-legal
+ * (alphanumeric + hyphens). 422 on collision returns a recognizable error.
+ */
+export async function createUserRepo(
+  user: UserRecord,
+  name: string,
+  description: string | null,
+): Promise<CreatedRepo> {
+  const token = await getGithubToken(user.id);
+  if (!token) {
+    throw new Error("github_not_connected");
+  }
+  const res = await fetch("https://api.github.com/user/repos", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "User-Agent": "uniqus-code",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      name,
+      description: description ?? "",
+      private: true,
+      auto_init: false,
+    }),
+  });
+  if (res.status === 401) {
+    await clearGithubToken(user.id);
+    throw new Error("github_not_connected");
+  }
+  if (res.status === 422) {
+    const body = (await res.json().catch(() => ({}))) as { message?: string };
+    throw new Error(`repo create rejected: ${body.message ?? "name taken or invalid"}`);
+  }
+  if (!res.ok) {
+    throw new Error(`github api ${res.status}`);
+  }
+  const r = (await res.json()) as {
+    full_name: string;
+    html_url: string;
+    clone_url: string;
+    default_branch: string;
+    private: boolean;
+  };
+  return {
+    full_name: r.full_name,
+    html_url: r.html_url,
+    clone_url: r.clone_url,
+    default_branch: r.default_branch || "main",
+    private: r.private,
+  };
+}

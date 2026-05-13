@@ -43,6 +43,23 @@ User experience:
 - If a web app should be previewed, use start_server and give the public_url returned by the tool. Do not invent a localhost URL.
 - If you cannot run something, say exactly what blocked you and what you already tried.
 
+Default working style:
+- Move from ambiguity to action: inspect the project, make conservative assumptions, and keep implementing unless a choice is genuinely risky or impossible to infer.
+- Before changing an existing app, identify its framework, package scripts, layout patterns, reusable components, styling system, and the smallest files that own the requested behavior.
+- Preserve the user's work. Do not overwrite unrelated edits, regenerate large files, or replace existing architecture when a focused change will solve the task.
+- Prefer complete, working vertical slices over static mockups. Wire realistic states, interactions, loading/error/empty states, and persistence when the feature implies them.
+- After errors, read the actual failure output, fix the root cause, and verify the fix. If one approach fails repeatedly, change approach instead of retrying the same command.
+
+Product and design quality:
+- When building UI, make the first screen the usable product experience, not a marketing placeholder, unless the user explicitly asked for a landing page.
+- Match the interface to the product domain. Operational tools should be dense, calm, scannable, and task-focused; consumer, editorial, game, or portfolio work can be more expressive.
+- Reuse existing design tokens, components, icon sets, routes, and state patterns before adding new ones. Keep spacing, radii, type scale, and color usage internally consistent.
+- Use real, specific copy and plausible data. Include empty, loading, disabled, error, and success states where users would naturally hit them.
+- Build responsive layouts deliberately: stable dimensions, no text overlap, usable touch targets on mobile, and no viewport-width font scaling.
+- Include accessible semantics, labels, keyboard reachability, visible focus states, sufficient contrast, and reduced-motion-friendly animation.
+- Use visual assets when a site, app, or game needs them. Prefer uploaded assets, local assets, generated bitmap assets, or relevant public assets over generic placeholder blocks.
+- After meaningful frontend work, start or reuse a preview server and inspect it with screenshot_preview at desktop and mobile sizes. Fix obvious layout, contrast, or rendering issues before reporting completion.
+
 Environment:
 - OS platform: ${platform}
 - ${platformWarning}
@@ -561,10 +578,22 @@ async function executeTool(
     }
     case "list_secrets": {
       if (!projectId) return "(secrets unavailable in non-project session)";
-      const rows = await listProjectSecrets(projectId);
-      if (rows.length === 0) return "(no secrets configured for this project)";
+      // env="*" → list across every env; default → only the `default` env so
+      // the agent doesn't accidentally try to plumb a production secret.
+      const envArg =
+        typeof args.env === "string" && args.env.trim() ? args.env.trim() : undefined;
+      const envFilter = envArg === "*" ? null : envArg;
+      const rows = await listProjectSecrets(projectId, envFilter);
+      if (rows.length === 0) {
+        return envArg
+          ? `(no secrets configured for env '${envArg}')`
+          : "(no secrets configured for this project)";
+      }
       return rows
-        .map((r) => `${r.name}${r.description ? ` — ${r.description}` : ""}`)
+        .map(
+          (r) =>
+            `${r.name}\t[env=${r.env}]${r.description ? `\t${r.description}` : ""}`,
+        )
         .join("\n");
     }
     case "get_secret": {
@@ -580,11 +609,13 @@ async function executeTool(
         userId,
         name: args.name.trim(),
         envFile: typeof args.env_file === "string" ? args.env_file : undefined,
+        env: typeof args.env === "string" ? args.env : undefined,
       });
       return JSON.stringify({
         env_var: r.env_var,
         env_file: r.env_file,
-        note: `The plaintext value was written to ${r.env_file}; read it from process.env.${r.env_var} (Node) or os.environ["${r.env_var}"] (Python). The value is NOT in the agent's tool-result context.`,
+        env: r.env,
+        note: `The plaintext value (from env '${r.env}') was written to ${r.env_file}; read it from process.env.${r.env_var} (Node) or os.environ["${r.env_var}"] (Python). The value is NOT in the agent's tool-result context.`,
       });
     }
     case "list_assets": {

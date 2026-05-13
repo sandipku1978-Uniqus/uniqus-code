@@ -16,14 +16,14 @@ export default function TerminalPanel({ onClose }: { onClose: () => void }) {
       <div className="terminal-tabs">
         <div className="tab active" style={{ cursor: "default" }}>
           <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--conf-high)" }} />
-          <span>Terminal</span>
+          <span>Logs</span>
         </div>
         <div className="actions">
           <button
             type="button"
             onClick={onClose}
             className="icon-btn-sm"
-            title="Hide terminal"
+            title="Hide logs"
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <line x1="18" y1="6" x2="6" y2="18" />
@@ -35,7 +35,7 @@ export default function TerminalPanel({ onClose }: { onClose: () => void }) {
       <div ref={scrollRef} className="terminal-body">
         {lines.length === 0 && (
           <div className="term-empty">
-            run_command output appears here.
+            Commands the agent runs will show up here.
           </div>
         )}
         {lines.map((line, i) => (

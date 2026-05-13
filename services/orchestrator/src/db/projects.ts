@@ -10,6 +10,8 @@ export interface ProjectRecord {
   updated_at: string;
   vercel_project_id?: string | null;
   vercel_project_name?: string | null;
+  github_repo_url?: string | null;
+  github_repo_full_name?: string | null;
 }
 
 export async function listProjects(ownerId: string): Promise<ProjectRecord[]> {
@@ -105,6 +107,28 @@ export async function deleteProject(id: string, ownerId: string): Promise<void> 
     .eq("id", id)
     .eq("owner_id", ownerId);
   if (error) throw new Error(`deleteProject failed: ${error.message}`);
+}
+
+/**
+ * Stamp the GitHub repo link onto the row after the user creates one through
+ * the workspace topbar. Surfaced in the All Projects view's card so the user
+ * can jump back to the repo on github.com without remembering the URL.
+ */
+export async function setGithubRepo(
+  id: string,
+  ownerId: string,
+  url: string,
+  fullName: string,
+): Promise<void> {
+  const { error } = await db()
+    .from("projects")
+    .update({
+      github_repo_url: url,
+      github_repo_full_name: fullName,
+    })
+    .eq("id", id)
+    .eq("owner_id", ownerId);
+  if (error) throw new Error(`setGithubRepo failed: ${error.message}`);
 }
 
 /**

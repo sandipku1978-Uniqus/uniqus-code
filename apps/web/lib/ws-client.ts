@@ -3,10 +3,11 @@
 import type { ClientEvent, ServerEvent } from "@uniqus/api-types";
 import { useStore, flushAllPendingEdits } from "./store";
 
-function defaultWsUrl(projectId: string): string {
+function defaultWsUrl(projectId: string, sessionId: string | null): string {
   const explicit = process.env.NEXT_PUBLIC_WS_URL;
+  const session = sessionId ? `&session=${encodeURIComponent(sessionId)}` : "";
   if (explicit) {
-    return `${explicit}?project=${encodeURIComponent(projectId)}`;
+    return `${explicit}?project=${encodeURIComponent(projectId)}${session}`;
   }
   // Match the page's TLS state so the browser doesn't refuse a `ws://`
   // upgrade from an `https://` origin (mixed content). Falls back to
@@ -16,19 +17,36 @@ function defaultWsUrl(projectId: string): string {
     const proto = window.location.protocol === "https:" ? "wss" : "ws";
     const host = window.location.hostname;
     const port = window.location.protocol === "https:" ? "" : ":8787";
-    return `${proto}://${host}${port}?project=${encodeURIComponent(projectId)}`;
+    return `${proto}://${host}${port}?project=${encodeURIComponent(projectId)}${session}`;
   }
-  return `ws://localhost:8787?project=${encodeURIComponent(projectId)}`;
+  return `ws://localhost:8787?project=${encodeURIComponent(projectId)}${session}`;
 }
 
 let socket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let activeProjectId: string | null = null;
+let activeSessionId: string | null = null;
 const tasksAutoOpenedProjects = new Set<string>();
 
-export function connect(projectId: string): void {
-  // If asked to connect to a different project, close the old one first.
-  if (socket && activeProjectId !== projectId) {
+// Reconnect backoff. A fixed 1.5s delay made every connected browser hammer
+// the orchestrator after a deploy/OOM/network blip, which can stall recovery
+// under thundering-herd. Cap at 30s, jitter to spread the herd.
+const RECONNECT_BASE_MS = 1_000;
+const RECONNECT_CAP_MS = 30_000;
+let reconnectAttempts = 0;
+
+function nextReconnectDelay(): number {
+  const exp = Math.min(RECONNECT_CAP_MS, RECONNECT_BASE_MS * 2 ** reconnectAttempts);
+  // Full jitter — uniform across [0, exp]. Better at de-correlating clients
+  // than equal/decorrelated jitter for the small fleet sizes we have here.
+  return Math.floor(Math.random() * exp);
+}
+
+export function connect(projectId: string, sessionId: string | null = null): void {
+  // If asked to connect to a different project OR a different session within
+  // the same project, close the old socket first — server-side history is
+  // bound at upgrade time, so we have to reconnect to switch sessions.
+  if (socket && (activeProjectId !== projectId || activeSessionId !== sessionId)) {
     try {
       socket.close();
     } catch {}
@@ -41,12 +59,14 @@ export function connect(projectId: string): void {
     return;
   }
   activeProjectId = projectId;
+  activeSessionId = sessionId;
 
-  const ws = new WebSocket(defaultWsUrl(projectId));
+  const ws = new WebSocket(defaultWsUrl(projectId, sessionId));
   socket = ws;
 
   ws.onopen = () => {
     useStore.getState().setConnected(true);
+    reconnectAttempts = 0;
     send({ type: "request_tree" });
     // Replay any edits the user made while the socket was down. Without this
     // a flaky network leaves dirty buffers stranded only in client state.
@@ -57,9 +77,11 @@ export function connect(projectId: string): void {
     useStore.getState().setConnected(false);
     socket = null;
     if (reconnectTimer) clearTimeout(reconnectTimer);
+    const delay = nextReconnectDelay();
+    reconnectAttempts += 1;
     reconnectTimer = setTimeout(() => {
-      if (activeProjectId) connect(activeProjectId);
-    }, 1500);
+      if (activeProjectId) connect(activeProjectId, activeSessionId);
+    }, delay);
   };
 
   ws.onerror = () => {
@@ -78,6 +100,7 @@ export function connect(projectId: string): void {
 
 export function disconnect(): void {
   activeProjectId = null;
+  reconnectAttempts = 0;
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -107,6 +130,18 @@ function handleEvent(event: ServerEvent): void {
   const s = useStore.getState();
   switch (event.type) {
     case "session_started":
+      // The server unconditionally replays the full history right after this
+      // event (see startSession in server.ts). Treat session_started as the
+      // contract that authoritative history is incoming and wipe whatever
+      // we accumulated locally first; otherwise a WS flap mid-session
+      // doubles up the assistant text (or a session switch leaves the
+      // previous thread's messages stuck on screen).
+      //
+      // The only thing we lose is an in-flight assistant text that hadn't
+      // been persisted yet — but that text was already orphaned on the
+      // server when the socket dropped, so the user has to re-prompt
+      // either way. Better a clean replay than a dirty merge.
+      s.resetChat();
       s.setUser(event.user);
       s.setProject(event.project);
       s.addSystem(
@@ -120,6 +155,11 @@ function handleEvent(event: ServerEvent): void {
       break;
     case "text":
       s.appendText(event.content);
+      break;
+    case "system":
+      // Non-agent infra messages — VM lifecycle, storage notices, etc. Render
+      // muted so the user doesn't read them as agent output.
+      s.addSystem(event.content);
       break;
     case "tool_call":
       s.addToolCall(event.call_id, event.name, event.input);

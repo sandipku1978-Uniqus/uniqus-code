@@ -205,10 +205,10 @@ export default function ChatPanel() {
       <div ref={scrollRef} className="chat-scroll">
         {chat.length === 0 && (
           <div style={{ color: "var(--text-dim)", fontSize: 12.5, fontStyle: "italic" }}>
-            Brief Codex on what to build.{" "}
+            Describe what you want to build.{" "}
             {mode === "plan-then-execute"
-              ? "It will propose a plan first."
-              : "It will start working immediately."}
+              ? "Codex will propose a plan first."
+              : "Codex will start working immediately."}
           </div>
         )}
         {turns.map((turn, idx) => {
@@ -304,7 +304,7 @@ export default function ChatPanel() {
                 : !connected
                 ? "Reconnecting…"
                 : project
-                ? "Brief Codex — describe what to build…"
+                ? "Describe what you want Codex to build…"
                 : "Connecting…"
             }
             rows={2}

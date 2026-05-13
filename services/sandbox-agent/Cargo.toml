@@ -1,0 +1,31 @@
+[package]
+name = "uniqus-sandbox-agent"
+version = "0.1.0"
+edition = "2021"
+description = "In-VM sandbox agent (Plan §1). Runs inside a Firecracker microVM as PID 1's first child and serves the agent RPC over a TCP listener bridged from vsock. Wire-compatible with the prior Node implementation."
+publish = false
+
+[[bin]]
+name = "uniqus-agent"
+path = "src/main.rs"
+
+[dependencies]
+# Small, single-thread-per-request HTTP/1.1 server. Picked over hyper/axum
+# because we don't need an async runtime, websockets, or HTTP/2 — the only
+# client is the orchestrator and concurrency is "a handful of in-flight
+# requests at most". Smaller binary, simpler reasoning.
+tiny_http = { version = "0.12", default-features = false }
+# JSON in/out for every endpoint. Same wire format as the Node agent.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Used by /fs/grep — matches the Node agent's RegExp behavior closely enough
+# for our single-line pattern matching needs.
+regex = "1"
+
+[profile.release]
+# Smaller binary — this ships in every per-VM rootfs, so size matters.
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+opt-level = "z"

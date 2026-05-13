@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { ProjectSummary } from "@uniqus/api-types";
@@ -8,6 +8,7 @@ import BrandLockup from "./BrandLockup";
 import {
   fetchProjects,
   createProjectApi,
+  createProjectFromBriefApi,
   importGithubApi,
   importZipApi,
   updateProjectApi,
@@ -48,6 +49,28 @@ const STOP_WORDS = new Set([
   "with", "and", "or", "of", "in", "on", "that", "this", "it", "is", "are",
 ]);
 
+/**
+ * Close a popover when the user clicks anywhere outside `ref.current`.
+ * Mirrors the pattern in ChatSessionDropdown — the container-ref check is the
+ * thing that makes the listener safe to attach at the window: it only fires
+ * for clicks that genuinely happened outside the menu's DOM subtree.
+ */
+function useOutsideClick(
+  ref: RefObject<HTMLElement | null>,
+  enabled: boolean,
+  onOutside: () => void,
+): void {
+  useEffect(() => {
+    if (!enabled) return;
+    const onClick = (e: MouseEvent): void => {
+      if (!ref.current) return;
+      if (!ref.current.contains(e.target as Node)) onOutside();
+    };
+    window.addEventListener("click", onClick);
+    return () => window.removeEventListener("click", onClick);
+  }, [enabled, onOutside, ref]);
+}
+
 function fallbackTileColor(projectId: string): string {
   let hash = 0;
   for (let i = 0; i < projectId.length; i++) {
@@ -57,7 +80,7 @@ function fallbackTileColor(projectId: string): string {
   return `hsl(${hue} 55% 28%)`;
 }
 
-type Mode = "blank" | "zip" | "github";
+type Mode = "blank" | "describe" | "zip" | "github";
 type GithubAuthMode = "oauth" | "pat";
 
 export default function ProjectPicker({
@@ -84,9 +107,23 @@ export default function ProjectPicker({
   const [brief, setBrief] = useState("");
   const [showNameOverride, setShowNameOverride] = useState(false);
 
+  // Describe mode: a fuller-paragraph brief that's run through Haiku 4.5
+  // server-side to extract a sane project name and a refined first prompt.
+  // Distinct state so the user can flip tabs without losing their brief.
+  const [describeText, setDescribeText] = useState("");
+  const [refining, setRefining] = useState(false);
+
   // Per-project menu state. Tracks which tile's dropdown is open so
   // clicking elsewhere closes it; rename/icon dialogs are inline modals.
   const [menuFor, setMenuFor] = useState<string | null>(null);
+
+  // Sidebar view selector. Default is the home dashboard (Brief Codex +
+  // recent tiles). "all" shows every project as a richer card with URL +
+  // repo + status; "recent" shows the same data sorted by activity with
+  // more verbose timestamps.
+  type View = "home" | "all" | "recent";
+  const [view, setView] = useState<View>("home");
+
   const [editing, setEditing] = useState<{
     project: ProjectSummary;
     field: "rename" | "icon" | "delete";
@@ -166,6 +203,28 @@ export default function ProjectPicker({
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     if (creating) return;
+
+    // Describe mode: send the full paragraph to the orchestrator, which
+    // calls Haiku to produce a sane name + a refined first message, then
+    // creates the project. Forward the refined first_message through ?brief=
+    // so the workspace fires it as the agent's opening turn.
+    if (mode === "describe") {
+      const trimmed = describeText.trim();
+      if (!trimmed) return;
+      setRefining(true);
+      setError(null);
+      try {
+        const { project, first_message } = await createProjectFromBriefApi(trimmed);
+        router.push(
+          `/projects/${project.id}?brief=${encodeURIComponent(first_message)}`,
+        );
+        return;
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        setRefining(false);
+        return;
+      }
+    }
 
     // Blank mode now leads with a brief. Either (a) brief alone — derive
     // the name from it; (b) brief + manual name override; (c) name only
@@ -279,13 +338,10 @@ export default function ProjectPicker({
     }
   }
 
-  // Close any open per-tile menu when the user clicks outside the picker.
-  useEffect(() => {
-    if (!menuFor) return;
-    const close = (): void => setMenuFor(null);
-    window.addEventListener("click", close);
-    return () => window.removeEventListener("click", close);
-  }, [menuFor]);
+  // Outside-click dismissal lives inside each ProjectTile / RichProjectCard
+  // via its own containerRef — see useOutsideClick below. A global window
+  // listener here would also fire for clicks on the open menu's own items
+  // unless every child handler stopped propagation, which is brittle.
 
   return (
     <>
@@ -308,7 +364,11 @@ export default function ProjectPicker({
       <div className="dash-shell">
         <aside className="dash-side">
           <div className="group">
-            <div className="nav-item active">
+            <button
+              type="button"
+              onClick={() => setView("home")}
+              className={`nav-item${view === "home" ? " active" : ""}`}
+            >
               <span className="ic">
                 <svg
                   width="14"
@@ -323,8 +383,12 @@ export default function ProjectPicker({
                 </svg>
               </span>
               Home
-            </div>
-            <div className="nav-item">
+            </button>
+            <button
+              type="button"
+              onClick={() => setView("all")}
+              className={`nav-item${view === "all" ? " active" : ""}`}
+            >
               <span className="ic">
                 <svg
                   width="14"
@@ -339,8 +403,12 @@ export default function ProjectPicker({
               </span>
               All projects
               <span className="count">{projects?.length ?? "—"}</span>
-            </div>
-            <div className="nav-item">
+            </button>
+            <button
+              type="button"
+              onClick={() => setView("recent")}
+              className={`nav-item${view === "recent" ? " active" : ""}`}
+            >
               <span className="ic">
                 <svg
                   width="14"
@@ -355,7 +423,7 @@ export default function ProjectPicker({
                 </svg>
               </span>
               Recent
-            </div>
+            </button>
           </div>
 
           <div className="group">
@@ -410,18 +478,28 @@ export default function ProjectPicker({
         </aside>
 
         <main className="dash-main">
+          {view === "all" || view === "recent" ? (
+            <ProjectListView
+              view={view}
+              projects={projects}
+              onEdit={(field, project) => setEditing({ project, field })}
+              menuFor={menuFor}
+              onOpenMenu={(id, open) => setMenuFor(open ? id : null)}
+            />
+          ) : (
+            <>
           <div className="pagehead">
             <div>
               <h1>
                 Welcome back, {(userName ?? userEmail).split(" ")[0] || "friend"}.
               </h1>
-              <p>Pick up where you left off — or hand a new brief to Codex.</p>
+              <p>Pick up where you left off — or describe a new one below.</p>
             </div>
           </div>
 
           <div className="newproj">
-            <h2>Brief Codex.</h2>
-            <p className="lede">Start fresh, or bring an existing codebase.</p>
+            <h2>Start a new project.</h2>
+            <p className="lede">Describe what you want, or bring an existing codebase.</p>
 
             <div
               role="tablist"
@@ -435,6 +513,7 @@ export default function ProjectPicker({
               {(
                 [
                   ["blank", "Blank project"],
+                  ["describe", "Describe in detail"],
                   ["zip", "Upload .zip"],
                   ["github", "Clone GitHub"],
                 ] as const
@@ -468,13 +547,48 @@ export default function ProjectPicker({
             </div>
 
             <form onSubmit={handleCreate} className="newproj-form">
-              {mode === "blank" ? (
+              {mode === "describe" ? (
+                <div className="newproj-blank">
+                  <textarea
+                    autoFocus
+                    value={describeText}
+                    onChange={(e) => setDescribeText(e.target.value)}
+                    placeholder={
+                      "Describe the project in your own words. Examples:\n" +
+                      '  "A website for my bakery with a menu, photos, and a contact form."\n' +
+                      '  "A booking page for my consulting business, with available time slots."\n' +
+                      '  "An app that tracks my invoices and reminds me when they’re due."\n' +
+                      "Codex picks the project name and turns this into the first prompt."
+                    }
+                    disabled={refining}
+                    rows={6}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                        e.preventDefault();
+                        void handleCreate(e as unknown as React.FormEvent);
+                      }
+                    }}
+                  />
+                  <div className="newproj-blank-row">
+                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                      Polished by Haiku 4.5 · ~200ms · adds nothing the brief doesn&apos;t imply
+                    </span>
+                    <button
+                      type="submit"
+                      className="btn-primary"
+                      disabled={refining || !describeText.trim()}
+                    >
+                      {refining ? "Refining brief…" : "Brief & start →"}
+                    </button>
+                  </div>
+                </div>
+              ) : mode === "blank" ? (
                 <div className="newproj-blank">
                   <textarea
                     autoFocus
                     value={brief}
                     onChange={(e) => setBrief(e.target.value)}
-                    placeholder="Describe what you want — e.g. a Slack bot that posts new HubSpot deals to #revenue every Monday."
+                    placeholder="Describe what you want — e.g. a website for my bakery with a menu, photos, and a contact form."
                     disabled={creating}
                     rows={3}
                     onKeyDown={(e) => {
@@ -502,7 +616,7 @@ export default function ProjectPicker({
                         (!brief.trim() && !name.trim())
                       }
                     >
-                      {creating ? "Creating…" : "Brief Codex →"}
+                      {creating ? "Creating…" : "Start building →"}
                     </button>
                   </div>
                   {showNameOverride && (
@@ -761,7 +875,7 @@ export default function ProjectPicker({
 
           {projects !== null && projects.length === 0 && (
             <div className="empty-state">
-              No projects yet. Brief Codex above to start one.
+              No projects yet. Describe what you want above to start one.
             </div>
           )}
 
@@ -802,6 +916,8 @@ export default function ProjectPicker({
               onConfirm={() => handleDelete(editing.project)}
             />
           )}
+            </>
+          )}
         </main>
       </div>
     </>
@@ -819,8 +935,10 @@ function ProjectTile({
   onOpenMenu: (open: boolean) => void;
   onEdit: (field: "rename" | "icon" | "delete") => void;
 }) {
+  const tileRef = useRef<HTMLDivElement>(null);
+  useOutsideClick(tileRef, menuOpen, () => onOpenMenu(false));
   return (
-    <div className="proj proj-tile">
+    <div className="proj proj-tile" ref={tileRef}>
       <div className="proj-tile-head">
         <ProjectAvatar project={project} />
         <button
@@ -877,7 +995,7 @@ function ProjectTile({
         <div className="meta">
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <span className="status">
-              <span className="d" /> Idle
+              <span className="d" /> Ready
             </span>
           </div>
           <span>{relativeTime(project.updated_at)}</span>
@@ -1056,4 +1174,285 @@ function relativeTime(iso: string): string {
   if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
   if (sec < 604800) return `${Math.floor(sec / 86400)}d ago`;
   return new Date(iso).toLocaleDateString();
+}
+
+/**
+ * "All projects" + "Recent" view. Same data, different sort: All shows
+ * projects alphabetically; Recent shows them by `updated_at` descending so
+ * the freshest work is at the top. Cards are richer than the home tiles —
+ * each surfaces the deploy URL, GitHub repo link, and a friendly status
+ * line so the user can jump straight to whichever surface they want.
+ */
+function ProjectListView({
+  view,
+  projects,
+  onEdit,
+  menuFor,
+  onOpenMenu,
+}: {
+  view: "all" | "recent";
+  projects: ProjectSummary[] | null;
+  onEdit: (field: "rename" | "icon" | "delete", project: ProjectSummary) => void;
+  menuFor: string | null;
+  onOpenMenu: (id: string, open: boolean) => void;
+}) {
+  const sorted = (() => {
+    if (!projects) return null;
+    const copy = [...projects];
+    if (view === "recent") {
+      copy.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+    } else {
+      copy.sort((a, b) => a.name.localeCompare(b.name));
+    }
+    return copy;
+  })();
+
+  return (
+    <>
+      <div className="pagehead">
+        <div>
+          <h1>{view === "all" ? "All projects" : "Recent activity"}</h1>
+          <p>
+            {view === "all"
+              ? "Every project you own. Click a card to open the workspace, or use the buttons to jump to its repo or deployment."
+              : "Most recently touched first. Each card shows the project's last update plus its repo and deploy URLs."}
+          </p>
+        </div>
+      </div>
+      {sorted === null ? (
+        <div style={{ color: "var(--text-muted)", fontSize: 13 }}>loading…</div>
+      ) : sorted.length === 0 ? (
+        <div className="empty-state">
+          No projects yet. Head back to <strong>Home</strong> and start one.
+        </div>
+      ) : (
+        <div style={{ display: "grid", gap: 12 }}>
+          {sorted.map((p) => (
+            <RichProjectCard
+              key={p.id}
+              project={p}
+              menuOpen={menuFor === p.id}
+              onOpenMenu={(open) => onOpenMenu(p.id, open)}
+              onEdit={(field) => onEdit(field, p)}
+              showFullTimestamp={view === "recent"}
+            />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function RichProjectCard({
+  project,
+  menuOpen,
+  onOpenMenu,
+  onEdit,
+  showFullTimestamp,
+}: {
+  project: ProjectSummary;
+  menuOpen: boolean;
+  onOpenMenu: (open: boolean) => void;
+  onEdit: (field: "rename" | "icon" | "delete") => void;
+  showFullTimestamp: boolean;
+}) {
+  // Vercel deploy URL: derived from `vercel_project_name` since that's what
+  // we persist after the first deploy. Returns null when the project has
+  // never deployed.
+  const vercelUrl =
+    project.vercel_project_name && project.vercel_project_name.trim()
+      ? `https://${project.vercel_project_name}.vercel.app`
+      : null;
+  const repoUrl = project.github_repo_url ?? null;
+  const repoName = project.github_repo_full_name ?? null;
+  const updated = showFullTimestamp
+    ? new Date(project.updated_at).toLocaleString()
+    : relativeTime(project.updated_at);
+  const cardRef = useRef<HTMLDivElement>(null);
+  useOutsideClick(cardRef, menuOpen, () => onOpenMenu(false));
+
+  return (
+    <div
+      ref={cardRef}
+      className="proj proj-tile"
+      style={{
+        display: "grid",
+        gridTemplateColumns: "auto 1fr auto",
+        alignItems: "center",
+        gap: 16,
+        padding: 14,
+      }}
+    >
+      <ProjectAvatar project={project} />
+      <div style={{ minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <Link
+            href={`/projects/${project.id}`}
+            style={{
+              color: "var(--text-primary)",
+              textDecoration: "none",
+              fontWeight: 600,
+              fontSize: 14,
+            }}
+          >
+            {project.name}
+          </Link>
+          <span
+            className="status"
+            title={`Last activity: ${updated}`}
+            style={{ fontSize: 11, color: "var(--text-muted)" }}
+          >
+            <span className="d" /> Ready · {updated}
+          </span>
+        </div>
+        <div
+          className="desc"
+          style={{
+            fontSize: 12,
+            color: "var(--text-muted)",
+            marginBottom: 8,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {project.description ?? "No description"}
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, fontSize: 11 }}>
+          {vercelUrl ? (
+            <CardChip
+              href={vercelUrl}
+              title={`Open ${vercelUrl}`}
+              icon="▲"
+              label={vercelUrl.replace(/^https:\/\//, "")}
+            />
+          ) : (
+            <CardChip
+              muted
+              icon="▲"
+              label="Not published yet"
+              title="Open the project and click Deploy in the topbar to publish it"
+            />
+          )}
+          {repoUrl ? (
+            <CardChip
+              href={repoUrl}
+              title={`Open ${repoName ?? repoUrl} on github.com`}
+              icon="◉"
+              label={repoName ?? "GitHub repo"}
+            />
+          ) : (
+            <CardChip
+              muted
+              icon="◉"
+              label="GitHub not connected"
+              title="Open the project and click Create GitHub repo in the topbar to connect"
+            />
+          )}
+        </div>
+      </div>
+      <div style={{ position: "relative", display: "flex", gap: 8 }}>
+        <Link
+          href={`/projects/${project.id}`}
+          className="btn-primary"
+          style={{ fontSize: 12, padding: "6px 12px", textDecoration: "none" }}
+        >
+          Open
+        </Link>
+        <button
+          type="button"
+          className="proj-menu-btn"
+          aria-label="Project actions"
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            onOpenMenu(!menuOpen);
+          }}
+          style={{ position: "static" }}
+        >
+          ⋯
+        </button>
+        {menuOpen && (
+          <div
+            className="proj-menu"
+            onClick={(e) => e.stopPropagation()}
+            style={{ top: "100%", right: 0 }}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                onOpenMenu(false);
+                onEdit("rename");
+              }}
+            >
+              Rename
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                onOpenMenu(false);
+                onEdit("icon");
+              }}
+            >
+              Change icon
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => {
+                onOpenMenu(false);
+                onEdit("delete");
+              }}
+            >
+              Delete
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CardChip({
+  href,
+  icon,
+  label,
+  title,
+  muted,
+}: {
+  href?: string;
+  icon: string;
+  label: string;
+  title: string;
+  muted?: boolean;
+}) {
+  const style: React.CSSProperties = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    padding: "2px 8px",
+    border: "1px solid var(--border-default)",
+    borderRadius: 4,
+    color: muted ? "var(--text-muted)" : "var(--text-primary)",
+    background: "var(--bg-elev)",
+    fontSize: 11,
+    textDecoration: "none",
+    fontFamily: "var(--mono, monospace)",
+  };
+  if (href) {
+    return (
+      <a href={href} target="_blank" rel="noreferrer" title={title} style={style}>
+        <span aria-hidden>{icon}</span>
+        <span style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis" }}>
+          {label}
+        </span>
+      </a>
+    );
+  }
+  return (
+    <span title={title} style={style}>
+      <span aria-hidden>{icon}</span>
+      <span>{label}</span>
+    </span>
+  );
 }

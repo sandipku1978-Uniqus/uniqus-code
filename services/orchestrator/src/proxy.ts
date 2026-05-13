@@ -128,6 +128,12 @@ export function resolveTarget(
 
 /**
  * Forward an HTTP request to the in-sandbox dev server and stream the response back.
+ *
+ * For HTML responses we buffer + inject a tiny navigation-reporter script so
+ * the workspace's preview URL bar can reflect the iframe's actual current
+ * path (including SPA pushState navigations). The script posts a message to
+ * `window.parent` on every path change. Cross-origin is fine — postMessage
+ * works across origins; we never need to read iframe.contentWindow.location.
  */
 export function proxyHttp(
   req: IncomingMessage,
@@ -142,6 +148,10 @@ export function proxyHttp(
     if (HOP_BY_HOP.has(lower)) continue;
     headers[k] = v;
   }
+  // Drop Accept-Encoding so HTML responses come back uncompressed. We need to
+  // inject a script and don't want to gunzip/regzip on every request. Other
+  // assets (JS, CSS, images) are passed through unchanged.
+  delete headers["accept-encoding"];
   headers.host = `${target.host}:${target.port}`;
 
   const upstream = http.request(
@@ -153,8 +163,6 @@ export function proxyHttp(
       headers,
     },
     (upRes) => {
-      // Pass through status + headers verbatim. Don't rewrite Location for
-      // now — most dev servers emit relative URLs; we'll revisit if needed.
       const outHeaders: Record<string, string | string[]> = {};
       for (const [k, v] of Object.entries(upRes.headers)) {
         if (v === undefined) continue;
@@ -173,8 +181,32 @@ export function proxyHttp(
       } else {
         outHeaders["set-cookie"] = ourCookie;
       }
-      res.writeHead(upRes.statusCode ?? 502, outHeaders);
-      upRes.pipe(res);
+
+      const contentType = String(upRes.headers["content-type"] ?? "");
+      const isHtml = contentType.toLowerCase().startsWith("text/html");
+      if (!isHtml) {
+        res.writeHead(upRes.statusCode ?? 502, outHeaders);
+        upRes.pipe(res);
+        return;
+      }
+      // Buffer + inject. Strip Content-Length (we'll let chunked-encoding handle it).
+      delete outHeaders["content-length"];
+      const chunks: Buffer[] = [];
+      upRes.on("data", (c: Buffer) => chunks.push(c));
+      upRes.on("end", () => {
+        const original = Buffer.concat(chunks).toString("utf-8");
+        const injected = injectNavReporter(original, target.serverId);
+        res.writeHead(upRes.statusCode ?? 502, outHeaders);
+        res.end(injected);
+      });
+      upRes.on("error", () => {
+        if (!res.headersSent) {
+          res.writeHead(502, { "Content-Type": "text/plain" });
+          res.end("preview proxy: upstream stream error");
+        } else {
+          res.destroy();
+        }
+      });
     },
   );
 
@@ -272,3 +304,56 @@ const HOP_BY_HOP = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
+
+/**
+ * Tiny script we inject into the head of every HTML preview response. It
+ * wraps history.pushState/replaceState and listens for popstate, then posts
+ * the current path to window.parent. The workspace's PreviewPanel listens
+ * for `uniqus:preview-nav` messages and updates the URL bar.
+ *
+ * Cross-origin safe — we only postMessage outward; we never read parent state.
+ * Idempotent if injected twice (the wrappers no-op on the second pass).
+ */
+function injectNavReporter(html: string, serverId: string): string {
+  const script = `<script>(function(){
+  if (window.__uniqusNavReporterInstalled) return;
+  window.__uniqusNavReporterInstalled = true;
+  var serverId = ${JSON.stringify(serverId)};
+  function post() {
+    try {
+      window.parent.postMessage({
+        type: "uniqus:preview-nav",
+        server_id: serverId,
+        path: location.pathname + location.search + location.hash,
+      }, "*");
+    } catch (e) {}
+  }
+  var wrap = function(name) {
+    var orig = history[name];
+    if (typeof orig !== "function") return;
+    history[name] = function() {
+      var r = orig.apply(this, arguments);
+      try { post(); } catch (e) {}
+      return r;
+    };
+  };
+  wrap("pushState"); wrap("replaceState");
+  window.addEventListener("popstate", post);
+  window.addEventListener("hashchange", post);
+  if (document.readyState !== "loading") post();
+  else document.addEventListener("DOMContentLoaded", post);
+})();</script>`;
+  // Prefer to inject at the start of <head> so we run before app code; fall
+  // back to <body> or just prepending if neither tag exists (rare).
+  const headOpen = html.search(/<head[^>]*>/i);
+  if (headOpen >= 0) {
+    const insertAt = html.indexOf(">", headOpen) + 1;
+    return html.slice(0, insertAt) + script + html.slice(insertAt);
+  }
+  const bodyOpen = html.search(/<body[^>]*>/i);
+  if (bodyOpen >= 0) {
+    const insertAt = html.indexOf(">", bodyOpen) + 1;
+    return html.slice(0, insertAt) + script + html.slice(insertAt);
+  }
+  return script + html;
+}

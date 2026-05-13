@@ -29,6 +29,10 @@ export default function SecretsModal({
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
   const [description, setDescription] = useState("");
+  // Same secret name can exist per env (default / development / staging /
+  // production / etc.). Defaults to "default" so single-env projects never
+  // see this knob unless they want to.
+  const [env, setEnv] = useState("default");
   const [saving, setSaving] = useState(false);
 
   const load = async () => {
@@ -61,10 +65,17 @@ export default function SecretsModal({
     setSaving(true);
     setError(null);
     try {
-      await upsertSecretApi(projectId, { name, value, description: description || null });
+      await upsertSecretApi(projectId, {
+        name,
+        value,
+        env,
+        description: description || null,
+      });
       setName("");
       setValue("");
       setDescription("");
+      // Keep the selected env so the user can add several secrets to one env
+      // back-to-back without re-picking.
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -73,10 +84,10 @@ export default function SecretsModal({
     }
   };
 
-  const onDelete = async (sName: string) => {
-    if (!confirm(`Delete secret ${sName}?`)) return;
+  const onDelete = async (s: SecretSummary) => {
+    if (!confirm(`Delete secret ${s.name} (env=${s.env})?`)) return;
     try {
-      await deleteSecretApi(projectId, sName);
+      await deleteSecretApi(projectId, s.name, s.env);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -133,13 +144,34 @@ export default function SecretsModal({
         <div style={{ padding: 16, overflow: "auto", display: "grid", gap: 16 }}>
           <form onSubmit={onAdd} style={{ display: "grid", gap: 8 }}>
             <div style={{ fontSize: 11, fontWeight: 600 }}>Add or update secret</div>
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "_"))}
-              placeholder="STRIPE_API_KEY"
-              style={inputStyle}
-            />
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 160px", gap: 8 }}>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) =>
+                  setName(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "_"))
+                }
+                placeholder="STRIPE_API_KEY"
+                style={inputStyle}
+              />
+              <input
+                type="text"
+                value={env}
+                onChange={(e) =>
+                  setEnv(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))
+                }
+                placeholder="env (default)"
+                title="Environment slot — default, development, staging, production, etc."
+                style={inputStyle}
+                list="uniqus-secret-env-options"
+              />
+              <datalist id="uniqus-secret-env-options">
+                <option value="default" />
+                <option value="development" />
+                <option value="staging" />
+                <option value="production" />
+              </datalist>
+            </div>
             <input
               type="password"
               value={value}
@@ -188,7 +220,22 @@ export default function SecretsModal({
                     }}
                   >
                     <div>
-                      <code style={{ fontSize: 12 }}>{s.name}</code>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <code style={{ fontSize: 12 }}>{s.name}</code>
+                        <span
+                          style={{
+                            fontSize: 10,
+                            color: "var(--text-dim)",
+                            border: "1px solid var(--border-default, #2a2a36)",
+                            borderRadius: 4,
+                            padding: "0 6px",
+                            fontFamily: "var(--mono, monospace)",
+                          }}
+                          title="Environment slot"
+                        >
+                          {s.env}
+                        </span>
+                      </div>
                       {s.description && (
                         <div style={{ color: "var(--text-dim)", fontSize: 10.5 }}>
                           {s.description}
@@ -196,10 +243,10 @@ export default function SecretsModal({
                       )}
                     </div>
                     <button
-                      onClick={() => onDelete(s.name)}
+                      onClick={() => onDelete(s)}
                       className="icon-btn-sm"
                       style={{ width: "auto", padding: "2px 8px", fontSize: 11 }}
-                      title={`Delete ${s.name}`}
+                      title={`Delete ${s.name} (env=${s.env})`}
                     >
                       delete
                     </button>

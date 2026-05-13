@@ -65,12 +65,16 @@ export default function SkillsModal({
     }
   };
 
-  const applyPack = async (id: string, mode: "replace" | "append") => {
+  // One design pack active at a time — the API supports append, but stacking
+  // packs ("retro pixel" + "liquid glass") produces contradictory guidance
+  // and was confusing in the UI. The skills file is still freeform; you can
+  // hand-edit it to mix concepts.
+  const applyPack = async (id: string) => {
     if (packBusy) return;
     setPackBusy(id);
     setError(null);
     try {
-      const r = await applySkillPackApi(projectId, id, mode);
+      const r = await applySkillPackApi(projectId, id, "replace");
       setContent(r.content);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -78,6 +82,17 @@ export default function SkillsModal({
       setPackBusy(null);
     }
   };
+
+  // A pack is "active" when its body header (`# Design: <Name>`) is present in
+  // the current skills.md. Cheap, robust, doesn't require backend changes.
+  const activePackId = (() => {
+    if (!content) return null;
+    for (const p of packs) {
+      const header = `# Design: ${p.name}`;
+      if (content.includes(header)) return p.id;
+    }
+    return null;
+  })();
 
   return (
     <div
@@ -172,44 +187,71 @@ export default function SkillsModal({
               Curated design packs
             </div>
             <div style={{ fontSize: 10.5, color: "var(--text-dim)", marginBottom: 10 }}>
-              Pre-built skill markdowns. Replace or append to your current Skills.
+              Pick one. Applying replaces the current Skills file with that
+              pack&apos;s body — you can hand-edit afterwards.
             </div>
             <div style={{ display: "grid", gap: 8 }}>
-              {packs.map((p) => (
-                <div
-                  key={p.id}
-                  style={{
-                    border: "1px solid var(--border-default, #2a2a36)",
-                    borderRadius: 6,
-                    padding: 10,
-                  }}
-                >
-                  <div style={{ fontSize: 12, fontWeight: 600 }}>{p.name}</div>
-                  <div style={{ fontSize: 10.5, color: "var(--text-dim)", marginBottom: 6 }}>
-                    {p.summary}
-                  </div>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <button
-                      onClick={() => applyPack(p.id, "replace")}
-                      disabled={!!packBusy}
-                      className="icon-btn-sm"
-                      style={{ width: "auto", padding: "2px 8px", fontSize: 10.5 }}
-                      title={`Replace skills with ${p.name}`}
+              {packs.map((p) => {
+                const isActive = activePackId === p.id;
+                return (
+                  <div
+                    key={p.id}
+                    style={{
+                      border: isActive
+                        ? "1px solid var(--accent, #6366f1)"
+                        : "1px solid var(--border-default, #2a2a36)",
+                      borderRadius: 6,
+                      padding: 10,
+                      background: isActive ? "rgba(99,102,241,0.08)" : undefined,
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 600,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                      }}
                     >
-                      Replace
-                    </button>
-                    <button
-                      onClick={() => applyPack(p.id, "append")}
-                      disabled={!!packBusy}
-                      className="icon-btn-sm"
-                      style={{ width: "auto", padding: "2px 8px", fontSize: 10.5 }}
-                      title={`Append ${p.name} to current skills`}
-                    >
-                      Append
-                    </button>
+                      {p.name}
+                      {isActive && (
+                        <span
+                          style={{
+                            fontSize: 9.5,
+                            color: "var(--accent, #6366f1)",
+                            border: "1px solid var(--accent, #6366f1)",
+                            borderRadius: 3,
+                            padding: "0 4px",
+                            textTransform: "uppercase",
+                            letterSpacing: 0.5,
+                          }}
+                        >
+                          Active
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 10.5, color: "var(--text-dim)", marginBottom: 6 }}>
+                      {p.summary}
+                    </div>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button
+                        onClick={() => applyPack(p.id)}
+                        disabled={!!packBusy || isActive}
+                        className="icon-btn-sm"
+                        style={{ width: "auto", padding: "2px 8px", fontSize: 10.5 }}
+                        title={
+                          isActive
+                            ? `${p.name} is already active`
+                            : `Apply ${p.name} (replaces current Skills)`
+                        }
+                      >
+                        {isActive ? "Active" : packBusy === p.id ? "Applying…" : "Apply"}
+                      </button>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>

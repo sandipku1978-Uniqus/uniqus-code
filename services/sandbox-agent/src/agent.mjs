@@ -8,7 +8,7 @@
  * deps so the rootfs stays small.
  *
  * Endpoints (mirror agentRpc.ts):
- *   GET  /health                     → { ok: true }
+ *   GET  /health                     → { ok: true, kind: "node" }
  *   GET  /fs/file?path=…             → { content }
  *   PUT  /fs/file                    body: { path, content, encoding? }
  *   POST /fs/edit                    body: { path, old_string, new_string }
@@ -21,8 +21,11 @@
  *
  * Cwd: /sandbox (mounted from the per-project ext4 image).
  *
- * Plan §1 calls for a Rust port; this Node version is a Phase-2 expedient.
- * Wire protocol is stable — Rust can drop in without orchestrator changes.
+ * LEGACY (Phase-2.x): the Rust port at src/main.rs is now the default agent.
+ * This .mjs is kept as a fallback for build hosts without rustup + musl-tools
+ * installed — see infra/firecracker/build-rootfs.sh for the switch logic.
+ * Wire format here MUST stay byte-compatible with main.rs; if you add an
+ * endpoint to one, mirror it in the other.
  */
 
 import http from "node:http";
@@ -111,7 +114,7 @@ async function handleRequest(req, res) {
     const url = new URL(req.url ?? "/", "http://vm");
     const method = req.method ?? "GET";
 
-    if (method === "GET" && url.pathname === "/health") return json(res, 200, { ok: true });
+    if (method === "GET" && url.pathname === "/health") return json(res, 200, { ok: true, kind: "node" });
     if (method === "GET" && url.pathname === "/fs/file") {
       const p = resolveSandbox(url.searchParams.get("path") ?? "");
       const content = await fs.readFile(p, "utf-8");

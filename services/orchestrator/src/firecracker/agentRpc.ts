@@ -20,10 +20,10 @@ import { touch as touchVm } from "./fleet.js";
  * Every method here returns a clean Error on transport failure with the
  * VM id + RPC name so fleet-manager logs are immediately useful.
  *
- * NOTE: today the agent is Node-based for ergonomic reasons (rootfs already
- * carries Node, wire format is plain JSON). Plan §1 calls for a Rust port
- * once the substrate is hot — wire protocol stays identical, only the
- * binary swaps.
+ * The in-VM agent is the Rust binary at services/sandbox-agent/src/main.rs
+ * (Plan §1). The legacy Node impl at src/agent.mjs remains as a build-time
+ * fallback when the host has no Rust toolchain. Wire format is identical
+ * across both — every change here must be mirrored in both implementations.
  */
 
 interface CommandResult {
@@ -117,14 +117,34 @@ export async function readServerLog(vm: VmHandle, id: string, maxBytes: number):
 }
 
 export async function ping(vm: VmHandle): Promise<boolean> {
+  return (await pingAgent(vm)) !== null;
+}
+
+/**
+ * Like `ping` but returns the agent's self-reported `kind` ("rust" | "node")
+ * on success, or null on transport failure. The fleet manager uses this on
+ * boot so it can stamp the VmHandle with which implementation answered.
+ */
+export async function pingAgent(
+  vm: VmHandle,
+): Promise<"rust" | "node" | "unknown" | null> {
   try {
     // Short timeout: while the VM is still booting, the kernel will RST
     // (fast fail) or the route will timeout. Either way we want to retry
     // quickly rather than blocking the boot loop on a dead probe.
-    await rpc<{ ok: true }>(vm, "GET", "/health", undefined, { readTimeoutMs: 500 });
-    return true;
+    const r = await rpc<{ ok: true; kind?: string }>(
+      vm,
+      "GET",
+      "/health",
+      undefined,
+      { readTimeoutMs: 500 },
+    );
+    if (r.kind === "rust" || r.kind === "node") return r.kind;
+    // An older agent without the `kind` field still passes /health; treat
+    // it as unknown rather than returning null, so boot succeeds.
+    return "unknown";
   } catch {
-    return false;
+    return null;
   }
 }
 

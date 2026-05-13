@@ -11,7 +11,12 @@ Use the submit_plan tool to return:
 - A list of concrete steps. Each step should be small enough to verify on its own — typically one file created, one command run, or one integration completed. Aim for 4–10 steps.
 - For each step, list the files it will touch (if any) and a one-line success criterion (how the agent will know the step worked).
 
-Be specific about file names, frameworks, and commands when the existing context supports it. For an existing or imported project where structure is unclear, include one bounded discovery step first (for example: inspect package.json and the relevant source tree), then concrete implementation steps.`;
+Be specific about file names, frameworks, and commands when the existing context supports it. For an existing or imported project where structure is unclear, include one bounded discovery step first (for example: inspect package.json and the relevant source tree), then concrete implementation steps.
+
+When planning frontend or design work, include steps for:
+- Finding existing design tokens, components, routes, assets, and styling conventions before proposing new ones.
+- Building the real usable screen or flow, including responsive layout, empty/loading/error states, accessibility, and plausible content.
+- Starting or reusing a preview server and checking the result visually at desktop and mobile sizes before declaring the work complete.`;
 
 const SUBMIT_PLAN_TOOL: Anthropic.Tool = {
   name: "submit_plan",

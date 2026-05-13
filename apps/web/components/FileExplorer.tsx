@@ -45,64 +45,68 @@ function buildTree(entries: TreeEntry[]): TreeNode[] {
 }
 
 /**
- * Pick a colored letter icon for a file based on its extension. Cheap and
- * lightweight — no extra asset bundle, no icon font. Maps a small set of
- * common extensions to a one-letter glyph + brand-friendly accent. Falls
- * back to a neutral gray "F" for everything else.
+ * Resolve a file's display label + accent color from its name. Drives the
+ * VSCode-Seti-inspired SVG file glyph below. Single source of truth — both
+ * the tree and the quick-open palette read from here.
+ *
+ * Special-cased filenames (package.json, Dockerfile, etc.) are detected
+ * before extension fallback so they get distinctive colors.
  */
-function fileIcon(name: string): { letter: string; tint: string } {
+function fileMeta(name: string): { label: string; color: string } {
+  const lower = name.toLowerCase();
+  // Filename matches first.
+  if (lower === "package.json") return { label: "{}", color: "#cb3837" };
+  if (lower === "package-lock.json") return { label: "{}", color: "#888" };
+  if (lower === "tsconfig.json") return { label: "{}", color: "#3178c6" };
+  if (lower === "dockerfile" || lower === "dockerfile.dev") return { label: "DK", color: "#2496ed" };
+  if (lower === ".gitignore" || lower === ".gitattributes") return { label: "GIT", color: "#f05033" };
+  if (lower === ".env" || lower.startsWith(".env.")) return { label: "ENV", color: "#ecd06f" };
+  if (lower === "readme.md" || lower === "readme") return { label: "RM", color: "#519aba" };
+  if (lower === "license" || lower === "license.md") return { label: "LIC", color: "#999" };
+  if (lower === "cargo.toml") return { label: "RS", color: "#dea584" };
+  if (lower === "go.mod" || lower === "go.sum") return { label: "GO", color: "#00add8" };
+  if (lower === "fly.toml") return { label: "FLY", color: "#824ff1" };
+  if (lower === "nixpacks.toml") return { label: "NIX", color: "#7e7eff" };
+
   const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
   switch (ext) {
-    case "ts":
-    case "tsx":
-      return { letter: "TS", tint: "#3178c6" };
-    case "js":
-    case "jsx":
-    case "mjs":
-    case "cjs":
-      return { letter: "JS", tint: "#f0db4f" };
-    case "py":
-      return { letter: "PY", tint: "#4b8bbe" };
-    case "go":
-      return { letter: "GO", tint: "#00add8" };
-    case "rs":
-      return { letter: "RS", tint: "#dea584" };
-    case "json":
-      return { letter: "{}", tint: "#cba253" };
-    case "md":
-    case "mdx":
-      return { letter: "M", tint: "#aaaaaa" };
-    case "css":
-    case "scss":
-    case "sass":
-      return { letter: "CSS", tint: "#264de4" };
-    case "html":
-    case "htm":
-      return { letter: "H", tint: "#e34c26" };
-    case "yml":
-    case "yaml":
-      return { letter: "Y", tint: "#cb171e" };
-    case "toml":
-      return { letter: "T", tint: "#9c4221" };
-    case "sh":
-    case "bash":
-    case "zsh":
-      return { letter: "$", tint: "#2ecc71" };
-    case "sql":
-      return { letter: "DB", tint: "#336791" };
-    case "env":
-      return { letter: "E", tint: "#ecd06f" };
-    case "lock":
-      return { letter: "L", tint: "#888888" };
-    case "png":
-    case "jpg":
-    case "jpeg":
-    case "gif":
-    case "svg":
-    case "webp":
-      return { letter: "IM", tint: "#ad7bd6" };
+    case "ts": return { label: "TS", color: "#3178c6" };
+    case "tsx": return { label: "TSX", color: "#3178c6" };
+    case "js": case "mjs": case "cjs": return { label: "JS", color: "#f0db4f" };
+    case "jsx": return { label: "JSX", color: "#f0db4f" };
+    case "py": return { label: "PY", color: "#3b82f6" };
+    case "go": return { label: "GO", color: "#00add8" };
+    case "rs": return { label: "RS", color: "#dea584" };
+    case "json": return { label: "{}", color: "#cba253" };
+    case "md": case "mdx": return { label: "MD", color: "#519aba" };
+    case "css": case "scss": case "sass": case "less":
+      return { label: "CSS", color: "#519aba" };
+    case "html": case "htm": return { label: "<>", color: "#e34c26" };
+    case "yml": case "yaml": return { label: "YML", color: "#cb171e" };
+    case "toml": return { label: "TOM", color: "#9c4221" };
+    case "sh": case "bash": case "zsh": case "fish":
+      return { label: "SH", color: "#4eaa25" };
+    case "sql": return { label: "SQL", color: "#336791" };
+    case "env": return { label: "ENV", color: "#ecd06f" };
+    case "lock": return { label: "LCK", color: "#888" };
+    case "svg": return { label: "SVG", color: "#ffb13b" };
+    case "png": case "jpg": case "jpeg": case "gif": case "webp": case "ico":
+      return { label: "IMG", color: "#ad7bd6" };
+    case "pdf": return { label: "PDF", color: "#dc2626" };
+    case "txt": return { label: "TXT", color: "#9ca3af" };
+    case "csv": return { label: "CSV", color: "#10b981" };
+    case "xml": return { label: "XML", color: "#fb923c" };
+    case "vue": return { label: "VUE", color: "#42b883" };
+    case "svelte": return { label: "SV", color: "#ff3e00" };
+    case "rb": return { label: "RB", color: "#cc342d" };
+    case "java": return { label: "JV", color: "#f89820" };
+    case "c": case "h": return { label: "C", color: "#a8b9cc" };
+    case "cpp": case "cc": case "cxx": case "hpp":
+      return { label: "C++", color: "#00599c" };
+    case "kt": case "kts": return { label: "KT", color: "#a97bff" };
+    case "swift": return { label: "SW", color: "#fa7343" };
     default:
-      return { letter: "F", tint: "#666666" };
+      return { label: ext ? ext.slice(0, 3).toUpperCase() : "•", color: "#9ca3af" };
   }
 }
 
@@ -365,26 +369,72 @@ function highlightMatch(path: string, query: string): React.ReactNode {
   );
 }
 
+/**
+ * VSCode-Seti-inspired file icon. Document outline + folded corner + a small
+ * accent bar at the bottom in the language's brand color, with a 2-3 char
+ * label inside the bar. Looks like the file icons in VSCode without
+ * shipping a 200-icon asset bundle.
+ */
 function FileGlyph({ name }: { name: string }) {
-  const { letter, tint } = fileIcon(name);
+  const { label, color } = fileMeta(name);
+  // 14×16 viewBox → renders at the same visual size as the previous square
+  // glyph but as a recognizable file shape.
   return (
-    <span className="file-glyph" style={{ background: tint }}>
-      {letter}
+    <span className="file-glyph" style={{ background: "transparent", color }}>
+      <svg width="14" height="16" viewBox="0 0 14 16" aria-hidden="true">
+        <path
+          d="M2.5 1.5h6L12 5v9a1 1 0 0 1-1 1H2.5a1 1 0 0 1-1-1V2.5a1 1 0 0 1 1-1z"
+          fill="rgba(255,255,255,0.04)"
+          stroke="rgba(255,255,255,0.28)"
+          strokeWidth="0.6"
+        />
+        <path
+          d="M8.5 1.5V5H12"
+          fill="rgba(255,255,255,0.10)"
+          stroke="rgba(255,255,255,0.28)"
+          strokeWidth="0.6"
+        />
+        <rect x="1.5" y="11" width="10.5" height="3.5" fill={color} rx="0.5" />
+        <text
+          x="6.75"
+          y="13.65"
+          textAnchor="middle"
+          fontFamily="-apple-system, 'Segoe UI', Roboto, sans-serif"
+          fontSize={label.length >= 3 ? "2.6" : "3.1"}
+          fontWeight="700"
+          fill="#ffffff"
+          letterSpacing="0.05"
+        >
+          {label}
+        </text>
+      </svg>
     </span>
   );
 }
 
+/**
+ * VSCode-style folder icon — open variant has the lid lifted. Uses the
+ * Seti-style amber color for closed folders, slightly lighter for open.
+ */
 function FolderGlyph({ open }: { open: boolean }) {
+  const fill = open ? "#e8a73d" : "#d59c45";
+  const tab = open ? "#c87d2a" : "#a86f24";
   return (
-    <span className="folder-glyph">
-      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <span className="folder-glyph" style={{ background: "transparent" }}>
+      <svg width="14" height="16" viewBox="0 0 14 16" aria-hidden="true">
         <path
-          d={
-            open
-              ? "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
-              : "M3 7v13a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-9l-2-3H5a2 2 0 0 0-2 2z"
-          }
+          d="M1.5 4.25a1 1 0 0 1 1-1h3l1.4 1.5h5.6a1 1 0 0 1 1 1V13a1 1 0 0 1-1 1H2.5a1 1 0 0 1-1-1V4.25z"
+          fill={fill}
+          stroke="rgba(0,0,0,0.25)"
+          strokeWidth="0.4"
         />
+        {open && (
+          <path
+            d="M2.5 7.5h10l-1 5.5a1 1 0 0 1-1 .8H3.5a1 1 0 0 1-1-1V7.5z"
+            fill={tab}
+            opacity="0.65"
+          />
+        )}
       </svg>
     </span>
   );

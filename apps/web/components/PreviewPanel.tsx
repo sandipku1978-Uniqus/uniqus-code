@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { PreviewServer } from "@uniqus/api-types";
 
 // Match the page's TLS state for the dev fallback so the iframe doesn't get
@@ -14,11 +14,51 @@ const ORCHESTRATOR_URL =
       : `http://${window.location.hostname}:8787`
     : "");
 
+interface PreviewNavMessage {
+  type: "uniqus:preview-nav";
+  server_id: string;
+  path: string;
+}
+
+function isPreviewNavMessage(data: unknown): data is PreviewNavMessage {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    (data as { type?: unknown }).type === "uniqus:preview-nav" &&
+    typeof (data as { server_id?: unknown }).server_id === "string" &&
+    typeof (data as { path?: unknown }).path === "string"
+  );
+}
+
 export default function PreviewPanel({ server }: { server: PreviewServer }) {
   const [reloadKey, setReloadKey] = useState(0);
+  // In-app path the iframe is currently showing — updated via postMessage
+  // from the navigation reporter the proxy injects into every HTML response.
+  // Starts at "/" because that's what we load. Cross-origin is fine: the
+  // iframe posts outward, we never need to read its location directly.
+  const [iframePath, setIframePath] = useState<string>("/");
   // Route through the orchestrator's preview proxy so the iframe works in
   // production (Vercel + Railway) where the dev server isn't on a public port.
-  const url = `${ORCHESTRATOR_URL}/preview/${server.id}/`;
+  const baseUrl = `${ORCHESTRATOR_URL}/preview/${server.id}/`;
+  // What we display in the URL bar: the orchestrator URL with the iframe's
+  // in-app path appended. So a SPA pushState to /about shows up correctly.
+  const displayedUrl = `${baseUrl.replace(/\/$/, "")}${iframePath.startsWith("/") ? iframePath : `/${iframePath}`}`;
+
+  useEffect(() => {
+    // Reset path when the underlying server changes — and when the user hits
+    // Reload, since the inner app starts at "/" again.
+    setIframePath("/");
+  }, [server.id, reloadKey]);
+
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      if (!isPreviewNavMessage(e.data)) return;
+      if (e.data.server_id !== server.id) return;
+      setIframePath(e.data.path || "/");
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [server.id]);
 
   return (
     <div className="preview-wrap">
@@ -34,13 +74,15 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
             <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
           </svg>
         </button>
-        <span className="url">{url}</span>
+        <span className="url" title={displayedUrl}>
+          {displayedUrl}
+        </span>
         <a
-          href={url}
+          href={displayedUrl}
           target="_blank"
           rel="noreferrer"
           className="icon-btn-sm"
-          title="Open in new tab"
+          title="Open current page in new tab"
           style={{ textDecoration: "none" }}
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -52,7 +94,7 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
       </div>
       <iframe
         key={reloadKey}
-        src={url}
+        src={baseUrl}
         className="preview-iframe"
         title={`preview ${server.port}`}
       />

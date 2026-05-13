@@ -3,9 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "In-VM sandbox agent. Runs as PID 1's first child inside a Firecracker microVM and proxies exec/fs/port-events to the orchestrator over vsock.",
+  "description": "In-VM sandbox agent (Plan §1). Default impl is the Rust binary in src/main.rs (Cargo.toml); this package.json + src/agent.mjs is the legacy Node fallback used when the build host has no Rust toolchain.",
   "scripts": {
-    "start": "node src/agent.mjs"
+    "start:legacy": "node src/agent.mjs"
   },
   "dependencies": {},
   "devDependencies": {}

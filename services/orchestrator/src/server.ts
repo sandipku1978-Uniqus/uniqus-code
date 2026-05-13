@@ -6,11 +6,15 @@ import {
   type IncomingHttpHeaders,
 } from "node:http";
 import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { spawn as spawnChild } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
+import AnthropicCtor from "@anthropic-ai/sdk";
 import type Anthropic from "@anthropic-ai/sdk";
+import { ensureAnthropic } from "./agent/router.js";
 import type {
   ClientEvent,
   ServerEvent,
@@ -43,7 +47,9 @@ import {
   isFirecrackerEnabled,
   ensureVm,
   destroy as destroyVm,
+  listVms,
   startIdleSweeper,
+  stopIdleSweeper,
   touch as touchVm,
   shutdownAll as shutdownAllVms,
 } from "./firecracker/index.js";
@@ -55,6 +61,7 @@ import {
   startServer as sandboxStartServer,
   stopServer as sandboxStopServer,
   writeFile as sandboxWriteFile,
+  runCommand as sandboxRunCommand,
 } from "./agent/sandbox.js";
 import { readRunConfig, writeRunConfig, detectRunConfig } from "./runConfig.js";
 import { needsInstall, runInstall } from "./ensureDeps.js";
@@ -66,8 +73,19 @@ import {
   touchProject,
   deleteProject,
   updateProject,
+  setGithubRepo,
 } from "./db/projects.js";
 import { loadHistory, appendMessage, clearHistory } from "./db/messages.js";
+import {
+  ensureDefaultSession,
+  listSessions,
+  getSession,
+  createSession,
+  renameSession,
+  deleteSession,
+  touchSession,
+  type ChatSessionRecord,
+} from "./db/chatSessions.js";
 import { unsealSessionFromCookieHeader, type AuthKitSession } from "./auth/workos.js";
 import { ensureBucket, listAll as storageListAll, remove as storageRemove } from "./storage/client.js";
 import { getTracker, clearTracker } from "./storage/sync.js";
@@ -80,6 +98,7 @@ import {
   handleDisconnect as githubDisconnect,
   listUserRepos as githubListRepos,
   getGithubToken,
+  createUserRepo as githubCreateRepo,
 } from "./github.js";
 import {
   handleStart as vercelStart,
@@ -162,16 +181,17 @@ async function main(): Promise<void> {
 
   if (isFirecrackerEnabled()) {
     startIdleSweeper();
-    process.once("SIGTERM", () => {
+    const onSignal = (sig: NodeJS.Signals): void => {
+      // Stop the 30s sweeper first so it doesn't hold the loop open while
+      // shutdownAll is waiting on the VMs. Without this, a Railway/Hetzner
+      // SIGTERM can wait up to a full tick before clean exit.
+      stopIdleSweeper();
       void shutdownAllVms().catch((err) =>
-        console.error("Firecracker shutdownAll failed:", err),
+        console.error(`Firecracker shutdownAll failed (${sig}):`, err),
       );
-    });
-    process.once("SIGINT", () => {
-      void shutdownAllVms().catch((err) =>
-        console.error("Firecracker shutdownAll failed:", err),
-      );
-    });
+    };
+    process.once("SIGTERM", () => onSignal("SIGTERM"));
+    process.once("SIGINT", () => onSignal("SIGINT"));
     console.log("[firecracker] enabled — VMs boot lazily on first user_message");
   }
 
@@ -323,6 +343,29 @@ async function authenticate(req: IncomingMessage): Promise<{
   return { session, user };
 }
 
+/**
+ * Build the `/health` response body. When Firecracker is enabled, breaks
+ * down active VMs by which in-VM agent answered /health at boot — so an
+ * operator can spot a silent Rust→Node fallback (rootfs build host without
+ * cargo/musl-tools) without needing to scrape per-VM logs.
+ */
+function healthSnapshot(): {
+  ok: true;
+  firecracker?: {
+    vms: number;
+    agents: { rust: number; node: number; unknown: number };
+  };
+} {
+  if (!isFirecrackerEnabled()) return { ok: true };
+  const agents = { rust: 0, node: 0, unknown: 0 };
+  const handles = listVms();
+  for (const vm of handles) {
+    const kind = vm.agentKind ?? "unknown";
+    agents[kind] += 1;
+  }
+  return { ok: true, firecracker: { vms: handles.length, agents } };
+}
+
 async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
   // Preview proxy: forward `/preview/:serverId/...` and Referer-tagged absolute
   // paths to the in-sandbox dev server. Runs BEFORE CORS/auth so iframes loaded
@@ -350,7 +393,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   }
 
   if (req.url === "/health") {
-    return json(res, 200, { ok: true });
+    return json(res, 200, healthSnapshot());
   }
 
   if (!req.url?.startsWith("/api/")) {
@@ -416,6 +459,38 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     });
     await fs.mkdir(sandboxDirFor(project.id), { recursive: true });
     return json(res, 201, { project: toProjectSummary(project) });
+  }
+
+  // NL project creation: user types a free-form brief ("Website for Narayan
+  // Balakrishnan, partner with EY at San Jose"), Haiku extracts a sane
+  // project name + a refined first message for the agent. Cheaper than
+  // making the user pick a name; sharper first prompts than passing the
+  // raw brief verbatim.
+  if (req.url === "/api/projects/from-brief" && req.method === "POST") {
+    const body = await readJsonBody<{ brief?: string; description?: string }>(req);
+    const brief = (body.brief ?? "").trim();
+    if (!brief) return json(res, 400, { error: "brief is required" });
+    if (brief.length > 4000) {
+      return json(res, 400, { error: "brief exceeds 4 KB cap" });
+    }
+    let refined: { name: string; first_message: string };
+    try {
+      refined = await refineBrief(brief);
+    } catch (err) {
+      return json(res, 502, {
+        error: `brief refinement failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+    const project = await createProject({
+      owner_id: user.id,
+      name: refined.name,
+      description: body.description ?? brief.slice(0, 200),
+    });
+    await fs.mkdir(sandboxDirFor(project.id), { recursive: true });
+    return json(res, 201, {
+      project: toProjectSummary(project),
+      first_message: refined.first_message,
+    });
   }
 
   // Codebase import: GitHub clone. Creates the project, clones into the sandbox,
@@ -555,8 +630,14 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (!project) return json(res, 404, { error: "project not found" });
     const sandbox = sandboxDirFor(projectId);
     const shape = await detectShape(sandbox);
+    // node-server (ws/socket.io/bullmq/etc.) needs a long-lived container —
+    // Vercel's serverless model would sever its sockets, so route to Fly.
     const recommended =
-      shape === "node" || shape === "static" ? "vercel" : shape === "unknown" ? null : "fly";
+      shape === "node" || shape === "static"
+        ? "vercel"
+        : shape === "unknown"
+          ? null
+          : "fly";
     return json(res, 200, { shape, recommended });
   }
   // POST /api/projects/:id/fly-deploy { app_name, region?, env_vars? }
@@ -631,26 +712,107 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return json(res, 200, { ok: true, restored_to: result.restored_to });
   }
 
+  // ── Chat sessions (Phase 2.x — multi-thread per project) ───────────────
+  // List all sessions for a project. Always returns at least one row —
+  // ensureDefaultSession creates the "Default" session lazily if missing.
+  const sessionsListMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/chat-sessions$/,
+  );
+  if (sessionsListMatch && req.method === "GET") {
+    const projectId = sessionsListMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const sessions = await listSessions(projectId);
+    return json(res, 200, {
+      sessions: sessions.map((s) => ({
+        id: s.id,
+        title: s.title,
+        created_at: s.created_at,
+        updated_at: s.updated_at,
+      })),
+    });
+  }
+  // Create a new session. Body: { title? }. Title is optional — falls back
+  // to a numbered "Chat N" if omitted.
+  if (sessionsListMatch && req.method === "POST") {
+    const projectId = sessionsListMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const body = await readJsonBody<{ title?: string }>(req).catch<{
+      title?: string;
+    }>(() => ({}));
+    const session = await createSession(projectId, body.title ?? null);
+    return json(res, 201, {
+      session: {
+        id: session.id,
+        title: session.title,
+        created_at: session.created_at,
+        updated_at: session.updated_at,
+      },
+    });
+  }
+  // PATCH / DELETE one session by id. Renaming reuses the title field.
+  const sessionItemMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/chat-sessions\/([0-9a-fA-F-]{8,})$/,
+  );
+  if (sessionItemMatch && req.method === "PATCH") {
+    const projectId = sessionItemMatch[1];
+    const sessionId = sessionItemMatch[2];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const body = await readJsonBody<{ title?: string }>(req);
+    const title = (body.title ?? "").trim();
+    if (!title) return json(res, 400, { error: "title is required" });
+    const session = await renameSession(projectId, sessionId, title);
+    return json(res, 200, {
+      session: {
+        id: session.id,
+        title: session.title,
+        created_at: session.created_at,
+        updated_at: session.updated_at,
+      },
+    });
+  }
+  if (sessionItemMatch && req.method === "DELETE") {
+    const projectId = sessionItemMatch[1];
+    const sessionId = sessionItemMatch[2];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    await deleteSession(projectId, sessionId);
+    return json(res, 200, { ok: true });
+  }
+
   // ── Secrets (Plan §6) ──────────────────────────────────────────────────
   // List secret NAMES (never values) for the secrets pane.
-  const secretsListMatch = req.url?.match(
+  const parsedSecretsUrl = new URL(req.url ?? "/", "http://x");
+  const secretsListMatch = parsedSecretsUrl.pathname.match(
     /^\/api\/projects\/([0-9a-fA-F-]{8,})\/secrets$/,
   );
   if (secretsListMatch && req.method === "GET") {
     const projectId = secretsListMatch[1];
     const project = await getProject(projectId, user.id);
     if (!project) return json(res, 404, { error: "project not found" });
-    const rows = await listSecrets(projectId);
+    // ?env=production filters to one env; ?env=* (or omitted) returns every env.
+    // The Secrets pane uses ?env=* so the user can see + manage all envs at once.
+    const envParam = parsedSecretsUrl.searchParams.get("env");
+    const envFilter = envParam === "*" || envParam === null || envParam === "" ? null : envParam;
+    let rows;
+    try {
+      rows = await listSecrets(projectId, envFilter);
+    } catch (err) {
+      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
     return json(res, 200, {
       secrets: rows.map((r) => ({
         id: r.id,
         name: r.name,
+        env: r.env,
         description: r.description,
         updated_at: r.updated_at,
       })),
     });
   }
-  // Create / update a secret. Body: { name, value, description? }.
+  // Create / update a secret. Body: { name, value, env?, description? }.
   if (secretsListMatch && req.method === "POST") {
     const projectId = secretsListMatch[1];
     const project = await getProject(projectId, user.id);
@@ -658,6 +820,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const body = await readJsonBody<{
       name?: string;
       value?: string;
+      env?: string;
       description?: string | null;
     }>(req);
     const name = String(body.name ?? "").trim();
@@ -673,30 +836,37 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (value.length > 32_768) {
       return json(res, 400, { error: "value exceeds 32 KB cap" });
     }
-    const row = await upsertSecret({
-      project_id: projectId,
-      name,
-      value,
-      description: body.description ?? null,
-    });
+    let row;
+    try {
+      row = await upsertSecret({
+        project_id: projectId,
+        name,
+        value,
+        env: body.env,
+        description: body.description ?? null,
+      });
+    } catch (err) {
+      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
     void audit({
       project_id: projectId,
       user_id: user.id,
       kind: "secret_write",
       target: name,
-      metadata: null,
+      metadata: { env: row.env },
     });
     return json(res, 200, {
       secret: {
         id: row.id,
         name: row.name,
+        env: row.env,
         description: row.description,
         updated_at: row.updated_at,
       },
     });
   }
-  // Delete a secret by name.
-  const secretDeleteMatch = req.url?.match(
+  // Delete a secret by name. ?env=… selects which env's slot; defaults to 'default'.
+  const secretDeleteMatch = parsedSecretsUrl.pathname.match(
     /^\/api\/projects\/([0-9a-fA-F-]{8,})\/secrets\/([A-Z_][A-Z0-9_]*)$/,
   );
   if (secretDeleteMatch && req.method === "DELETE") {
@@ -704,13 +874,18 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const name = secretDeleteMatch[2];
     const project = await getProject(projectId, user.id);
     if (!project) return json(res, 404, { error: "project not found" });
-    await deleteSecret(projectId, name);
+    const envParam = parsedSecretsUrl.searchParams.get("env");
+    try {
+      await deleteSecret(projectId, name, envParam);
+    } catch (err) {
+      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+    }
     void audit({
       project_id: projectId,
       user_id: user.id,
       kind: "secret_delete",
       target: name,
-      metadata: null,
+      metadata: { env: envParam ?? null },
     });
     return json(res, 200, { ok: true });
   }
@@ -816,6 +991,72 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (req.url === "/api/github/disconnect" && req.method === "POST") {
     await githubDisconnect(user);
     return json(res, 200, { ok: true });
+  }
+
+  // Create a fresh GitHub repo for this project. On-demand from the
+  // workspace topbar — not auto-fired on project creation, since we don't
+  // want to spam every starter project into the user's GitHub account.
+  // Body: { name?, private?: boolean }. If `name` is omitted, derives from
+  // the project name.
+  const createRepoMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/create-github-repo$/,
+  );
+  if (createRepoMatch && req.method === "POST") {
+    const projectId = createRepoMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    if (project.github_repo_url) {
+      return json(res, 409, {
+        error: "project already has a GitHub repo linked",
+        repo_url: project.github_repo_url,
+        repo_full_name: project.github_repo_full_name,
+      });
+    }
+    const body = await readJsonBody<{ name?: string }>(req).catch<{ name?: string }>(() => ({}));
+    // GitHub repo names: alphanumeric, -, _, . — keep it close to the project name.
+    const requestedName =
+      (body.name ?? project.name).toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
+    if (!requestedName || requestedName.length > 100) {
+      return json(res, 400, { error: "invalid repo name" });
+    }
+    let repo;
+    try {
+      repo = await githubCreateRepo(user, requestedName, project.description);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg === "github_not_connected") {
+        return json(res, 409, { error: "github_not_connected" });
+      }
+      return json(res, 502, { error: msg });
+    }
+    await setGithubRepo(projectId, user.id, repo.html_url, repo.full_name);
+    // Best-effort initial push from the host-side sandbox dir. If this
+    // fails (no git on host, sandbox empty, network), the repo still
+    // exists empty — the user can push later via the agent.
+    let pushedOk = false;
+    let pushNote = "";
+    try {
+      const token = await getGithubToken(user.id);
+      if (token) {
+        await initialPushToRepo({
+          sandboxDir: sandboxDirFor(projectId),
+          cloneUrl: repo.clone_url,
+          token,
+          defaultBranch: repo.default_branch,
+          projectName: project.name,
+        });
+        pushedOk = true;
+      }
+    } catch (err) {
+      pushNote = err instanceof Error ? err.message : String(err);
+    }
+    return json(res, 201, {
+      repo_url: repo.html_url,
+      repo_full_name: repo.full_name,
+      default_branch: repo.default_branch,
+      pushed: pushedOk,
+      push_note: pushNote || undefined,
+    });
   }
 
   // ── Vercel OAuth ────────────────────────────────────────────────────────
@@ -1012,30 +1253,71 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       }
     }
 
+    // Make sure the VM is up before we install or start. The agent loop has
+    // its own ensureVm in the WS path, but the topbar Run button is a
+    // separate stateless POST — without this it would silently spawn the
+    // dev server on the orchestrator host even with Firecracker on.
+    let runVm: VmHandle | undefined = undefined;
+    if (isFirecrackerEnabled()) {
+      try {
+        runVm = await ensureVm({ projectId, hostSandboxDir: dest });
+      } catch (err) {
+        return json(res, 500, {
+          error: `Firecracker VM boot failed: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    }
+
     // node_modules disappears every Railway redeploy because Storage sync
     // skips it (size). If we have a package.json with no node_modules, npm
     // run dev will fail with "<binary>: not found". Install first.
+    //
+    // In Firecracker mode the install must happen inside the VM (where the
+    // dev server will run); otherwise we'd install into the orchestrator
+    // host's filesystem and the VM would still be missing modules. Both
+    // paths use the unified sandboxRunCommand which dispatches through the
+    // VM when a handle is set.
     const installer = await needsInstall(dest);
     if (installer) {
       broadcastToProject(projectId, {
         type: "text",
         content: `\n[run] installing dependencies (${installer} install) — this can take a minute…\n`,
       });
-      const result = await runInstall(dest, installer);
-      if (!result.ok) {
-        return json(res, 400, {
-          error: `${installer} install failed (${Math.round(result.durationMs / 1000)}s):\n${result.stderr.slice(-2000)}`,
-        });
+      const installStart = Date.now();
+      if (runVm) {
+        const args =
+          installer === "pnpm"
+            ? "install --prefer-offline"
+            : installer === "yarn"
+              ? "install --frozen-lockfile"
+              : "install --no-audit --no-fund --prefer-offline";
+        const r = await sandboxRunCommand(
+          { rootDir: dest, vm: runVm },
+          `${installer} ${args}`,
+          5 * 60_000,
+        );
+        if (r.exitCode !== 0) {
+          return json(res, 400, {
+            error: `${installer} install failed (${Math.round((Date.now() - installStart) / 1000)}s) in VM:\n${(r.stderr || r.stdout).slice(-2000)}`,
+          });
+        }
+      } else {
+        const result = await runInstall(dest, installer);
+        if (!result.ok) {
+          return json(res, 400, {
+            error: `${installer} install failed (${Math.round(result.durationMs / 1000)}s):\n${result.stderr.slice(-2000)}`,
+          });
+        }
       }
       broadcastToProject(projectId, {
         type: "text",
-        content: `[run] dependencies installed in ${(result.durationMs / 1000).toFixed(1)}s\n`,
+        content: `[run] dependencies installed in ${((Date.now() - installStart) / 1000).toFixed(1)}s\n`,
       });
     }
 
     try {
       const info = await sandboxStartServer(
-        { rootDir: dest },
+        { rootDir: dest, vm: runVm },
         config.command,
         config.port,
         60_000,
@@ -1596,6 +1878,9 @@ function toProjectSummary(p: {
   icon?: string | null;
   created_at: string;
   updated_at: string;
+  github_repo_url?: string | null;
+  github_repo_full_name?: string | null;
+  vercel_project_name?: string | null;
 }): ProjectSummary {
   return {
     id: p.id,
@@ -1604,6 +1889,9 @@ function toProjectSummary(p: {
     icon: p.icon ?? null,
     created_at: p.created_at,
     updated_at: p.updated_at,
+    github_repo_url: p.github_repo_url ?? null,
+    github_repo_full_name: p.github_repo_full_name ?? null,
+    vercel_project_name: p.vercel_project_name ?? null,
   };
 }
 
@@ -1647,10 +1935,28 @@ async function handleUpgrade(
   const project = await getProject(projectId, auth.user.id);
   if (!project) return reject(403, "Project not found or access denied");
 
+  // Resolve which chat session this WS will read/write. Defaults to the
+  // project's default session — or creates one on first access. An
+  // explicit `?session=<uuid>` lets the user switch threads without
+  // touching the rest of the workspace state.
+  const requestedSession = url.searchParams.get("session");
+  let session: ChatSessionRecord;
+  try {
+    if (requestedSession) {
+      const found = await getSession(projectId, requestedSession);
+      session = found ?? (await ensureDefaultSession(projectId));
+    } else {
+      session = await ensureDefaultSession(projectId);
+    }
+  } catch (err) {
+    console.error("session resolution failed:", err);
+    return reject(500, "session resolution failed");
+  }
+
   await fs.mkdir(sandboxDirFor(projectId), { recursive: true });
 
   wss.handleUpgrade(req, socket as import("node:net").Socket, head, (ws) => {
-    handleConnection(ws, auth.user, project).catch((err) => {
+    handleConnection(ws, auth.user, project, session).catch((err) => {
       console.error("Connection handler crashed:", err);
       try {
         ws.close();
@@ -1671,7 +1977,9 @@ async function handleConnection(
     created_at: string;
     updated_at: string;
   },
+  session: ChatSessionRecord,
 ): Promise<void> {
+  const sessionId = session.id;
   const apiKey = process.env.ANTHROPIC_API_KEY!;
   const sandboxDir = sandboxDirFor(project.id);
 
@@ -1752,7 +2060,9 @@ async function handleConnection(
       }
 
       if (event.type === "reset_session") {
-        await clearHistory(project.id);
+        // Wipe just THIS chat session's history — other sessions for the
+        // same project (and the sandbox files / VM / secrets) are untouched.
+        await clearHistory(project.id, sessionId);
         history.length = 0;
         clearTodos(project.id);
         broadcastToProject(project.id, { type: "todos_updated", todos: [] });
@@ -1840,10 +2150,15 @@ async function handleConnection(
               projectId: project.id,
               hostSandboxDir: sandboxDir,
             });
-            console.log(`[ws ${project.id}] VM ${vmHandle.id} ready in ${Date.now() - t0}ms (ip=${vmHandle.ip})`);
+            const bootMs = Date.now() - t0;
+            console.log(`[ws ${project.id}] VM ${vmHandle.id} ready in ${bootMs}ms (ip=${vmHandle.ip})`);
+            // Render as a muted system message — don't disguise infra noise as
+            // agent output. "Fresh VM started" reads as a status notice; the
+            // ms timing tells the user whether they hit cold boot or a fast
+            // snapshot-restore path.
             send({
-              type: "text",
-              content: `\n[fleet] booted Firecracker VM ${vmHandle.id}\n`,
+              type: "system",
+              content: `Fresh VM started · ${bootMs} ms`,
             });
           } catch (err) {
             console.error(`[ws ${project.id}] VM boot failed after ${Date.now() - t0}ms:`, err);
@@ -1867,6 +2182,7 @@ async function handleConnection(
             apiKey,
             history,
             project.id,
+            sessionId,
             sandboxDir,
             vmHandle,
             user.id,
@@ -1920,7 +2236,7 @@ async function handleConnection(
   }
 
   try {
-    const loaded = await loadHistory(project.id);
+    const loaded = await loadHistory(project.id, sessionId);
     history.push(...loaded);
   } catch (err) {
     console.error("loadHistory failed:", err);
@@ -1937,6 +2253,7 @@ async function handleConnection(
     platform: process.platform,
     project: toProjectSummary(project),
     user: { id: user.id, email: user.email, display_name: user.display_name },
+    chat_session: { id: session.id, title: session.title },
   });
 
   for (const msg of history) {
@@ -2161,6 +2478,7 @@ async function runSession(
   apiKey: string,
   history: Anthropic.MessageParam[],
   projectId: string,
+  sessionId: string,
   sandboxDir: string,
   vmHandle: VmHandle | null,
   userId: string,
@@ -2338,10 +2656,30 @@ async function runSession(
   // partial assistant message + synthesized tool_results need to survive so
   // the next turn's history is a valid sequence.
   for (let i = turnStartLength; i < history.length; i++) {
-    await appendMessage(projectId, history[i]).catch((err) =>
+    await appendMessage(projectId, sessionId, history[i]).catch((err) =>
       console.error("appendMessage failed:", err),
     );
   }
+  // Bump the session's updated_at so the dropdown can sort by recency.
+  // Fire-and-forget — the user shouldn't wait for a metadata write to see
+  // `complete` — but on failure the session would silently drop to the
+  // bottom of the dropdown, so retry once and log loudly if it still fails.
+  touchSession(sessionId).catch(async (err) => {
+    try {
+      await new Promise((r) => setTimeout(r, 250));
+      await touchSession(sessionId);
+    } catch (err2) {
+      console.error(
+        `[chat-session] touch failed for project=${projectId.slice(0, 8)} ` +
+          `session=${sessionId.slice(0, 8)} after retry — dropdown ordering ` +
+          `will be stale until the next turn:`,
+        err2 instanceof Error ? err2.message : err2,
+        "(initial error:",
+        err instanceof Error ? err.message : err,
+        ")",
+      );
+    }
+  });
 
   send({
     type: "complete",
@@ -2384,6 +2722,175 @@ async function readSandboxFile(rootDir: string, p: string): Promise<string | nul
   } catch {
     return null;
   }
+}
+
+/**
+ * NL project creation helper. Single Haiku call: returns a short kebab-case
+ * project name and a refined first message. Cheap (~200ms, ~$0.0003) so we
+ * call it on every brief — the alternative (deriving a name from the first
+ * 5 words and forwarding the brief verbatim) produces unreadable names like
+ * "website-of-narayan-balakrishnan-partner" and unfocused first prompts.
+ *
+ * Falls back gracefully on any error: caller catches and surfaces the
+ * failure rather than creating a half-baked project.
+ */
+const PROJECT_NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
+function sanitizeProjectName(raw: string): string {
+  const slug = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 40);
+  if (PROJECT_NAME_RE.test(slug)) return slug;
+  return `untitled-${randomUUID().slice(0, 6)}`;
+}
+
+/**
+ * Push a project's host-side sandbox dir to a freshly-created GitHub repo as
+ * the initial commit. Best-effort and bounded: a 60s timeout on the git push
+ * stops the request from hanging if the network is slow.
+ *
+ * Idempotent only on the empty-sandbox case (we wrap `git init` in -b, then
+ * abort if `.git` already exists). For sandboxes that already have a git
+ * history, the user has their own workflow and we don't want to clobber it.
+ */
+async function initialPushToRepo(opts: {
+  sandboxDir: string;
+  cloneUrl: string;
+  token: string;
+  defaultBranch: string;
+  projectName: string;
+}): Promise<void> {
+  // If the sandbox already has a .git, skip — user is managing their own history.
+  if (await fileExists(path.join(opts.sandboxDir, ".git"))) {
+    throw new Error(
+      ".git already present in sandbox; skipping initial push (set the remote yourself with `git remote add origin <url>`)",
+    );
+  }
+  await fs.mkdir(opts.sandboxDir, { recursive: true });
+  // GitHub rejects empty pushes — write a minimal README so the initial commit
+  // has something. Doesn't overwrite an existing README.
+  const readme = path.join(opts.sandboxDir, "README.md");
+  if (!(await fileExists(readme))) {
+    await fs.writeFile(readme, `# ${opts.projectName}\n\nCreated by Uniqus Codex.\n`);
+  }
+  const askpassDir = await fs.mkdtemp(path.join(tmpdir(), "uniqus-git-askpass-"));
+  const askpassPath = path.join(askpassDir, "askpass.js");
+  await fs.writeFile(
+    askpassPath,
+    `#!/usr/bin/env node
+const prompt = process.argv.slice(2).join(" ");
+process.stdout.write(/username/i.test(prompt) ? "x-access-token\\n" : ${JSON.stringify(opts.token + "\n")});
+`,
+    { mode: 0o700 },
+  );
+  await fs.chmod(askpassPath, 0o700).catch(() => {});
+  const env = {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ASKPASS: askpassPath,
+  };
+  const run = (args: string[]): Promise<void> =>
+    new Promise((resolve, reject) => {
+      const p = spawnChild("git", args, { cwd: opts.sandboxDir, env, stdio: ["ignore", "pipe", "pipe"] });
+      let stderr = "";
+      p.stderr?.on("data", (c: Buffer) => (stderr += c.toString()));
+      const timer = setTimeout(() => {
+        try {
+          p.kill("SIGKILL");
+        } catch {}
+        reject(new Error(`git ${args[0]} timed out after 60s`));
+      }, 60_000);
+      p.once("error", (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      p.once("close", (code) => {
+        clearTimeout(timer);
+        if (code === 0) resolve();
+        else reject(new Error(`git ${args[0]} exited ${code}: ${stderr.slice(-300).trim()}`));
+      });
+    });
+
+  try {
+    await run(["init", "-b", opts.defaultBranch]);
+    await run([
+      "-c",
+      "user.email=uniqus@noreply.invalid",
+      "-c",
+      "user.name=Uniqus Codex",
+      "-c",
+      "commit.gpgsign=false",
+      "add",
+      "-A",
+    ]);
+    await run([
+      "-c",
+      "user.email=uniqus@noreply.invalid",
+      "-c",
+      "user.name=Uniqus Codex",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "-m",
+      "Initial commit",
+    ]);
+    await run(["remote", "add", "origin", opts.cloneUrl]);
+    await run(["push", "-u", "origin", opts.defaultBranch]);
+  } finally {
+    await fs.rm(askpassDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function fileExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function refineBrief(
+  brief: string,
+): Promise<{ name: string; first_message: string }> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not set");
+  const client = new AnthropicCtor({ apiKey });
+  const system =
+    "You turn a one-line project brief into (a) a short kebab-case project name " +
+    "and (b) a clearer first message for an autonomous coding agent that will " +
+    "build the thing. Reply ONLY with valid JSON of shape " +
+    `{"name": "<kebab-case, <=40 chars, no leading/trailing dash>", "first_message": "<concrete prompt for the coding agent>"}. ` +
+    "The name should hint at the subject (e.g. 'narayan-portfolio', 'uniqus-marketing-site'). " +
+    "The first_message should preserve the user's intent verbatim where possible — only add structure (\"build a ...\", \"include ...\") and clarify obvious gaps (preferred stack defaults, sections, etc.). " +
+    "Do NOT invent facts (names, deadlines, integrations) the user didn't mention. " +
+    "Do NOT wrap output in markdown fences.";
+  const response = await client.messages.create({
+    model: ensureAnthropic("classify"),
+    max_tokens: 600,
+    system,
+    messages: [{ role: "user", content: brief }],
+  });
+  const text = response.content
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("")
+    .trim();
+  let parsed: { name?: unknown; first_message?: unknown };
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`refiner returned non-JSON: ${text.slice(0, 200)}`);
+  }
+  const name =
+    typeof parsed.name === "string" ? sanitizeProjectName(parsed.name) : sanitizeProjectName(brief);
+  const firstMessage =
+    typeof parsed.first_message === "string" && parsed.first_message.trim()
+      ? parsed.first_message.trim()
+      : brief;
+  return { name, first_message: firstMessage };
 }
 
 main().catch((err) => {

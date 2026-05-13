@@ -23,7 +23,7 @@ export default async function LoginPage() {
         <h1>Sign in</h1>
         <p className="sub">Engineering, on demand.</p>
         <a href={signInUrl} className="signin-btn">
-          Continue with WorkOS
+          Continue securely
         </a>
         <div className="footer">
           By signing in you agree to the terms and privacy policy.

@@ -253,13 +253,22 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "list_secrets",
     description:
-      "List the names of secrets configured for this project. Values are NEVER returned — only names + optional descriptions, so you can decide which secret a code path needs without holding plaintext in your context.",
-    input_schema: { type: "object", properties: {} },
+      "List the names of secrets configured for this project. Values are NEVER returned — only names + envs + optional descriptions, so you can decide which secret a code path needs without holding plaintext in your context. Default behavior shows the 'default' env; pass env='*' to see every env, or a specific env name (e.g. 'production') to filter.",
+    input_schema: {
+      type: "object",
+      properties: {
+        env: {
+          type: "string",
+          description:
+            "Optional. Env name to filter by (e.g. 'development', 'staging', 'production'), or '*' to list every env. Default 'default'.",
+        },
+      },
+    },
   },
   {
     name: "get_secret",
     description:
-      "Fetch a project secret by name and write it as an env var into a .env file in the sandbox so generated code can read it via process.env / os.environ. Returns the env-var name on success — does NOT return the plaintext to the agent context. The .env file is gitignored by default. Every read is audit-logged.",
+      "Fetch a project secret by name and write it as an env var into a .env file in the sandbox so generated code can read it via process.env / os.environ. Returns the env-var name on success — does NOT return the plaintext to the agent context. The .env file is gitignored by default. Every read is audit-logged. Use the optional 'env' field to read a specific environment's slot (defaults to 'default').",
     input_schema: {
       type: "object",
       properties: {
@@ -267,6 +276,11 @@ export const TOOLS: Anthropic.Tool[] = [
         env_file: {
           type: "string",
           description: "Optional. .env file relative to sandbox root. Default '.env'.",
+        },
+        env: {
+          type: "string",
+          description:
+            "Optional. Which environment's slot to read (e.g. 'development', 'staging', 'production'). Default 'default'.",
         },
       },
       required: ["name"],

@@ -53,6 +53,85 @@ export const createProjectApi = (
     body: JSON.stringify({ name, description }),
   });
 
+/**
+ * NL project creation: hand the orchestrator a free-form brief, get back
+ * a created project plus a refined first message ready to fire as the
+ * agent's opening turn. Costs one Haiku call (~$0.0003, ~200ms).
+ */
+export const createProjectFromBriefApi = (
+  brief: string,
+): Promise<{ project: ProjectSummary; first_message: string }> =>
+  api("/api/projects/from-brief", {
+    method: "POST",
+    body: JSON.stringify({ brief }),
+  });
+
+export interface CreateGithubRepoResult {
+  repo_url: string;
+  repo_full_name: string;
+  default_branch: string;
+  /** True when the orchestrator was able to push the initial commit. */
+  pushed: boolean;
+  /** Set when push was attempted but failed — surface to user as a hint. */
+  push_note?: string;
+}
+
+/**
+ * Create a fresh GitHub repo (always private) for a project, using the
+ * user's existing GitHub OAuth token. Best-effort initial push from the
+ * host-side sandbox dir; pushed=false means the user needs to push from
+ * the agent themselves.
+ */
+export const createGithubRepoApi = (
+  projectId: string,
+  body: { name?: string } = {},
+): Promise<CreateGithubRepoResult> =>
+  api(`/api/projects/${projectId}/create-github-repo`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+// ── Chat sessions (Phase 2.x) ────────────────────────────────────────────────
+
+export interface ChatSessionSummary {
+  id: string;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export const fetchChatSessionsApi = (
+  projectId: string,
+): Promise<{ sessions: ChatSessionSummary[] }> =>
+  api(`/api/projects/${projectId}/chat-sessions`);
+
+export const createChatSessionApi = (
+  projectId: string,
+  title?: string,
+): Promise<{ session: ChatSessionSummary }> =>
+  api(`/api/projects/${projectId}/chat-sessions`, {
+    method: "POST",
+    body: JSON.stringify({ title }),
+  });
+
+export const renameChatSessionApi = (
+  projectId: string,
+  sessionId: string,
+  title: string,
+): Promise<{ session: ChatSessionSummary }> =>
+  api(`/api/projects/${projectId}/chat-sessions/${sessionId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  });
+
+export const deleteChatSessionApi = (
+  projectId: string,
+  sessionId: string,
+): Promise<{ ok: true }> =>
+  api(`/api/projects/${projectId}/chat-sessions/${sessionId}`, {
+    method: "DELETE",
+  });
+
 export const updateProjectApi = (
   projectId: string,
   patch: { name?: string; description?: string | null; icon?: string | null },
@@ -282,18 +361,30 @@ export const restoreCheckpointApi = (
 export interface SecretSummary {
   id: string;
   name: string;
+  /**
+   * Environment slot. Same `name` can exist in multiple envs with different
+   * values (e.g. "production" vs "development"). Defaults to "default" when
+   * the caller doesn't specify one.
+   */
+  env: string;
   description: string | null;
   updated_at: string;
 }
 
+/**
+ * env="*" returns secrets across every env (default behavior — the modal
+ * shows them all so the user can manage multi-env setups). A specific env
+ * name (e.g. "production") filters to that env's slot.
+ */
 export const fetchSecretsApi = (
   projectId: string,
+  env: string = "*",
 ): Promise<{ secrets: SecretSummary[] }> =>
-  api(`/api/projects/${projectId}/secrets`);
+  api(`/api/projects/${projectId}/secrets?env=${encodeURIComponent(env)}`);
 
 export const upsertSecretApi = (
   projectId: string,
-  body: { name: string; value: string; description?: string | null },
+  body: { name: string; value: string; env?: string; description?: string | null },
 ): Promise<{ secret: SecretSummary }> =>
   api(`/api/projects/${projectId}/secrets`, {
     method: "POST",
@@ -303,8 +394,12 @@ export const upsertSecretApi = (
 export const deleteSecretApi = (
   projectId: string,
   name: string,
+  env: string = "default",
 ): Promise<{ ok: true }> =>
-  api(`/api/projects/${projectId}/secrets/${name}`, { method: "DELETE" });
+  api(
+    `/api/projects/${projectId}/secrets/${name}?env=${encodeURIComponent(env)}`,
+    { method: "DELETE" },
+  );
 
 // ── Slash commands ────────────────────────────────────────────────────────────
 
