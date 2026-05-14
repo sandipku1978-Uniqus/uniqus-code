@@ -15,15 +15,27 @@ const workosMiddleware = authkitMiddleware({
 
 /**
  * Guest accounts have no WorkOS session, so the stock authkitMiddleware would
- * bounce them to /login. Let a request through untouched when it carries a
- * valid `uniqus-guest` cookie; otherwise fall back to the WorkOS middleware
- * exactly as before. A just-converted guest still has wos-session, so that
- * case flows through WorkOS normally.
+ * bounce them to /login. Two bypasses:
+ *
+ *  1. The web app's own guest API routes (/api/guest/*) handle their own auth —
+ *     signup + restore are unauthenticated by definition (the visitor has no
+ *     cookie yet), convert + signout read the guest cookie themselves. The
+ *     WorkOS middleware must never intercept them, or it redirects the
+ *     would-be guest to the WorkOS sign-in page.
+ *  2. A request carrying a valid `uniqus-guest` cookie is let through
+ *     untouched. A just-converted guest still has wos-session, so that case
+ *     flows through WorkOS normally.
+ *
+ * Everything else falls back to the WorkOS middleware exactly as before.
  */
 export default async function middleware(
   req: NextRequest,
   event: NextFetchEvent,
 ) {
+  const { pathname } = req.nextUrl;
+  if (pathname === "/api/guest" || pathname.startsWith("/api/guest/")) {
+    return NextResponse.next();
+  }
   const guest = await unsealGuestCookie(
     req.cookies.get(GUEST_COOKIE_NAME)?.value,
   );
