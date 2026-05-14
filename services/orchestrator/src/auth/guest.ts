@@ -10,14 +10,17 @@
  * forged. authenticate() in server.ts tries the WorkOS cookie first, then
  * falls back to this one.
  *
- * The cookie is set with the same Domain as wos-session (WORKOS_COOKIE_DOMAIN)
- * so it reaches both the web app and the orchestrator subdomain.
+ * Cookie ownership: the orchestrator SEALS the cookie value, but the web app
+ * SETS the actual cookie (apps/web/app/api/guest/*). The web app reliably has
+ * WORKOS_COOKIE_DOMAIN configured (AuthKit depends on it) so the cookie spans
+ * app. + api.; the orchestrator historically only ever READ cookies and may
+ * not have that env var. The orchestrator only needs to read this one too.
  *
  * Flow:
- *   - POST /api/guest              → create a guest account, set cookie, return
- *                                    the one-time recovery code.
+ *   - POST /api/guest              → create a guest account; return the sealed
+ *                                    cookie value + the one-time recovery code.
  *   - POST /api/guest/restore      → re-attach to an existing guest via its
- *                                    recovery code (new device / cleared cookies).
+ *                                    recovery code; return the sealed cookie.
  *   - POST /api/guest/merge        → after the guest signs in with Google, move
  *                                    their projects onto the WorkOS account.
  *   - GET  /api/guest/recovery-code → re-display the code to a logged-in guest.
@@ -63,14 +66,6 @@ function getCookiePassword(): string {
     throw new Error("WORKOS_COOKIE_PASSWORD must be at least 32 characters");
   }
   return pw;
-}
-
-function isHttps(req: IncomingMessage): boolean {
-  // Behind Railway/Vercel/Fly the inner socket is HTTP; the edge sets
-  // x-forwarded-proto. Secure cookies are required for SameSite=None.
-  if (req.headers["x-forwarded-proto"] === "https") return true;
-  const host = req.headers.host ?? "";
-  return !host.startsWith("localhost") && !host.startsWith("127.0.0.1");
 }
 
 // ── Recovery codes ────────────────────────────────────────────────────────────
@@ -136,32 +131,6 @@ async function sealGuestCookie(
   });
 }
 
-function cookieAttributes(req: IncomingMessage, maxAgeSeconds: number): string {
-  const parts = ["Path=/", "HttpOnly", `Max-Age=${maxAgeSeconds}`];
-  // Match wos-session's Domain so the cookie reaches both the web app and the
-  // orchestrator subdomain. Omitted in local dev (a host-only localhost cookie
-  // is sent across ports anyway).
-  const domain = process.env.WORKOS_COOKIE_DOMAIN;
-  if (domain) parts.push(`Domain=${domain}`);
-  // Cross-site (web app origin → orchestrator origin) needs SameSite=None,
-  // which the browser only accepts alongside Secure. Local http dev falls back
-  // to Lax so the cookie still works without TLS.
-  if (isHttps(req)) parts.push("SameSite=None", "Secure");
-  else parts.push("SameSite=Lax");
-  return parts.join("; ");
-}
-
-function setGuestCookie(
-  res: ServerResponse,
-  req: IncomingMessage,
-  sealed: string,
-): void {
-  res.setHeader(
-    "Set-Cookie",
-    `${GUEST_COOKIE}=${sealed}; ${cookieAttributes(req, GUEST_COOKIE_TTL_SECONDS)}`,
-  );
-}
-
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -176,14 +145,12 @@ function errMessage(err: unknown): string {
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /**
- * POST /api/guest — create a fresh guest account, set the cookie, and return
- * the one-time recovery code. The code is shown to the user once at signup
- * (and re-viewable later via /api/guest/recovery-code while logged in).
+ * POST /api/guest — create a fresh guest account. Returns the one-time recovery
+ * code (shown once at signup, re-viewable later via /api/guest/recovery-code)
+ * plus the sealed cookie value for the web app's route handler to set as a
+ * first-party cookie.
  */
-export async function handleGuestCreate(
-  req: IncomingMessage,
-  res: ServerResponse,
-): Promise<void> {
+export async function handleGuestCreate(res: ServerResponse): Promise<void> {
   const code = generateRecoveryCode();
   const displayName = generateGuestDisplayName();
   let user: UserRecord;
@@ -196,17 +163,19 @@ export async function handleGuestCreate(
   } catch (err) {
     return json(res, 500, { error: `guest signup failed: ${errMessage(err)}` });
   }
-  setGuestCookie(res, req, await sealGuestCookie(user.id, displayName));
-  json(res, 201, { recovery_code: code, display_name: displayName });
+  // The web app sets the actual cookie (it has WORKOS_COOKIE_DOMAIN) — we just
+  // hand back the sealed value for its route handler to relay.
+  const sealed_cookie = await sealGuestCookie(user.id, displayName);
+  json(res, 201, { recovery_code: code, display_name: displayName, sealed_cookie });
 }
 
 /**
  * POST /api/guest/restore { recovery_code } — re-attach to an existing guest
- * account from another device or after cookies were cleared. 404 for an
- * unknown code or a guest that has already converted to a real account.
+ * account from another device or after cookies were cleared. Returns the
+ * sealed cookie value for the web app to set. 404 for an unknown code or a
+ * guest that has already converted to a real account.
  */
 export async function handleGuestRestore(
-  req: IncomingMessage,
   res: ServerResponse,
   recoveryCode: string,
 ): Promise<void> {
@@ -220,8 +189,8 @@ export async function handleGuestRestore(
   }
   if (!user) return json(res, 404, { error: "recovery code not recognised" });
   const displayName = user.display_name ?? "Guest";
-  setGuestCookie(res, req, await sealGuestCookie(user.id, displayName));
-  json(res, 200, { display_name: displayName });
+  const sealed_cookie = await sealGuestCookie(user.id, displayName);
+  json(res, 200, { display_name: displayName, sealed_cookie });
 }
 
 /**

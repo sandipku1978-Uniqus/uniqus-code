@@ -476,20 +476,39 @@ export interface GuestCreateResult {
 }
 
 /**
- * Create a free guest account. The orchestrator sets the uniqus-guest cookie
- * on the response and returns the one-time recovery code to show the student.
+ * Create a free guest account. Hits the web app's own route handler (not the
+ * orchestrator directly) so the uniqus-guest cookie is set first-party with the
+ * web app's WORKOS_COOKIE_DOMAIN — otherwise the cookie is host-only to the
+ * orchestrator and the dashboard never sees it. Returns the one-time code.
  */
-export const createGuestApi = (): Promise<GuestCreateResult> =>
-  api("/api/guest", { method: "POST", body: "{}" });
+export const createGuestApi = async (): Promise<GuestCreateResult> => {
+  const res = await fetch("/api/guest", {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`guest signup failed: ${body || res.statusText}`);
+  }
+  return (await res.json()) as GuestCreateResult;
+};
 
 /** Re-attach to an existing guest account via its recovery code. */
-export const restoreGuestApi = (
+export const restoreGuestApi = async (
   recoveryCode: string,
-): Promise<{ display_name: string | null }> =>
-  api("/api/guest/restore", {
+): Promise<{ display_name: string | null }> => {
+  const res = await fetch("/api/guest/restore", {
     method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ recovery_code: recoveryCode }),
   });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`restore failed: ${body || res.statusText}`);
+  }
+  return (await res.json()) as { display_name: string | null };
+};
 
 /** Re-display the logged-in guest's own recovery code (for the yellow banner). */
 export const fetchGuestRecoveryCodeApi = (): Promise<{

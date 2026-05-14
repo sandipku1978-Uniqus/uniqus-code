@@ -491,17 +491,18 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     });
   }
 
-  // Guest account signup + restore. There's no session yet, so these run above
-  // the auth gate — but they still got the isOriginAllowed() check above, since
-  // they're state-changing fetches from our own web app.
+  // Guest account signup + restore. Called server-to-server by the web app's
+  // route handlers (apps/web/app/api/guest/*), which relay the sealed cookie
+  // value we return into a first-party cookie. No session needed, so these run
+  // above the auth gate.
   if (req.url === "/api/guest" && req.method === "POST") {
-    return await handleGuestCreate(req, res);
+    return await handleGuestCreate(res);
   }
   if (req.url === "/api/guest/restore" && req.method === "POST") {
     const body = await readJsonBody<{ recovery_code?: string }>(req).catch(
       () => ({}) as { recovery_code?: string },
     );
-    return await handleGuestRestore(req, res, body.recovery_code ?? "");
+    return await handleGuestRestore(res, body.recovery_code ?? "");
   }
 
   const auth = await authenticate(req);

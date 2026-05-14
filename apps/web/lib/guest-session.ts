@@ -8,8 +8,11 @@
  * (Edge-compatible) and nothing from next/headers. Server-component helpers
  * that need next/headers live in guest-server.ts.
  *
- * The cookie is *set* by the orchestrator (POST /api/guest); the web app only
- * ever reads it, and clears it on signout / after conversion.
+ * The cookie is *set* by the web app's route handlers (apps/web/app/api/guest/*):
+ * the orchestrator seals the value, but the web app owns the actual cookie so
+ * it gets the right Domain (WORKOS_COOKIE_DOMAIN, which the web app reliably
+ * has and the orchestrator may not). Read by the middleware, server components,
+ * and — cross-origin but same-site — the orchestrator.
  */
 
 import { unsealData } from "iron-session";
@@ -53,9 +56,26 @@ export async function unsealGuestCookie(
 }
 
 /**
- * Cookie options for clearing the guest cookie. The Domain must match what the
- * orchestrator set it with (WORKOS_COOKIE_DOMAIN) or the browser keeps the
- * stale cookie. Used by the signout + convert route handlers.
+ * Cookie options for SETTING the guest cookie from a web-app route handler
+ * (apps/web/app/api/guest/*). Domain comes from WORKOS_COOKIE_DOMAIN — the same
+ * domain AuthKit uses for wos-session — so the cookie spans app. + api.
+ * `secure` is derived from the request so it also works on http://localhost.
+ */
+export function guestCookieSetOptions(req: Request) {
+  return {
+    httpOnly: true,
+    path: "/",
+    maxAge: GUEST_COOKIE_TTL_SECONDS,
+    sameSite: "lax" as const,
+    secure: new URL(req.url).protocol === "https:",
+    domain: process.env.WORKOS_COOKIE_DOMAIN || undefined,
+  };
+}
+
+/**
+ * Cookie options for clearing the guest cookie. Domain + path must match how it
+ * was set (guestCookieSetOptions) or the browser keeps the stale cookie. Used
+ * by the signout + convert route handlers.
  */
 export function guestCookieClearOptions(): {
   maxAge: number;
