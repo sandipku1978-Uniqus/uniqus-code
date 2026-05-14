@@ -1383,7 +1383,33 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     // host's filesystem and the VM would still be missing modules. Both
     // paths use the unified sandboxRunCommand which dispatches through the
     // VM when a handle is set.
-    const installer = await needsInstall(dest);
+    let installer = await needsInstall(dest);
+    // needsInstall() inspects the HOST sandbox dir, but in Firecracker mode the
+    // dev server runs INSIDE the VM — a separate filesystem. A stale host
+    // node_modules (or a VM that cold-booted without one, e.g. after an
+    // orchestrator restart) makes the host check lie: the install gets skipped
+    // and `npm run dev` then fails with "<binary>: not found". When we have a
+    // VM, probe IT for a package.json and install there regardless of host
+    // state. (Storage sync skips node_modules, so the VM never starts with it.)
+    if (runVm && !installer) {
+      try {
+        const probe = await sandboxRunCommand(
+          { rootDir: dest, vm: runVm },
+          "[ -f package.json ] && { [ -f pnpm-lock.yaml ] && echo pnpm || { [ -f yarn.lock ] && echo yarn || echo npm; }; } || echo none",
+          30_000,
+        );
+        const out = probe.stdout;
+        installer = out.includes("pnpm")
+          ? "pnpm"
+          : out.includes("yarn")
+            ? "yarn"
+            : out.includes("npm")
+              ? "npm"
+              : null;
+      } catch (err) {
+        console.error(`[run ${projectId}] VM dependency probe failed:`, err);
+      }
+    }
     if (installer) {
       broadcastToProject(projectId, {
         type: "text",
