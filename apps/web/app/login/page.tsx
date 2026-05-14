@@ -1,10 +1,15 @@
 import { getSignInUrl, withAuth } from "@workos-inc/authkit-nextjs";
 import { redirect } from "next/navigation";
+import GuestLoginActions from "@/components/GuestLoginActions";
+import { getGuestSession } from "@/lib/guest-server";
 
 export default async function LoginPage() {
-  // If you're already signed in, skip the sign-in card and go straight to projects.
+  // Already signed in with a WorkOS account → skip the card. A guest visitor
+  // is deliberately NOT redirected: /login is their upgrade path, and the
+  // place to restore a guest account from a recovery code.
   const { user } = await withAuth();
   if (user) redirect("/projects");
+  const isExistingGuest = !!(await getGuestSession());
 
   // Land on /projects after auth, not /, so we don't loop back through marketing.
   const signInUrl = await getSignInUrl({ returnTo: "/projects" });
@@ -25,6 +30,7 @@ export default async function LoginPage() {
         <a href={signInUrl} className="signin-btn">
           Continue securely
         </a>
+        <GuestLoginActions isExistingGuest={isExistingGuest} />
         <div className="footer">
           By signing in you agree to the terms and privacy policy.
         </div>

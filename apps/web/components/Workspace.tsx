@@ -18,6 +18,7 @@ import TerminalPanel from "./TerminalPanel";
 import DeployButton from "./DeployButton";
 import BrandLockup from "./BrandLockup";
 import GithubRepoButton from "./GithubRepoButton";
+import GuestBanner from "./GuestBanner";
 import ChatSessionDropdown from "./ChatSessionDropdown";
 import SkillsModal from "./SkillsModal";
 import SecretsModal from "./SecretsModal";
@@ -37,10 +38,17 @@ export default function Workspace({
   const project = useStore((s) => s.project);
   const reset = useStore((s) => s.reset);
   const lastSyncedAt = useStore((s) => s.lastSyncedAt);
-  const chatLength = useStore((s) => s.chat.length);
+  // Real conversation history — anything that isn't a `system` item. The
+  // `session_started` handler always adds a "session ready" system message,
+  // so `chat.length` is never 0 once the WS is up; gating the first-turn
+  // fire on it would suppress the brief on every brand-new project.
+  const hasHistory = useStore((s) => s.chat.some((i) => i.kind !== "system"));
   const mode = useStore((s) => s.mode);
   const addUserMessage = useStore((s) => s.addUserMessage);
   const setBusy = useStore((s) => s.setBusy);
+  // account_type arrives on the WS session_started event. Guests get full
+  // parity except GitHub + deploys, so we drop those two topbar buttons.
+  const isGuest = useStore((s) => s.user?.account_type) === "guest";
 
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -77,7 +85,7 @@ export default function Workspace({
   useEffect(() => {
     if (!briefParam) return;
     if (!connected || !project) return;
-    if (chatLength > 0) {
+    if (hasHistory) {
       // History exists — strip the param without firing. Avoids
       // surprise-re-running an old brief on re-open.
       router.replace(`/projects/${projectId}`);
@@ -99,7 +107,7 @@ export default function Workspace({
     briefParam,
     connected,
     project,
-    chatLength,
+    hasHistory,
     mode,
     addUserMessage,
     setBusy,
@@ -133,8 +141,8 @@ export default function Workspace({
         <div className="actions">
           <ChatSessionDropdown projectId={projectId} />
           <RunButton projectId={projectId} />
-          <DeployButton projectId={projectId} />
-          <GithubRepoButton projectId={projectId} />
+          {!isGuest && <DeployButton projectId={projectId} />}
+          {!isGuest && <GithubRepoButton projectId={projectId} />}
           <button
             onClick={() => setSkillsOpen(true)}
             className="toggle-btn"
@@ -217,6 +225,8 @@ export default function Workspace({
           </a>
         </div>
       </div>
+
+      {isGuest && <GuestBanner variant="compact" />}
 
       {/* Main grid */}
       <div className="ide-grid">

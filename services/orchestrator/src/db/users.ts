@@ -1,11 +1,19 @@
+import { randomUUID } from "node:crypto";
 import { db } from "./client.js";
 import { decryptToken, encryptToken } from "../auth/encrypt.js";
 
+/** Columns that make up a UserRecord — shared by every query that returns one. */
+const USER_COLUMNS = "id, workos_id, email, display_name, account_type, converted_at";
+
 export interface UserRecord {
   id: string;
-  workos_id: string;
+  /** NULL for guest accounts — they have no WorkOS identity. */
+  workos_id: string | null;
   email: string;
   display_name: string | null;
+  account_type: "standard" | "guest";
+  /** Set when a guest signs in with Google and their projects move across. */
+  converted_at: string | null;
 }
 
 export interface GithubLink {
@@ -36,10 +44,13 @@ export async function upsertUser(input: {
         workos_id: input.workos_id,
         email: input.email,
         display_name: input.display_name ?? null,
+        // WorkOS-identity rows are always standard accounts — be explicit
+        // rather than relying on the column default.
+        account_type: "standard",
       },
       { onConflict: "workos_id" },
     )
-    .select("id, workos_id, email, display_name")
+    .select(USER_COLUMNS)
     .single();
 
   if (error || !data) {
@@ -184,4 +195,170 @@ export async function getGithubToken(userId: string): Promise<string | null> {
     console.error(`getGithubToken decrypt failed for user ${userId}:`, err);
     return null;
   }
+}
+
+// ── Guest / education accounts ────────────────────────────────────────────────
+
+/**
+ * Look up any user by primary key. Used by the guest auth path in
+ * authenticate() — the guest cookie carries the users.id and we resolve the
+ * row from it (the WorkOS path uses upsertUser keyed on workos_id instead).
+ */
+export async function getUserById(id: string): Promise<UserRecord | null> {
+  const { data, error } = await db()
+    .from("users")
+    .select(USER_COLUMNS)
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw new Error(`getUserById failed: ${error.message}`);
+  return (data ?? null) as UserRecord | null;
+}
+
+/**
+ * Create a fresh guest account. Guests have no WorkOS identity and no real
+ * email — the email column is NOT NULL, so we store a synthetic .invalid
+ * address (never shown; display_name is what the UI renders). The recovery
+ * code arrives already hashed (for the restore lookup) and encrypted (for
+ * re-display) from auth/guest.ts.
+ */
+export async function createGuestUser(input: {
+  display_name: string;
+  recovery_hash: string;
+  recovery_code_enc: string;
+}): Promise<UserRecord> {
+  const id = randomUUID();
+  const { data, error } = await db()
+    .from("users")
+    .insert({
+      id,
+      workos_id: null,
+      email: `guest-${id}@guest.invalid`,
+      display_name: input.display_name,
+      account_type: "guest",
+      guest_recovery_hash: input.recovery_hash,
+      guest_recovery_code_enc: input.recovery_code_enc,
+      last_active_at: new Date().toISOString(),
+    })
+    .select(USER_COLUMNS)
+    .single();
+  if (error || !data) throw new Error(`createGuestUser failed: ${error?.message}`);
+  return data as UserRecord;
+}
+
+/**
+ * Resolve a guest account from the sha256 of its recovery code. Returns null
+ * for an unknown code, a non-guest row, or a guest that has already converted
+ * (convert nulls the recovery columns, but guard converted_at too).
+ */
+export async function getGuestByRecoveryHash(
+  hash: string,
+): Promise<UserRecord | null> {
+  const { data, error } = await db()
+    .from("users")
+    .select(USER_COLUMNS)
+    .eq("guest_recovery_hash", hash)
+    .maybeSingle();
+  if (error) throw new Error(`getGuestByRecoveryHash failed: ${error.message}`);
+  if (!data) return null;
+  const user = data as UserRecord;
+  if (user.account_type !== "guest" || user.converted_at) return null;
+  return user;
+}
+
+/**
+ * Bump last_active_at so the inactivity sweeper doesn't reap an account that's
+ * actually in use. Called fire-and-forget from authenticate() on every guest
+ * request. Also clears grace_started_at so a guest who returns during the
+ * grace window is pulled back out of the deletion queue.
+ */
+export async function touchUserActivity(id: string): Promise<void> {
+  const { error } = await db()
+    .from("users")
+    .update({ last_active_at: new Date().toISOString(), grace_started_at: null })
+    .eq("id", id);
+  if (error) throw new Error(`touchUserActivity failed: ${error.message}`);
+}
+
+/**
+ * Mark a guest account converted: its projects have just been reassigned to a
+ * WorkOS account. Null the recovery columns so the dead account can never be
+ * re-claimed with the old code.
+ */
+export async function markGuestConverted(guestId: string): Promise<void> {
+  const { error } = await db()
+    .from("users")
+    .update({
+      converted_at: new Date().toISOString(),
+      guest_recovery_hash: null,
+      guest_recovery_code_enc: null,
+    })
+    .eq("id", guestId)
+    .eq("account_type", "guest");
+  if (error) throw new Error(`markGuestConverted failed: ${error.message}`);
+}
+
+/**
+ * Decrypt and return a guest's own recovery code so the "Show recovery code"
+ * affordance can re-display it. The caller must already be authenticated as
+ * this guest — holding the session cookie is what authorises the read.
+ */
+export async function getGuestRecoveryCode(id: string): Promise<string | null> {
+  const { data, error } = await db()
+    .from("users")
+    .select("guest_recovery_code_enc")
+    .eq("id", id)
+    .maybeSingle();
+  if (error || !data?.guest_recovery_code_enc) return null;
+  try {
+    return decryptToken(data.guest_recovery_code_enc as string);
+  } catch (err) {
+    console.error(`getGuestRecoveryCode decrypt failed for ${id}:`, err);
+    return null;
+  }
+}
+
+/**
+ * Sweeper step 1: move live guests whose last activity is older than
+ * `inactiveDays` into the grace window. Single UPDATE — returns the count.
+ */
+export async function markStaleGuestsForGrace(
+  inactiveDays: number,
+): Promise<number> {
+  const cutoff = new Date(Date.now() - inactiveDays * 86_400_000).toISOString();
+  const { data, error } = await db()
+    .from("users")
+    .update({ grace_started_at: new Date().toISOString() })
+    .eq("account_type", "guest")
+    .is("converted_at", null)
+    .is("grace_started_at", null)
+    .lt("last_active_at", cutoff)
+    .select("id");
+  if (error) throw new Error(`markStaleGuestsForGrace failed: ${error.message}`);
+  return (data ?? []).length;
+}
+
+/**
+ * Sweeper query: guests that have sat in the grace window longer than
+ * `graceDays` without being touched or converted — these get hard-deleted.
+ */
+export async function listGuestsToDelete(graceDays: number): Promise<string[]> {
+  const cutoff = new Date(Date.now() - graceDays * 86_400_000).toISOString();
+  const { data, error } = await db()
+    .from("users")
+    .select("id")
+    .eq("account_type", "guest")
+    .is("converted_at", null)
+    .lt("grace_started_at", cutoff);
+  if (error) throw new Error(`listGuestsToDelete failed: ${error.message}`);
+  return (data ?? []).map((r) => r.id as string);
+}
+
+/**
+ * Hard-delete a user row. ON DELETE CASCADE clears their projects, messages,
+ * chat sessions, deployments and audit events. Used by the guest sweeper after
+ * per-project Storage/VM teardown has run.
+ */
+export async function deleteUser(id: string): Promise<void> {
+  const { error } = await db().from("users").delete().eq("id", id);
+  if (error) throw new Error(`deleteUser failed: ${error.message}`);
 }

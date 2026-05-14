@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { ProjectSummary } from "@uniqus/api-types";
 import BrandLockup from "./BrandLockup";
+import GuestBanner from "./GuestBanner";
 import {
   fetchProjects,
   createProjectApi,
@@ -83,16 +84,29 @@ function fallbackTileColor(projectId: string): string {
 type Mode = "blank" | "describe" | "zip" | "github";
 type GithubAuthMode = "oauth" | "pat";
 
+const MODE_TABS: ReadonlyArray<readonly [Mode, string]> = [
+  ["blank", "Blank project"],
+  ["describe", "Describe in detail"],
+  ["zip", "Upload .zip"],
+  ["github", "Clone GitHub"],
+];
+
 export default function ProjectPicker({
   userEmail,
   userName,
   signOutUrl,
+  accountType = "standard",
+  convertFailed = false,
 }: {
-  userEmail: string;
+  userEmail: string | null;
   userName: string | null;
   signOutUrl: string;
+  accountType?: "standard" | "guest";
+  convertFailed?: boolean;
 }) {
   const router = useRouter();
+  const isGuest = accountType === "guest";
+  const displayLabel = userName ?? userEmail ?? "there";
   const searchParams = useSearchParams();
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -153,21 +167,22 @@ export default function ProjectPicker({
   // user back here). Picks up the new login without a manual refresh.
   const githubFlag = searchParams?.get("github") ?? null;
   useEffect(() => {
+    if (isGuest) return; // guests have no GitHub access
     fetchGithubStatus()
       .then((s) => setGithub(s))
       .catch(() => setGithub({ connected: false, login: null, connected_at: null }));
-  }, [githubFlag]);
+  }, [githubFlag, isGuest]);
 
   // When the user is connected, default to OAuth mode and fetch their
   // repos so the dropdown is ready before they switch to "Clone GitHub".
   useEffect(() => {
-    if (!github?.connected) return;
+    if (isGuest || !github?.connected) return;
     setGithubAuthMode("oauth");
     setReposError(null);
     fetchGithubRepos()
       .then((r) => setRepos(r.repos))
       .catch((err) => setReposError(err instanceof Error ? err.message : String(err)));
-  }, [github?.connected]);
+  }, [github?.connected, isGuest]);
 
   // Surface OAuth callback failures in the UI; clear the param so a refresh
   // doesn't replay the message.
@@ -353,13 +368,38 @@ export default function ProjectPicker({
         </div>
         <div className="right">
           <span style={{ color: "var(--text-muted)", fontSize: 12 }}>
-            {userName ?? userEmail}
+            {displayLabel}
           </span>
           <a href={signOutUrl} className="btn-ghost" style={{ fontSize: 12 }}>
             Sign out
           </a>
         </div>
       </nav>
+
+      {isGuest && <GuestBanner />}
+      {convertFailed && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "8px 16px",
+            fontSize: 12.5,
+            background: "rgba(220, 90, 90, 0.1)",
+            borderBottom: "1px solid rgba(220, 90, 90, 0.35)",
+            color: "var(--text-primary)",
+          }}
+        >
+          <span>We couldn&apos;t move your guest projects onto this account.</span>
+          <a
+            href="/api/guest/convert"
+            className="btn-ghost"
+            style={{ fontSize: 12, padding: "3px 9px", marginLeft: "auto" }}
+          >
+            Retry
+          </a>
+        </div>
+      )}
 
       <div className="dash-shell">
         <aside className="dash-side">
@@ -469,7 +509,7 @@ export default function ProjectPicker({
             </div>
             <div className="row">
               <span>Plan</span>
-              <span className="v">Free</span>
+              <span className="v">{isGuest ? "Guest" : "Free"}</span>
             </div>
             <div className="bar">
               <div className="fill" style={{ width: "20%" }} />
@@ -491,7 +531,7 @@ export default function ProjectPicker({
           <div className="pagehead">
             <div>
               <h1>
-                Welcome back, {(userName ?? userEmail).split(" ")[0] || "friend"}.
+                Welcome back, {displayLabel.split(" ")[0] || "friend"}.
               </h1>
               <p>Pick up where you left off — or describe a new one below.</p>
             </div>
@@ -510,13 +550,8 @@ export default function ProjectPicker({
                 borderBottom: "1px solid var(--border-default)",
               }}
             >
-              {(
-                [
-                  ["blank", "Blank project"],
-                  ["describe", "Describe in detail"],
-                  ["zip", "Upload .zip"],
-                  ["github", "Clone GitHub"],
-                ] as const
+              {MODE_TABS.filter(
+                ([m]) => !isGuest || m !== "github",
               ).map(([m, label]) => (
                 <button
                   key={m}
@@ -666,7 +701,7 @@ export default function ProjectPicker({
               )}
             </form>
 
-            {mode === "github" && (
+            {!isGuest && mode === "github" && (
               <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
                 {github === null ? (
                   <div style={{ fontSize: 12, color: "var(--text-muted)" }}>

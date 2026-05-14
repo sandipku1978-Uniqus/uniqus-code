@@ -1,18 +1,24 @@
 import Link from "next/link";
 import { withAuth } from "@workos-inc/authkit-nextjs";
 import BrandLockup from "@/components/BrandLockup";
+import GuestBanner from "@/components/GuestBanner";
+import { getGuestSession } from "@/lib/guest-server";
 
 export default async function MarketingPage() {
-  // Auth-aware CTAs: signed-in visitors get sent to their dashboard, not the
-  // sign-in page, otherwise we trap them in a loop after WorkOS callback.
+  // Auth-aware CTAs: signed-in visitors (WorkOS or guest) get sent to their
+  // dashboard, not the sign-in page, otherwise we trap them in a loop after
+  // the WorkOS callback.
   const { user } = await withAuth();
-  const ctaHref = user ? "/projects" : "/login";
-  const ctaPrimary = user ? "Open dashboard" : "Get started";
-  const ctaHero = user ? "Open dashboard" : "Start a project";
-  const ctaCta = user ? "Open dashboard" : "Start free";
+  const guest = user ? null : await getGuestSession();
+  const signedIn = !!user || !!guest;
+  const ctaHref = signedIn ? "/projects" : "/login";
+  const ctaPrimary = signedIn ? "Open dashboard" : "Get started";
+  const ctaHero = signedIn ? "Open dashboard" : "Start a project";
+  const ctaCta = signedIn ? "Open dashboard" : "Start free";
 
   return (
     <div className="marketing-shell">
+      {guest && <GuestBanner />}
       {/* Topnav */}
       <nav className="topnav">
         <Link href="/" style={{ textDecoration: "none" }}>

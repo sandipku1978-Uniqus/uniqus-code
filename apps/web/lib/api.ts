@@ -467,3 +467,31 @@ export async function uploadProjectFilesApi(input: {
   }
   return (await res.json()) as { files: UploadedFileSummary[] };
 }
+
+// ── Guest / education accounts ────────────────────────────────────────────────
+
+export interface GuestCreateResult {
+  recovery_code: string;
+  display_name: string;
+}
+
+/**
+ * Create a free guest account. The orchestrator sets the uniqus-guest cookie
+ * on the response and returns the one-time recovery code to show the student.
+ */
+export const createGuestApi = (): Promise<GuestCreateResult> =>
+  api("/api/guest", { method: "POST", body: "{}" });
+
+/** Re-attach to an existing guest account via its recovery code. */
+export const restoreGuestApi = (
+  recoveryCode: string,
+): Promise<{ display_name: string | null }> =>
+  api("/api/guest/restore", {
+    method: "POST",
+    body: JSON.stringify({ recovery_code: recoveryCode }),
+  });
+
+/** Re-display the logged-in guest's own recovery code (for the yellow banner). */
+export const fetchGuestRecoveryCodeApi = (): Promise<{
+  recovery_code: string | null;
+}> => api("/api/guest/recovery-code");

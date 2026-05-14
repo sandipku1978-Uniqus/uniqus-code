@@ -60,6 +60,8 @@ export interface CurrentUser {
   id: string;
   email: string;
   display_name: string | null;
+  /** "guest" accounts have full parity with "standard" except GitHub + deploys. */
+  account_type: "standard" | "guest";
 }
 
 export type DeploymentState = "QUEUED" | "BUILDING" | "READY" | "ERROR" | "CANCELED";

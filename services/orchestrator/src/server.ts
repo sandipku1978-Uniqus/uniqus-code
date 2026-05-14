@@ -54,6 +54,7 @@ import {
   shutdownAll as shutdownAllVms,
 } from "./firecracker/index.js";
 import type { VmHandle } from "./firecracker/types.js";
+import { startGuestSweeper, stopGuestSweeper } from "./guest/sweeper.js";
 import {
   shellInfo,
   listServers,
@@ -65,7 +66,12 @@ import {
 } from "./agent/sandbox.js";
 import { readRunConfig, writeRunConfig, detectRunConfig } from "./runConfig.js";
 import { needsInstall, runInstall } from "./ensureDeps.js";
-import { upsertUser, type UserRecord } from "./db/users.js";
+import {
+  upsertUser,
+  getUserById,
+  touchUserActivity,
+  type UserRecord,
+} from "./db/users.js";
 import {
   listProjects,
   createProject,
@@ -87,6 +93,13 @@ import {
   type ChatSessionRecord,
 } from "./db/chatSessions.js";
 import { unsealSessionFromCookieHeader, type AuthKitSession } from "./auth/workos.js";
+import {
+  unsealGuestFromCookieHeader,
+  handleGuestCreate,
+  handleGuestRestore,
+  handleGuestMerge,
+  handleGuestRecoveryCode,
+} from "./auth/guest.js";
 import { ensureBucket, listAll as storageListAll, remove as storageRemove } from "./storage/client.js";
 import { getTracker, clearTracker } from "./storage/sync.js";
 import { resolveTarget, proxyHttp, proxyWebSocket } from "./proxy.js";
@@ -194,6 +207,13 @@ async function main(): Promise<void> {
     process.once("SIGINT", () => onSignal("SIGINT"));
     console.log("[firecracker] enabled — VMs boot lazily on first user_message");
   }
+
+  // Guest account inactivity cleanup runs regardless of Firecracker — the
+  // Storage + DB teardown matters either way, and destroyVm is a no-op when
+  // Firecracker is off.
+  startGuestSweeper(sandboxDirFor);
+  process.once("SIGTERM", stopGuestSweeper);
+  process.once("SIGINT", stopGuestSweeper);
 
   const httpServer = createServer((req, res) => {
     handleHttp(req, res).catch((err) => {
@@ -328,19 +348,59 @@ async function readJsonBody<T>(req: IncomingMessage): Promise<T> {
   return JSON.parse(Buffer.concat(chunks).toString("utf-8")) as T;
 }
 
+/**
+ * Resolve the caller to a UserRecord. Tries the WorkOS session cookie first,
+ * then falls back to the guest cookie (see auth/guest.ts) — so guest accounts
+ * flow through every /api/* route and the WS upgrade exactly like a standard
+ * account. `kind` lets the few endpoints that care (guest restrictions, the
+ * conversion + recovery-code routes) branch; `session` is only set for WorkOS.
+ */
 async function authenticate(req: IncomingMessage): Promise<{
-  session: AuthKitSession;
+  kind: "workos" | "guest";
+  session?: AuthKitSession;
   user: UserRecord;
 } | null> {
   const session = await unsealSessionFromCookieHeader(req.headers.cookie);
-  if (!session) return null;
-  const user = await upsertUser({
-    workos_id: session.user.id,
-    email: session.user.email,
-    display_name:
-      [session.user.firstName, session.user.lastName].filter(Boolean).join(" ") || null,
-  });
-  return { session, user };
+  if (session) {
+    const user = await upsertUser({
+      workos_id: session.user.id,
+      email: session.user.email,
+      display_name:
+        [session.user.firstName, session.user.lastName].filter(Boolean).join(" ") || null,
+    });
+    return { kind: "workos", session, user };
+  }
+  const guest = await unsealGuestFromCookieHeader(req.headers.cookie);
+  if (guest) {
+    const user = await getUserById(guest.userId);
+    // Accept only a live guest row — a converted guest's cookie is dead.
+    if (user && user.account_type === "guest" && !user.converted_at) {
+      // Fire-and-forget: keep the inactivity sweeper from reaping an account
+      // that's actually in use, and pull it back out of the grace window.
+      void touchUserActivity(user.id).catch((err) =>
+        console.error(`touchUserActivity(${user.id}) failed:`, err),
+      );
+      return { kind: "guest", user };
+    }
+  }
+  return null;
+}
+
+/**
+ * Block git/Vercel/Fly capabilities for guest accounts. Guests have full
+ * parity with standard accounts except they can't touch GitHub or deploy —
+ * those need a real identity. Returns true (and sends the 403) when blocked,
+ * so callers do `if (guestForbidden(res, user)) return;`.
+ */
+function guestForbidden(res: ServerResponse, user: UserRecord): boolean {
+  if (user.account_type === "guest") {
+    json(res, 403, {
+      error: "guest_account_restricted",
+      detail: "Sign in with Google to use GitHub and deploys.",
+    });
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -431,6 +491,19 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     });
   }
 
+  // Guest account signup + restore. There's no session yet, so these run above
+  // the auth gate — but they still got the isOriginAllowed() check above, since
+  // they're state-changing fetches from our own web app.
+  if (req.url === "/api/guest" && req.method === "POST") {
+    return await handleGuestCreate(req, res);
+  }
+  if (req.url === "/api/guest/restore" && req.method === "POST") {
+    const body = await readJsonBody<{ recovery_code?: string }>(req).catch(
+      () => ({}) as { recovery_code?: string },
+    );
+    return await handleGuestRestore(req, res, body.recovery_code ?? "");
+  }
+
   const auth = await authenticate(req);
   if (!auth) {
     return json(res, 401, { error: "not authenticated" });
@@ -439,8 +512,31 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
 
   if (req.url === "/api/me" && req.method === "GET") {
     return json(res, 200, {
-      user: { id: user.id, email: user.email, display_name: user.display_name },
+      user: {
+        id: user.id,
+        email: user.email,
+        display_name: user.display_name,
+        account_type: user.account_type,
+      },
     });
+  }
+
+  // Guest → WorkOS conversion. Called server-side by the web app's /projects
+  // page when the request carries both cookies. WorkOS-only — a guest can't
+  // "merge" into anything.
+  if (req.url === "/api/guest/merge" && req.method === "POST") {
+    if (auth.kind !== "workos") {
+      return json(res, 403, { error: "merge requires a signed-in account" });
+    }
+    return json(res, 200, await handleGuestMerge(req, user));
+  }
+  // Re-display a guest's own recovery code for the "Show recovery code"
+  // affordance in the yellow banner. Guest-only.
+  if (req.url === "/api/guest/recovery-code" && req.method === "GET") {
+    if (auth.kind !== "guest") {
+      return json(res, 403, { error: "not a guest account" });
+    }
+    return json(res, 200, await handleGuestRecoveryCode(user));
   }
 
   if (req.url === "/api/projects" && req.method === "GET") {
@@ -496,6 +592,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // Codebase import: GitHub clone. Creates the project, clones into the sandbox,
   // then pushes the resulting tree to Storage so other sessions hydrate from it.
   if (req.url === "/api/projects/import-github" && req.method === "POST") {
+    if (guestForbidden(res, user)) return;
     const body = await readJsonBody<{
       name?: string;
       description?: string;
@@ -645,6 +742,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     /^\/api\/projects\/([0-9a-fA-F-]{8,})\/fly-deploy$/,
   );
   if (flyDeployMatch && req.method === "POST") {
+    if (guestForbidden(res, user)) return;
     const projectId = flyDeployMatch[1];
     const project = await getProject(projectId, user.id);
     if (!project) return json(res, 404, { error: "project not found" });
@@ -968,12 +1066,14 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // Top-level nav from the web app — no Origin header in most browsers, which
   // is why isOriginAllowed() returns true above.
   if (req.url?.startsWith("/api/github/start") && req.method === "GET") {
+    if (guestForbidden(res, user)) return;
     return await githubStart(req, res, user, ALLOWED_ORIGINS);
   }
 
   // GitHub OAuth: list the user's repos for the import picker. Returns 409
   // if the user hasn't connected yet so the UI can show "Connect GitHub".
   if (req.url === "/api/github/repos" && req.method === "GET") {
+    if (guestForbidden(res, user)) return;
     try {
       const repos = await githubListRepos(user);
       return json(res, 200, { repos });
@@ -989,6 +1089,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // GitHub OAuth: clear the stored token. Used by the "Disconnect GitHub"
   // affordance in the UI; lets a user revoke without leaving our app.
   if (req.url === "/api/github/disconnect" && req.method === "POST") {
+    if (guestForbidden(res, user)) return;
     await githubDisconnect(user);
     return json(res, 200, { ok: true });
   }
@@ -1002,6 +1103,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     /^\/api\/projects\/([0-9a-fA-F-]{8,})\/create-github-repo$/,
   );
   if (createRepoMatch && req.method === "POST") {
+    if (guestForbidden(res, user)) return;
     const projectId = createRepoMatch[1];
     const project = await getProject(projectId, user.id);
     if (!project) return json(res, 404, { error: "project not found" });
@@ -1064,9 +1166,11 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return json(res, 200, await vercelStatus(user));
   }
   if (req.url?.startsWith("/api/vercel/start") && req.method === "GET") {
+    if (guestForbidden(res, user)) return;
     return await vercelStart(req, res, user, ALLOWED_ORIGINS);
   }
   if (req.url === "/api/vercel/disconnect" && req.method === "POST") {
+    if (guestForbidden(res, user)) return;
     await vercelDisconnect(user);
     return json(res, 200, { ok: true });
   }
@@ -1091,6 +1195,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     /^\/api\/projects\/([0-9a-fA-F-]{8,})\/deploy$/,
   );
   if (deployStartMatch && req.method === "POST") {
+    if (guestForbidden(res, user)) return;
     const projectId = deployStartMatch[1];
     const project = await getProject(projectId, user.id);
     if (!project) return json(res, 403, { error: "project not found or access denied" });
@@ -2252,7 +2357,12 @@ async function handleConnection(
     shell: shellInfo().name,
     platform: process.platform,
     project: toProjectSummary(project),
-    user: { id: user.id, email: user.email, display_name: user.display_name },
+    user: {
+      id: user.id,
+      email: user.email,
+      display_name: user.display_name,
+      account_type: user.account_type,
+    },
     chat_session: { id: session.id, title: session.title },
   });
 

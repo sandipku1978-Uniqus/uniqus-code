@@ -30,6 +30,35 @@ alter table users add column if not exists vercel_user_login text;
 alter table users add column if not exists vercel_team_id text;
 alter table users add column if not exists vercel_connected_at timestamptz;
 
+-- Guest / education accounts. A guest signs up with no Google account and no
+-- email — districts control what students can sign into, so this is the only
+-- way to get students using the product before a district approves it.
+-- A guest is a normal users row (everything is owner_id-scoped, so a guest
+-- gets full capability parity for free) with account_type='guest' and a NULL
+-- workos_id. The unique constraint on workos_id still holds — Postgres treats
+-- NULLs as distinct — and upsertUser's onConflict only runs for WorkOS users.
+alter table users alter column workos_id drop not null;
+alter table users add column if not exists account_type text not null default 'standard'
+  check (account_type in ('standard', 'guest'));
+-- Recovery code: how a guest gets back into their account on another device
+-- (kids on shared/managed Chromebooks that wipe cookies). Stored two ways —
+-- a sha256 hash for the indexed restore lookup, and an AES-256-GCM ciphertext
+-- (same key/helper as the OAuth tokens) so a logged-in guest can re-view it.
+-- Re-viewing is not a security downgrade: holding the session cookie already
+-- grants full access. Both columns are nulled when a guest converts.
+alter table users add column if not exists guest_recovery_hash text;
+alter table users add column if not exists guest_recovery_code_enc text;
+-- Inactivity cleanup: there is no hard calendar expiry, but a guest account
+-- untouched for GUEST_INACTIVE_DAYS enters a grace period, and is deleted if
+-- still untouched and unconverted GUEST_GRACE_DAYS later. converted_at is set
+-- when the guest signs in with Google and their projects move to the real
+-- account; a converted row is dead for auth purposes.
+alter table users add column if not exists last_active_at timestamptz;
+alter table users add column if not exists grace_started_at timestamptz;
+alter table users add column if not exists converted_at timestamptz;
+create unique index if not exists users_guest_recovery_hash_idx
+  on users (guest_recovery_hash) where guest_recovery_hash is not null;
+
 create table if not exists projects (
   id uuid primary key default gen_random_uuid(),
   owner_id uuid not null references users(id) on delete cascade,

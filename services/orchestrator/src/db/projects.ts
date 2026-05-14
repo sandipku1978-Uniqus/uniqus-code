@@ -152,3 +152,22 @@ export async function setVercelProject(
     .eq("owner_id", ownerId);
   if (error) throw new Error(`setVercelProject failed: ${error.message}`);
 }
+
+/**
+ * Move every project owned by `fromOwnerId` to `toOwnerId`. This is the core
+ * of guest→WorkOS conversion: the guest's projects — and, via their unchanged
+ * project_id FKs, all their messages, chat sessions, secrets and audit events
+ * — become the real account's, with nothing lost. Returns the count moved.
+ */
+export async function reassignProjectsOwner(
+  fromOwnerId: string,
+  toOwnerId: string,
+): Promise<number> {
+  const { data, error } = await db()
+    .from("projects")
+    .update({ owner_id: toOwnerId })
+    .eq("owner_id", fromOwnerId)
+    .select("id");
+  if (error) throw new Error(`reassignProjectsOwner failed: ${error.message}`);
+  return (data ?? []).length;
+}
