@@ -182,7 +182,7 @@ export const previewTabId = (serverId: string): string => `preview:${serverId}`;
 export const useStore = create<State>((set, get) => ({
   connected: false,
   busy: false,
-  mode: "plan-then-execute",
+  mode: "execute-only",
   chat: [],
   tree: [],
   selectedFile: null,

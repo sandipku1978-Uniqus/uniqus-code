@@ -370,69 +370,46 @@ function highlightMatch(path: string, query: string): React.ReactNode {
 }
 
 /**
- * VSCode-Seti-inspired file icon. Document outline + folded corner + a small
- * accent bar at the bottom in the language's brand color, with a 2-3 char
- * label inside the bar. Looks like the file icons in VSCode without
- * shipping a 200-icon asset bundle.
+ * VSCode default-style file icon. A simple document silhouette in the
+ * language's brand color — matches VSCode's built-in icon theme.
  */
 function FileGlyph({ name }: { name: string }) {
-  const { label, color } = fileMeta(name);
-  // 14×16 viewBox → renders at the same visual size as the previous square
-  // glyph but as a recognizable file shape.
+  const { color } = fileMeta(name);
   return (
     <span className="file-glyph" style={{ background: "transparent", color }}>
-      <svg width="14" height="16" viewBox="0 0 14 16" aria-hidden="true">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
         <path
-          d="M2.5 1.5h6L12 5v9a1 1 0 0 1-1 1H2.5a1 1 0 0 1-1-1V2.5a1 1 0 0 1 1-1z"
-          fill="rgba(255,255,255,0.04)"
-          stroke="rgba(255,255,255,0.28)"
-          strokeWidth="0.6"
+          d="M4 1h5.5L13 4.5V14a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1z"
+          fill="currentColor"
+          opacity="0.85"
         />
         <path
-          d="M8.5 1.5V5H12"
-          fill="rgba(255,255,255,0.10)"
-          stroke="rgba(255,255,255,0.28)"
-          strokeWidth="0.6"
+          d="M9.5 1v3.5H13"
+          fill="currentColor"
+          opacity="0.55"
         />
-        <rect x="1.5" y="11" width="10.5" height="3.5" fill={color} rx="0.5" />
-        <text
-          x="6.75"
-          y="13.65"
-          textAnchor="middle"
-          fontFamily="-apple-system, 'Segoe UI', Roboto, sans-serif"
-          fontSize={label.length >= 3 ? "2.6" : "3.1"}
-          fontWeight="700"
-          fill="#ffffff"
-          letterSpacing="0.05"
-        >
-          {label}
-        </text>
       </svg>
     </span>
   );
 }
 
 /**
- * VSCode-style folder icon — open variant has the lid lifted. Uses the
- * Seti-style amber color for closed folders, slightly lighter for open.
+ * VSCode default-style folder icon — simple flat folder shape.
+ * Open variant tilts the lid up.
  */
 function FolderGlyph({ open }: { open: boolean }) {
-  const fill = open ? "#e8a73d" : "#d59c45";
-  const tab = open ? "#c87d2a" : "#a86f24";
   return (
     <span className="folder-glyph" style={{ background: "transparent" }}>
-      <svg width="14" height="16" viewBox="0 0 14 16" aria-hidden="true">
-        <path
-          d="M1.5 4.25a1 1 0 0 1 1-1h3l1.4 1.5h5.6a1 1 0 0 1 1 1V13a1 1 0 0 1-1 1H2.5a1 1 0 0 1-1-1V4.25z"
-          fill={fill}
-          stroke="rgba(0,0,0,0.25)"
-          strokeWidth="0.4"
-        />
-        {open && (
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        {open ? (
+          <>
+            <path d="M1.5 3.5a1 1 0 0 1 1-1h3.1l1.4 1.5h6a1 1 0 0 1 1 1v1H4.5l-3 7V3.5z" fill="#dcb67a" />
+            <path d="M1.5 12l3-7H14l-3 7H1.5z" fill="#e8ce93" />
+          </>
+        ) : (
           <path
-            d="M2.5 7.5h10l-1 5.5a1 1 0 0 1-1 .8H3.5a1 1 0 0 1-1-1V7.5z"
-            fill={tab}
-            opacity="0.65"
+            d="M1.5 3.5a1 1 0 0 1 1-1h3.1l1.4 1.5h6a1 1 0 0 1 1 1V13a1 1 0 0 1-1 1H2.5a1 1 0 0 1-1-1V3.5z"
+            fill="#c09553"
           />
         )}
       </svg>

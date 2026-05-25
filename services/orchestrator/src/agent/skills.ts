@@ -84,6 +84,13 @@ Use when: the user wants a premium but understated app, tool, portfolio, or land
 - Make layouts breathe: 24px minimum page padding, 40-64px section gaps on desktop, tighter but still clear spacing on mobile.
 - Use real product copy and plausible sample data. Avoid Lorem Ipsum and generic marketing claims.
 - Check before finishing: no text overflow, no gratuitous gradients, clear focus states, and the primary action is visually obvious.
+
+Technical defaults:
+- Use Tailwind CSS if available, otherwise CSS Modules. Never inline more than 3 style properties.
+- Images: use next/image with explicit width/height, or <img> with loading="lazy" and explicit aspect-ratio.
+- Responsive breakpoints: 640px (sm), 768px (md), 1024px (lg). Test at 390px mobile and 1280px desktop.
+- Animations: use CSS transitions (150-300ms ease) on opacity, transform, background-color. No spring physics unless asked.
+- Color system: define CSS custom properties (--color-bg, --color-text, --color-accent, --color-border) and use them everywhere.
 `,
   },
   {
@@ -101,6 +108,13 @@ Use when: the user is building a business app, admin console, CRM, analytics too
 - Treat charts as work tools: label axes, show units, use readable legends, and avoid chart junk.
 - Use 4-8px radius, light borders, subtle row hover, clear selected states, and consistent density.
 - Check before finishing: keyboard reachable controls, visible focus rings, usable at 1280px desktop and 390px mobile, and no table text collisions.
+
+Technical defaults:
+- Tables: use CSS grid or HTML table with sticky header (position: sticky; top: 0). For 10+ columns, add horizontal scroll with overflow-x: auto on a wrapper.
+- Sidebar: fixed 240-280px width on desktop, collapsible to icons at 48px, hidden drawer on mobile. Use flex or grid, not absolute positioning.
+- Data fetching: use loading skeletons (pulsing gray rectangles matching content shape), not spinners. Show skeleton for 0-3 seconds, then content.
+- Forms: validate on blur for individual fields, on submit for the form. Show errors inline below the field, not in alerts.
+- Status badges: use semantic colors with labels (not color alone). Pill shape, 6px vertical padding, 10px horizontal, uppercase 10px text.
 `,
   },
   {

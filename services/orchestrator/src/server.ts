@@ -54,6 +54,7 @@ import {
   shutdownAll as shutdownAllVms,
 } from "./firecracker/index.js";
 import type { VmHandle } from "./firecracker/types.js";
+import * as fcAgent from "./firecracker/agentRpc.js";
 import { startGuestSweeper, stopGuestSweeper } from "./guest/sweeper.js";
 import {
   shellInfo,
@@ -665,6 +666,44 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   );
   if (uploadMatch && req.method === "POST") {
     return await handleProjectUploads(req, res, user, uploadMatch[1]);
+  }
+
+  // Serve raw file bytes (images, binaries) for the editor's image viewer.
+  const rawFileMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/raw\/(.+)$/,
+  );
+  if (rawFileMatch && req.method === "GET") {
+    const projectId = rawFileMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const relPath = decodeURIComponent(rawFileMatch[2]);
+    const dest = sandboxDirFor(projectId);
+    try {
+      const full = resolveSandboxChild(dest, relPath);
+      const buf = await fs.readFile(full);
+      const ext = path.extname(relPath).toLowerCase();
+      const mimeMap: Record<string, string> = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+        ".svg": "image/svg+xml",
+        ".ico": "image/x-icon",
+        ".pdf": "application/pdf",
+      };
+      const ct = mimeMap[ext] ?? "application/octet-stream";
+      res.writeHead(200, {
+        "Content-Type": ct,
+        "Content-Length": buf.length,
+        "Cache-Control": "no-cache",
+      });
+      res.end(buf);
+    } catch {
+      return json(res, 404, { error: "file not found" });
+    }
+    return;
   }
 
   const projectIdMatch = req.url?.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})$/);
@@ -1637,10 +1676,30 @@ async function handleProjectUploads(
 
   const saved: UploadedFileSummary[] = [];
   try {
+    // If Firecracker is enabled, boot/reuse the VM so we can mirror uploads
+    // into it — otherwise read_file from the agent won't find them.
+    let vm: VmHandle | undefined;
+    if (isFirecrackerEnabled()) {
+      try {
+        vm = await ensureVm({ projectId, hostSandboxDir: dest });
+      } catch (err) {
+        console.error(`upload: VM boot failed, uploads will be host-only:`, err);
+      }
+    }
+
     for (const item of pending) {
       const full = resolveSandboxChild(dest, item.summary.path);
       await fs.mkdir(path.dirname(full), { recursive: true });
       await fs.writeFile(full, item.content);
+      // Mirror text-safe uploads into the VM so read_file also works.
+      if (vm) {
+        try {
+          await fcAgent.writeFile(vm, item.summary.path, item.content.toString("utf-8"));
+        } catch {
+          // Binary files or encoding issues — host copy is still authoritative
+          // and read_asset (which runs on the orchestrator) will find it.
+        }
+      }
       await getTracker(projectId, dest).syncFile(item.summary.path);
       saved.push(item.summary);
       broadcastToProject(projectId, { type: "file_changed", path: item.summary.path });
@@ -2049,7 +2108,9 @@ async function handleUpgrade(
       proxyWebSocket(req, socket, head, target);
       return;
     }
-    if (rawUrl.startsWith("/preview/")) return reject(404, "Preview server not found");
+    // Server not found or has stopped — reject the WS upgrade cleanly so
+    // the browser's HMR client doesn't endlessly retry against the orchestrator.
+    return reject(502, "Preview server not running");
   }
 
   // Same origin allowlist applies to the agent WebSocket upgrade — without
@@ -2233,7 +2294,7 @@ async function handleConnection(
         // User edited a file in the IDE. Persist + sync to Storage. Always ack
         // back so the editor can show "saved" / "save failed" state.
         try {
-          await sandboxWriteFile({ rootDir: sandboxDir }, event.path, event.content);
+          await sandboxWriteFile({ rootDir: sandboxDir, vm: vmHandle ?? undefined }, event.path, event.content);
           send({ type: "client_write_ack", path: event.path, ok: true });
           // Tell other sessions on this project that the file changed (their
           // editor will refresh if they have it open). Skip our own session
@@ -2910,7 +2971,7 @@ async function initialPushToRepo(opts: {
   // has something. Doesn't overwrite an existing README.
   const readme = path.join(opts.sandboxDir, "README.md");
   if (!(await fileExists(readme))) {
-    await fs.writeFile(readme, `# ${opts.projectName}\n\nCreated by Uniqus Codex.\n`);
+    await fs.writeFile(readme, `# ${opts.projectName}\n\nCreated by Uniqus Code.\n`);
   }
   const askpassDir = await fs.mkdtemp(path.join(tmpdir(), "uniqus-git-askpass-"));
   const askpassPath = path.join(askpassDir, "askpass.js");
@@ -2956,7 +3017,7 @@ process.stdout.write(/username/i.test(prompt) ? "x-access-token\\n" : ${JSON.str
       "-c",
       "user.email=uniqus@noreply.invalid",
       "-c",
-      "user.name=Uniqus Codex",
+      "user.name=Uniqus Code",
       "-c",
       "commit.gpgsign=false",
       "add",
@@ -2966,7 +3027,7 @@ process.stdout.write(/username/i.test(prompt) ? "x-access-token\\n" : ${JSON.str
       "-c",
       "user.email=uniqus@noreply.invalid",
       "-c",
-      "user.name=Uniqus Codex",
+      "user.name=Uniqus Code",
       "-c",
       "commit.gpgsign=false",
       "commit",

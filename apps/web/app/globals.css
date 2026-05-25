@@ -871,6 +871,13 @@ section.band .sub {
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
+.thinking-indicator {
+  animation: pulse-dim 1.5s ease-in-out infinite;
+}
+@keyframes pulse-dim {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
 .msg-body {
   font-size: 13px;
   line-height: 1.55;
@@ -979,6 +986,48 @@ section.band .sub {
   margin-top: 8px;
 }
 
+/* Inline tasks bar (above composer) */
+.tasks-inline {
+  border-top: 1px solid var(--border-default);
+  background: rgba(167, 139, 250, 0.03);
+}
+.tasks-inline-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 11.5px;
+}
+.tasks-inline-toggle:hover { background: rgba(255,255,255,0.02); }
+.tasks-inline-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.tasks-inline-active {
+  color: var(--accent, #a78bfa);
+  font-size: 11px;
+}
+.tasks-inline-list {
+  padding: 0 12px 8px;
+  display: grid;
+  gap: 3px;
+}
+.tasks-inline-item {
+  display: grid;
+  grid-template-columns: 14px 1fr;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 11.5px;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
 /* Composer */
 .composer {
   border-top: 1px solid var(--border-default);
@@ -996,6 +1045,11 @@ section.band .sub {
   transition: border-color var(--dur-base) ease;
 }
 .composer .field:focus-within { border-color: var(--brand-purple); }
+.composer.dragging .field {
+  border-color: var(--brand-purple);
+  background: rgba(167, 139, 250, 0.06);
+  box-shadow: inset 0 0 0 1px var(--brand-purple);
+}
 .composer textarea {
   background: transparent;
   border: 0;

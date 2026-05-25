@@ -1,11 +1,123 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { useStore, fileTabId, previewTabId, flushSave } from "@/lib/store";
 import { send } from "@/lib/ws-client";
-import { stopServerApi } from "@/lib/api";
+import { stopServerApi, getApiBase } from "@/lib/api";
 import CodeEditor from "./CodeEditor";
 import PreviewPanel from "./PreviewPanel";
+
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"]);
+
+function isImageFile(filePath: string): boolean {
+  const ext = filePath.lastIndexOf(".") >= 0 ? filePath.slice(filePath.lastIndexOf(".")).toLowerCase() : "";
+  return IMAGE_EXTENSIONS.has(ext);
+}
+
+function ImageViewer({ path, projectId }: { path: string; projectId: string | null }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!projectId) return;
+    let cancelled = false;
+    // Fetch the raw file bytes from the orchestrator API and create an object URL
+    fetch(`${getApiBase()}/api/projects/${projectId}/raw/${encodeURIComponent(path)}`, { credentials: "include" })
+      .then((res) => {
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        return res.blob();
+      })
+      .then((blob) => {
+        if (cancelled) return;
+        setUrl(URL.createObjectURL(blob));
+        setError(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [path, projectId]);
+
+  // Cleanup object URL on unmount
+  useEffect(() => {
+    return () => {
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [url]);
+
+  if (error) {
+    return (
+      <div className="editor-empty" style={{ gap: 8 }}>
+        <p style={{ color: "var(--text-dim)" }}>Could not load image: {error}</p>
+      </div>
+    );
+  }
+  if (!url) {
+    return (
+      <div className="editor-empty">
+        <p style={{ color: "var(--text-dim)" }}>Loading image…</p>
+      </div>
+    );
+  }
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        height: "100%",
+        width: "100%",
+        overflow: "auto",
+        background: "repeating-conic-gradient(#1a1a22 0% 25%, #121218 0% 50%) 50% / 20px 20px",
+        padding: 24,
+      }}
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={url}
+        alt={path.split("/").pop() ?? "image"}
+        style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 4 }}
+      />
+    </div>
+  );
+}
+
+function isMarkdownFile(filePath: string): boolean {
+  const ext = filePath.lastIndexOf(".") >= 0 ? filePath.slice(filePath.lastIndexOf(".")).toLowerCase() : "";
+  return ext === ".md" || ext === ".mdx";
+}
+
+function MarkdownPreview({ content }: { content: string }) {
+  return (
+    <div
+      style={{
+        height: "100%",
+        overflow: "auto",
+        padding: "24px 32px",
+        background: "var(--bg-canvas, #0e0e14)",
+        color: "var(--text-primary, #e4e2dc)",
+        fontSize: 14,
+        lineHeight: 1.7,
+      }}
+    >
+      <div className="md" style={{ maxWidth: 760 }}>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            a: ({ ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+          }}
+        >
+          {content}
+        </ReactMarkdown>
+      </div>
+    </div>
+  );
+}
 
 export default function EditorPreviewArea() {
   const previews = useStore((s) => s.previews);
@@ -16,7 +128,9 @@ export default function EditorPreviewArea() {
   const removePreview = useStore((s) => s.removePreview);
   const saveStatus = useStore((s) => s.saveStatus);
   const selectedFile = useStore((s) => s.selectedFile);
+  const fileContent = useStore((s) => s.fileContent);
   const projectId = useStore((s) => s.project?.id ?? null);
+  const [mdPreview, setMdPreview] = useState(false);
 
   const hasAnyTabs = openFiles.length > 0 || previews.length > 0;
 
@@ -138,17 +252,37 @@ export default function EditorPreviewArea() {
               </button>
             );
           })}
+          {activeFilePath && isMarkdownFile(activeFilePath) && (
+            <button
+              type="button"
+              onClick={() => setMdPreview((v) => !v)}
+              className={`tab ${mdPreview ? "active" : ""}`}
+              style={{ marginLeft: "auto", fontSize: 10, gap: 4, opacity: 0.85 }}
+              title={mdPreview ? "Show source" : "Preview markdown"}
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M2 3h12v10H2V3zm1 1v8h10V4H3zm1 1h3v2H6v2H5V5h-.5L4 5zm4.5 0H10l1.5 3-1.5 3H8.5l1.5-3-1.5-3z"/>
+              </svg>
+              {mdPreview ? "Source" : "Preview"}
+            </button>
+          )}
         </div>
       )}
 
       <div className="editor-content">
         {activePreview && <PreviewPanel server={activePreview} />}
-        {activeFilePath && <CodeEditor />}
+        {activeFilePath && isImageFile(activeFilePath) ? (
+          <ImageViewer path={activeFilePath} projectId={projectId} />
+        ) : activeFilePath && isMarkdownFile(activeFilePath) && mdPreview ? (
+          <MarkdownPreview content={fileContent} />
+        ) : activeFilePath ? (
+          <CodeEditor />
+        ) : null}
         {!hasAnyTabs && (
           <div className="editor-empty">
             <h3>Your preview will show up here.</h3>
             <p>
-              Once Codex starts the project, a live preview opens here as a tab. You can also
+              Once Uniqus starts the project, a live preview opens here as a tab. You can also
               open a file from the explorer to see its code.
             </p>
           </div>

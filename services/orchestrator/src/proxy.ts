@@ -286,7 +286,10 @@ export function proxyWebSocket(
   });
 
   upstream.on("error", () => {
+    // Send a proper HTTP response so the browser knows the upgrade failed
+    // definitively (rather than just destroying, which triggers infinite retries).
     try {
+      clientSocket.write("HTTP/1.1 502 Bad Gateway\r\n\r\n");
       clientSocket.destroy();
     } catch {}
   });

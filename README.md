@@ -10,6 +10,11 @@ AI-powered dev-environment platform. See [the plan](C:/Users/thech/.claude/plans
 - **1.5.1** ✅ Preview proxy — iframe loads dev servers through the orchestrator at `/preview/:serverId/`, so previews work in production where the in-sandbox port isn't publicly exposed.
 - **1.5.2** ✅ Codebase import — ZIP upload and GitHub clone (with optional PAT for private repos) on the new-project page.
 
+## Live Links
+
+- `https://app.uniqus-code.com` The side hosted on vercel, handles frontend
+- `https://api2.uniqus-code.com` The orchestrator hosted on the hetzner box with firecracker
+
 ## Setup
 
 ```sh
@@ -33,7 +38,7 @@ Starts both servers in parallel:
 - Orchestrator WebSocket on `ws://localhost:8787`
 - Web app on `http://localhost:3000`
 
-Open the web app, toggle "plan mode" on or off in the input footer, and describe what to build. With plan mode on, you'll get a structured plan from Opus that you can edit before approving; the agent then executes with Sonnet.
+Open the web app, toggle "plan mode" on or off in the input footer, and describe what to build. With plan mode on, you'll get a structured plan from Opus that you can edit before approving; the agent then executes with Opus 4.7.
 
 ## CLI mode (no UI)
 

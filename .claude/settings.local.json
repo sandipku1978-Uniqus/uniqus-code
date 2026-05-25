@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(npm --version)",
-      "Bash(npx --version)"
+      "Bash(npx --version)",
+      "Bash(*)"
     ]
   }
 }

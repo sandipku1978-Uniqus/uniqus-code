@@ -25,6 +25,7 @@ function defaultApiBase(): string {
 }
 
 const API_BASE = defaultApiBase();
+export function getApiBase(): string { return API_BASE; }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {

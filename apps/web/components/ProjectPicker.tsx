@@ -131,7 +131,7 @@ export default function ProjectPicker({
   // clicking elsewhere closes it; rename/icon dialogs are inline modals.
   const [menuFor, setMenuFor] = useState<string | null>(null);
 
-  // Sidebar view selector. Default is the home dashboard (Brief Codex +
+  // Sidebar view selector. Default is the home dashboard (Brief Uniqus +
   // recent tiles). "all" shows every project as a richer card with URL +
   // repo + status; "recent" shows the same data sorted by activity with
   // more verbose timestamps.
@@ -593,7 +593,7 @@ export default function ProjectPicker({
                       '  "A website for my bakery with a menu, photos, and a contact form."\n' +
                       '  "A booking page for my consulting business, with available time slots."\n' +
                       '  "An app that tracks my invoices and reminds me when they’re due."\n' +
-                      "Codex picks the project name and turns this into the first prompt."
+                      "Uniqus picks the project name and turns this into the first prompt."
                     }
                     disabled={refining}
                     rows={6}
@@ -665,8 +665,8 @@ export default function ProjectPicker({
                   )}
                   <p className="newproj-hint">
                     {brief.trim()
-                      ? `Codex will run this as your first turn. Project name will be "${name.trim() || deriveNameFromBrief(brief)}".`
-                      : "Press ⌘/Ctrl + Enter to submit. Codex picks up from your brief on the next screen."}
+                      ? `Uniqus will run this as your first turn. Project name will be "${name.trim() || deriveNameFromBrief(brief)}".`
+                      : "Press ⌘/Ctrl + Enter to submit. Uniqus picks up from your brief on the next screen."}
                   </p>
                 </div>
               ) : (

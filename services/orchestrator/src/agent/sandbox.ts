@@ -83,12 +83,15 @@ export async function writeFile(sandbox: Sandbox, p: string, content: string): P
   if (sandbox.vm) {
     await fcAgent.writeFile(sandbox.vm, p, content);
     // Mirror host-side so the existing storage sync / file tree walker still
-    // surfaces the change. Best-effort — the VM is the authoritative copy.
+    // surfaces the change. The VM is the authoritative copy but the file tree
+    // and storage sync read from the host filesystem.
     try {
       const full = resolvePath(sandbox, p);
       await fs.mkdir(path.dirname(full), { recursive: true });
       await fs.writeFile(full, content, "utf-8");
-    } catch {}
+    } catch (err) {
+      console.error(`[sandbox] host mirror failed for ${p}:`, err);
+    }
     return;
   }
   const full = resolvePath(sandbox, p);
@@ -104,7 +107,9 @@ export async function editFile(
 ): Promise<void> {
   if (sandbox.vm) {
     await fcAgent.editFile(sandbox.vm, p, oldString, newString);
-    // Best-effort host mirror — match writeFile.
+    // Best-effort host mirror — match writeFile. If the host copy is stale
+    // (editFile couldn't find oldString), fall back to reading the full file
+    // from the VM and writing it to the host so the tree stays accurate.
     try {
       const full = resolvePath(sandbox, p);
       const content = await fs.readFile(full, "utf-8").catch(() => null);
@@ -112,9 +117,25 @@ export async function editFile(
         const occurrences = content.split(oldString).length - 1;
         if (occurrences === 1) {
           await fs.writeFile(full, content.replace(oldString, newString), "utf-8");
+        } else {
+          // Host copy is out of sync — re-fetch from VM.
+          const vmContent = await fcAgent.readFile(sandbox.vm, p).catch(() => null);
+          if (vmContent !== null) {
+            await fs.mkdir(path.dirname(full), { recursive: true });
+            await fs.writeFile(full, vmContent, "utf-8");
+          }
+        }
+      } else {
+        // File doesn't exist on host yet — pull from VM.
+        const vmContent = await fcAgent.readFile(sandbox.vm, p).catch(() => null);
+        if (vmContent !== null) {
+          await fs.mkdir(path.dirname(full), { recursive: true });
+          await fs.writeFile(full, vmContent, "utf-8");
         }
       }
-    } catch {}
+    } catch (err) {
+      console.error(`[sandbox] host mirror (edit) failed for ${p}:`, err);
+    }
     return;
   }
   const full = resolvePath(sandbox, p);

@@ -313,7 +313,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "ask_user",
     description:
-      "Pause execution and ask the user a clarifying question. Use ONLY when intent is genuinely ambiguous and the answer materially changes what you'll build (e.g. \"Should this run on a schedule, on demand, or both?\", \"Postgres or SQLite?\"). Do NOT use for trivial confirmations, status updates, or anything you can decide yourself by reading the code or running a command. Provide structured options when the answer is one of a small set; allow_free_text=true (the default) lets the user type something else if their answer doesn't fit. Returns the user's answer as a string. The loop blocks until they respond; do not call this tool more than once per turn.",
+      "Pause execution and ask the user a clarifying question. Use when: (1) the user's request is ambiguous and the answer changes what you'll build (e.g. \"Should this run on a schedule or on demand?\", \"Postgres or SQLite?\", \"Which page should this component go on?\"), (2) you need a credential, API key, or external URL, (3) the user asked you to confirm before a destructive or major change, (4) you've encountered an issue and want the user's preference on how to proceed. Provide structured options when the answer is one of a small set; allow_free_text=true (the default) lets the user type something else. Returns the user's answer as a string. The loop blocks until they respond. Prefer asking over guessing when the wrong guess would waste significant work.",
     input_schema: {
       type: "object",
       properties: {

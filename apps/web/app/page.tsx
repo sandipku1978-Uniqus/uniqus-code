@@ -94,7 +94,7 @@ export default async function MarketingPage() {
               </div>
               <div className="chat-msg">
                 <div className="who">
-                  <span className="av agent">C</span> Codex
+                  <span className="av agent">U</span> Uniqus
                 </div>
                 <div className="body">
                   Reading <code>lib/stripe.ts</code> and <code>prisma/schema.prisma</code>.
@@ -103,7 +103,7 @@ export default async function MarketingPage() {
               </div>
               <div className="chat-msg">
                 <div className="who">
-                  <span className="av agent">C</span> Codex
+                  <span className="av agent">U</span> Uniqus
                 </div>
                 <div className="body">
                   Created <code>app/api/webhooks/stripe/route.ts</code> and added the{" "}
@@ -177,7 +177,7 @@ export default async function MarketingPage() {
       <section className="band" id="features">
         <div className="section-head">
           <span className="label-eyebrow">Meet the agent</span>
-          <h2>Codex. One agent, every part of your stack.</h2>
+          <h2>Uniqus. One agent, every part of your stack.</h2>
           <p className="sub">
             Built on Claude Sonnet 4.6 with Opus 4.7 for planning. Reads everything, cites
             everything, never ships the destructive change quietly.
@@ -312,7 +312,7 @@ const STEPS = [
   {
     num: "01  Describe",
     title: "Tell it what you want.",
-    body: "One sentence is enough. Paste a Linear ticket, a screenshot, or a Notion doc. Codex picks it apart and forms a plan before touching a file.",
+    body: "One sentence is enough. Paste a Linear ticket, a screenshot, or a Notion doc. Uniqus picks it apart and forms a plan before touching a file.",
   },
   {
     num: "02  Watch it work",

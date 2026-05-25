@@ -131,15 +131,24 @@ export async function listAssets(sandboxDir: string): Promise<AssetEntry[]> {
 
 function resolveAssetPath(sandboxDir: string, name: string): string {
   const cleaned = name.replace(/^\/+/, "");
-  // Accept either bare name ("logo.png") or full relative path ("assets/uploads/logo.png").
-  const rel = cleaned.startsWith(`${ASSETS_ROOT}/`) ? cleaned : `${ASSETS_ROOT}/${cleaned}`;
   if (path.isAbsolute(cleaned)) {
     throw new Error("asset name must be sandbox-relative");
   }
+  // Accept paths from both assets/uploads/ and assets/screenshots/
+  const SCREENSHOTS_ROOT = "assets/screenshots";
+  let rel: string;
+  if (cleaned.startsWith(`${ASSETS_ROOT}/`) || cleaned.startsWith(`${SCREENSHOTS_ROOT}/`)) {
+    rel = cleaned;
+  } else {
+    rel = `${ASSETS_ROOT}/${cleaned}`;
+  }
   const full = path.resolve(sandboxDir, rel);
-  const root = path.resolve(sandboxDir, ASSETS_ROOT);
-  if (full !== root && !full.startsWith(root + path.sep)) {
-    throw new Error("asset path escapes uploads directory");
+  const uploadsRoot = path.resolve(sandboxDir, ASSETS_ROOT);
+  const screenshotsRoot = path.resolve(sandboxDir, SCREENSHOTS_ROOT);
+  const inUploads = full === uploadsRoot || full.startsWith(uploadsRoot + path.sep);
+  const inScreenshots = full === screenshotsRoot || full.startsWith(screenshotsRoot + path.sep);
+  if (!inUploads && !inScreenshots) {
+    throw new Error("asset path escapes allowed directories");
   }
   const relParts = rel.split(/[\\/]+/);
   if (relParts.includes("..")) {

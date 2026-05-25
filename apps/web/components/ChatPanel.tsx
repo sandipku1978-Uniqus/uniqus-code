@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { UploadedFileSummary } from "@uniqus/api-types";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
+  createChatSessionApi,
   fetchSlashCommandsApi,
   uploadProjectFilesApi,
   type SlashCommandSummary,
@@ -25,10 +27,14 @@ export default function ChatPanel() {
   const connected = useStore((s) => s.connected);
   const expandedTurns = useStore((s) => s.expandedTurns);
   const toggleTurn = useStore((s) => s.toggleTurn);
+  const todos = useStore((s) => s.todos);
+  const [tasksExpanded, setTasksExpanded] = useState(false);
   const [input, setInput] = useState("");
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [slashCommands, setSlashCommands] = useState<SlashCommandSummary[]>([]);
   const [slashIndex, setSlashIndex] = useState(0);
   // True from the moment the user clicks Stop until the server's `complete`
@@ -56,6 +62,68 @@ export default function ChatPanel() {
       abort = true;
     };
   }, [project]);
+
+  // Auto-resize textarea: grow up to ~15 lines, then scroll
+  const autoResize = useCallback(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    const lineHeight = 20; // approx line-height in px
+    const maxHeight = lineHeight * 15;
+    ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
+    ta.style.overflowY = ta.scrollHeight > maxHeight ? "auto" : "hidden";
+  }, []);
+
+  useEffect(() => {
+    autoResize();
+  }, [input, autoResize]);
+
+  // Drag-and-drop handlers
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragging(true);
+  }, []);
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragging(false);
+  }, []);
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setDragging(false);
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        addFiles(e.dataTransfer.files);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  // Clipboard paste for images/files
+  const handlePaste = useCallback(
+    (e: React.ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const files: File[] = [];
+      for (const item of Array.from(items)) {
+        if (item.kind === "file") {
+          const file = item.getAsFile();
+          if (file) files.push(file);
+        }
+      }
+      if (files.length > 0) {
+        e.preventDefault();
+        const dt = new DataTransfer();
+        for (const f of files) dt.items.add(f);
+        addFiles(dt.files);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
   // Show palette when input begins with "/" and is one token wide
   // ("/review" matches; "/review now" doesn't).
@@ -87,6 +155,28 @@ export default function ChatPanel() {
     }
     return set;
   }, [tree]);
+
+  // @file autocomplete — detect "@<partial>" at current cursor position.
+  const [atIndex, setAtIndex] = useState(0);
+  const atFilter = useMemo(() => {
+    const m = input.match(/(?:^|\s)@([\w./-]*)$/);
+    return m ? m[1].toLowerCase() : null;
+  }, [input]);
+  const atMatches = useMemo(() => {
+    if (atFilter === null) return [];
+    const all = Array.from(validFilePaths);
+    return all
+      .filter((p) => p.toLowerCase().includes(atFilter))
+      .sort((a, b) => {
+        const aStarts = a.toLowerCase().startsWith(atFilter) ? 0 : 1;
+        const bStarts = b.toLowerCase().startsWith(atFilter) ? 0 : 1;
+        return aStarts - bStarts || a.localeCompare(b);
+      })
+      .slice(0, 8);
+  }, [atFilter, validFilePaths]);
+  useEffect(() => {
+    setAtIndex(0);
+  }, [atFilter]);
 
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
@@ -130,7 +220,7 @@ export default function ChatPanel() {
     });
     if (!ok) {
       // Socket is closed — the message never left the browser. Surface that
-      // instead of leaving the UI stuck on "Codex is running…" forever, and
+      // instead of leaving the UI stuck on "Uniqus is running…" forever, and
       // unblock the composer so the user can retry once we reconnect.
       setBusy(false);
       addSystem(
@@ -156,11 +246,22 @@ export default function ChatPanel() {
     }
   };
 
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
   const resetChat = () => {
     if (busy || chat.length === 0) return;
     if (confirm("Clear chat history? Sandbox files are kept.")) {
       send({ type: "reset_session" });
     }
+  };
+
+  const newChat = async () => {
+    if (busy || !project) return;
+    try {
+      const r = await createChatSessionApi(project.id, `Chat ${Date.now()}`);
+      router.push(`/projects/${project.id}?session=${encodeURIComponent(r.session.id)}`);
+    } catch {}
   };
 
   const addFiles = (files: FileList | null) => {
@@ -199,6 +300,15 @@ export default function ChatPanel() {
           >
             clear
           </button>
+          <button
+            onClick={() => void newChat()}
+            disabled={busy || !project}
+            className="icon-btn-sm"
+            title="Start a new chat session"
+            style={{ width: "auto", padding: "2px 8px", fontSize: 11 }}
+          >
+            + new chat
+          </button>
         </div>
       </div>
 
@@ -207,8 +317,8 @@ export default function ChatPanel() {
           <div style={{ color: "var(--text-dim)", fontSize: 12.5, fontStyle: "italic" }}>
             Describe what you want to build.{" "}
             {mode === "plan-then-execute"
-              ? "Codex will propose a plan first."
-              : "Codex will start working immediately."}
+              ? "Uniqus will propose a plan first."
+              : "Uniqus will start working immediately."}
           </div>
         )}
         {turns.map((turn, idx) => {
@@ -226,9 +336,74 @@ export default function ChatPanel() {
             />
           );
         })}
+        {busy && (() => {
+          // Show a thinking indicator when the agent is working but no tool
+          // calls or text have streamed yet (e.g. planning, booting VM).
+          const lastTurn = turns[turns.length - 1];
+          const hasVisibleActivity = lastTurn && !lastTurn.complete && lastTurn.body.length > 0;
+          if (hasVisibleActivity) return null;
+          return (
+            <div className="msg">
+              <div className="head">
+                <span className="av agent">U</span>
+                <span className="name">Uniqus</span>
+                <span className="frame thinking-indicator">
+                  {mode === "plan-then-execute" ? "Thinking about a plan…" : "Thinking…"}
+                </span>
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
-      <div className="composer">
+      {/* Inline tasks bar — collapsible, above the composer */}
+      {todos.length > 0 && (
+        <div className="tasks-inline">
+          <button
+            type="button"
+            className="tasks-inline-toggle"
+            onClick={() => setTasksExpanded((v) => !v)}
+          >
+            <span className="tasks-inline-summary">
+              {(() => {
+                const done = todos.filter((t) => t.status === "completed").length;
+                const inFlight = todos.find((t) => t.status === "in_progress");
+                return (
+                  <>
+                    <span style={{ opacity: 0.6 }}>Tasks {done}/{todos.length}</span>
+                    {inFlight && (
+                      <span className="tasks-inline-active">▶ {inFlight.activeForm}</span>
+                    )}
+                  </>
+                );
+              })()}
+            </span>
+            <span style={{ fontSize: 10, opacity: 0.5 }}>{tasksExpanded ? "▾" : "▸"}</span>
+          </button>
+          {tasksExpanded && (
+            <div className="tasks-inline-list">
+              {todos.map((t, i) => {
+                const icon = t.status === "completed" ? "✓" : t.status === "in_progress" ? "▶" : "·";
+                const color = t.status === "completed" ? "var(--text-dim)" : t.status === "in_progress" ? "var(--accent, #a78bfa)" : "var(--text-primary)";
+                const label = t.status === "in_progress" ? t.activeForm : t.content;
+                return (
+                  <div key={i} className="tasks-inline-item" style={{ color }}>
+                    <span style={{ fontFamily: "var(--font-mono-stack)", fontSize: 11 }}>{icon}</span>
+                    <span style={{ textDecoration: t.status === "completed" ? "line-through" : "none" }}>{label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div
+        className={`composer${dragging ? " dragging" : ""}`}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
         <div className="field">
           {slashMatches.length > 0 && (
             <div
@@ -270,10 +445,73 @@ export default function ChatPanel() {
               ))}
             </div>
           )}
+          {atMatches.length > 0 && (
+            <div
+              style={{
+                marginBottom: 6,
+                border: "1px solid var(--border-default, #2a2a36)",
+                borderRadius: 6,
+                background: "var(--bg-elev, #1a1a22)",
+                overflow: "hidden",
+                maxHeight: 200,
+                overflowY: "auto",
+              }}
+            >
+              {atMatches.map((p, i) => (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => {
+                    setInput((prev) => prev.replace(/@[\w./-]*$/, `@${p} `));
+                  }}
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    width: "100%",
+                    textAlign: "left",
+                    padding: "5px 10px",
+                    fontSize: 12,
+                    background: i === atIndex ? "rgba(255,255,255,0.05)" : "transparent",
+                    border: 0,
+                    color: "var(--text-primary)",
+                    cursor: "pointer",
+                  }}
+                >
+                  <code style={{ color: "var(--accent, #a78bfa)", fontSize: 11 }}>@{p}</code>
+                </button>
+              ))}
+            </div>
+          )}
           <textarea
+            ref={textareaRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            onPaste={handlePaste}
             onKeyDown={(e) => {
+              // @file autocomplete navigation
+              if (atMatches.length > 0) {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setAtIndex((i) => (i + 1) % atMatches.length);
+                  return;
+                }
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setAtIndex((i) => (i - 1 + atMatches.length) % atMatches.length);
+                  return;
+                }
+                if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+                  e.preventDefault();
+                  const pick = atMatches[atIndex] ?? atMatches[0];
+                  if (pick) setInput((prev) => prev.replace(/@[\w./-]*$/, `@${pick} `));
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  // clear the @-token to dismiss the palette
+                  return;
+                }
+              }
               if (slashMatches.length > 0) {
                 if (e.key === "ArrowDown") {
                   e.preventDefault();
@@ -300,14 +538,15 @@ export default function ChatPanel() {
             disabled={busy || uploading || !project || !connected}
             placeholder={
               busy
-                ? "Codex is running…"
+                ? "Uniqus is running…"
                 : !connected
                 ? "Reconnecting…"
                 : project
-                ? "Describe what you want Codex to build…"
+                ? "Describe what you want Uniqus to build…"
                 : "Connecting…"
             }
             rows={2}
+            style={{ resize: "none", overflowY: "hidden" }}
           />
           <input
             ref={fileInputRef}
@@ -358,7 +597,7 @@ export default function ChatPanel() {
                 setMode(mode === "plan-then-execute" ? "execute-only" : "plan-then-execute")
               }
               className={`plan-toggle ${mode === "plan-then-execute" ? "on" : ""}`}
-              title="Plan mode — Codex proposes a plan you can edit before it executes"
+              title="Plan mode — Uniqus proposes a plan you can edit before it executes"
             >
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <polyline points="20 6 9 17 4 12" />
@@ -589,8 +828,8 @@ function ChatItemView({ item }: { item: ChatItem }) {
     return (
       <div className="msg">
         <div className="head">
-          <span className="av agent">C</span>
-          <span className="name">Codex</span>
+          <span className="av agent">U</span>
+          <span className="name">Uniqus</span>
           <span className="frame">Engineering agent</span>
         </div>
         <div className="msg-body" style={{ paddingLeft: 30 }}>
@@ -647,7 +886,7 @@ function UserQuestionCard({
     <div className="msg">
       <div className="head">
         <span className="av agent">?</span>
-        <span className="name">Codex is asking</span>
+        <span className="name">Uniqus is asking</span>
         <span className="frame">needs your input</span>
       </div>
       <div className="msg-body" style={{ paddingLeft: 30 }}>
