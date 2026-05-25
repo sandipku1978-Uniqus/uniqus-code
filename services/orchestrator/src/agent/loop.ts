@@ -59,6 +59,7 @@ Product and design quality:
 - Include accessible semantics, labels, keyboard reachability, visible focus states, sufficient contrast, and reduced-motion-friendly animation.
 - Use visual assets when a site, app, or game needs them. Prefer uploaded assets, local assets, generated bitmap assets, or relevant public assets over generic placeholder blocks.
 - After meaningful frontend work, start or reuse a preview server and inspect it with screenshot_preview at desktop and mobile sizes. Fix obvious layout, contrast, or rendering issues before reporting completion.
+- Screenshot viewport: keep viewport dimensions reasonable (max ~1920x1080). Do NOT use full_page=true on pages with very long scroll — the resulting image may exceed the 8000px dimension limit and fail. For long pages, take multiple viewport-sized screenshots at different scroll positions instead.
 
 Environment:
 - OS platform: ${platform}
@@ -543,7 +544,11 @@ async function executeTool(
           },
           {
             type: "text" as const,
-            text: `Screenshot saved to ${result.asset_path} (${result.width}x${result.height}, url: ${result.resolved_url})`,
+            text: `Screenshot saved to ${result.asset_path} (${result.width}x${result.height}, url: ${result.resolved_url})${
+              result.http_error
+                ? `\n\nWARNING: The page returned an error: ${result.http_error}\nCall read_server_log with the server_id to see what went wrong.`
+                : ""
+            }`,
           },
         ],
       };

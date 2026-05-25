@@ -19,11 +19,11 @@ function isImageFile(filePath: string): boolean {
 function ImageViewer({ path, projectId }: { path: string; projectId: string | null }) {
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [zoom, setZoom] = useState(100);
 
   useEffect(() => {
     if (!projectId) return;
     let cancelled = false;
-    // Fetch the raw file bytes from the orchestrator API and create an object URL
     fetch(`${getApiBase()}/api/projects/${projectId}/raw/${encodeURIComponent(path)}`, { credentials: "include" })
       .then((res) => {
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -42,6 +42,11 @@ function ImageViewer({ path, projectId }: { path: string; projectId: string | nu
       cancelled = true;
     };
   }, [path, projectId]);
+
+  // Reset zoom when switching files
+  useEffect(() => {
+    setZoom(100);
+  }, [path]);
 
   // Cleanup object URL on unmount
   useEffect(() => {
@@ -65,24 +70,51 @@ function ImageViewer({ path, projectId }: { path: string; projectId: string | nu
     );
   }
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        height: "100%",
-        width: "100%",
-        overflow: "auto",
-        background: "repeating-conic-gradient(#1a1a22 0% 25%, #121218 0% 50%) 50% / 20px 20px",
-        padding: 24,
-      }}
-    >
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={url}
-        alt={path.split("/").pop() ?? "image"}
-        style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 4 }}
-      />
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", width: "100%" }}>
+      {/* Zoom toolbar */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "4px 10px",
+          borderBottom: "1px solid var(--border-default, #2a2a36)",
+          background: "var(--bg-surface, #16161e)",
+          fontSize: 11,
+          color: "var(--text-dim)",
+          flexShrink: 0,
+        }}
+      >
+        <button type="button" onClick={() => setZoom((z) => Math.max(10, z - 25))} style={{ background: "none", border: "none", color: "var(--text-primary)", cursor: "pointer", fontSize: 14, padding: "2px 6px" }}>−</button>
+        <span style={{ minWidth: 40, textAlign: "center" }}>{zoom}%</span>
+        <button type="button" onClick={() => setZoom((z) => Math.min(500, z + 25))} style={{ background: "none", border: "none", color: "var(--text-primary)", cursor: "pointer", fontSize: 14, padding: "2px 6px" }}>+</button>
+        <button type="button" onClick={() => setZoom(100)} style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 10, padding: "2px 6px" }}>Reset</button>
+      </div>
+      {/* Image area */}
+      <div
+        style={{
+          flex: 1,
+          overflow: "auto",
+          display: "flex",
+          alignItems: zoom <= 100 ? "center" : "flex-start",
+          justifyContent: zoom <= 100 ? "center" : "flex-start",
+          background: "repeating-conic-gradient(#1a1a22 0% 25%, #121218 0% 50%) 50% / 20px 20px",
+          padding: 24,
+        }}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={url}
+          alt={path.split("/").pop() ?? "image"}
+          style={{
+            width: `${zoom}%`,
+            maxWidth: zoom <= 100 ? "100%" : "none",
+            objectFit: "contain",
+            borderRadius: 4,
+            imageRendering: zoom >= 200 ? "pixelated" : "auto",
+          }}
+        />
+      </div>
     </div>
   );
 }

@@ -147,9 +147,13 @@ function handleEvent(event: ServerEvent): void {
       s.addSystem(
         `session ready · ${event.project.name} · ${event.platform} (${event.shell})`,
       );
-      // Re-request tree: hydration from Storage may have just written new files
-      // that weren't in the tree we got at WS open.
-      send({ type: "request_tree" });
+      // Tree was already requested in onopen. Only re-request if we don't
+      // have any tree data yet (first connect). Skipping the duplicate
+      // request prevents a visible flash when switching chat sessions
+      // within the same project (the tree is project-wide, not per-session).
+      if (s.tree.length === 0) {
+        send({ type: "request_tree" });
+      }
       break;
     case "iteration":
       break;

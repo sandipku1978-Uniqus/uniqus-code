@@ -201,8 +201,9 @@ export function proxyHttp(
       });
       upRes.on("error", () => {
         if (!res.headersSent) {
-          res.writeHead(502, { "Content-Type": "text/plain" });
-          res.end("preview proxy: upstream stream error");
+          const html = previewErrorPage(502, "Preview server crashed", "The dev server stopped responding mid-stream. Check the server logs in the chat for details.");
+          res.writeHead(502, { "Content-Type": "text/html" });
+          res.end(html);
         } else {
           res.destroy();
         }
@@ -212,8 +213,9 @@ export function proxyHttp(
 
   upstream.on("error", (err) => {
     if (!res.headersSent) {
-      res.writeHead(502, { "Content-Type": "text/plain" });
-      res.end(`preview proxy: upstream error: ${err.message}`);
+      const html = previewErrorPage(502, "Oh no! The server seems to be down", `Could not connect to the dev server: ${err.message}. It may have crashed or timed out. Ask the Uniqus agent to check the server logs and restart.`);
+      res.writeHead(502, { "Content-Type": "text/html" });
+      res.end(html);
     } else {
       res.destroy();
     }
@@ -359,4 +361,31 @@ function injectNavReporter(html: string, serverId: string): string {
     return html.slice(0, insertAt) + script + html.slice(insertAt);
   }
   return script + html;
+}
+
+/**
+ * Styled HTML error page for preview iframe failures. Shows a friendly
+ * message instead of a blank page or raw error text.
+ */
+export function previewErrorPage(status: number, title: string, detail: string): string {
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,"Segoe UI",Roboto,sans-serif;background:#0e0e14;color:#e4e2dc;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
+.card{text-align:center;max-width:420px}
+.code{font-size:64px;font-weight:700;color:#a78bfa;opacity:0.3;line-height:1}
+h1{font-size:18px;margin:12px 0 8px;color:#e4e2dc}
+p{font-size:13px;color:#9ca3af;line-height:1.6;margin-bottom:16px}
+a{color:#a78bfa;text-decoration:none;font-size:13px}
+a:hover{text-decoration:underline}
+.detail{background:#16161e;border:1px solid #2a2a36;border-radius:6px;padding:10px 14px;font-family:monospace;font-size:11px;color:#9ca3af;margin-bottom:16px;text-align:left;word-break:break-all;max-height:120px;overflow:auto}
+</style></head><body>
+<div class="card">
+<div class="code">${status}</div>
+<h1>${title}</h1>
+<p>${detail}</p>
+<a href="/">← Back to dashboard</a>
+</div></body></html>`;
 }

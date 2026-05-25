@@ -103,7 +103,7 @@ import {
 } from "./auth/guest.js";
 import { ensureBucket, listAll as storageListAll, remove as storageRemove } from "./storage/client.js";
 import { getTracker, clearTracker } from "./storage/sync.js";
-import { resolveTarget, proxyHttp, proxyWebSocket } from "./proxy.js";
+import { resolveTarget, proxyHttp, proxyWebSocket, previewErrorPage } from "./proxy.js";
 import { importZip, importGithub } from "./import.js";
 import {
   handleStart as githubStart,
@@ -439,8 +439,9 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       return;
     }
     if (url.startsWith("/preview/")) {
-      res.writeHead(404, { "Content-Type": "text/plain" });
-      res.end("preview server not found or stopped");
+      const html = previewErrorPage(404, "Preview server not running", "This dev server has stopped or hasn't been started yet. Go back to the chat and ask Uniqus to start a preview server.");
+      res.writeHead(404, { "Content-Type": "text/html" });
+      res.end(html);
       return;
     }
   }
@@ -2767,6 +2768,17 @@ async function runSession(
     onToolResult: (callId, name, input, toolResult, isError) => {
       send({ type: "tool_result", call_id: callId, result: toolResult, is_error: isError });
       if (isError) return;
+      // Broadcast file_changed for write/edit so the file explorer updates
+      // in real-time (not just at turn end). Also triggers Storage sync.
+      if (name === "write_file" || name === "edit_file") {
+        const filePath = String((input as { path?: unknown })?.path ?? "");
+        if (filePath) {
+          broadcastToProject(projectId, { type: "file_changed", path: filePath });
+          getTracker(projectId, sandboxDir)
+            .syncFile(filePath)
+            .catch((err) => console.error(`syncFile ${filePath} after ${name} failed:`, err));
+        }
+      }
       // Per-tool-call checkpoint (Plan §3.5). Fires for tools that modified
       // sandbox state. Background — never blocks the loop.
       if (name === "write_file" || name === "edit_file" || name === "run_command") {

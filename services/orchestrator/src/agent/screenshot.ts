@@ -32,6 +32,8 @@ export interface ShotResult {
   resolved_url: string;
   width: number;
   height: number;
+  /** Set when the page returned an HTTP error (4xx/5xx). Includes status + body excerpt. */
+  http_error?: string;
 }
 
 export async function takeScreenshot(opts: ShotOpts): Promise<ShotResult> {
@@ -47,6 +49,18 @@ export async function takeScreenshot(opts: ShotOpts): Promise<ShotResult> {
   try {
     const ctx = await browser.newContext({ viewport });
     const page = await ctx.newPage();
+
+    // Track HTTP errors so we can surface them to the agent.
+    let httpError = "";
+    page.on("response", (resp) => {
+      if (resp.url() === targetUrl || resp.url() === targetUrl + "/") {
+        const status = resp.status();
+        if (status >= 400) {
+          httpError = `HTTP ${status} ${resp.statusText()}`;
+        }
+      }
+    });
+
     await page.goto(targetUrl, { waitUntil: "load", timeout: 30_000 }).catch(async (err: unknown) => {
       // Many dev servers don't fire `load` cleanly with HMR. Fall back to
       // domcontentloaded so we at least capture something rendered.
@@ -54,6 +68,15 @@ export async function takeScreenshot(opts: ShotOpts): Promise<ShotResult> {
         throw err;
       });
     });
+
+    // If the page returned an error HTTP status, try to capture the body text.
+    if (httpError) {
+      try {
+        const bodyText = await page.textContent("body").catch(() => null);
+        if (bodyText) httpError += `: ${bodyText.slice(0, 500).trim()}`;
+      } catch {}
+    }
+
     if (opts.wait_ms && opts.wait_ms > 0) {
       await page.waitForTimeout(Math.min(opts.wait_ms, 10_000));
     }
@@ -61,12 +84,17 @@ export async function takeScreenshot(opts: ShotOpts): Promise<ShotResult> {
     await fs.mkdir(dir, { recursive: true });
     const file = `${randomUUID().slice(0, 8)}.png`;
     const full = path.join(dir, file);
-    await page.screenshot({ path: full, fullPage: !!opts.full_page });
+    // Limit full-page screenshots to 8000px height (Claude API limit).
+    const clip = opts.full_page
+      ? { x: 0, y: 0, width: viewport.width, height: Math.min(await page.evaluate("document.body.scrollHeight") as number, 7800) }
+      : undefined;
+    await page.screenshot({ path: full, fullPage: !clip && !!opts.full_page, clip });
     return {
       asset_path: `${SHOT_DIR}/${file}`,
       resolved_url: targetUrl,
       width: viewport.width,
-      height: viewport.height,
+      height: clip ? clip.height : viewport.height,
+      http_error: httpError || undefined,
     };
   } finally {
     await browser.close().catch(() => {});

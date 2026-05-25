@@ -4,9 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { UploadedFileSummary } from "@uniqus/api-types";
-import { useRouter, useSearchParams } from "next/navigation";
 import {
-  createChatSessionApi,
   fetchSlashCommandsApi,
   uploadProjectFilesApi,
   type SlashCommandSummary,
@@ -14,6 +12,7 @@ import {
 import { useStore, type ChatItem } from "@/lib/store";
 import { send } from "@/lib/ws-client";
 import PlanReview from "./PlanReview";
+import ChatSessionDropdown from "./ChatSessionDropdown";
 
 export default function ChatPanel() {
   const chat = useStore((s) => s.chat);
@@ -246,22 +245,11 @@ export default function ChatPanel() {
     }
   };
 
-  const router = useRouter();
-  const searchParams = useSearchParams();
-
   const resetChat = () => {
     if (busy || chat.length === 0) return;
     if (confirm("Clear chat history? Sandbox files are kept.")) {
       send({ type: "reset_session" });
     }
-  };
-
-  const newChat = async () => {
-    if (busy || !project) return;
-    try {
-      const r = await createChatSessionApi(project.id, `Chat ${Date.now()}`);
-      router.push(`/projects/${project.id}?session=${encodeURIComponent(r.session.id)}`);
-    } catch {}
   };
 
   const addFiles = (files: FileList | null) => {
@@ -291,6 +279,7 @@ export default function ChatPanel() {
       <div className="pane-header">
         <span className="label-micro">Chat</span>
         <div className="actions">
+          {project && <ChatSessionDropdown projectId={project.id} />}
           <button
             onClick={resetChat}
             disabled={busy || chat.length === 0}
@@ -299,15 +288,6 @@ export default function ChatPanel() {
             style={{ width: "auto", padding: "2px 8px", fontSize: 11 }}
           >
             clear
-          </button>
-          <button
-            onClick={() => void newChat()}
-            disabled={busy || !project}
-            className="icon-btn-sm"
-            title="Start a new chat session"
-            style={{ width: "auto", padding: "2px 8px", fontSize: 11 }}
-          >
-            + new chat
           </button>
         </div>
       </div>

@@ -19,11 +19,9 @@ import DeployButton from "./DeployButton";
 import BrandLockup from "./BrandLockup";
 import GithubRepoButton from "./GithubRepoButton";
 import GuestBanner from "./GuestBanner";
-import ChatSessionDropdown from "./ChatSessionDropdown";
 import SkillsModal from "./SkillsModal";
 import SecretsModal from "./SecretsModal";
 import CheckpointsModal from "./CheckpointsModal";
-import TasksPane from "./TasksPane";
 
 export default function Workspace({
   projectId,
@@ -139,7 +137,6 @@ export default function Workspace({
         </div>
 
         <div className="actions">
-          <ChatSessionDropdown projectId={projectId} />
           <RunButton projectId={projectId} />
           {!isGuest && <DeployButton projectId={projectId} />}
           {!isGuest && <GithubRepoButton projectId={projectId} />}
@@ -185,17 +182,6 @@ export default function Workspace({
             icon={
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-              </svg>
-            }
-          />
-          <ToggleButton
-            on={panels.tasks}
-            onClick={() => togglePanel("tasks")}
-            label="Tasks"
-            icon={
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <polyline points="9 11 12 14 22 4" />
-                <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
               </svg>
             }
           />
@@ -249,19 +235,11 @@ export default function Workspace({
           <Panel id="main" defaultSize={panels.files ? 45 : 55} minSize={30} order={3}>
             <PanelGroup
               direction="vertical"
-              autoSaveId={`uniqus-v-${panels.terminal ? "t" : "nt"}-${panels.tasks ? "k" : "nk"}`}
+              autoSaveId={`uniqus-v-${panels.terminal ? "t" : "nt"}`}
             >
-              <Panel id="editor" defaultSize={panels.terminal || panels.tasks ? 60 : 100} minSize={20} order={1}>
+              <Panel id="editor" defaultSize={panels.terminal ? 60 : 100} minSize={20} order={1}>
                 <EditorPreviewArea />
               </Panel>
-              {panels.tasks && (
-                <>
-                  <PanelResizeHandle className="resize-handle-v" />
-                  <Panel id="tasks" defaultSize={25} minSize={12} order={2}>
-                    <TasksPane onClose={() => togglePanel("tasks")} />
-                  </Panel>
-                </>
-              )}
               {panels.terminal && (
                 <>
                   <PanelResizeHandle className="resize-handle-v" />
