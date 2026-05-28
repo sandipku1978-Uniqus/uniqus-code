@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Modal from "./Modal";
 import {
   deleteSecretApi,
   fetchSecretsApi,
@@ -95,54 +96,30 @@ export default function SecretsModal({
   };
 
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.6)",
-        zIndex: 100,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 24,
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: "min(720px, 100%)",
-          maxHeight: "85vh",
-          background: "var(--bg-surface, #16161e)",
-          border: "1px solid var(--border-default, #2a2a36)",
-          borderRadius: 8,
-          display: "grid",
-          gridTemplateRows: "auto 1fr auto",
-          overflow: "hidden",
-        }}
-      >
-        <div
-          style={{
-            padding: "12px 16px",
-            borderBottom: "1px solid var(--border-default, #2a2a36)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-          }}
-        >
-          <div>
-            <div style={{ fontWeight: 600, fontSize: 14 }}>Project Secrets</div>
-            <div style={{ color: "var(--text-dim, #999)", fontSize: 11.5 }}>
-              Encrypted at rest · Agent reads via <code>get_secret</code>; values are NEVER returned to the chat
-            </div>
+    <Modal
+      title="Project Secrets"
+      subtitle={
+        <>
+          Encrypted at rest · Agent reads via <code>get_secret</code>; values are NEVER returned to the chat
+        </>
+      }
+      onClose={onClose}
+      width={720}
+      bodyStyle={{ display: "grid", gap: 16 }}
+      footer={
+        <>
+          <div className={`modal-status${error ? " error" : ""}`}>
+            {error ?? "Audit-logged · AES-256-GCM encrypted"}
           </div>
-          <button onClick={onClose} className="icon-btn-sm" title="Close">
-            ✕
-          </button>
-        </div>
-
-        <div style={{ padding: 16, overflow: "auto", display: "grid", gap: 16 }}>
-          <form onSubmit={onAdd} style={{ display: "grid", gap: 8 }}>
+          <div className="modal-actions">
+            <button onClick={onClose} className="btn-secondary">
+              Close
+            </button>
+          </div>
+        </>
+      }
+    >
+      <form onSubmit={onAdd} style={{ display: "grid", gap: 8 }}>
             <div style={{ fontSize: 11, fontWeight: 600 }}>Add or update secret</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 160px", gap: 8 }}>
               <input
@@ -237,7 +214,7 @@ export default function SecretsModal({
                         </span>
                       </div>
                       {s.description && (
-                        <div style={{ color: "var(--text-dim)", fontSize: 10.5 }}>
+                        <div style={{ color: "var(--text-dim)", fontSize: 11 }}>
                           {s.description}
                         </div>
                       )}
@@ -255,36 +232,17 @@ export default function SecretsModal({
               </div>
             )}
           </div>
-        </div>
-
-        <div
-          style={{
-            padding: "10px 16px",
-            borderTop: "1px solid var(--border-default, #2a2a36)",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <div style={{ fontSize: 11, color: error ? "var(--conf-low, #c0392b)" : "var(--text-dim)" }}>
-            {error ?? "Audit-logged · AES-256-GCM encrypted"}
-          </div>
-          <button onClick={onClose} className="icon-btn-sm" style={{ width: "auto", padding: "4px 12px" }}>
-            Close
-          </button>
-        </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
 const inputStyle: React.CSSProperties = {
   width: "100%",
-  background: "var(--bg-base, #0d0d12)",
-  color: "var(--text-primary, #e6e6ee)",
-  border: "1px solid var(--border-default, #2a2a36)",
+  background: "var(--bg-base)",
+  color: "var(--text-primary)",
+  border: "1px solid var(--border-default)",
   borderRadius: 6,
   padding: "6px 10px",
-  fontFamily: "var(--mono, monospace)",
-  fontSize: 12.5,
+  fontFamily: "var(--font-mono-stack)",
+  fontSize: 12,
 };

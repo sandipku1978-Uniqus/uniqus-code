@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Modal from "./Modal";
 import {
   applySkillPackApi,
   fetchSkillPacksApi,
@@ -95,194 +96,137 @@ export default function SkillsModal({
   })();
 
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.6)",
-        zIndex: 100,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 24,
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: "min(960px, 100%)",
-          maxHeight: "85vh",
-          background: "var(--bg-surface, #16161e)",
-          border: "1px solid var(--border-default, #2a2a36)",
-          borderRadius: 8,
-          display: "grid",
-          gridTemplateRows: "auto 1fr auto",
-          overflow: "hidden",
-        }}
-      >
-        <div
-          style={{
-            padding: "12px 16px",
-            borderBottom: "1px solid var(--border-default, #2a2a36)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-          }}
-        >
-          <div>
-            <div style={{ fontWeight: 600, fontSize: 14 }}>Project Skills</div>
-            <div style={{ color: "var(--text-dim, #999)", fontSize: 11.5 }}>
-              Stored at <code>.uniqus/skills.md</code> · prepended to the agent system prompt every turn
-            </div>
-          </div>
-          <button onClick={onClose} className="icon-btn-sm" title="Close">
-            ✕
-          </button>
-        </div>
-
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 280px",
-            overflow: "hidden",
-            minHeight: 0,
-          }}
-        >
-          <div style={{ padding: 16, overflow: "auto", minHeight: 0 }}>
-            {loading ? (
-              <div style={{ color: "var(--text-dim, #999)", fontSize: 12.5 }}>Loading…</div>
-            ) : (
-              <textarea
-                value={content}
-                onChange={(e) => setContent(e.target.value)}
-                placeholder={`# Project guidance for the agent\n\n- Always use Python 3.11.\n- Brand voice is dry and concise.\n- Avoid jQuery; prefer fetch + DOM APIs.\n- Bind dev servers to 0.0.0.0.`}
-                style={{
-                  width: "100%",
-                  height: "100%",
-                  minHeight: 360,
-                  background: "var(--bg-base, #0d0d12)",
-                  color: "var(--text-primary, #e6e6ee)",
-                  border: "1px solid var(--border-default, #2a2a36)",
-                  borderRadius: 6,
-                  padding: 10,
-                  fontFamily: "var(--mono, ui-monospace), JetBrains Mono, monospace",
-                  fontSize: 12.5,
-                  lineHeight: 1.5,
-                  resize: "none",
-                }}
-              />
-            )}
-          </div>
-          <div
-            style={{
-              borderLeft: "1px solid var(--border-default, #2a2a36)",
-              padding: 12,
-              overflow: "auto",
-              minHeight: 0,
-              background: "rgba(255,255,255,0.02)",
-            }}
-          >
-            <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 8, color: "var(--text-primary)" }}>
-              Curated design packs
-            </div>
-            <div style={{ fontSize: 10.5, color: "var(--text-dim)", marginBottom: 10 }}>
-              Pick one. Applying replaces the current Skills file with that
-              pack&apos;s body — you can hand-edit afterwards.
-            </div>
-            <div style={{ display: "grid", gap: 8 }}>
-              {packs.map((p) => {
-                const isActive = activePackId === p.id;
-                return (
-                  <div
-                    key={p.id}
-                    style={{
-                      border: isActive
-                        ? "1px solid var(--accent, #6366f1)"
-                        : "1px solid var(--border-default, #2a2a36)",
-                      borderRadius: 6,
-                      padding: 10,
-                      background: isActive ? "rgba(99,102,241,0.08)" : undefined,
-                    }}
-                  >
-                    <div
-                      style={{
-                        fontSize: 12,
-                        fontWeight: 600,
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 6,
-                      }}
-                    >
-                      {p.name}
-                      {isActive && (
-                        <span
-                          style={{
-                            fontSize: 9.5,
-                            color: "var(--accent, #6366f1)",
-                            border: "1px solid var(--accent, #6366f1)",
-                            borderRadius: 3,
-                            padding: "0 4px",
-                            textTransform: "uppercase",
-                            letterSpacing: 0.5,
-                          }}
-                        >
-                          Active
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ fontSize: 10.5, color: "var(--text-dim)", marginBottom: 6 }}>
-                      {p.summary}
-                    </div>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button
-                        onClick={() => applyPack(p.id)}
-                        disabled={!!packBusy || isActive}
-                        className="icon-btn-sm"
-                        style={{ width: "auto", padding: "2px 8px", fontSize: 10.5 }}
-                        title={
-                          isActive
-                            ? `${p.name} is already active`
-                            : `Apply ${p.name} (replaces current Skills)`
-                        }
-                      >
-                        {isActive ? "Active" : packBusy === p.id ? "Applying…" : "Apply"}
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-
-        <div
-          style={{
-            padding: "10px 16px",
-            borderTop: "1px solid var(--border-default, #2a2a36)",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <div style={{ fontSize: 11, color: error ? "var(--conf-low, #c0392b)" : "var(--text-dim)" }}>
+    <Modal
+      title="Project Skills"
+      subtitle={
+        <>
+          Stored at <code>.uniqus/skills.md</code> · prepended to the agent system prompt every turn
+        </>
+      }
+      onClose={onClose}
+      width={960}
+      bodyStyle={{ padding: 0, display: "grid", gridTemplateColumns: "1fr 280px" }}
+      footer={
+        <>
+          <div className={`modal-status${error ? " error" : ""}`}>
             {error ?? `${content.length.toLocaleString()} chars · max 64 KB`}
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={onClose} className="icon-btn-sm" style={{ width: "auto", padding: "4px 12px" }}>
+          <div className="modal-actions">
+            <button onClick={onClose} className="btn-secondary">
               Cancel
             </button>
-            <button
-              onClick={onSave}
-              disabled={saving || loading}
-              className="send-btn"
-              style={{ padding: "4px 14px" }}
-            >
+            <button onClick={onSave} disabled={saving || loading} className="btn-primary">
               {saving ? "Saving…" : "Save"}
             </button>
           </div>
+        </>
+      }
+    >
+      <div style={{ padding: 16, overflow: "auto", minHeight: 0 }}>
+        {loading ? (
+          <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Loading…</div>
+        ) : (
+          <textarea
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            placeholder={`# Project guidance for the agent\n\n- Always use Python 3.11.\n- Brand voice is dry and concise.\n- Avoid jQuery; prefer fetch + DOM APIs.\n- Bind dev servers to 0.0.0.0.`}
+            style={{
+              width: "100%",
+              height: "100%",
+              minHeight: 360,
+              background: "var(--bg-base)",
+              color: "var(--text-primary)",
+              border: "1px solid var(--border-default)",
+              borderRadius: 6,
+              padding: 10,
+              fontFamily: "var(--font-mono-stack)",
+              fontSize: 12,
+              lineHeight: 1.5,
+              resize: "none",
+            }}
+          />
+        )}
+      </div>
+      <div
+        style={{
+          borderLeft: "1px solid var(--border-default)",
+          padding: 12,
+          overflow: "auto",
+          minHeight: 0,
+          background: "rgba(255,255,255,0.02)",
+        }}
+      >
+        <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 8, color: "var(--text-primary)" }}>
+          Curated design packs
+        </div>
+        <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10 }}>
+          Pick one. Applying replaces the current Skills file with that
+          pack&apos;s body — you can hand-edit afterwards.
+        </div>
+        <div style={{ display: "grid", gap: 8 }}>
+          {packs.map((p) => {
+            const isActive = activePackId === p.id;
+            return (
+              <div
+                key={p.id}
+                style={{
+                  border: isActive
+                    ? "1px solid var(--accent)"
+                    : "1px solid var(--border-default)",
+                  borderRadius: 6,
+                  padding: 10,
+                  background: isActive ? "rgba(178,30,125,0.08)" : undefined,
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                  }}
+                >
+                  {p.name}
+                  {isActive && (
+                    <span
+                      style={{
+                        fontSize: 10,
+                        color: "var(--accent)",
+                        border: "1px solid var(--accent)",
+                        borderRadius: 3,
+                        padding: "0 4px",
+                        textTransform: "uppercase",
+                        letterSpacing: 0.5,
+                      }}
+                    >
+                      Active
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>
+                  {p.summary}
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button
+                    onClick={() => applyPack(p.id)}
+                    disabled={!!packBusy || isActive}
+                    className="btn-secondary"
+                    style={{ padding: "3px 10px", fontSize: 11 }}
+                    title={
+                      isActive
+                        ? `${p.name} is already active`
+                        : `Apply ${p.name} (replaces current Skills)`
+                    }
+                  >
+                    {isActive ? "Active" : packBusy === p.id ? "Applying…" : "Apply"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }

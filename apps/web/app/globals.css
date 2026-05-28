@@ -12,11 +12,20 @@
   --brand-purple-hi:     #5a32a0;
   --brand-gradient:      linear-gradient(135deg, #482879, #B21E7D);
 
+  /* Accent — single source of truth. Magenta reads far better than the dark
+     brand purple as an active/selected cue on a near-black surface. */
+  --accent:              #B21E7D;
+  --accent-primary:      #B21E7D;
+
   /* Surfaces (dark only) */
   --bg-dark:             #0c0c11;
+  --bg-pane:             #0e0e14;   /* IDE panes / topbar / status bar */
   --bg-surface:          #16161e;
   --bg-surface-hover:    #1e1e28;
   --bg-surface-active:   #252530;
+  --bg-elev:             #1e1e28;   /* raised fields (inputs, textareas) */
+  --bg-base:             #0c0c11;   /* alias used by modal/guest surfaces */
+  --bg-canvas:           #0e0e14;   /* markdown/document canvas */
 
   /* Text — warm ramp, not cool gray */
   --text-primary:        #e4e2dc;
@@ -40,6 +49,19 @@
   /* Type */
   --font-sans-stack: var(--font-sans), ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono-stack: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  --mono: var(--font-mono-stack);   /* legacy alias referenced by some components */
+
+  /* Type scale — a real ramp, not a smear. Snap every size to one of these;
+     no half-pixel values (they render fuzzy and signal ad-hoc sizing). */
+  --fs-2xs: 10px;
+  --fs-xs:  11px;
+  --fs-sm:  12px;
+  --fs-base:13px;
+  --fs-md:  14px;
+  --fs-lg:  16px;
+  --fs-xl:  20px;
+  --fs-2xl: 24px;
+  --fs-3xl: 32px;
 
   /* Radii */
   --radius-sm: 6px;
@@ -76,8 +98,20 @@ code, pre, .mono {
 }
 
 *:focus-visible {
-  outline: 2px solid var(--brand-purple);
+  /* Magenta, not the dark brand purple — #482879 is nearly invisible as a ring
+     on a near-black surface. */
+  outline: 2px solid var(--brand-magenta);
   outline-offset: 2px;
+}
+/* Dense rows/tabs clip an offset outline (overflow:hidden parents); inset it
+   so keyboard focus stays visible. */
+.tree-row:focus-visible,
+.tree-row-wrap:focus-within,
+.quick-open-row:focus-visible,
+.tab:focus-visible,
+.proj-icon-grid button:focus-visible {
+  outline: 2px solid var(--brand-magenta);
+  outline-offset: -2px;
 }
 
 /* Scrollbar */
@@ -130,7 +164,13 @@ code, pre, .mono {
   transition: all var(--dur-base) ease;
 }
 .btn-primary:hover { opacity: 0.9; transform: translateY(-1px); }
-.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+.btn-primary:disabled {
+  /* Clearly inert — a flat gray, not a faded gradient (which read as "broken"). */
+  background: var(--bg-surface-active);
+  color: var(--text-dim);
+  cursor: not-allowed;
+  transform: none;
+}
 .btn-primary.btn-lg { padding: 12px 22px; font-size: 14px; }
 
 .btn-secondary {
@@ -242,7 +282,7 @@ code, pre, .mono {
 .md a { color: var(--brand-magenta); text-decoration: underline; }
 .md code {
   font-family: var(--font-mono-stack);
-  font-size: 11.5px;
+  font-size: 12px;
   background: var(--bg-surface-active);
   padding: 1px 5px;
   border-radius: 4px;
@@ -284,6 +324,75 @@ code, pre, .mono {
   margin: 0.8em 0;
 }
 .md strong { color: var(--text-primary); }
+
+/* ==========================================================================
+   Modal primitive (components/Modal.tsx) — single source for every overlay
+   ========================================================================== */
+@keyframes modalFadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modalPopIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.99); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.6);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  animation: modalFadeIn var(--dur-fast) ease-out;
+}
+.modal-card {
+  width: min(var(--modal-w, 640px), 100%);
+  max-height: var(--modal-h, 85vh);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.5);
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  overflow: hidden;
+  animation: modalPopIn var(--dur-base) ease-out;
+}
+.modal-card:focus { outline: none; }
+.modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-default);
+}
+.modal-title { font-size: var(--fs-md); font-weight: 600; color: var(--text-primary); }
+.modal-sub { margin-top: 2px; font-size: var(--fs-sm); color: var(--text-muted); }
+.modal-sub code,
+.modal-head code { font-family: var(--font-mono-stack); font-size: 11px; }
+.modal-close {
+  flex-shrink: 0;
+  width: 28px; height: 28px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  font-size: 15px; line-height: 1;
+  transition: all var(--dur-fast) ease;
+}
+.modal-close:hover { background: var(--bg-surface-hover); color: var(--text-primary); }
+.modal-body { overflow: auto; min-height: 0; padding: 16px; }
+.modal-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border-default);
+}
+.modal-status { font-size: var(--fs-xs); color: var(--text-muted); }
+.modal-status.error { color: var(--conf-low); }
+.modal-actions { display: flex; gap: 8px; align-items: center; }
 
 /* Resize handles for react-resizable-panels */
 .resize-handle-h {
@@ -459,7 +568,7 @@ section.band .sub {
   color: var(--text-primary);
 }
 .feature h3 { margin: 0 0 8px; font-size: 15px; font-weight: 600; }
-.feature p { color: var(--text-muted); font-size: 13.5px; line-height: 1.65; margin: 0; }
+.feature p { color: var(--text-muted); font-size: 14px; line-height: 1.65; margin: 0; }
 
 .agent-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 64px; }
 .agent-quote p {
@@ -497,7 +606,7 @@ section.band .sub {
   display: block;
 }
 .step h3 { font-size: 16px; font-weight: 600; margin: 0 0 8px; }
-.step p { color: var(--text-muted); font-size: 13.5px; line-height: 1.65; margin: 0; }
+.step p { color: var(--text-muted); font-size: 14px; line-height: 1.65; margin: 0; }
 
 .compare { display: grid; grid-template-columns: repeat(3, 1fr); gap: 48px; }
 .compare .stat .num {
@@ -577,6 +686,16 @@ section.band .sub {
   margin-bottom: 2px;
 }
 .dash-side .nav-item:hover { background: var(--bg-surface-hover); color: var(--text-primary); }
+.dash-side .nav-item.soon {
+  cursor: default;
+  opacity: 0.55;
+}
+.dash-side .nav-item.soon:hover { background: transparent; color: var(--text-muted); }
+.dash-side .nav-item.soon .count {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 9px;
+}
 .dash-side .nav-item.active {
   background: var(--bg-surface);
   color: var(--text-primary);
@@ -622,6 +741,9 @@ section.band .sub {
   padding: 24px 28px;
   margin-bottom: 40px;
   background: var(--bg-surface);
+  /* Cap the width so the composer doesn't sprawl into dead space on wide
+     viewports; stays left-aligned with the project grid below. */
+  max-width: 880px;
 }
 .newproj h2 { font-size: 16px; margin: 0 0 4px; font-weight: 500; }
 .newproj .lede { color: var(--text-muted); font-size: 13px; margin: 0 0 16px; }
@@ -654,20 +776,20 @@ section.band .sub {
 @media (max-width: 700px)  { .proj-grid { grid-template-columns: 1fr; } }
 
 .proj {
-  background: transparent;
+  background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   padding: 20px;
   cursor: pointer;
-  transition: border-color var(--dur-base) ease;
+  transition: border-color var(--dur-base) ease, background var(--dur-base) ease;
   display: block;
 }
-.proj:hover { border-color: var(--text-muted); }
-.proj h3 { font-size: 14px; font-weight: 600; margin: 0 0 6px; font-family: var(--font-mono-stack); }
+.proj:hover { border-color: var(--text-muted); background: var(--bg-surface-hover); }
+.proj h3 { font-size: 14px; font-weight: 600; margin: 0 0 6px; }
 .proj .desc { color: var(--text-muted); font-size: 12px; line-height: 1.5; margin: 0 0 14px; min-height: 36px; }
 .proj .meta {
   display: flex; align-items: center; justify-content: space-between;
-  font-size: 11px; color: var(--text-dim);
+  font-size: 11px; color: var(--text-muted);
   border-top: 1px solid var(--border-default); padding-top: 12px;
 }
 .proj .status {
@@ -675,9 +797,9 @@ section.band .sub {
   font-family: var(--font-mono-stack);
   font-size: 10px; text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--text-dim);
+  color: var(--text-muted);
 }
-.proj .status .d { width: 6px; height: 6px; border-radius: 50%; background: var(--text-dim); }
+.proj .status .d { width: 6px; height: 6px; border-radius: 50%; background: var(--conf-high); }
 
 .empty-state {
   border: 1px dashed var(--border-default);
@@ -889,7 +1011,7 @@ section.band .sub {
   white-space: pre-wrap;
 }
 .msg-system {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-dim);
   font-style: italic;
   padding: 4px 0;
@@ -930,7 +1052,7 @@ section.band .sub {
   max-height: 240px;
   overflow-y: auto;
   white-space: pre-wrap;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--text-muted);
 }
 .tool-card pre.err { color: var(--conf-low); }
@@ -956,7 +1078,7 @@ section.band .sub {
 .plan-card ol {
   margin: 0 0 0 16px;
   padding: 0;
-  font-size: 12.5px;
+  font-size: 12px;
   color: var(--text-primary);
   line-height: 1.6;
 }
@@ -973,7 +1095,7 @@ section.band .sub {
   border-radius: 4px;
   padding: 4px 8px;
   font-family: inherit;
-  font-size: 12.5px;
+  font-size: 12px;
   margin-bottom: 4px;
 }
 .plan-card .actions { display: flex; gap: 8px; margin-top: 12px; }
@@ -1001,7 +1123,7 @@ section.band .sub {
   background: transparent;
   color: var(--text-primary);
   cursor: pointer;
-  font-size: 11.5px;
+  font-size: 12px;
 }
 .tasks-inline-toggle:hover { background: rgba(255,255,255,0.02); }
 .tasks-inline-summary {
@@ -1023,7 +1145,7 @@ section.band .sub {
   grid-template-columns: 14px 1fr;
   gap: 6px;
   align-items: baseline;
-  font-size: 11.5px;
+  font-size: 12px;
   padding: 2px 4px;
   border-radius: 3px;
 }
@@ -1133,7 +1255,7 @@ section.band .sub {
   white-space: nowrap;
   color: var(--brand-magenta);
   font-family: var(--font-mono-stack);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .message-file-refs {
   display: flex;
@@ -1153,7 +1275,7 @@ section.band .sub {
   padding: 1px 6px;
   border-radius: var(--radius-sm);
   font-family: var(--font-mono-stack);
-  font-size: 10.5px;
+  font-size: 11px;
   max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1273,6 +1395,11 @@ section.band .sub {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  /* `.newproj-form` is a flex row (built for the single-line input layout);
+     without this, the column collapses to its content width and leaves a
+     large empty gap to its right. Fill the row instead. */
+  flex: 1;
+  min-width: 0;
 }
 .newproj-blank textarea {
   width: 100%;
@@ -1340,7 +1467,7 @@ section.band .sub {
   justify-content: space-between;
   align-items: center;
   font-size: 11px;
-  color: var(--text-dim);
+  color: var(--text-muted);
   margin-top: auto;
 }
 .proj-tile-head {
@@ -1510,7 +1637,11 @@ section.band .sub {
   align-items: center;
   gap: 6px;
 }
-.composer .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.composer .send-btn:disabled {
+  background: var(--bg-surface-active);
+  color: var(--text-dim);
+  cursor: not-allowed;
+}
 
 /* ── File Explorer ─────────────────────────────────────────────────────── */
 .tree-list {
@@ -1524,7 +1655,7 @@ section.band .sub {
   align-items: center;
   gap: 6px;
   padding: 3px 12px 3px 8px;
-  font-size: 12.5px;
+  font-size: 12px;
   color: var(--text-muted);
   cursor: pointer;
   user-select: none;
@@ -1634,7 +1765,7 @@ section.band .sub {
   border-radius: 3px;
   padding: 1px 4px;
   font-family: inherit;
-  font-size: 12.5px;
+  font-size: 12px;
   color: var(--text-primary);
   min-width: 0;
 }
@@ -1703,7 +1834,7 @@ section.band .sub {
   text-align: left;
   cursor: pointer;
   font-family: inherit;
-  font-size: 12.5px;
+  font-size: 12px;
   color: var(--text-primary);
 }
 .quick-open-row.active {
@@ -1730,7 +1861,7 @@ section.band .sub {
 .quick-open-hint {
   border-top: 1px solid var(--border-default);
   padding: 6px 12px;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--text-dim);
 }
 
@@ -1920,13 +2051,14 @@ section.band .sub {
 /* ── Status bar ─────────────────────────────────────────────────────────── */
 .status-bar {
   height: 24px;
-  background: var(--brand-gradient);
+  background: var(--bg-pane);
+  border-top: 1px solid var(--border-default);
   display: flex;
   align-items: center;
   padding: 0 12px;
   gap: 16px;
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.92);
+  color: var(--text-muted);
   flex-shrink: 0;
 }
 .status-bar .seg { display: inline-flex; align-items: center; gap: 5px; }

@@ -271,7 +271,7 @@ export default function Workspace({
               width: 7,
               height: 7,
               borderRadius: "50%",
-              background: connected ? "#fff" : "rgba(255,255,255,0.4)",
+              background: connected ? "var(--conf-high)" : "var(--text-dim)",
             }}
           />
           {connected ? "online" : "connecting…"}

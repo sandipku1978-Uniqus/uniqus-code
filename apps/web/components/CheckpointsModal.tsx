@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Modal from "./Modal";
 import {
   fetchCheckpointsApi,
   restoreCheckpointApi,
@@ -66,111 +67,63 @@ export default function CheckpointsModal({
   };
 
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.6)",
-        zIndex: 100,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 24,
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: "min(640px, 100%)",
-          maxHeight: "80vh",
-          background: "var(--bg-surface, #16161e)",
-          border: "1px solid var(--border-default, #2a2a36)",
-          borderRadius: 8,
-          display: "grid",
-          gridTemplateRows: "auto 1fr auto",
-          overflow: "hidden",
-        }}
-      >
-        <div
-          style={{
-            padding: "12px 16px",
-            borderBottom: "1px solid var(--border-default, #2a2a36)",
-          }}
-        >
-          <div style={{ fontWeight: 600, fontSize: 14 }}>Checkpoints</div>
-          <div style={{ color: "var(--text-dim, #999)", fontSize: 11.5 }}>
-            Auto-committed after every agent file edit or command. Click to rewind — your current state is saved first.
-          </div>
-        </div>
-
-        <div style={{ overflow: "auto", padding: 12 }}>
-          {loading ? (
-            <div style={{ color: "var(--text-dim)", fontSize: 12 }}>Loading…</div>
-          ) : items.length === 0 ? (
-            <div style={{ color: "var(--text-dim)", fontSize: 12 }}>
-              No checkpoints yet. They’ll appear here after the agent makes its first change.
-            </div>
-          ) : (
-            <div style={{ display: "grid", gap: 4 }}>
-              {items.map((c) => (
-                <button
-                  key={c.sha}
-                  onClick={() => onRestore(c.sha)}
-                  disabled={busy === c.sha}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "70px 1fr auto",
-                    gap: 10,
-                    padding: "6px 10px",
-                    border: "1px solid var(--border-default, #2a2a36)",
-                    background: busy === c.sha ? "rgba(255,255,255,0.06)" : "transparent",
-                    color: "var(--text-primary)",
-                    borderRadius: 6,
-                    textAlign: "left",
-                    cursor: busy ? "default" : "pointer",
-                    fontSize: 12,
-                  }}
-                >
-                  <code style={{ fontSize: 11, color: "var(--accent, #a78bfa)" }}>{c.short_sha}</code>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {c.message}
-                  </span>
-                  <span style={{ fontSize: 10.5, color: "var(--text-dim)" }}>
-                    {new Date(c.created_at).toLocaleString()}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div
-          style={{
-            padding: "10px 16px",
-            borderTop: "1px solid var(--border-default, #2a2a36)",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <div
-            style={{
-              fontSize: 11,
-              color: error ? "var(--conf-low, #c0392b)" : "var(--text-dim)",
-            }}
-          >
+    <Modal
+      title="Checkpoints"
+      subtitle="Auto-committed after every agent file edit or command. Click to rewind — your current state is saved first."
+      onClose={onClose}
+      width={640}
+      bodyStyle={{ padding: 12 }}
+      footer={
+        <>
+          <div className={`modal-status${error ? " error" : ""}`}>
             {error ?? `${items.length} checkpoints`}
           </div>
-          <button
-            onClick={onClose}
-            className="icon-btn-sm"
-            style={{ width: "auto", padding: "4px 12px" }}
-          >
-            Close
-          </button>
+          <div className="modal-actions">
+            <button onClick={onClose} className="btn-secondary">
+              Close
+            </button>
+          </div>
+        </>
+      }
+    >
+      {loading ? (
+        <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Loading…</div>
+      ) : items.length === 0 ? (
+        <div style={{ color: "var(--text-muted)", fontSize: 12 }}>
+          No checkpoints yet. They’ll appear here after the agent makes its first change.
         </div>
-      </div>
-    </div>
+      ) : (
+        <div style={{ display: "grid", gap: 4 }}>
+          {items.map((c) => (
+            <button
+              key={c.sha}
+              onClick={() => onRestore(c.sha)}
+              disabled={busy === c.sha}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "70px 1fr auto",
+                gap: 10,
+                padding: "6px 10px",
+                border: "1px solid var(--border-default)",
+                background: busy === c.sha ? "var(--bg-surface-hover)" : "transparent",
+                color: "var(--text-primary)",
+                borderRadius: 6,
+                textAlign: "left",
+                cursor: busy ? "default" : "pointer",
+                fontSize: 12,
+              }}
+            >
+              <code style={{ fontSize: 11, color: "var(--accent)" }}>{c.short_sha}</code>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {c.message}
+              </span>
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                {new Date(c.created_at).toLocaleString()}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </Modal>
   );
 }

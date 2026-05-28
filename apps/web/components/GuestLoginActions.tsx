@@ -209,7 +209,7 @@ export default function GuestLoginActions({
             </h2>
             <p
               style={{
-                fontSize: 12.5,
+                fontSize: 12,
                 color: "var(--text-muted)",
                 margin: "0 0 14px",
               }}

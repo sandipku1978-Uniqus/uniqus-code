@@ -294,7 +294,7 @@ export default function ChatPanel() {
 
       <div ref={scrollRef} className="chat-scroll">
         {chat.length === 0 && (
-          <div style={{ color: "var(--text-dim)", fontSize: 12.5, fontStyle: "italic" }}>
+          <div style={{ color: "var(--text-dim)", fontSize: 12, fontStyle: "italic" }}>
             Describe what you want to build.{" "}
             {mode === "plan-then-execute"
               ? "Uniqus will propose a plan first."

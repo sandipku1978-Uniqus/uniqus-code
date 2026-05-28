@@ -384,7 +384,7 @@ export default function ProjectPicker({
             alignItems: "center",
             gap: 10,
             padding: "8px 16px",
-            fontSize: 12.5,
+            fontSize: 12,
             background: "rgba(220, 90, 90, 0.1)",
             borderBottom: "1px solid rgba(220, 90, 90, 0.35)",
             color: "var(--text-primary)",
@@ -468,7 +468,7 @@ export default function ProjectPicker({
 
           <div className="group">
             <div className="label-micro">Workspace</div>
-            <div className="nav-item">
+            <div className="nav-item soon" aria-disabled="true" title="Coming soon">
               <span className="ic">
                 <svg
                   width="14"
@@ -483,8 +483,9 @@ export default function ProjectPicker({
                 </svg>
               </span>
               Deployments
+              <span className="count">soon</span>
             </div>
-            <div className="nav-item">
+            <div className="nav-item soon" aria-disabled="true" title="Coming soon">
               <span className="ic">
                 <svg
                   width="14"
@@ -499,6 +500,7 @@ export default function ProjectPicker({
                 </svg>
               </span>
               Datasets
+              <span className="count">soon</span>
             </div>
           </div>
 
@@ -1313,7 +1315,7 @@ function RichProjectCard({
       style={{
         display: "grid",
         gridTemplateColumns: "auto 1fr auto",
-        alignItems: "center",
+        alignItems: "start",
         gap: 16,
         padding: 14,
       }}
@@ -1386,7 +1388,7 @@ function RichProjectCard({
           )}
         </div>
       </div>
-      <div style={{ position: "relative", display: "flex", gap: 8 }}>
+      <div style={{ position: "relative", display: "flex", gap: 8, alignSelf: "center" }}>
         <Link
           href={`/projects/${project.id}`}
           className="btn-primary"

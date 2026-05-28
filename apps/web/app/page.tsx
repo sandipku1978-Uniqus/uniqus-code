@@ -190,7 +190,7 @@ export default async function MarketingPage() {
               run the tests, and tell you what I&apos;m uncertain about. If a migration is
               destructive, I stop and ask.&rdquo;
             </p>
-            <div className="byline">CODEX · ENGINEERING AGENT</div>
+            <div className="byline">UNIQUS · ENGINEERING AGENT</div>
           </div>
           <div className="stack-matrix">
             {STACK.map((s) => (

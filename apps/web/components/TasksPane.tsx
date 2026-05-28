@@ -50,7 +50,7 @@ export default function TasksPane({ onClose }: { onClose: () => void }) {
           style={{
             borderTop: "1px solid var(--border-default, #2a2a36)",
             padding: "8px 12px",
-            fontSize: 11.5,
+            fontSize: 12,
             color: "var(--text-dim)",
           }}
         >
@@ -79,7 +79,7 @@ function TaskRow({ item }: { item: { content: string; activeForm: string; status
         gridTemplateColumns: "16px 1fr",
         gap: 8,
         alignItems: "baseline",
-        fontSize: 12.5,
+        fontSize: 12,
         padding: "4px 6px",
         borderRadius: 4,
         background:
