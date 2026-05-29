@@ -4,6 +4,7 @@ import { create } from "zustand";
 import type {
   CurrentUser,
   DeploymentState,
+  ModelChoice,
   Plan,
   PreviewServer,
   ProjectSummary,
@@ -11,6 +12,98 @@ import type {
   TreeEntry,
   UploadedFileSummary,
 } from "@uniqus/api-types";
+import { MODEL_CATALOG } from "@uniqus/api-types";
+
+/**
+ * The agent model choice is an account-wide default (the Settings "Default
+ * model" card and the composer picker both edit it), so we persist it to
+ * localStorage rather than resetting it per project. "auto" is the default.
+ */
+const MODEL_STORAGE_KEY = "uniqus.model";
+
+function readStoredModel(): ModelChoice {
+  if (typeof window === "undefined") return "auto";
+  try {
+    const stored = window.localStorage.getItem(MODEL_STORAGE_KEY) || "auto";
+    if (stored === "auto" || MODEL_CATALOG.some((m) => m.id === stored)) {
+      return stored;
+    }
+    return "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+function persistModel(model: ModelChoice): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(MODEL_STORAGE_KEY, model);
+  } catch {
+    /* private mode / quota — non-fatal, the choice just won't persist */
+  }
+}
+
+/**
+ * Appearance preferences (Settings → Appearance). Like the model default,
+ * these are account-wide client preferences persisted to localStorage. They
+ * are applied to <html> via `data-theme` / `data-density` attributes — the
+ * CSS token overrides in globals.css key off those. An inline script in the
+ * root layout reads the same keys to set the attributes before first paint
+ * (no flash); the setters below keep the DOM in sync on live changes.
+ */
+export type ThemeChoice = "dark" | "light";
+export type DensityChoice = "comfortable" | "compact";
+
+const THEME_STORAGE_KEY = "uniqus.theme";
+const DENSITY_STORAGE_KEY = "uniqus.density";
+
+function readStoredTheme(): ThemeChoice {
+  if (typeof window === "undefined") return "dark";
+  try {
+    return window.localStorage.getItem(THEME_STORAGE_KEY) === "light" ? "light" : "dark";
+  } catch {
+    return "dark";
+  }
+}
+
+function readStoredDensity(): DensityChoice {
+  if (typeof window === "undefined") return "comfortable";
+  try {
+    return window.localStorage.getItem(DENSITY_STORAGE_KEY) === "compact"
+      ? "compact"
+      : "comfortable";
+  } catch {
+    return "comfortable";
+  }
+}
+
+function applyTheme(theme: ThemeChoice): void {
+  if (typeof document === "undefined") return;
+  document.documentElement.dataset.theme = theme;
+}
+
+function applyDensity(density: DensityChoice): void {
+  if (typeof document === "undefined") return;
+  document.documentElement.dataset.density = density;
+}
+
+function persistTheme(theme: ThemeChoice): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch {
+    /* private mode / quota — non-fatal */
+  }
+}
+
+function persistDensity(density: DensityChoice): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(DENSITY_STORAGE_KEY, density);
+  } catch {
+    /* private mode / quota — non-fatal */
+  }
+}
 
 export interface DeploymentLive {
   id: string;
@@ -91,6 +184,20 @@ interface State {
    * override a deliberate choice. Reset per project in `reset()`.
    */
   modeTouched: boolean;
+  /**
+   * Which model the agent runs on. `"auto"` lets the orchestrator pick the
+   * best model per role; a catalog id ("<provider>:<model>") is an explicit
+   * Advanced override. Persisted to localStorage as an account-wide default.
+   */
+  model: ModelChoice;
+  /**
+   * Appearance preferences (account-wide, localStorage-backed). `theme`
+   * flips the CSS token set (dark/light); `density` tightens the global
+   * spacing/type rhythm (comfortable/compact). Both are mirrored onto
+   * <html> data-attributes so the CSS overrides cascade app-wide.
+   */
+  theme: ThemeChoice;
+  density: DensityChoice;
   chat: ChatItem[];
   tree: TreeEntry[];
   selectedFile: string | null;
@@ -140,6 +247,12 @@ interface State {
   setMode(m: "plan-then-execute" | "execute-only"): void;
   /** Set mode from a user action (the Plan toggle). Marks modeTouched. */
   setModeManual(m: "plan-then-execute" | "execute-only"): void;
+  /** Set the agent model choice and persist it as the account-wide default. */
+  setModel(m: ModelChoice): void;
+  /** Set the UI theme; persists + applies to <html data-theme>. */
+  setTheme(t: ThemeChoice): void;
+  /** Set the UI density; persists + applies to <html data-density>. */
+  setDensity(d: DensityChoice): void;
   addUserMessage(
     content: string,
     attachments?: UploadedFileSummary[],
@@ -194,6 +307,13 @@ export const useStore = create<State>((set, get) => ({
   busy: false,
   mode: "execute-only",
   modeTouched: false,
+  model: readStoredModel(),
+  // SSR-safe defaults: the persisted choice is applied to <html> before paint
+  // by the layout bootstrap script, and hydrated into the store on mount via
+  // hydrateAppearanceFromStorage() — initializing from localStorage here would
+  // desync the first client render from the server HTML.
+  theme: "dark",
+  density: "comfortable",
   chat: [],
   tree: [],
   selectedFile: null,
@@ -222,6 +342,20 @@ export const useStore = create<State>((set, get) => ({
   setBusy: (b) => set({ busy: b }),
   setMode: (m) => set({ mode: m }),
   setModeManual: (m) => set({ mode: m, modeTouched: true }),
+  setModel: (m) => {
+    persistModel(m);
+    set({ model: m });
+  },
+  setTheme: (t) => {
+    persistTheme(t);
+    applyTheme(t);
+    set({ theme: t });
+  },
+  setDensity: (d) => {
+    persistDensity(d);
+    applyDensity(d);
+    set({ density: d });
+  },
 
   addUserMessage: (content, attachments, fileRefs) =>
     set((s) => ({
@@ -520,4 +654,20 @@ export async function flushAllPendingEdits(): Promise<void> {
   for (const p of paths) {
     await flushSave(p).catch(() => {});
   }
+}
+
+/**
+ * Pull the persisted Appearance prefs into the store after mount. The store
+ * initializes to SSR-safe defaults (dark/comfortable) so the first client
+ * render matches the server HTML; call this from a `useEffect` to reconcile
+ * with localStorage once hydration is done. The DOM is already themed by the
+ * layout bootstrap script, so this only syncs the in-memory state that the
+ * Appearance controls read.
+ */
+export function hydrateAppearanceFromStorage(): void {
+  const { theme, density, setTheme, setDensity } = useStore.getState();
+  const storedTheme = readStoredTheme();
+  const storedDensity = readStoredDensity();
+  if (storedTheme !== theme) setTheme(storedTheme);
+  if (storedDensity !== density) setDensity(storedDensity);
 }

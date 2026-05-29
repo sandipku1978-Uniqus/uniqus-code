@@ -9,7 +9,7 @@ import { GUEST_COOKIE_NAME, unsealGuestCookie } from "@/lib/guest-session";
 const workosMiddleware = authkitMiddleware({
   middlewareAuth: {
     enabled: true,
-    unauthenticatedPaths: ["/", "/login", "/callback"],
+    unauthenticatedPaths: ["/", "/login", "/callback", "/guide"],
   },
 });
 
@@ -44,5 +44,5 @@ export default async function middleware(
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\\.png$).*)"],
+  matcher: ["/((?!guide(?:/|$)|_next/static|_next/image|favicon.ico|.*\\.png$).*)"],
 };

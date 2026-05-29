@@ -1,11 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { TOOLS, WEB_SEARCH_TOOL } from "./tools.js";
+import { TOOLS } from "./tools.js";
 import * as sb from "./sandbox.js";
 import type { Sandbox } from "./sandbox.js";
 import { ensureProjectDeps } from "../ensureDeps.js";
 import { normalizeMessageHistoryInPlace } from "./messageHistory.js";
 import { maybeCompact, type CompactionResult } from "./compact.js";
-import { formatSkillsForPrompt, readSkills } from "./skills.js";
+import { formatAccountPromptForPrompt, formatSkillsForPrompt, readSkills } from "./skills.js";
 import { isImageAsset, listAssets, readAssetBase64, readAssetText } from "./assets.js";
 import {
   startBackgroundJob,
@@ -14,7 +14,9 @@ import {
   killJob,
 } from "./background.js";
 import { takeScreenshot } from "./screenshot.js";
-import { ensureAnthropic } from "./router.js";
+import { resolveModel } from "./router.js";
+import { getProvider, providerKeysFromEnv, type ProviderKeys } from "./providers/index.js";
+import type { ModelChoice } from "@uniqus/api-types";
 import { setTodos, type TodoItem } from "./todos.js";
 import { listProjectSecrets, plumbSecretToEnvFile } from "../secrets.js";
 import { callConnector, listProjectConnectors } from "../connectors/index.js";
@@ -22,7 +24,10 @@ import { callConnector, listProjectConnectors } from "../connectors/index.js";
 const MAX_ITERATIONS = 125;
 const MAX_TOKENS = 16384*2;
 
-function buildSystemPrompt(skillsBody: string | null): string {
+function buildSystemPrompt(
+  skillsBody: string | null,
+  accountPrompt: string | null,
+): string {
   const { name: shellName, isUnixLike } = sb.shellInfo();
   const platform = process.platform;
 
@@ -106,7 +111,7 @@ Conventions:
 7. Use list_dir or grep to verify state when you're unsure (e.g., after a scaffold) instead of guessing paths.
 8. When the task is complete, briefly summarize what you built, include the public URL if you started a server, and describe how to use it inside Uniqus Code. Do not end by telling the user to run local terminal commands.
 9. File size: write_file content is part of your output token budget (~16k tokens). For files larger than ~500 lines, write a smaller version first then grow it with edit_file or additional write_file calls — do NOT try to dump 1000+ lines in a single tool call, the response will be truncated and the tool input will arrive without the content field. If that happens you'll see "write_file requires 'content' as a string" — split the work and retry.
-10. Currency of facts: when the task names specific products, models, versions, or prices — ESPECIALLY anything about AI/LLM models (benchmark dashboards, model pickers, "compare the latest models" apps) — do NOT trust your training data for the current lineup; it lags reality by months. web_search the newest model names and version numbers FIRST, then write those into the code. Naming a stale model (an old version when a newer one has shipped, or omitting a current flagship) is a failure the user will immediately notice. The same applies to "latest" library versions, framework releases, and API endpoints.${formatSkillsForPrompt(skillsBody)}`;
+10. Currency of facts: when the task names specific products, models, versions, or prices — ESPECIALLY anything about AI/LLM models (benchmark dashboards, model pickers, "compare the latest models" apps) — do NOT trust your training data for the current lineup; it lags reality by months. web_search the newest model names and version numbers FIRST, then write those into the code. Naming a stale model (an old version when a newer one has shipped, or omitting a current flagship) is a failure the user will immediately notice. The same applies to "latest" library versions, framework releases, and API endpoints.${formatAccountPromptForPrompt(accountPrompt)}${formatSkillsForPrompt(skillsBody)}`;
 }
 
 export interface LoopHooks {
@@ -184,11 +189,29 @@ export interface LoopOptions extends LoopHooks {
    */
   skills?: string | null;
   /**
+   * Account-wide custom prompt (Settings → Custom prompts). Appended to the
+   * system prompt ahead of project Skills. Resolved by the caller from the
+   * user's account settings once per turn; null/undefined ⇒ omitted.
+   */
+  accountPrompt?: string | null;
+  /**
    * The acting user's id, used for audit-event attribution on
    * secret_read / connector_invoke / checkpoint_create. Optional so CLI
    * runs (no user context) still work.
    */
   userId?: string | null;
+  /**
+   * Which model to run the agent on for this turn (Plan §5). `"auto"` or
+   * undefined ⇒ the router picks the best model; a catalog id overrides it
+   * (the Advanced picker). Compaction always stays on the Claude default.
+   */
+  modelChoice?: ModelChoice;
+  /**
+   * Provider API keys. Defaults to reading them from the environment; passed
+   * explicitly mainly for tests. `apiKey` above remains the Anthropic key used
+   * for compaction and as the Anthropic provider key.
+   */
+  providerKeys?: ProviderKeys;
 }
 
 export interface LoopResult {
@@ -199,10 +222,18 @@ export async function runAgentLoop(
   userMessage: string,
   opts: LoopOptions,
 ): Promise<LoopResult> {
-  const client = new Anthropic({ apiKey: opts.apiKey });
+  // Resolve the model + provider once per turn. The model can't change
+  // mid-turn (the user picks it before sending), so a single adapter serves
+  // every iteration of this loop.
+  const resolved = resolveModel("agent", opts.modelChoice);
+  const keys: ProviderKeys = opts.providerKeys ?? {
+    ...providerKeysFromEnv(),
+    anthropic: opts.apiKey,
+  };
+  const provider = getProvider(resolved.provider, keys);
   const skillsBody =
     opts.skills !== undefined ? opts.skills : await readSkills(opts.sandbox.rootDir);
-  const systemPrompt = buildSystemPrompt(skillsBody);
+  const systemPrompt = buildSystemPrompt(skillsBody, opts.accountPrompt ?? null);
   const messages = opts.messages ?? [];
   messages.push({ role: "user", content: userMessage });
   normalizeMessageHistoryInPlace(messages);
@@ -225,22 +256,25 @@ export async function runAgentLoop(
       normalizeMessageHistoryInPlace(messages);
     }
 
-    // Stream the assistant response so the user sees text + tool starts as
-    // they arrive. Without this, large write_file calls look like a black
-    // hole — the tool input is the file content and arrives as a single
-    // delayed block.
-    let stream;
+    // Stream one assistant turn through the resolved provider. The adapter
+    // emits text + tool-start hooks as content arrives (so large write_file
+    // calls don't look like a black hole) and returns the assistant content
+    // blocks plus the client tool calls to execute. Provider-side tools
+    // (Anthropic web_search) are surfaced by the adapter and not returned here.
+    let turn;
     try {
-      stream = client.messages.stream(
-        {
-          model: ensureAnthropic("agent"),
-          max_tokens: MAX_TOKENS,
-          system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
-          tools: [...TOOLS, WEB_SEARCH_TOOL] as Anthropic.MessageCreateParams["tools"],
-          messages,
-        },
-        opts.signal ? { signal: opts.signal } : undefined,
-      );
+      turn = await provider.streamAgentTurn({
+        model: resolved.model,
+        system: systemPrompt,
+        tools: TOOLS as Anthropic.Tool[],
+        messages,
+        maxTokens: MAX_TOKENS,
+        signal: opts.signal,
+        onText: opts.onText,
+        onToolCallStarted: opts.onToolCallStarted,
+        onToolCall: opts.onToolCall,
+        onToolResult: opts.onToolResult,
+      });
     } catch (err) {
       // Treat any error as "aborted" if the user has actually pressed Stop.
       // The SDK's abort error class isn't always named the way our matcher
@@ -249,74 +283,10 @@ export async function runAgentLoop(
       throw err;
     }
 
-    // Track which tool_use blocks we've already announced via onToolCallStarted
-    // — content_block_start fires once per block, but be defensive against duplicates.
-    const announcedTools = new Set<string>();
+    const toolCalls = turn.toolCalls;
+    messages.push({ role: "assistant", content: turn.content });
 
-    stream.on("streamEvent", (event) => {
-      if (event.type === "content_block_start") {
-        const block = event.content_block;
-        if (block.type === "tool_use" && !announcedTools.has(block.id)) {
-          announcedTools.add(block.id);
-          opts.onToolCallStarted?.(block.id, block.name);
-        }
-      } else if (event.type === "content_block_delta") {
-        const delta = event.delta;
-        if (delta.type === "text_delta") {
-          opts.onText?.(delta.text);
-        }
-        // Tool input deltas accumulate inside the SDK; we surface the full
-        // parsed input on content_block_stop below. Streaming partial JSON
-        // to the UI is more cost than payoff right now.
-      }
-    });
-
-    let finalMessage: Anthropic.Message;
-    try {
-      finalMessage = await stream.finalMessage();
-    } catch (err) {
-      if (opts.signal?.aborted || isAbortError(err)) return { aborted: true };
-      throw err;
-    }
-
-    const toolCalls: Array<{ id: string; name: string; input: unknown }> = [];
-    for (const block of finalMessage.content) {
-      if (block.type === "tool_use") {
-        toolCalls.push({ id: block.id, name: block.name, input: block.input });
-        // Emit the final, parsed tool_use *after* streaming so the UI has the
-        // full input. onToolCallStarted already created the row.
-        opts.onToolCall?.(block.id, block.name, block.input);
-      } else if (block.type !== "text") {
-        // Server-side tool blocks (web_search). Anthropic ran the search;
-        // we just surface the activity in the UI — no execution needed.
-        const b = block as unknown as {
-          type: string;
-          id?: string;
-          name?: string;
-          input?: unknown;
-          tool_use_id?: string;
-          content?: unknown;
-        };
-        if (b.type === "server_tool_use") {
-          if (b.id && !announcedTools.has(b.id)) {
-            opts.onToolCallStarted?.(b.id, b.name ?? "web_search");
-          }
-          opts.onToolCall?.(b.id ?? "", b.name ?? "web_search", b.input);
-        } else if (b.type === "web_search_tool_result") {
-          opts.onToolResult?.(
-            b.tool_use_id ?? "",
-            "web_search",
-            undefined,
-            formatWebSearchResults(b.content),
-            false,
-          );
-        }
-      }
-    }
-
-    messages.push({ role: "assistant", content: finalMessage.content });
-
-    if (finalMessage.stop_reason === "end_turn" || toolCalls.length === 0) {
+    if (turn.stopReason === "end_turn" || toolCalls.length === 0) {
       return { aborted: false };
     }
 
@@ -748,18 +718,4 @@ async function executeTool(
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
-}
-
-function formatWebSearchResults(content: unknown): string {
-  if (!Array.isArray(content)) return JSON.stringify(content ?? null);
-  const lines: string[] = [];
-  content.forEach((r, i) => {
-    const item = r as { type?: string; title?: string; url?: string; error_code?: string };
-    if (item.type === "web_search_result") {
-      lines.push(`${i + 1}. ${item.title ?? "(no title)"}\n   ${item.url ?? ""}`);
-    } else if (item.error_code) {
-      lines.push(`${i + 1}. [error] ${item.error_code}`);
-    }
-  });
-  return lines.length > 0 ? lines.join("\n") : "(no results)";
 }

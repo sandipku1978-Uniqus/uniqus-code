@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "@google/genai": "^2.7.0",
     "@supabase/supabase-js": "^2.47.10",
     "@uniqus/api-types": "*",
     "@workos-inc/node": "^9.2.0",
@@ -20,6 +21,7 @@
     "cookie": "^1.0.2",
     "dotenv": "^16.4.7",
     "iron-session": "^8.0.4",
+    "openai": "^6.39.1",
     "pg": "^8.13.1",
     "playwright": "^1.59.1",
     "tree-kill": "^1.2.2",

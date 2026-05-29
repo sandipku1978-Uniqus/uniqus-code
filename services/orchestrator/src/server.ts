@@ -22,6 +22,7 @@ import type {
   TreeEntry,
   ProjectSummary,
   UploadedFileSummary,
+  ModelChoice,
 } from "@uniqus/api-types";
 import { runAgentLoop } from "./agent/loop.js";
 import { proposePlan, formatPlanForExecution } from "./agent/plan.js";
@@ -70,6 +71,8 @@ import {
   upsertUser,
   getUserById,
   touchUserActivity,
+  getAccountSettings,
+  setAccountSettings,
   type UserRecord,
 } from "./db/users.js";
 import {
@@ -141,6 +144,25 @@ const PREVIEW_BASE_URL =
 
 function sandboxDirFor(projectId: string): string {
   return path.resolve(SANDBOX_ROOT, projectId);
+}
+
+/**
+ * Seed a brand-new project's `.uniqus/skills.md` from the owner's account-wide
+ * default skills (Settings → Custom prompts & default skills). No-op when the
+ * account has no default skills set, or when the sandbox already carries a
+ * skills file (so an imported repo's own conventions are never clobbered).
+ * Best-effort: a failure here must not block project creation.
+ */
+async function seedDefaultSkills(ownerId: string, sandboxDir: string): Promise<void> {
+  try {
+    const { default_skills } = await getAccountSettings(ownerId);
+    if (!default_skills.trim()) return;
+    const existing = await readSkills(sandboxDir);
+    if (existing && existing.trim()) return;
+    await writeSkills(sandboxDir, default_skills);
+  } catch (err) {
+    console.error("seedDefaultSkills failed (non-fatal):", err);
+  }
 }
 
 type Sender = (event: ServerEvent) => void;
@@ -523,6 +545,34 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     });
   }
 
+  // Account-wide agent customization (Settings → Custom prompts & default
+  // skills). custom_prompt is injected into the agent system prompt every
+  // turn; default_skills seeds .uniqus/skills.md on new projects. Available
+  // to both standard and guest accounts — both drive the agent.
+  if (req.url === "/api/account/settings" && req.method === "GET") {
+    return json(res, 200, { settings: await getAccountSettings(user.id) });
+  }
+  if (req.url === "/api/account/settings" && req.method === "PUT") {
+    const body = await readJsonBody<{ custom_prompt?: string; default_skills?: string }>(req);
+    const patch: { custom_prompt?: string; default_skills?: string } = {};
+    if (typeof body.custom_prompt === "string") {
+      if (body.custom_prompt.length > 16 * 1024) {
+        return json(res, 400, { error: "custom_prompt exceeds 16 KB" });
+      }
+      patch.custom_prompt = body.custom_prompt;
+    }
+    if (typeof body.default_skills === "string") {
+      if (body.default_skills.length > 64 * 1024) {
+        return json(res, 400, { error: "default_skills exceeds 64 KB" });
+      }
+      patch.default_skills = body.default_skills;
+    }
+    if (Object.keys(patch).length === 0) {
+      return json(res, 400, { error: "nothing to update" });
+    }
+    return json(res, 200, { settings: await setAccountSettings(user.id, patch) });
+  }
+
   // Guest → WorkOS conversion. Called server-side by the web app's /projects
   // page when the request carries both cookies. WorkOS-only — a guest can't
   // "merge" into anything.
@@ -555,15 +605,16 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       name,
       description: body.description ?? null,
     });
-    await fs.mkdir(sandboxDirFor(project.id), { recursive: true });
+    const sandboxDir = sandboxDirFor(project.id);
+    await fs.mkdir(sandboxDir, { recursive: true });
+    await seedDefaultSkills(user.id, sandboxDir);
     return json(res, 201, { project: toProjectSummary(project) });
   }
 
   // NL project creation: user types a free-form brief ("Website for Narayan
-  // Balakrishnan, partner with EY at San Jose"), Haiku extracts a sane
-  // project name + a refined first message for the agent. Cheaper than
-  // making the user pick a name; sharper first prompts than passing the
-  // raw brief verbatim.
+  // Balakrishnan, partner with EY at San Jose"), Haiku derives a sane project
+  // name and the brief is forwarded to the agent verbatim. Cheaper than making
+  // the user pick a name; refineBrief never throws (falls back to a slug).
   if (req.url === "/api/projects/from-brief" && req.method === "POST") {
     const body = await readJsonBody<{ brief?: string; description?: string }>(req);
     const brief = (body.brief ?? "").trim();
@@ -584,7 +635,9 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       name: refined.name,
       description: body.description ?? brief.slice(0, 200),
     });
-    await fs.mkdir(sandboxDirFor(project.id), { recursive: true });
+    const sandboxDir = sandboxDirFor(project.id);
+    await fs.mkdir(sandboxDir, { recursive: true });
+    await seedDefaultSkills(user.id, sandboxDir);
     return json(res, 201, {
       project: toProjectSummary(project),
       first_message: refined.first_message,
@@ -2374,6 +2427,7 @@ async function handleConnection(
             event.attachments,
             event.file_refs,
             event.mode,
+            event.model,
             send,
             apiKey,
             history,
@@ -2677,6 +2731,7 @@ async function runSession(
   attachments: UploadedFileSummary[] | undefined,
   fileRefs: string[] | undefined,
   mode: "plan-then-execute" | "execute-only",
+  modelChoice: ModelChoice | undefined,
   send: Sender,
   apiKey: string,
   history: Anthropic.MessageParam[],
@@ -2706,10 +2761,25 @@ async function runSession(
   // Re-read skills every turn so edits during a long session take effect
   // on the next iteration (rather than only after a session reset).
   const skillsBody = await readSkills(sandboxDir);
+  // Account-wide custom prompt (Settings → Custom prompts). Fetched per turn
+  // so edits take effect immediately; non-fatal if the lookup fails.
+  const accountPrompt = userId
+    ? await getAccountSettings(userId)
+        .then((s) => s.custom_prompt)
+        .catch(() => null)
+    : null;
   let finalMessage = messageWithRefs;
 
   if (mode === "plan-then-execute") {
-    const plan = await proposePlan(messageWithRefs, apiKey, history, skillsBody);
+    const plan = await proposePlan(
+      messageWithRefs,
+      apiKey,
+      history,
+      skillsBody,
+      modelChoice,
+      undefined,
+      accountPrompt,
+    );
     if (signal.aborted) {
       send({ type: "complete", tool_calls: 0, elapsed_ms: Date.now() - start, aborted: true });
       return;
@@ -2737,7 +2807,15 @@ async function runSession(
           // Empty history for the plan call: the live history ends with the
           // assistant's enter_plan_mode tool_use, which would need a paired
           // tool_result; the reason + original message carry the context.
-          const plan = await proposePlan(planPrompt, apiKey, [], skillsBody);
+          const plan = await proposePlan(
+            planPrompt,
+            apiKey,
+            [],
+            skillsBody,
+            modelChoice,
+            undefined,
+            accountPrompt,
+          );
           if (signal.aborted) throw new Error("aborted before plan approval");
           send({ type: "plan_proposed", plan });
           const approved = await awaitPlanApproval();
@@ -2762,11 +2840,13 @@ async function runSession(
   const result = await runAgentLoop(finalMessage, {
     sandbox: { rootDir: sandboxDir, vm: vmHandle ?? undefined },
     apiKey,
+    modelChoice,
     projectId,
     messages: history,
     signal,
     previewBaseUrl: PREVIEW_BASE_URL,
     skills: skillsBody,
+    accountPrompt,
     userId,
     onTodoWrite: (items) => broadcastToProject(projectId, { type: "todos_updated", todos: items }),
     requestUserAnswer: registerUserAnswer,
@@ -2962,14 +3042,15 @@ async function readSandboxFile(rootDir: string, p: string): Promise<string | nul
 }
 
 /**
- * NL project creation helper. Single Haiku call: returns a short kebab-case
- * project name and a refined first message. Cheap (~200ms, ~$0.0003) so we
- * call it on every brief — the alternative (deriving a name from the first
- * 5 words and forwarding the brief verbatim) produces unreadable names like
- * "website-of-narayan-balakrishnan-partner" and unfocused first prompts.
+ * NL project creation helper. Single Haiku call: turns a free-form brief into
+ * a short kebab-case project name. Cheap (~200ms, ~$0.0003) so we call it on
+ * every brief — the alternative (deriving a name from the first 5 words)
+ * produces unreadable names like "website-of-narayan-balakrishnan-partner".
  *
- * Falls back gracefully on any error: caller catches and surfaces the
- * failure rather than creating a half-baked project.
+ * The brief is forwarded to the agent verbatim as the first message — we no
+ * longer rewrite the user's intent. Never throws: any failure (missing key,
+ * API error, junk response) falls back to a slug of the brief, so project
+ * creation always proceeds.
  */
 const PROJECT_NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 function sanitizeProjectName(raw: string): string {
@@ -3092,42 +3173,45 @@ async function fileExists(p: string): Promise<boolean> {
 async function refineBrief(
   brief: string,
 ): Promise<{ name: string; first_message: string }> {
+  // The brief is always forwarded verbatim — we only ask Haiku for a name.
+  return { name: await nameFromBrief(brief), first_message: brief };
+}
+
+/**
+ * Ask Haiku for a short kebab-case project name. Returns plain text (not JSON,
+ * so there's nothing to mis-parse), and falls back to a slug of the brief on
+ * any error so callers never have to handle a throw.
+ */
+async function nameFromBrief(brief: string): Promise<string> {
+  const fallback = sanitizeProjectName(brief);
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not set");
-  const client = new AnthropicCtor({ apiKey });
-  const system =
-    "You turn a one-line project brief into (a) a short kebab-case project name " +
-    "and (b) a clearer first message for an autonomous coding agent that will " +
-    "build the thing. Reply ONLY with valid JSON of shape " +
-    `{"name": "<kebab-case, <=40 chars, no leading/trailing dash>", "first_message": "<concrete prompt for the coding agent>"}. ` +
-    "The name should hint at the subject (e.g. 'narayan-portfolio', 'uniqus-marketing-site'). " +
-    "The first_message should preserve the user's intent verbatim where possible — only add structure (\"build a ...\", \"include ...\") and clarify obvious gaps (preferred stack defaults, sections, etc.). " +
-    "Do NOT invent facts (names, deadlines, integrations) the user didn't mention. " +
-    "Do NOT wrap output in markdown fences.";
-  const response = await client.messages.create({
-    model: ensureAnthropic("classify"),
-    max_tokens: 600,
-    system,
-    messages: [{ role: "user", content: brief }],
-  });
-  const text = response.content
-    .filter((b): b is Anthropic.TextBlock => b.type === "text")
-    .map((b) => b.text)
-    .join("")
-    .trim();
-  let parsed: { name?: unknown; first_message?: unknown };
+  if (!apiKey) return fallback;
   try {
-    parsed = JSON.parse(text);
+    const client = new AnthropicCtor({ apiKey });
+    const system =
+      "You name software projects. Given a one-line brief, reply with ONLY a " +
+      "short kebab-case project name (lowercase, hyphen-separated, <=40 chars, " +
+      "no leading/trailing dash) that hints at the subject — e.g. " +
+      "'narayan-portfolio', 'ai-frontier-metrics-hub'. No quotes, no JSON, no " +
+      "explanation, no markdown — just the name on a single line.";
+    const response = await client.messages.create({
+      model: ensureAnthropic("classify"),
+      max_tokens: 32,
+      system,
+      messages: [{ role: "user", content: brief }],
+    });
+    const text = response.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("")
+      .trim();
+    const name = sanitizeProjectName(text);
+    // sanitizeProjectName returns an "untitled-…" slug for unusable input;
+    // prefer the brief slug in that case if it's any better.
+    return name.startsWith("untitled-") ? fallback : name;
   } catch {
-    throw new Error(`refiner returned non-JSON: ${text.slice(0, 200)}`);
+    return fallback;
   }
-  const name =
-    typeof parsed.name === "string" ? sanitizeProjectName(parsed.name) : sanitizeProjectName(brief);
-  const firstMessage =
-    typeof parsed.first_message === "string" && parsed.first_message.trim()
-      ? parsed.first_message.trim()
-      : brief;
-  return { name, first_message: firstMessage };
 }
 
 main().catch((err) => {

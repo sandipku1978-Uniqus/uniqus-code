@@ -11,6 +11,109 @@ export interface Plan {
 
 export type RunMode = "plan-then-execute" | "execute-only";
 
+/** LLM providers the coding agent can run on. */
+export type ModelProvider = "anthropic" | "openai" | "google";
+
+/**
+ * What model the coding agent should use for a turn.
+ * - `"auto"` (the default): the orchestrator picks the strongest sensible
+ *   model per role. Never resolves to a low/cheap tier.
+ * - A catalog `id` ("<provider>:<model>", e.g. "openai:gpt-5.5"): an explicit
+ *   override chosen via the Advanced model picker. "results may vary" applies.
+ */
+export type ModelChoice = "auto" | string;
+
+/**
+ * One selectable model in the Advanced picker. The curated `MODEL_CATALOG`
+ * below is the single source of truth shared by the web UI (to render the
+ * picker) and the orchestrator (to validate an override and route it to the
+ * right provider). Deliberately excludes the lowest tiers (Claude Haiku,
+ * Gemini Flash-Lite, GPT mini/nano) — those are never offered for the agent.
+ */
+export interface ModelOption {
+  /** "<provider>:<model>" — also the value sent as a `ModelChoice`. */
+  id: string;
+  provider: ModelProvider;
+  /** Provider-native model id passed to that provider's API. */
+  model: string;
+  /** Short human label for the picker, e.g. "Claude Opus 4.8". */
+  label: string;
+  /** One-line "what it's good at" shown under the label. */
+  description: string;
+  /** Coarse capability/cost tier. "frontier" = top, "high" = strong. */
+  tier: "frontier" | "high";
+}
+
+export const MODEL_CATALOG: ReadonlyArray<ModelOption> = [
+  // ── Anthropic ──
+  {
+    id: "anthropic:claude-opus-4-8",
+    provider: "anthropic",
+    model: "claude-opus-4-8",
+    label: "Claude Opus 4.8",
+    description: "Anthropic's most capable coding & agentic model.",
+    tier: "frontier",
+  },
+  {
+    id: "anthropic:claude-sonnet-4-6",
+    provider: "anthropic",
+    model: "claude-sonnet-4-6",
+    label: "Claude Sonnet 4.6",
+    description: "Fast, strong general coding — great cost/quality balance.",
+    tier: "high",
+  },
+  // ── OpenAI ──
+  {
+    id: "openai:gpt-5.5",
+    provider: "openai",
+    model: "gpt-5.5",
+    label: "GPT-5.5",
+    description: "OpenAI's flagship for complex reasoning and coding.",
+    tier: "frontier",
+  },
+  {
+    id: "openai:gpt-5.5-pro",
+    provider: "openai",
+    model: "gpt-5.5-pro",
+    label: "GPT-5.5 Pro",
+    description: "Highest-accuracy GPT-5.5 — slower, for hard problems.",
+    tier: "frontier",
+  },
+  {
+    id: "openai:gpt-5.3-codex",
+    provider: "openai",
+    model: "gpt-5.3-codex",
+    label: "GPT-5.3 Codex",
+    description: "Agentic coding model tuned for long tool-use sessions.",
+    tier: "high",
+  },
+  // ── Google ──
+  {
+    id: "google:gemini-3.1-pro-preview-customtools",
+    provider: "google",
+    model: "gemini-3.1-pro-preview-customtools",
+    label: "Gemini 3.1 Pro Preview",
+    description: "Agentic workflows & coding with a 1M-token context.",
+    tier: "frontier",
+  },
+  {
+    id: "google:gemini-3.5-flash",
+    provider: "google",
+    model: "gemini-3.5-flash",
+    label: "Gemini 3.5 Flash",
+    description: "Near-Pro intelligence at Flash speed; strong at code.",
+    tier: "high",
+  },
+  {
+    id: "google:gemini-2.5-pro",
+    provider: "google",
+    model: "gemini-2.5-pro",
+    label: "Gemini 2.5 Pro",
+    description: "High-capability reasoning & coding, 1M-token context.",
+    tier: "high",
+  },
+];
+
 export interface UploadedFileSummary {
   name: string;
   path: string;
@@ -23,6 +126,12 @@ export type ClientEvent =
       type: "user_message";
       content: string;
       mode: RunMode;
+      /**
+       * Which model to run the agent (and plan step) on for this turn.
+       * Omitted or `"auto"` ⇒ the orchestrator picks the best model per role.
+       * A catalog id ("<provider>:<model>") ⇒ explicit Advanced override.
+       */
+      model?: ModelChoice;
       attachments?: UploadedFileSummary[];
       /**
        * Sandbox-relative paths the user explicitly @-referenced in the
@@ -62,6 +171,17 @@ export interface CurrentUser {
   display_name: string | null;
   /** "guest" accounts have full parity with "standard" except GitHub + deploys. */
   account_type: "standard" | "guest";
+}
+
+/**
+ * Account-wide agent customization (Settings → Custom prompts & default
+ * skills). `custom_prompt` is appended to the agent system prompt on every
+ * turn; `default_skills` is the Skills markdown seeded into each new project's
+ * `.uniqus/skills.md`. Empty string = unset.
+ */
+export interface AccountSettings {
+  custom_prompt: string;
+  default_skills: string;
 }
 
 export type DeploymentState = "QUEUED" | "BUILDING" | "READY" | "ERROR" | "CANCELED";

@@ -1,89 +1,127 @@
 /**
  * Multi-provider model routing (Plan §5).
  *
- * Phase-2 default: Claude Opus 4.7 for the agent loop and plan-mode, Sonnet
- * 4.6 for the future execute-mode default, Haiku 4.5 for compaction /
- * classification. The "router behind a clean interface" decision in §2 means
- * the agent loop never names a vendor — it asks the router for a model by
- * role, and the router resolves it.
+ * The agent loop, plan-mode, and compaction never name a vendor — they ask
+ * the router for a model by ROLE, and the router resolves it to a concrete
+ * `{ provider, model }`. A `ModelChoice` from the UI (per-turn) can override
+ * the user-facing roles (`agent`, `plan`); the internal roles (`compact`,
+ * `classify`) are infrastructure and stay on a fast Claude model regardless.
  *
- * Per-project / per-turn overrides land via env vars or future per-project
- * settings; the agent loop, plan-mode, and classification stay Claude-only
- * by default per Plan §5: "Driven by user demand, not a wholesale Claude
- * replacement. Explicit 'results may vary' warning when overriding."
+ * Resolution precedence for `agent`/`plan`:
+ *   1. An explicit, valid per-turn `ModelChoice` (the Advanced picker).
+ *   2. An ops env override (`UNIQUS_MODEL_<ROLE>`).
+ *   3. The "auto" default for that role.
  *
- * Today the router only resolves model IDs and exposes the active provider
- * — actual cross-provider request shapes (OpenAI / Gemini / OSS) come
- * through the same interface when a customer demands them. The shape is
- * intentionally tight so a future provider plugs in without touching loop.ts.
+ * "auto" deliberately resolves to a frontier model — never a low/cheap tier.
+ * The selectable set lives in `MODEL_CATALOG` (@uniqus/api-types) so the web
+ * picker and this router share one source of truth.
  */
+
+import {
+  MODEL_CATALOG,
+  type ModelChoice,
+  type ModelProvider,
+} from "@uniqus/api-types";
 
 export type ModelRole =
   | "agent" // long tool-use loop
-  | "plan" // plan-mode (Opus by default)
-  | "compact" // history summarizer (Haiku)
-  | "classify"; // routing / diagnose / lightweight
+  | "plan" // plan-mode
+  | "compact" // history summarizer (internal, Claude-only)
+  | "classify"; // routing / brief-refine / lightweight (internal, Claude-only)
 
-export type Provider = "anthropic" | "openai" | "google";
+export type Provider = ModelProvider;
 
 export interface ResolvedModel {
   provider: Provider;
   model: string;
-  /** Set when overridden via env / per-project settings. UI should warn. */
+  /** Set when overridden via the Advanced picker or env. UI shows "results may vary". */
   overridden: boolean;
 }
 
-const DEFAULTS: Record<ModelRole, ResolvedModel> = {
-  agent: { provider: "anthropic", model: "claude-opus-4-7", overridden: false },
-  plan: { provider: "anthropic", model: "claude-opus-4-7", overridden: false },
+/**
+ * "auto" defaults. The user-facing roles default to Claude's flagship — the
+ * strongest coding model and the product's native provider. Internal roles
+ * use Haiku: they summarize / classify, never write code, so the
+ * "no low tiers for the agent" rule doesn't apply to them.
+ */
+const AUTO: Record<ModelRole, ResolvedModel> = {
+  agent: { provider: "anthropic", model: "claude-opus-4-8", overridden: false },
+  plan: { provider: "anthropic", model: "claude-opus-4-8", overridden: false },
   compact: { provider: "anthropic", model: "claude-haiku-4-5-20251001", overridden: false },
   classify: { provider: "anthropic", model: "claude-haiku-4-5-20251001", overridden: false },
 };
 
-/**
- * Env-var overrides. Examples:
- *   UNIQUS_MODEL_AGENT=claude-sonnet-4-6
- *   UNIQUS_MODEL_PLAN=anthropic:claude-opus-4-7
- *   UNIQUS_MODEL_COMPACT=openai:gpt-4o-mini
- *
- * Format: optional "<provider>:" prefix; bare model names default to anthropic.
- */
-function fromEnv(role: ModelRole): ResolvedModel | null {
-  const key = `UNIQUS_MODEL_${role.toUpperCase()}`;
-  const raw = process.env[key];
-  if (!raw) return null;
+const PROVIDERS: ReadonlySet<string> = new Set<ModelProvider>([
+  "anthropic",
+  "openai",
+  "google",
+]);
+
+/** Resolve a curated catalog id ("<provider>:<model>") to a concrete model. */
+function fromCatalog(choice: string): ResolvedModel | null {
+  const opt = MODEL_CATALOG.find((m) => m.id === choice);
+  if (!opt) return null;
+  return { provider: opt.provider, model: opt.model, overridden: true };
+}
+
+/** Parse a freeform "<provider>:<model>" string (env / power-user escape hatch). */
+function fromFreeform(raw: string): ResolvedModel | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   const colonAt = trimmed.indexOf(":");
   if (colonAt > 0) {
-    const provider = trimmed.slice(0, colonAt).toLowerCase() as Provider;
+    const provider = trimmed.slice(0, colonAt).toLowerCase();
     const model = trimmed.slice(colonAt + 1).trim();
-    if ((provider === "anthropic" || provider === "openai" || provider === "google") && model) {
-      return { provider, model, overridden: true };
+    if (PROVIDERS.has(provider) && model) {
+      return { provider: provider as Provider, model, overridden: true };
     }
+    return null;
   }
+  // Bare model name → assume Anthropic (back-compat with old env values).
   return { provider: "anthropic", model: trimmed, overridden: true };
 }
 
-export function resolveModel(role: ModelRole): ResolvedModel {
-  return fromEnv(role) ?? DEFAULTS[role];
+/**
+ * Env-var overrides. Examples:
+ *   UNIQUS_MODEL_AGENT=anthropic:claude-opus-4-8
+ *   UNIQUS_MODEL_COMPACT=claude-haiku-4-5-20251001
+ */
+function fromEnv(role: ModelRole): ResolvedModel | null {
+  const raw = process.env[`UNIQUS_MODEL_${role.toUpperCase()}`];
+  if (!raw) return null;
+  return fromFreeform(raw);
 }
 
-export function modelForRole(role: ModelRole): string {
-  return resolveModel(role).model;
+/** True for "auto" or any value the router can actually resolve. */
+export function isValidChoice(choice: string): boolean {
+  if (choice === "auto") return true;
+  return fromCatalog(choice) !== null || fromFreeform(choice) !== null;
 }
 
 /**
- * Mark a model as non-Anthropic so callers can refuse to call Anthropic-shaped
- * helpers with a foreign model ID. The agent loop today only knows Anthropic;
- * a future cross-provider adapter lives behind this guard.
+ * Resolve the model for a role. `choice` (the per-turn Advanced override) only
+ * affects the user-facing `agent`/`plan` roles; internal roles ignore it.
+ */
+export function resolveModel(role: ModelRole, choice?: ModelChoice): ResolvedModel {
+  if ((role === "agent" || role === "plan") && choice && choice !== "auto") {
+    const picked = fromCatalog(choice) ?? fromFreeform(choice);
+    if (picked) return picked;
+    // Unknown/invalid id: fall through to env/auto rather than crash the turn.
+  }
+  return fromEnv(role) ?? AUTO[role];
+}
+
+/**
+ * Resolve a role that MUST stay on Anthropic (compaction / classification).
+ * Returns the model id and throws if an env override points it elsewhere —
+ * those code paths only speak the Anthropic request shape.
  */
 export function ensureAnthropic(role: ModelRole): string {
   const m = resolveModel(role);
   if (m.provider !== "anthropic") {
     throw new Error(
       `Role '${role}' is configured for ${m.provider} (${m.model}), but this code path only supports Anthropic. ` +
-        `Either revert ${`UNIQUS_MODEL_${role.toUpperCase()}`} to a Claude model, or extend the router with a provider adapter.`,
+        `Revert UNIQUS_MODEL_${role.toUpperCase()} to a Claude model.`,
     );
   }
   return m.model;

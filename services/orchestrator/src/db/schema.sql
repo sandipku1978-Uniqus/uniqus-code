@@ -59,6 +59,16 @@ alter table users add column if not exists converted_at timestamptz;
 create unique index if not exists users_guest_recovery_hash_idx
   on users (guest_recovery_hash) where guest_recovery_hash is not null;
 
+-- Account-wide agent customization (Settings → Custom prompts & default skills).
+-- custom_prompt is appended to the agent system prompt on every turn, on top of
+-- the per-project .uniqus/skills.md, so the user's standing instructions apply
+-- everywhere without re-typing. default_skills is the Skills markdown seeded
+-- into a brand-new project's .uniqus/skills.md at creation, so those
+-- conventions are in effect from the first turn. Both are plain text (NULL =
+-- unset); the API caps them at 16 KB / 64 KB respectively.
+alter table users add column if not exists custom_prompt text;
+alter table users add column if not exists default_skills text;
+
 create table if not exists projects (
   id uuid primary key default gen_random_uuid(),
   owner_id uuid not null references users(id) on delete cascade,

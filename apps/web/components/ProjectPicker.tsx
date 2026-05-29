@@ -8,7 +8,6 @@ import BrandLockup from "./BrandLockup";
 import GuestBanner from "./GuestBanner";
 import {
   fetchProjects,
-  createProjectApi,
   createProjectFromBriefApi,
   importGithubApi,
   importZipApi,
@@ -124,12 +123,11 @@ function fallbackTileColor(projectId: string): string {
   return `hsl(${hue} 55% 28%)`;
 }
 
-type Mode = "blank" | "describe" | "zip" | "github";
+type Mode = "describe" | "zip" | "github";
 type GithubAuthMode = "oauth" | "pat";
 
 const MODE_TABS: ReadonlyArray<readonly [Mode, string]> = [
-  ["blank", "Blank project"],
-  ["describe", "Describe in detail"],
+  ["describe", "Describe your idea"],
   ["zip", "Upload .zip"],
   ["github", "Clone GitHub"],
 ];
@@ -154,7 +152,7 @@ export default function ProjectPicker({
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [mode, setMode] = useState<Mode>("blank");
+  const [mode, setMode] = useState<Mode>("describe");
   const [name, setName] = useState("");
 
   // Describe mode: a fuller-paragraph brief that's run through Haiku 4.5
@@ -290,26 +288,6 @@ export default function ProjectPicker({
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
         setRefining(false);
-        return;
-      }
-    }
-
-    // Blank mode is name-only: create an empty project and open it WITHOUT
-    // sending anything to the agent. (The brief→first-turn flow lives in
-    // "Describe in detail".) This keeps the two modes distinct and stops a
-    // blank project from silently firing the typed text as turn one.
-    if (mode === "blank") {
-      const trimmedName = name.trim();
-      if (!trimmedName) return;
-      setCreating(true);
-      setError(null);
-      try {
-        const { project } = await createProjectApi(trimmedName);
-        router.push(`/projects/${project.id}`);
-        return;
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-        setCreating(false);
         return;
       }
     }
@@ -708,29 +686,6 @@ export default function ProjectPicker({
                     </button>
                   </div>
                 </div>
-              ) : mode === "blank" ? (
-                <div className="newproj-blank">
-                  <input
-                    autoFocus
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    placeholder="Project name — e.g. acme-billing-portal"
-                    disabled={creating}
-                  />
-                  <div className="newproj-blank-row">
-                    <span className="newproj-hint" style={{ margin: 0 }}>
-                      Creates an empty project and opens it — nothing is sent to the
-                      agent until you type your first message.
-                    </span>
-                    <button
-                      type="submit"
-                      className="btn-primary"
-                      disabled={creating || !name.trim()}
-                    >
-                      {creating ? "Creating…" : "Create project →"}
-                    </button>
-                  </div>
-                </div>
               ) : (
                 <>
                   <input
@@ -961,7 +916,7 @@ export default function ProjectPicker({
               </div>
             )}
 
-              {(mode === "blank" || mode === "describe") && (
+              {mode === "describe" && (
                 <div className="dash-chips">
                   {EXAMPLE_PROMPTS.map((p) => (
                     <button

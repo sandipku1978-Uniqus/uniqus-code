@@ -3,6 +3,9 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import BrandLockup from "./BrandLockup";
+import ModelPicker from "./ModelPicker";
+import AppearanceCard from "./AppearanceCard";
+import CustomPromptsCard from "./CustomPromptsCard";
 import {
   fetchGithubStatus,
   disconnectGithubApi,
@@ -153,37 +156,26 @@ export default function SettingsView({
           </div>
         </div>
 
-        {/* Scaffolded — not yet backed by persistence */}
-        <div className="settings-card soon">
-          <h2>
-            Appearance<span className="settings-soon-badge">soon</span>
-          </h2>
+        {/* Appearance — functional (theme + density, account-wide client pref) */}
+        <AppearanceCard />
+
+        <div className="settings-card">
+          <h2>Default model</h2>
           <p className="settings-card-sub">
-            Theme and density options. Today the app uses a single dark theme.
+            Choose which model the coding agent runs on. <strong>Auto</strong>{" "}
+            lets Uniqus pick the strongest model for each task. Under{" "}
+            <strong>Advanced</strong>, override it with a specific model from
+            Anthropic (Claude), OpenAI (ChatGPT), or Google (Gemini). This is
+            your account-wide default; you can also change it per turn from the
+            chat composer.
           </p>
+          <div style={{ marginTop: 12 }}>
+            <ModelPicker variant="settings" />
+          </div>
         </div>
 
-        <div className="settings-card soon">
-          <h2>
-            Default model<span className="settings-soon-badge">soon</span>
-          </h2>
-          <p className="settings-card-sub">
-            Choose which Claude model the agent uses by default, and an optional
-            faster model for lighter turns. Not yet configurable — the platform
-            currently selects models per task.
-          </p>
-        </div>
-
-        <div className="settings-card soon">
-          <h2>
-            Custom prompts &amp; default skills
-            <span className="settings-soon-badge">soon</span>
-          </h2>
-          <p className="settings-card-sub">
-            Account-wide system-prompt additions and skills applied to every new
-            project. For now, set these per project under Skills.
-          </p>
-        </div>
+        {/* Custom prompts & default skills — functional (account-wide, persisted) */}
+        <CustomPromptsCard />
       </div>
     </>
   );

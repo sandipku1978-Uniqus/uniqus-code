@@ -13,12 +13,14 @@ import { useStore, type ChatItem } from "@/lib/store";
 import { send } from "@/lib/ws-client";
 import PlanReview from "./PlanReview";
 import ChatSessionDropdown from "./ChatSessionDropdown";
+import ModelPicker from "./ModelPicker";
 
 export default function ChatPanel() {
   const chat = useStore((s) => s.chat);
   const busy = useStore((s) => s.busy);
   const mode = useStore((s) => s.mode);
   const setModeManual = useStore((s) => s.setModeManual);
+  const model = useStore((s) => s.model);
   const addUserMessage = useStore((s) => s.addUserMessage);
   const addSystem = useStore((s) => s.addSystem);
   const setBusy = useStore((s) => s.setBusy);
@@ -214,6 +216,7 @@ export default function ChatPanel() {
       type: "user_message",
       content,
       mode,
+      model: model !== "auto" ? model : undefined,
       attachments,
       file_refs: fileRefs.length > 0 ? fileRefs : undefined,
     });
@@ -584,6 +587,7 @@ export default function ChatPanel() {
               </svg>
               Plan
             </button>
+            <ModelPicker variant="compact" />
             {busy ? (
               <button
                 type="button"

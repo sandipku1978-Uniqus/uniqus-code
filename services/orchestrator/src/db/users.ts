@@ -197,6 +197,62 @@ export async function getGithubToken(userId: string): Promise<string | null> {
   }
 }
 
+// ── Account settings (custom prompt + default skills) ──────────────────────────
+
+export interface AccountSettingsRecord {
+  /** Account-wide system-prompt addition, injected into the agent every turn. */
+  custom_prompt: string;
+  /** Skills markdown seeded into `.uniqus/skills.md` of every new project. */
+  default_skills: string;
+}
+
+/**
+ * Read the account-wide agent customization. Returns empty strings (not null)
+ * when unset, so callers can treat it as plain text without null checks.
+ */
+export async function getAccountSettings(
+  userId: string,
+): Promise<AccountSettingsRecord> {
+  const { data, error } = await db()
+    .from("users")
+    .select("custom_prompt, default_skills")
+    .eq("id", userId)
+    .maybeSingle();
+  if (error) throw new Error(`getAccountSettings failed: ${error.message}`);
+  return {
+    custom_prompt: (data?.custom_prompt as string | null) ?? "",
+    default_skills: (data?.default_skills as string | null) ?? "",
+  };
+}
+
+/**
+ * Update one or both account settings. Only the keys present in `patch` are
+ * written, so the UI can save the custom prompt and default skills
+ * independently. Returns the persisted values.
+ */
+export async function setAccountSettings(
+  userId: string,
+  patch: Partial<AccountSettingsRecord>,
+): Promise<AccountSettingsRecord> {
+  const update: Record<string, string> = {};
+  if (patch.custom_prompt !== undefined) update.custom_prompt = patch.custom_prompt;
+  if (patch.default_skills !== undefined) update.default_skills = patch.default_skills;
+
+  const { data, error } = await db()
+    .from("users")
+    .update(update)
+    .eq("id", userId)
+    .select("custom_prompt, default_skills")
+    .single();
+  if (error || !data) {
+    throw new Error(`setAccountSettings failed: ${error?.message ?? "no row returned"}`);
+  }
+  return {
+    custom_prompt: (data.custom_prompt as string | null) ?? "",
+    default_skills: (data.default_skills as string | null) ?? "",
+  };
+}
+
 // ── Guest / education accounts ────────────────────────────────────────────────
 
 /**

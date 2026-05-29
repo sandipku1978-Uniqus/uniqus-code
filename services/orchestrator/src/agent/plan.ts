@@ -1,8 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { Plan } from "@uniqus/api-types";
+import type { ModelChoice, Plan } from "@uniqus/api-types";
 import { normalizeMessageHistory } from "./messageHistory.js";
-import { formatSkillsForPrompt } from "./skills.js";
-import { ensureAnthropic } from "./router.js";
+import { formatAccountPromptForPrompt, formatSkillsForPrompt } from "./skills.js";
+import { resolveModel } from "./router.js";
+import { getProvider, providerKeysFromEnv, type ProviderKeys } from "./providers/index.js";
 
 const PLAN_SYSTEM_PROMPT_BASE = `You are an AI software engineer in plan mode. The user has described what they want built; your job is to produce a structured plan, NOT to execute it.
 
@@ -57,25 +58,26 @@ export async function proposePlan(
   apiKey: string,
   history: Anthropic.MessageParam[] = [],
   skills: string | null = null,
+  modelChoice?: ModelChoice,
+  providerKeys?: ProviderKeys,
+  accountPrompt: string | null = null,
 ): Promise<Plan> {
-  const client = new Anthropic({ apiKey });
-  const system = skills
-    ? `${PLAN_SYSTEM_PROMPT_BASE}${formatSkillsForPrompt(skills)}`
-    : PLAN_SYSTEM_PROMPT_BASE;
-  const response = await client.messages.create({
-    model: ensureAnthropic("plan"),
-    max_tokens: 4096,
-    system,
-    tools: [SUBMIT_PLAN_TOOL],
-    tool_choice: { type: "tool", name: "submit_plan" },
-    messages: normalizeMessageHistory([...history, { role: "user", content: userMessage }]),
-  });
+  const system = `${PLAN_SYSTEM_PROMPT_BASE}${formatAccountPromptForPrompt(accountPrompt)}${formatSkillsForPrompt(skills)}`;
 
-  const block = response.content.find((b) => b.type === "tool_use");
-  if (!block || block.type !== "tool_use" || block.name !== "submit_plan") {
-    throw new Error("Plan model did not return a submit_plan tool call");
-  }
-  return block.input as Plan;
+  // Plan mode honors the same per-turn model choice as the agent loop, so the
+  // plan is drafted by whichever model the user selected.
+  const resolved = resolveModel("plan", modelChoice);
+  const keys: ProviderKeys = providerKeys ?? { ...providerKeysFromEnv(), anthropic: apiKey };
+  const provider = getProvider(resolved.provider, keys);
+
+  const input = await provider.callForcedTool({
+    model: resolved.model,
+    system,
+    tool: SUBMIT_PLAN_TOOL,
+    messages: normalizeMessageHistory([...history, { role: "user", content: userMessage }]),
+    maxTokens: 4096,
+  });
+  return input as Plan;
 }
 
 export function formatPlanForExecution(plan: Plan): string {

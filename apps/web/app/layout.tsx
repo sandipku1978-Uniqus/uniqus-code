@@ -24,9 +24,22 @@ export const metadata: Metadata = {
   },
 };
 
+/**
+ * Apply the persisted Appearance prefs (Settings → Appearance) to <html>
+ * before first paint, so a light-theme / compact user never sees a flash of
+ * the dark/comfortable defaults. Reads the same localStorage keys the store
+ * writes (`uniqus.theme` / `uniqus.density`). Defaults to dark/comfortable
+ * when unset or unreadable. Kept inline + tiny so it runs synchronously in
+ * <head> ahead of the stylesheet applying token overrides.
+ */
+const APPEARANCE_BOOTSTRAP = `(function(){try{var d=document.documentElement;var t=localStorage.getItem("uniqus.theme");d.dataset.theme=t==="light"?"light":"dark";var s=localStorage.getItem("uniqus.density");d.dataset.density=s==="compact"?"compact":"comfortable";}catch(e){document.documentElement.dataset.theme="dark";document.documentElement.dataset.density="comfortable";}})();`;
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`${dmSans.variable} ${jetBrainsMono.variable}`}>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: APPEARANCE_BOOTSTRAP }} />
+      </head>
       <body>{children}</body>
     </html>
   );

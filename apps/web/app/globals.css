@@ -26,6 +26,8 @@
   --bg-elev:             #1e1e28;   /* raised fields (inputs, textareas) */
   --bg-base:             #0c0c11;   /* alias used by modal/guest surfaces */
   --bg-canvas:           #0e0e14;   /* markdown/document canvas */
+  --bg-code:             #07070b;   /* deepest surface: code / tool-output blocks */
+  --bg-chat:             #131319;   /* marketing IDE chat column */
 
   /* Text — warm ramp, not cool gray */
   --text-primary:        #e4e2dc;
@@ -75,6 +77,68 @@
   --dur-base: 200ms;
   --dur-slow: 300ms;
 }
+
+/* ==========================================================================
+   Light theme (Settings → Appearance). Only the surface / text / border /
+   semantic-tint tokens flip — brand, accent, type, radii, and motion are
+   theme-agnostic. Every component reads these via var(), and the hardcoded
+   dark surfaces were tokenized (--bg-dark/-pane/-code/-chat), so flipping
+   the set here re-skins the whole app. `data-theme` is set before paint by
+   the bootstrap script in layout.tsx, so there is no dark→light flash.
+   ========================================================================== */
+:root[data-theme="light"] {
+  /* Surfaces — warm near-white ramp mirroring the dark ladder */
+  --bg-dark:           #f4f3f0;
+  --bg-pane:           #ffffff;
+  --bg-surface:        #ffffff;
+  --bg-surface-hover:  #f1eff2;
+  --bg-surface-active: #e7e4ea;
+  --bg-elev:           #ffffff;
+  --bg-base:           #f4f3f0;
+  --bg-canvas:         #ffffff;
+  --bg-code:           #f3f1ee;   /* code / tool-output blocks */
+  --bg-chat:           #faf9f7;   /* marketing IDE chat column */
+
+  /* Text — dark warm ramp on light */
+  --text-primary:      #1c1b22;
+  --text-muted:        #57555e;
+  --text-dim:          #84818b;
+  --text-xdim:         #b4b1ba;
+
+  /* Borders */
+  --border-default:    #e3e0e6;
+  --border-light:      #eeecf0;
+  --border-active:     #482879;
+
+  /* Semantic — slightly deeper foregrounds for AA contrast on white;
+     translucent backgrounds read fine over a light surface as-is. */
+  --conf-high:         #0f9d6b;
+  --conf-medium:       #b27400;
+  --conf-low:          #d23f3f;
+}
+
+/* ==========================================================================
+   Compact density (Settings → Appearance). Tightens the global type rhythm
+   and the padding on the high-traffic surfaces (chat, settings, dashboard
+   tiles). `data-density` is set before paint alongside the theme.
+   ========================================================================== */
+:root[data-density="compact"] body { font-size: 13px; line-height: 1.5; }
+:root[data-density="compact"] .settings-card { padding: 14px 16px; }
+:root[data-density="compact"] .settings-row { padding: 7px 0; }
+:root[data-density="compact"] .settings-wrap { padding-top: 28px; }
+:root[data-density="compact"] .dash-main { padding: 22px 28px 48px; }
+:root[data-density="compact"] .proj { padding: 14px; }
+:root[data-density="compact"] .msg { margin-bottom: 12px; }
+:root[data-density="compact"] .tool-card { padding: 6px 8px; }
+:root[data-density="compact"] .chat-scroll { padding: 12px 12px 6px; }
+:root[data-density="compact"] .composer { padding: 8px 10px 10px; }
+
+/* A few surfaces use a hardcoded dark translucent fill (not a token) that
+   can't flip on its own — re-skin them for light so the glassy nav and
+   faint chip fills don't stay dark on a light page. */
+:root[data-theme="light"] .topnav { background: rgba(255, 255, 255, 0.85); }
+:root[data-theme="light"] .attachment-chip,
+:root[data-theme="light"] .message-attachment { background: rgba(0, 0, 0, 0.03); }
 
 html, body {
   margin: 0;
@@ -297,7 +361,7 @@ code, pre, .mono {
   border-radius: 4px;
 }
 .md pre {
-  background: #0c0c11;
+  background: var(--bg-dark);
   border: 1px solid var(--border-default);
   padding: 10px 12px;
   border-radius: var(--radius-md);
@@ -513,7 +577,7 @@ code, pre, .mono {
 .ide-chat {
   border-right: 1px solid var(--border-default);
   padding: 14px;
-  background: #131319;
+  background: var(--bg-chat);
   overflow: hidden;
 }
 .chat-msg { margin-bottom: 14px; }
@@ -545,7 +609,7 @@ code, pre, .mono {
   padding: 16px 18px;
   margin: 0;
   color: var(--text-primary);
-  background: #0e0e14;
+  background: var(--bg-pane);
   overflow: hidden;
   white-space: pre-wrap;
 }
@@ -700,7 +764,7 @@ section.band .sub {
 .dash-side {
   border-right: 1px solid var(--border-default);
   padding: 24px 16px;
-  background: #0e0e14;
+  background: var(--bg-pane);
   display: flex;
   flex-direction: column;
   /* Long nav lists scroll within the sidebar without pushing the usage card
@@ -868,7 +932,7 @@ section.band .sub {
 
 .ide-topbar {
   height: 44px;
-  background: #0e0e14;
+  background: var(--bg-pane);
   border-bottom: 1px solid var(--border-default);
   display: flex;
   align-items: center;
@@ -983,7 +1047,7 @@ section.band .sub {
 .ide-grid > [data-panel-group] { flex: 1; }
 
 .pane {
-  background: #0e0e14;
+  background: var(--bg-pane);
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -998,7 +1062,7 @@ section.band .sub {
   padding: 0 12px;
   gap: 8px;
   flex-shrink: 0;
-  background: #0e0e14;
+  background: var(--bg-pane);
 }
 .pane-header .label-micro { color: var(--text-muted); }
 .pane-header .actions {
@@ -1093,7 +1157,7 @@ section.band .sub {
 .tool-card pre {
   margin: 8px 0 0;
   padding: 8px;
-  background: #07070b;
+  background: var(--bg-code);
   border-radius: 4px;
   max-height: 240px;
   overflow-y: auto;
@@ -1200,7 +1264,7 @@ section.band .sub {
 .composer {
   border-top: 1px solid var(--border-default);
   padding: 10px 12px 12px;
-  background: #0e0e14;
+  background: var(--bg-pane);
 }
 .composer .field {
   background: var(--bg-surface);
@@ -1917,14 +1981,14 @@ section.band .sub {
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  background: #0c0c11;
+  background: var(--bg-dark);
 }
 .tab-strip {
   height: 36px;
   border-bottom: 1px solid var(--border-default);
   display: flex;
   align-items: stretch;
-  background: #0e0e14;
+  background: var(--bg-pane);
   flex-shrink: 0;
   overflow-x: auto;
 }
@@ -1948,7 +2012,7 @@ section.band .sub {
   position: relative;
 }
 .tab.active {
-  background: #0c0c11;
+  background: var(--bg-dark);
   color: var(--text-primary);
 }
 .tab.active::after {
@@ -2051,7 +2115,7 @@ section.band .sub {
 
 /* ── Terminal ──────────────────────────────────────────────────────────── */
 .terminal-pane {
-  background: #07070b;
+  background: var(--bg-code);
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -2063,7 +2127,7 @@ section.band .sub {
   border-bottom: 1px solid var(--border-default);
   display: flex;
   align-items: center;
-  background: #0e0e14;
+  background: var(--bg-pane);
   flex-shrink: 0;
   padding-right: 8px;
 }
@@ -2399,15 +2463,15 @@ section.band .sub {
    ========================================================================== */
 .doc-shell {
   display: grid;
-  grid-template-columns: 220px minmax(0, 820px);
+  grid-template-columns: 220px minmax(0, 980px);
   gap: 48px;
   justify-content: center;
   padding: 40px 32px 96px;
   align-items: start;
 }
+.doc-shell-wide { grid-template-columns: 220px minmax(0, 1040px); }
 @media (max-width: 900px) {
   .doc-shell { grid-template-columns: 1fr; gap: 24px; padding: 24px 20px 64px; }
-  .doc-toc { display: none; }
 }
 .doc-toc {
   position: sticky;
@@ -2415,6 +2479,10 @@ section.band .sub {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  border: 1px solid var(--border-default);
+  background: color-mix(in srgb, var(--bg-surface) 72%, transparent);
+  border-radius: var(--radius-lg);
+  padding: 14px;
 }
 .doc-toc .label-micro { margin-bottom: 6px; padding: 0; }
 .doc-toc a {
@@ -2427,22 +2495,60 @@ section.band .sub {
   margin-left: -12px;
   transition: color var(--dur-base) ease, border-color var(--dur-base) ease;
 }
-.doc-toc a:hover { color: var(--text-primary); border-color: var(--border-default); }
+.doc-toc a:hover { color: var(--text-primary); border-color: var(--brand-magenta); }
+@media (max-width: 900px) {
+  .doc-toc { display: none; }
+}
 
-.doc { color: var(--text-primary); line-height: 1.65; }
-.doc h1 { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 10px; }
-.doc .doc-lede { color: var(--text-muted); font-size: 15px; margin: 0 0 8px; }
-.doc section { margin-top: 36px; scroll-margin-top: 88px; }
-.doc h2 { font-size: 18px; font-weight: 600; margin: 0 0 10px; }
-.doc p { font-size: 14px; color: var(--text-secondary, var(--text-primary)); margin: 0 0 12px; }
+.doc {
+  color: var(--text-primary);
+  line-height: 1.65;
+}
+.doc h1 {
+  font-size: clamp(30px, 4vw, 48px);
+  line-height: 1.05;
+  font-weight: 700;
+  letter-spacing: 0;
+  margin: 0 0 16px;
+  max-width: 760px;
+}
+.doc .doc-lede {
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1.7;
+  margin: 0;
+  max-width: 720px;
+}
+.doc section { scroll-margin-top: 88px; }
+.doc h2 {
+  font-size: 22px;
+  line-height: 1.2;
+  font-weight: 650;
+  letter-spacing: 0;
+  margin: 0 0 10px;
+}
+.doc h3 {
+  font-size: 15px;
+  line-height: 1.3;
+  font-weight: 650;
+  letter-spacing: 0;
+  margin: 0 0 8px;
+}
+.doc p {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin: 0 0 12px;
+}
+.doc strong { color: var(--text-primary); font-weight: 650; }
 .doc ul { margin: 0 0 14px; padding-left: 20px; }
-.doc li { font-size: 14px; margin: 6px 0; }
+.doc li { font-size: 14px; margin: 6px 0; color: var(--text-muted); }
 .doc code {
   font-family: var(--font-mono-stack);
   font-size: 12.5px;
   background: var(--bg-surface-active);
   padding: 1px 5px;
   border-radius: 4px;
+  color: var(--text-primary);
 }
 .doc kbd {
   font-family: var(--font-mono-stack);
@@ -2453,17 +2559,247 @@ section.band .sub {
   border-radius: 4px;
   padding: 1px 5px;
 }
-.doc .doc-tip {
+.doc a { color: var(--brand-magenta); text-decoration: none; }
+.doc a:hover { text-decoration: underline; }
+
+.doc-guide { display: grid; gap: 34px; }
+.doc-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 28px;
+  align-items: end;
+  min-height: 360px;
+  padding: 48px 0 20px;
+  border-bottom: 1px solid var(--border-default);
+}
+.doc-kicker,
+.doc-card-label {
+  margin: 0 0 10px;
+  color: var(--brand-magenta);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.doc-hero-panel {
+  border: 1px solid var(--border-default);
+  background: linear-gradient(180deg, var(--bg-surface), var(--bg-pane));
+  border-radius: var(--radius-lg);
+  padding: 18px;
+}
+.doc-mini-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: mini-step;
+}
+.doc-mini-steps li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding: 10px 0;
+  border-top: 1px solid var(--border-default);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.doc-mini-steps li:first-child { border-top: 0; }
+.doc-mini-steps li::before {
+  counter-increment: mini-step;
+  content: counter(mini-step);
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-active);
+  color: var(--text-muted);
+  font-family: var(--font-mono-stack);
+  font-size: 11px;
+  flex: 0 0 auto;
+}
+.doc-quick-grid,
+.doc-grid {
+  display: grid;
+  gap: 14px;
+}
+.doc-quick-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.doc-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.doc-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.doc-card,
+.doc-note,
+.doc-example,
+.doc-template {
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  border-radius: var(--radius-lg);
+  padding: 18px;
+}
+.doc-card-accent {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--brand-magenta) 10%, transparent), transparent 65%),
+    var(--bg-surface);
+}
+.doc-card.compact { padding: 16px; }
+.doc-card p,
+.doc-note p,
+.doc-example p,
+.doc-template p { margin-bottom: 0; }
+.doc-card-sub {
+  color: var(--text-primary);
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.doc-section {
+  display: grid;
+  gap: 16px;
+  padding-top: 18px;
+}
+.doc-section-head {
+  max-width: 760px;
+  padding-top: 12px;
+}
+.doc-section-head p:last-child { margin-bottom: 0; }
+.doc-callout {
   border-left: 3px solid var(--brand-magenta);
   background: var(--bg-surface);
   border-radius: 0 var(--radius-md) var(--radius-md) 0;
-  padding: 10px 14px;
+  padding: 12px 16px;
   font-size: 13px;
   color: var(--text-muted);
 }
-.doc .doc-foot { margin-top: 48px; font-size: 13px; }
-.doc .doc-foot a, .doc a { color: var(--brand-magenta); text-decoration: none; }
-.doc .doc-foot a:hover { text-decoration: underline; }
+.doc-callout.neutral { border-left-color: var(--text-dim); }
+.doc-command-list {
+  display: grid;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--bg-surface);
+}
+.doc-command-row {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  padding: 13px 16px;
+  border-top: 1px solid var(--border-default);
+}
+.doc-command-row:first-child { border-top: 0; }
+.doc-command-row span {
+  color: var(--text-muted);
+  font-size: 13.5px;
+}
+.doc-note-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.doc-step-list {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: guide-step;
+}
+.doc-step-list li {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  column-gap: 14px;
+  margin: 0;
+  padding: 16px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+.doc-step-list li::before {
+  counter-increment: guide-step;
+  content: counter(guide-step, decimal-leading-zero);
+  grid-row: span 2;
+  width: 36px;
+  height: 36px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--brand-magenta);
+  font-family: var(--font-mono-stack);
+  font-size: 12px;
+}
+.doc-step-list strong {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 14px;
+}
+.doc-step-list span {
+  color: var(--text-muted);
+  font-size: 13.5px;
+}
+.doc-inline-action { margin: 2px 0 0; font-size: 13px; }
+.doc-safety-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+.doc-safety-strip div {
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+  border-left: 1px solid var(--border-default);
+}
+.doc-safety-strip div:first-child { border-left: 0; }
+.doc-safety-strip span {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.doc-example.good {
+  border-color: color-mix(in srgb, var(--conf-high) 45%, var(--border-default));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--conf-high) 9%, transparent), transparent 70%),
+    var(--bg-surface);
+}
+.doc-template {
+  border-color: color-mix(in srgb, var(--brand-magenta) 45%, var(--border-default));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--brand-magenta) 8%, transparent), transparent 75%),
+    var(--bg-surface);
+}
+.doc-template .label-micro {
+  padding: 0;
+  margin-bottom: 10px;
+}
+.doc .doc-foot {
+  margin-top: 12px;
+  font-size: 13px;
+}
+
+@media (max-width: 1100px) {
+  .doc-quick-grid,
+  .doc-grid.three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .doc-hero { grid-template-columns: 1fr; min-height: 0; }
+  .doc-hero-panel { max-width: 420px; }
+}
+@media (max-width: 700px) {
+  .doc-guide { gap: 26px; }
+  .doc-hero { padding-top: 18px; gap: 20px; }
+  .doc-quick-grid,
+  .doc-grid.two,
+  .doc-grid.three,
+  .doc-note-grid,
+  .doc-safety-strip { grid-template-columns: 1fr; }
+  .doc-command-row { grid-template-columns: 1fr; gap: 6px; }
+  .doc-step-list li { grid-template-columns: 1fr; }
+  .doc-step-list li::before { grid-row: auto; margin-bottom: 8px; }
+  .doc-safety-strip div,
+  .doc-safety-strip div:first-child {
+    border-left: 0;
+    border-top: 1px solid var(--border-default);
+  }
+  .doc-safety-strip div:first-child { border-top: 0; }
+}
 
 /* Settings */
 .settings-wrap { max-width: 760px; margin: 0 auto; padding: 40px 32px 96px; }

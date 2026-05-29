@@ -1,6 +1,7 @@
 "use client";
 
 import type {
+  AccountSettings,
   CurrentUser,
   DeploymentState,
   ProjectSummary,
@@ -41,6 +42,21 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const fetchMe = (): Promise<{ user: CurrentUser }> => api("/api/me");
+
+// ── Account settings (custom prompt + default skills) ─────────────────────────
+
+export type { AccountSettings } from "@uniqus/api-types";
+
+export const fetchAccountSettingsApi = (): Promise<{ settings: AccountSettings }> =>
+  api("/api/account/settings");
+
+export const updateAccountSettingsApi = (
+  patch: Partial<AccountSettings>,
+): Promise<{ settings: AccountSettings }> =>
+  api("/api/account/settings", {
+    method: "PUT",
+    body: JSON.stringify(patch),
+  });
 
 export const fetchProjects = (): Promise<{ projects: ProjectSummary[] }> =>
   api("/api/projects");
