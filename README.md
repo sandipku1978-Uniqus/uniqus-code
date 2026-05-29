@@ -1,19 +1,68 @@
 # Uniqus Code
 
-AI-powered dev-environment platform. See [the plan](C:/Users/thech/.claude/plans/can-you-come-up-soft-tower.md) for the full roadmap.
+A browser-based AI app builder — *engineering, on demand*. Describe what you
+want, and a multi-provider coding agent builds it in an isolated sandbox with a
+live preview, then helps you ship it.
 
-## Status
+## Live links
 
-- **1.1** ✅ Agent loop alive (Claude tool-use, local-process sandbox, CLI)
-- **1.2** ✅ Web UI shell — Next.js + chat + file tree + Monaco editor + terminal panel, talking to orchestrator over WebSocket
-- **1.3** ⚠️ Plan-mode UI ✅ shipped. Firecracker host **deferred** — needs a Linux box with KVM (your Windows machine can't run it natively without WSL2 + nested virt). Will be its own session.
-- **1.5.1** ✅ Preview proxy — iframe loads dev servers through the orchestrator at `/preview/:serverId/`, so previews work in production where the in-sandbox port isn't publicly exposed.
-- **1.5.2** ✅ Codebase import — ZIP upload and GitHub clone (with optional PAT for private repos) on the new-project page.
+- `https://app.uniqus-code.com` — web app (Vercel, serves the `main` branch)
+- `https://api2.uniqus-code.com` — orchestrator (Hetzner box, Firecracker microVMs)
 
-## Live Links
+## What it does
 
-- `https://app.uniqus-code.com` The side hosted on vercel, handles frontend
-- `https://api2.uniqus-code.com` The orchestrator hosted on the hetzner box with firecracker
+- **Describe → build.** Write a project in plain English; Uniqus names it,
+  sharpens it into a first prompt, opens the workspace, and (for new projects)
+  proposes a plan before touching files. Or import existing code by **.zip** or
+  **GitHub clone**.
+- **Multi-provider agent.** The coding agent runs on a model resolved per turn:
+  **Auto** (Claude Opus) by default, or an explicit override from Anthropic
+  (Claude), OpenAI (GPT-5.x, via the Responses API), or Google (Gemini 3.x).
+  A per-turn **thinking-effort** control (low / medium / high) maps to each
+  provider's native reasoning knob, and the model's reasoning streams into a
+  collapsible trace.
+- **Built-in web search** on all three providers (Anthropic server-side,
+  OpenAI Responses `web_search`, Gemini 3.x `googleSearch`).
+- **Tool-use loop.** read/write/edit files, run commands, start dev servers with
+  a live preview, grep/list, screenshot the preview, background jobs, first-party
+  connectors, and per-project secrets (encrypted; values never returned to the
+  model). Plan mode investigates the codebase with read-only tools and streams
+  what it's doing before proposing editable steps.
+- **Per-project isolation.** Each project runs in its own **Firecracker
+  microVM** sandbox on the orchestrator; files sync to object Storage and the VM
+  snapshots/restores so reopening is fast.
+- **Customization.** Per-project + account-wide **Skills** (`.uniqus/skills.md`),
+  ~17 curated **design packs**, account-wide custom prompt + default skills,
+  light/dark theme + density.
+- **Ship it.** Deploy to **Vercel** or **Fly.io**, create a GitHub repo, and
+  rewind to **checkpoints**. Guest/education accounts work without a Google login.
+
+## Monorepo layout
+
+- `apps/web/` — Next.js web app (Vercel). Dashboard, chat-centric IDE workspace
+  (chat / files / editor + preview / logs), settings, guide, marketing.
+- `services/orchestrator/` — Node service (Hetzner). Agent loop + WebSocket
+  gateway + per-project sandboxes.
+  - `src/agent/loop.ts` — the tool-use agent loop (provider-agnostic)
+  - `src/agent/plan.ts` — streaming plan mode (read-only investigation → `submit_plan`)
+  - `src/agent/router.ts` — model routing (`MODEL_CATALOG`, Auto defaults)
+  - `src/agent/providers/` — Anthropic / OpenAI / Gemini adapters
+  - `src/agent/compact.ts` — history compaction
+  - `src/firecracker/` — Firecracker microVM fleet (boot, snapshot/restore, idle GC)
+  - `src/proxy.ts` — preview proxy (`/preview/:serverId/*` → in-sandbox dev server)
+  - `src/server.ts` — HTTP + WS gateway; `src/cli.ts` — terminal entry point
+- `packages/api-types/` — shared types: WS event schemas, `MODEL_CATALOG`,
+  `SKILL_PACKS` (curated design packs).
+
+## Deploy targets
+
+- **`apps/web` → Vercel.** Pushing `main` triggers the production deploy.
+  Frontend changes need nothing on Hetzner.
+- **`services/orchestrator` + sandbox → Hetzner** (systemd `uniqus-orchestrator`).
+  Deploy with the `/deploy-hetzner` command. The Firecracker rootfs only rebuilds
+  when `services/sandbox-agent/` or `infra/firecracker/build-rootfs.sh` changes.
+
+See [CLAUDE.md](CLAUDE.md) for working notes (branching, deploy, providers).
 
 ## Setup
 
@@ -21,11 +70,16 @@ AI-powered dev-environment platform. See [the plan](C:/Users/thech/.claude/plans
 npm install
 ```
 
-Add your Anthropic API key to `.env.local` at the repo root:
+Provider keys live in `.env.local` at the repo root (orchestrator reads them):
 
 ```
-ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_API_KEY=sk-ant-...     # required (agent + compaction)
+OPENAI_API_KEY=sk-...            # optional — only for OpenAI models
+GOOGLE_API_KEY=...               # optional — only for Gemini models (or GEMINI_API_KEY)
 ```
+
+A missing optional key produces a clear "set X" error only when a user picks
+that provider's model.
 
 ## Run
 
@@ -33,12 +87,20 @@ ANTHROPIC_API_KEY=sk-ant-...
 npm run dev
 ```
 
-Starts both servers in parallel:
+Starts both in parallel:
 
-- Orchestrator WebSocket on `ws://localhost:8787`
-- Web app on `http://localhost:3000`
+- Web app on `http://localhost:4242`
+- Orchestrator on `http://localhost:8787` (HTTP + WebSocket)
 
-Open the web app, toggle "plan mode" on or off in the input footer, and describe what to build. With plan mode on, you'll get a structured plan from Opus that you can edit before approving; the agent then executes with Opus 4.7.
+Open the web app, describe what to build, and (optionally) toggle plan mode in
+the composer. Locally the sandbox falls back to a local-process directory at
+`./.sandbox/` (Firecracker needs a Linux host with KVM, i.e. the Hetzner box).
+
+## Typecheck
+
+```sh
+npm run typecheck      # turbo, all workspaces
+```
 
 ## CLI mode (no UI)
 
@@ -46,44 +108,12 @@ Open the web app, toggle "plan mode" on or off in the input footer, and describe
 npm run agent -- "create a hello.txt with the text 'hi'"
 ```
 
-Same loop, terminal-only output. No plan mode in the CLI yet.
-
-## Layout
-
-- `apps/web/` — Next.js 15 web UI (3-pane: chat / file tree+editor / terminal)
-- `services/orchestrator/` — Claude tool-use loop + WebSocket server
-  - `src/agent/loop.ts` — agent loop
-  - `src/agent/plan.ts` — plan-mode (Opus → `submit_plan` tool)
-  - `src/agent/sandbox.ts` — local-process sandbox (Firecracker comes later)
-  - `src/proxy.ts` — preview proxy: forwards `/preview/:serverId/*` to in-sandbox dev servers (HTTP + WS for HMR)
-  - `src/import.ts` — codebase import: ZIP extract + `git clone` with optional PAT
-  - `src/server.ts` — HTTP + WS gateway used by the web app
-  - `src/cli.ts` — terminal entry point
-- `packages/api-types/` — shared event schemas
-
-Sandbox lives at `./.sandbox/` (gitignored) and is shared across runs — the agent sees existing files between prompts.
+Same agent loop, terminal-only output.
 
 ## Preview proxy
 
-Dev servers the agent starts inside the sandbox are reached at
-`{ORCHESTRATOR_URL}/preview/{serverId}/`. The orchestrator forwards both HTTP
-and WebSocket traffic to `127.0.0.1:{port}` of the sandboxed process. This is
-what makes the iframe work in production where the sandbox port isn't publicly
-bound — the proxy is the public entrypoint.
-
-Known limit: HMR / live-reload sockets need `Referer` to find the right server
-and browsers don't always include it on WS handshakes. Hard reload from the
-preview toolbar works in all cases. The proper fix (wildcard subdomains per
-server) is tracked as 1.13.
-
-## Codebase import
-
-On the project picker:
-
-- **Blank project** — empty sandbox (existing behavior).
-- **Upload .zip** — multipart upload, extracted into the sandbox. Up to 250 MB
-  compressed. `.git/` and `node_modules/` are stripped on extract. A
-  GitHub-style single-root folder (e.g. `repo-main/`) is detected and stripped.
-- **Clone GitHub** — `git clone --depth 1` of any HTTPS repo. For private
-  repos, paste a fine-scoped PAT. The PAT is used once and not stored. The
-  cloned `.git/` is removed; you get a clean source tree.
+Dev servers the agent starts inside a sandbox are reached at
+`{ORCHESTRATOR_URL}/preview/{serverId}/`. The orchestrator forwards HTTP and
+WebSocket traffic to the sandboxed process, so previews work in production where
+the sandbox port isn't publicly bound. Hard reload from the preview toolbar is
+the reliable path when HMR sockets can't resolve the target.

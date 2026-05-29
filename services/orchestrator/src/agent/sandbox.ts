@@ -74,9 +74,28 @@ function resolvePath(sandbox: Sandbox, p: string): string {
   return resolved;
 }
 
+/** Cap a single read_file / grep result so one call can't flood the context. */
+const MAX_READ_BYTES = 256 * 1024;
+
 export async function readFile(sandbox: Sandbox, p: string): Promise<string> {
   if (sandbox.vm) return await fcAgent.readFile(sandbox.vm, p);
-  return await fs.readFile(resolvePath(sandbox, p), "utf-8");
+  const full = resolvePath(sandbox, p);
+  const stat = await fs.stat(full);
+  if (stat.size > MAX_READ_BYTES) {
+    // Read only the head rather than pulling a multi-MB file into memory.
+    const fh = await fs.open(full, "r");
+    try {
+      const buf = Buffer.alloc(MAX_READ_BYTES);
+      const { bytesRead } = await fh.read(buf, 0, MAX_READ_BYTES, 0);
+      return (
+        buf.subarray(0, bytesRead).toString("utf-8") +
+        `\n\n[... file truncated: ${stat.size} bytes total, showing the first ${MAX_READ_BYTES}. Read specific ranges if you need more. ...]`
+      );
+    } finally {
+      await fh.close();
+    }
+  }
+  return await fs.readFile(full, "utf-8");
 }
 
 export async function writeFile(sandbox: Sandbox, p: string, content: string): Promise<void> {
@@ -159,10 +178,17 @@ export async function grep(sandbox: Sandbox, pattern: string, p?: string): Promi
   const regex = new RegExp(pattern);
   const results: string[] = [];
   const root = path.resolve(sandbox.rootDir);
+  // Stop once we've gathered enough — a broad pattern over a big tree can match
+  // tens of thousands of lines, and the whole join would otherwise land in
+  // history and replay every iteration.
+  let bytes = 0;
+  let capped = false;
 
   async function walk(dir: string): Promise<void> {
+    if (capped) return;
     const entries = await fs.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
+      if (capped) return;
       if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
@@ -173,7 +199,13 @@ export async function grep(sandbox: Sandbox, pattern: string, p?: string): Promi
           const lines = content.split("\n");
           for (let i = 0; i < lines.length; i++) {
             if (regex.test(lines[i])) {
-              results.push(`${path.relative(root, full)}:${i + 1}: ${lines[i].trim()}`);
+              const line = `${path.relative(root, full)}:${i + 1}: ${lines[i].trim()}`;
+              results.push(line);
+              bytes += line.length + 1;
+              if (bytes >= MAX_READ_BYTES) {
+                capped = true;
+                return;
+              }
             }
           }
         } catch {
@@ -184,7 +216,11 @@ export async function grep(sandbox: Sandbox, pattern: string, p?: string): Promi
   }
 
   await walk(target);
-  return results.length > 0 ? results.join("\n") : "(no matches)";
+  if (results.length === 0) return "(no matches)";
+  const out = results.join("\n");
+  return capped
+    ? `${out}\n\n[... more matches omitted (hit ${MAX_READ_BYTES}-byte cap) — use a narrower pattern or path ...]`
+    : out;
 }
 
 export interface CommandResult {

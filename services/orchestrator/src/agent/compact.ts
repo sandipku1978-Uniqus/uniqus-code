@@ -36,6 +36,9 @@ const COMPACT_KEEP_TOKENS = numEnv("COMPACT_KEEP_TOKENS", 80_000);
 // English code+prose; we use 4 (slightly under-estimating tokens) so the
 // threshold trips a bit early — preferable to tripping late and 400ing.
 const CHARS_PER_TOKEN = 4;
+// Per-image token estimate (~1.5k tokens, a typical screenshot's vision cost),
+// expressed in chars so it folds into the char-based estimate.
+const IMAGE_CHARS = 1500 * CHARS_PER_TOKEN;
 const MAX_SUMMARY_TOKENS = 4096;
 
 function numEnv(key: string, fallback: number): number {
@@ -81,8 +84,14 @@ function blockChars(block: unknown): number {
     }
     return 0;
   }
-  // image / document / other multimodal blocks: small constant for the
-  // wrapper. The actual image bytes don't count against the text context.
+  // Image blocks: a realistic per-image vision cost (~1.5k tokens ≈ 6000
+  // chars). The old constant-64 made compaction blind to images, so a turn
+  // that accumulated many screenshots could silently overflow the context
+  // window without ever tripping the threshold. We deliberately do NOT count
+  // the raw base64 length (~150 KB) — that bills the same image at ~25× its
+  // true token cost and would thrash compaction on normal image turns.
+  if (b.type === "image") return IMAGE_CHARS;
+  // other multimodal/wrapper blocks: small constant.
   return 64;
 }
 

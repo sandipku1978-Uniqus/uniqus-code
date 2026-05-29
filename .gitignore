@@ -9,3 +9,6 @@ dist/
 .env.local
 .DS_Store
 setup-files/
+
+# Local product/strategy notes — not for git
+/notes/

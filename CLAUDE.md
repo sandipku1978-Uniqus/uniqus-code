@@ -1,5 +1,16 @@
 # Uniqus Code — working notes for Claude
 
+## Working principles
+- **Fix the root cause; never paper over it.** Do not "resolve" an issue by
+  disabling the feature, hiding it behind a "coming soon"/`soon` sticker, a
+  stub, or by telling the user/model "you don't have X" when the real ask is to
+  make X work. If a capability is hard (e.g. a different API surface is needed),
+  implement that — or, if it's genuinely out of scope, say so explicitly and
+  explain why, rather than shipping a band-aid that looks done.
+- When a provider/API rejects something, check the provider's current docs for
+  the supported shape before changing code — don't guess from memory (the
+  models here are newer than the training cutoff).
+
 ## Branching / git
 - **Do NOT create new branches.** Work directly on `main` and commit there.
   Only create a branch if the user explicitly asks for one in that message.
@@ -25,15 +36,19 @@
 - Provider adapters live in `services/orchestrator/src/agent/providers/`.
   Canonical message shape is Anthropic's; the OpenAI/Gemini adapters translate
   in/out.
-- **Built-in web search: Anthropic only.** The OpenAI/Gemini built-in search
-  was removed — Chat Completions rejects `web_search_options` for the GPT-5.x
-  models we route (it's a Responses-API/search-model feature), and Gemini's
-  `googleSearch` can't combine with function calling without
-  `tool_config.include_server_side_tool_invocations` (and is uneven across
-  2.5/3.x). Both run function-calling only; only the Anthropic path keeps a
-  server-side `web_search`. Image/screenshot previews still work on all three
-  (tool-result images ride a follow-up user message on OpenAI, `inlineData`
-  parts on Gemini).
+- **Built-in web search: all three providers.** Anthropic server-side
+  `web_search`; OpenAI via the **Responses API** built-in `{type:"web_search"}`
+  tool (Chat Completions can't mix `web_search_options`/`reasoning_effort` with
+  function tools — that's why OpenAI runs on `/v1/responses`); Gemini **3.x**
+  `googleSearch` grounding + `toolConfig.includeServerSideToolInvocations`
+  (Gemini **2.5** genuinely can't combine search with function calling, so it
+  has no web search). Server-side search calls are surfaced as a `web_search`
+  activity row and never executed by the loop; on Gemini they're recognized by
+  NOT matching one of our tool names. The system prompt advertises web_search
+  only when the resolved model actually has it (loop.ts `hasWebSearch`).
+  Image/screenshot previews work on all three (tool-result images ride a
+  follow-up user message on OpenAI's Responses input, `inlineData` parts on
+  Gemini).
 - **Thinking effort** (`ThinkingEffort` = low/medium/high in `api-types`): a
   per-turn reasoning control set in the composer's model picker, account-wide
   default in the store (localStorage), default "medium". Plumbed

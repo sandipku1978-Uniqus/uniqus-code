@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { SKILL_PACKS } from "@uniqus/api-types";
 import {
   fetchAccountSettingsApi,
   updateAccountSettingsApi,
@@ -150,6 +151,38 @@ export default function CustomPromptsCard() {
               (<code>.uniqus/skills.md</code>). Existing projects and imported
               repos are left untouched. Edit per project from the workspace.
             </span>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                Start from a curated design pack:
+              </span>
+              <select
+                value=""
+                onChange={(e) => {
+                  const pack = SKILL_PACKS.find((p) => p.id === e.target.value);
+                  if (!pack) return;
+                  setDefaultSkills((prev) =>
+                    prev.trim() ? `${prev.trim()}\n\n${pack.body}` : pack.body,
+                  );
+                }}
+                title="Append a curated design-direction pack to your default skills"
+                style={{
+                  background: "var(--bg-elev)",
+                  border: "1px solid var(--border-default)",
+                  borderRadius: 6,
+                  padding: "6px 8px",
+                  color: "var(--text-primary)",
+                  fontSize: 12,
+                  fontFamily: "inherit",
+                }}
+              >
+                <option value="">Add a pack…</option>
+                {SKILL_PACKS.map((p) => (
+                  <option key={p.id} value={p.id} title={p.summary}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </div>
             <textarea
               value={defaultSkills}
               onChange={(e) => setDefaultSkills(e.target.value)}

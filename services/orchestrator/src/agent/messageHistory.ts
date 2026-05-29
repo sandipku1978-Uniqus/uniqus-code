@@ -105,3 +105,57 @@ export function normalizeMessageHistoryInPlace(messages: Anthropic.MessageParam[
   const normalized = normalizeMessageHistory(messages);
   messages.splice(0, messages.length, ...normalized);
 }
+
+/** A "real" user turn (the user's words), not a batch of tool_result blocks. */
+function isUserTurnMessage(msg: Anthropic.MessageParam): boolean {
+  if (msg.role !== "user") return false;
+  if (typeof msg.content === "string") return true;
+  return (
+    Array.isArray(msg.content) &&
+    msg.content.some((b) => isBlock(b) && b.type === "text")
+  );
+}
+
+const IMAGE_STRIP_STUB =
+  "[screenshot omitted from context to save tokens — re-run the tool if you need to see it again]";
+
+/**
+ * Drop base64 image blocks from tool_results that belong to PRIOR turns,
+ * keeping only the current turn's images (everything after the last real user
+ * message). Screenshots/read_asset images are ~100-400 KB of base64 each;
+ * without this they sit in history, get persisted, and are re-sent on every
+ * one of the loop's iterations and every subsequent turn — the main driver of
+ * runaway input-token usage. The agent still sees images on the turn it
+ * captured them; older ones become a short text stub it can refresh on demand.
+ * Mutates in place (the live history array), so the pruned form is also what
+ * gets persisted.
+ */
+export function pruneStaleImagesInPlace(messages: Anthropic.MessageParam[]): void {
+  let lastUserTurn = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (isUserTurnMessage(messages[i])) {
+      lastUserTurn = i;
+      break;
+    }
+  }
+  if (lastUserTurn <= 0) return; // nothing before the current turn to prune
+
+  for (let i = 0; i < lastUserTurn; i++) {
+    const msg = messages[i];
+    if (!Array.isArray(msg.content)) continue;
+    let changed = false;
+    const content = msg.content.map((block) => {
+      if (!isBlock(block) || block.type !== "tool_result") return block;
+      const tr = block as Anthropic.ToolResultBlockParam;
+      if (!Array.isArray(tr.content)) return block;
+      if (!tr.content.some((c) => isBlock(c) && c.type === "image")) return block;
+      changed = true;
+      const kept = tr.content.filter((c) => !(isBlock(c) && c.type === "image"));
+      return {
+        ...tr,
+        content: kept.length > 0 ? kept : [{ type: "text", text: IMAGE_STRIP_STUB }],
+      } as Anthropic.ToolResultBlockParam;
+    });
+    if (changed) messages[i] = { ...msg, content } as Anthropic.MessageParam;
+  }
+}

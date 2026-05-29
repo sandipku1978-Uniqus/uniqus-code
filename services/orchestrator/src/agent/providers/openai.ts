@@ -18,6 +18,11 @@ import type {
  * always passes tools. Responses supports both, and streams reasoning
  * summaries we surface as the live thinking trace.
  *
+ * Web search: the built-in `web_search` tool is attached alongside our function
+ * tools (Responses supports mixing the two). OpenAI runs it server-side; we
+ * surface the `web_search_call` items as a web_search activity row (parity with
+ * Anthropic) and never hand them to the loop to execute.
+ *
  * Translation: the canonical Anthropic-shaped history maps to Responses `input`
  * items (assistant text → output_text message; tool_use → function_call item;
  * tool_result → function_call_output item) and the output items map back to
@@ -68,7 +73,7 @@ export class OpenAIAdapter implements ModelProviderAdapter {
         model: p.model,
         instructions: p.system,
         input: toResponsesInput(p.messages),
-        tools: toResponsesTools(p.tools),
+        tools: toResponsesTools(p.tools, true),
         max_output_tokens: p.maxTokens,
         store: false,
         ...(reasoning ? { reasoning } : {}),
@@ -94,6 +99,9 @@ export class OpenAIAdapter implements ModelProviderAdapter {
           if (event.item.type === "function_call" && !announced.has(event.item.call_id)) {
             announced.add(event.item.call_id);
             p.onToolCallStarted?.(event.item.call_id, event.item.name);
+          } else if (event.item.type === "web_search_call") {
+            // Server-side search — surface the activity, never execute it.
+            p.onToolCallStarted?.(event.item.id, "web_search");
           }
           break;
         case "response.output_item.done":
@@ -103,6 +111,16 @@ export class OpenAIAdapter implements ModelProviderAdapter {
               name: event.item.name,
               args: event.item.arguments,
             });
+          } else if (event.item.type === "web_search_call") {
+            const query = webSearchQuery(event.item);
+            p.onToolCall?.(event.item.id, "web_search", { query });
+            p.onToolResult?.(
+              event.item.id,
+              "web_search",
+              { query },
+              query ? `Searched the web: ${query}` : "Searched the web.",
+              false,
+            );
           }
           break;
       }
@@ -132,7 +150,7 @@ export class OpenAIAdapter implements ModelProviderAdapter {
         model: p.model,
         instructions: p.system,
         input: toResponsesInput(p.messages),
-        tools: toResponsesTools(p.tools),
+        tools: toResponsesTools(p.tools, true),
         max_output_tokens: p.maxTokens,
         store: false,
         ...(reasoning ? { reasoning } : {}),
@@ -154,6 +172,16 @@ export class OpenAIAdapter implements ModelProviderAdapter {
         p.onToolCallStarted?.(item.call_id, item.name);
         p.onToolCall?.(item.call_id, item.name, input);
         toolCalls.push({ id: item.call_id, name: item.name, input });
+      } else if (item.type === "web_search_call") {
+        const query = webSearchQuery(item);
+        p.onToolCallStarted?.(item.id, "web_search");
+        p.onToolResult?.(
+          item.id,
+          "web_search",
+          { query },
+          query ? `Searched the web: ${query}` : "Searched the web.",
+          false,
+        );
       } else if (item.type === "reasoning") {
         for (const s of item.summary) p.onThinking?.(s.text);
       }
@@ -175,7 +203,7 @@ export class OpenAIAdapter implements ModelProviderAdapter {
       model: p.model,
       instructions: p.system,
       input: toResponsesInput(p.messages),
-      tools: toResponsesTools([p.tool]),
+      tools: toResponsesTools([p.tool], false),
       tool_choice: { type: "function", name: p.tool.name },
       max_output_tokens: p.maxTokens,
       store: false,
@@ -188,6 +216,12 @@ export class OpenAIAdapter implements ModelProviderAdapter {
   }
 }
 
+/** Best-effort search query from a web_search_call item's action, for display. */
+function webSearchQuery(item: OpenAI.Responses.ResponseFunctionWebSearch): string {
+  const action = item.action as { query?: unknown } | undefined;
+  return typeof action?.query === "string" ? action.query : "";
+}
+
 function safeParseJson(s: string): unknown {
   if (!s || !s.trim()) return {};
   try {
@@ -197,15 +231,23 @@ function safeParseJson(s: string): unknown {
   }
 }
 
-/** Anthropic tool schema → Responses API flat function-tool shape. */
-function toResponsesTools(tools: Anthropic.Tool[]): OpenAI.Responses.Tool[] {
-  return tools.map((t) => ({
+/**
+ * Anthropic tool schema → Responses API tools: our function tools plus the
+ * built-in `web_search`. `includeWebSearch` is false for the forced-tool (plan)
+ * call, which must return exactly one specific function.
+ */
+function toResponsesTools(
+  tools: Anthropic.Tool[],
+  includeWebSearch: boolean,
+): OpenAI.Responses.Tool[] {
+  const fns: OpenAI.Responses.Tool[] = tools.map((t) => ({
     type: "function",
     name: t.name,
     description: t.description ?? null,
     parameters: t.input_schema as Record<string, unknown>,
     strict: false,
   }));
+  return includeWebSearch ? [{ type: "web_search" }, ...fns] : fns;
 }
 
 /**

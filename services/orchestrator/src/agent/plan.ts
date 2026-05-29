@@ -4,20 +4,60 @@ import { normalizeMessageHistory } from "./messageHistory.js";
 import { formatAccountPromptForPrompt, formatSkillsForPrompt } from "./skills.js";
 import { resolveModel } from "./router.js";
 import { getProvider, providerKeysFromEnv, type ProviderKeys } from "./providers/index.js";
+import { TOOLS } from "./tools.js";
+import { executeTool, truncateToolResultText, type LoopHooks } from "./loop.js";
+import type { Sandbox } from "./sandbox.js";
 
-const PLAN_SYSTEM_PROMPT_BASE = `You are an AI software engineer in plan mode. The user has described what they want built; your job is to produce a structured plan, NOT to execute it.
+const PLAN_SYSTEM_PROMPT_BASE = `You are an AI software engineer in plan mode. The user has described what they want built; your job is to INSPECT the project as needed and then produce a structured plan, NOT to execute it.
 
-Use the submit_plan tool to return:
+You have READ-ONLY tools to ground the plan in reality: read_file, list_dir, grep, list_assets, and read_asset. For an existing or imported project, USE them before planning — check package.json, the framework, the directory layout, the files you'll touch, and any uploaded reference assets. Do NOT guess at file names or structure you can verify. You cannot modify files, run commands, or start servers in plan mode.
+
+When you have enough understanding, call the submit_plan tool to return:
 - A one-paragraph summary of what will be built and how it will work.
 - A list of concrete steps. Each step should be small enough to verify on its own — typically one file created, one command run, or one integration completed. Aim for 4–10 steps.
 - For each step, list the files it will touch (if any) and a one-line success criterion (how the agent will know the step worked).
 
-Be specific about file names, frameworks, and commands when the existing context supports it. For an existing or imported project where structure is unclear, include one bounded discovery step first (for example: inspect package.json and the relevant source tree), then concrete implementation steps.
+Be specific about file names, frameworks, and commands, grounded in what you actually saw. For a brand-new project where there is nothing to inspect, skip straight to the plan.
 
 When planning frontend or design work, include steps for:
 - Finding existing design tokens, components, routes, assets, and styling conventions before proposing new ones.
 - Building the real usable screen or flow, including responsive layout, empty/loading/error states, accessibility, and plausible content.
-- Starting or reusing a preview server and checking the result visually at desktop and mobile sizes before declaring the work complete.`;
+- Starting or reusing a preview server and checking the result visually at desktop and mobile sizes before declaring the work complete.
+
+ALWAYS finish by calling submit_plan. Keep any narration before it brief — a sentence on what you're checking is enough; the user can see your tool calls.`;
+
+/** Read-only tools the planner may use to investigate before proposing a plan. */
+const PLAN_READONLY_TOOL_NAMES = new Set([
+  "read_file",
+  "list_dir",
+  "grep",
+  "list_assets",
+  "read_asset",
+]);
+
+/** Hooks to stream the planner's investigation (text, reasoning, tool activity). */
+export type PlanHooks = Pick<
+  LoopHooks,
+  "onText" | "onThinking" | "onToolCallStarted" | "onToolCall" | "onToolResult"
+>;
+
+export interface PlanOptions {
+  apiKey: string;
+  /** Sandbox the planner inspects with read-only tools. */
+  sandbox: Sandbox;
+  history?: Anthropic.MessageParam[];
+  skills?: string | null;
+  accountPrompt?: string | null;
+  modelChoice?: ModelChoice;
+  providerKeys?: ProviderKeys;
+  projectId?: string | null;
+  signal?: AbortSignal;
+  /** Stream the planner's progress to the client (same events as the agent loop). */
+  hooks?: PlanHooks;
+}
+
+const MAX_PLAN_ITERATIONS = 16;
+const PLAN_MAX_TOKENS = 8192;
 
 const SUBMIT_PLAN_TOOL: Anthropic.Tool = {
   name: "submit_plan",
@@ -53,31 +93,129 @@ const SUBMIT_PLAN_TOOL: Anthropic.Tool = {
   },
 };
 
-export async function proposePlan(
-  userMessage: string,
-  apiKey: string,
-  history: Anthropic.MessageParam[] = [],
-  skills: string | null = null,
-  modelChoice?: ModelChoice,
-  providerKeys?: ProviderKeys,
-  accountPrompt: string | null = null,
-): Promise<Plan> {
-  const system = `${PLAN_SYSTEM_PROMPT_BASE}${formatAccountPromptForPrompt(accountPrompt)}${formatSkillsForPrompt(skills)}`;
+/**
+ * Draft a plan, letting the model first INVESTIGATE the project with read-only
+ * tools and STREAMING its progress (text, reasoning, tool calls) to the client
+ * via `opts.hooks` — the same events the execute loop emits, so the user sees
+ * the planner work. It loops until the model calls submit_plan; a final forced
+ * submit_plan guarantees a structured Plan if it ends without one. Runs on a
+ * COPY of history, so the (transient) investigation isn't persisted.
+ */
+export async function proposePlan(userMessage: string, opts: PlanOptions): Promise<Plan> {
+  const system = `${PLAN_SYSTEM_PROMPT_BASE}${formatAccountPromptForPrompt(
+    opts.accountPrompt ?? null,
+  )}${formatSkillsForPrompt(opts.skills ?? null)}`;
 
-  // Plan mode honors the same per-turn model choice as the agent loop, so the
-  // plan is drafted by whichever model the user selected.
-  const resolved = resolveModel("plan", modelChoice);
-  const keys: ProviderKeys = providerKeys ?? { ...providerKeysFromEnv(), anthropic: apiKey };
+  // Plan mode honors the same per-turn model choice as the agent loop.
+  const resolved = resolveModel("plan", opts.modelChoice);
+  const keys: ProviderKeys = opts.providerKeys ?? {
+    ...providerKeysFromEnv(),
+    anthropic: opts.apiKey,
+  };
   const provider = getProvider(resolved.provider, keys);
+  const hooks = opts.hooks ?? {};
 
-  const input = await provider.callForcedTool({
+  const planTools: Anthropic.Tool[] = [
+    ...TOOLS.filter((t) => PLAN_READONLY_TOOL_NAMES.has(t.name)),
+    SUBMIT_PLAN_TOOL,
+  ];
+
+  const messages: Anthropic.MessageParam[] = normalizeMessageHistory([
+    ...(opts.history ?? []),
+    { role: "user", content: userMessage },
+  ]);
+
+  for (let iter = 0; iter < MAX_PLAN_ITERATIONS; iter++) {
+    if (opts.signal?.aborted) throw new Error("aborted before plan");
+
+    let turn;
+    try {
+      turn = await provider.streamAgentTurn({
+        model: resolved.model,
+        system,
+        tools: planTools,
+        messages,
+        maxTokens: PLAN_MAX_TOKENS,
+        signal: opts.signal,
+        onText: hooks.onText,
+        onThinking: hooks.onThinking,
+        onToolCallStarted: hooks.onToolCallStarted,
+        onToolCall: hooks.onToolCall,
+        onToolResult: hooks.onToolResult,
+      });
+    } catch (err) {
+      if (opts.signal?.aborted) throw new Error("aborted during plan");
+      throw err;
+    }
+
+    messages.push({ role: "assistant", content: turn.content });
+
+    // The model submitted its plan — done.
+    const submitted = turn.toolCalls.find((c) => c.name === "submit_plan");
+    if (submitted) return submitted.input as Plan;
+
+    // No tools and no plan: it just talked. Force a plan to finish.
+    if (turn.toolCalls.length === 0) break;
+
+    // Execute the read-only investigation tools and feed results back.
+    const toolResults: Anthropic.ToolResultBlockParam[] = [];
+    for (const call of turn.toolCalls) {
+      if (opts.signal?.aborted) throw new Error("aborted during plan");
+      try {
+        const result = await executeTool(
+          opts.sandbox,
+          call.name,
+          call.input,
+          call.id,
+          opts.projectId ?? null,
+          undefined,
+          opts.signal,
+          undefined,
+          undefined,
+          undefined,
+          null,
+        );
+        if (result && typeof result === "object" && (result as { __multimodal?: boolean }).__multimodal) {
+          const mm = result as { content: Array<{ type: string; [k: string]: unknown }> };
+          const textSummary = mm.content.find((b) => b.type === "text") as { text: string } | undefined;
+          hooks.onToolResult?.(call.id, call.name, call.input, textSummary?.text ?? "(image)", false);
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: call.id,
+            content: mm.content as unknown as Anthropic.ToolResultBlockParam["content"],
+          });
+        } else {
+          const text = truncateToolResultText(
+            (typeof result === "string" ? result : JSON.stringify(result)) || "(no output)",
+          );
+          hooks.onToolResult?.(call.id, call.name, call.input, text, false);
+          toolResults.push({ type: "tool_result", tool_use_id: call.id, content: text });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        hooks.onToolResult?.(call.id, call.name, call.input, msg, true);
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: call.id,
+          content: `Error: ${msg}`,
+          is_error: true,
+        });
+      }
+    }
+    messages.push({ role: "user", content: toolResults });
+  }
+
+  // Fallback: the model investigated but didn't submit (or hit the cap) — force
+  // a structured plan so the user always gets one.
+  const forced = await provider.callForcedTool({
     model: resolved.model,
     system,
     tool: SUBMIT_PLAN_TOOL,
-    messages: normalizeMessageHistory([...history, { role: "user", content: userMessage }]),
+    messages: normalizeMessageHistory(messages),
     maxTokens: 4096,
+    signal: opts.signal,
   });
-  return input as Plan;
+  return forced as Plan;
 }
 
 export function formatPlanForExecution(plan: Plan): string {

@@ -1,0 +1,6 @@
+{
+  // globals.css starts with Tailwind's @tailwind directives; VS Code's built-in
+  // CSS language server doesn't know them and reports "Unknown at rule". They're
+  // valid (PostCSS/Tailwind processes them), so silence that specific check.
+  "css.lint.unknownAtRules": "ignore"
+}

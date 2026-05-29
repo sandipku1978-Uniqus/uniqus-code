@@ -60,6 +60,38 @@ function stripForeignFields(
 }
 
 /**
+ * Mark the last message's last block as a cache breakpoint so the whole
+ * conversation prefix (system + all prior messages) is read from cache on the
+ * next iteration instead of re-billed in full. The agent loop replays the
+ * growing history every iteration; without this, a long tool-use turn pays
+ * full input price for the unchanged prefix each time. Returns a shallow copy
+ * (only the last message/block is cloned) so shared history isn't mutated.
+ */
+function withPrefixCache(messages: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
+  if (messages.length === 0) return messages;
+  const lastIdx = messages.length - 1;
+  const last = messages[lastIdx];
+  const cc = { type: "ephemeral" as const };
+
+  let content: Anthropic.MessageParam["content"];
+  if (typeof last.content === "string") {
+    content = [{ type: "text", text: last.content, cache_control: cc }];
+  } else if (Array.isArray(last.content) && last.content.length > 0) {
+    content = last.content.map((b, i) =>
+      i === last.content.length - 1
+        ? ({ ...(b as object), cache_control: cc } as Anthropic.ContentBlockParam)
+        : b,
+    );
+  } else {
+    return messages;
+  }
+
+  const copy = [...messages];
+  copy[lastIdx] = { ...last, content } as Anthropic.MessageParam;
+  return copy;
+}
+
+/**
  * Anthropic adapter. This is the native path — the canonical message shape IS
  * Anthropic's, so there's no translation. It also keeps the server-side
  * web_search tool, which only Anthropic offers; the other adapters omit it.
@@ -78,7 +110,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
       max_tokens: p.maxTokens,
       system: [{ type: "text", text: p.system, cache_control: { type: "ephemeral" } }],
       tools: [...p.tools, WEB_SEARCH_TOOL] as Anthropic.MessageCreateParams["tools"],
-      messages: stripForeignFields(p.messages),
+      messages: withPrefixCache(stripForeignFields(p.messages)),
     } as Anthropic.MessageCreateParamsStreaming;
     applyEffort(params as unknown as Record<string, unknown>, p.thinkingEffort);
 

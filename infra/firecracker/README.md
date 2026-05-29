@@ -48,11 +48,28 @@ FIRECRACKER_IDLE_PAUSE_MS=300000
 - KVM access scoped to the `kvm` group; orchestrator runs as a non-root
   user added to that group by `host-setup.sh`.
 
+## Idle lifecycle & retention
+
+The fleet manager (`services/orchestrator/src/firecracker/fleet.ts`) escalates
+idle VMs in tiers, all env-tunable:
+
+- `FIRECRACKER_IDLE_PAUSE_MS` (default 5 min) — running → paused.
+- `FIRECRACKER_IDLE_SNAPSHOT_MS` (default 30 min paused) — paused → snapshotted:
+  takes a full snapshot, kills firecracker, frees the VM's RAM. Reopening does a
+  sub-second restore from the snapshot pair.
+- `FIRECRACKER_GC_MAX_IDLE_MS` (default **72 h**) — snapshot-retention ceiling.
+  Past this we *reclaim* the VM: free the ~1 GiB snapshot/memory pair + rootfs
+  overlay, but **keep** the per-project `sandbox.ext4` (so `node_modules` and
+  uncommitted state survive). Reopening then cold-boots but reattaches that
+  image — skipping re-hydration and a cold `npm install`.
+- `FIRECRACKER_FS_REAP_MAX_IDLE_MS` (default **14 days**) — only after this do
+  we finally delete `sandbox.ext4` to reclaim disk for a long-untouched project.
+
+This keeps "reopen after a day or two" fast (snapshot restore) and "reopen after
+a couple weeks" merely a cold boot rather than a full reinstall.
+
 ## What's deliberately not here yet
 
-- **Snapshot/restore** for sub-second cold start. The Firecracker API
-  client (`services/orchestrator/src/firecracker/client.ts`) supports it;
-  the fleet manager doesn't yet wire snapshots in.
 - **ZFS** for the host filesystem. Plan §1 specifies it for snapshot
   density. Phase-2 uses ext4 + reflink (XFS-friendly) — adequate at
   10–100 VMs/host, not at 1000+.

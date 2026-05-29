@@ -54,13 +54,26 @@ const IDLE_SNAPSHOT_AFTER_PAUSE_MS = Number(
   process.env.FIRECRACKER_IDLE_SNAPSHOT_MS ?? 30 * 60_000,
 );
 /**
- * Hard idle ceiling — after this much total inactivity, destroy the VM and
- * its on-disk artifacts entirely. Without this, paused/snapshotted VMs
- * accumulate forever and eat the host's disk. 24 h is the dogfood default;
- * lower it for a small host.
+ * Snapshot retention ceiling — after this much total inactivity we RECLAIM the
+ * VM: free the firecracker process, the ~1 GiB memory/snapshot pair, and the
+ * rootfs overlay, but KEEP the per-project sandbox.ext4 (which holds
+ * node_modules and any uncommitted state). Reopening within this window does a
+ * sub-second snapshot restore; reopening after it does a cold boot but still
+ * reattaches the existing sandbox image — so it skips re-hydration and, more
+ * importantly, a cold `npm install`. Bumped from 24 h to 72 h so a "next day"
+ * reopen still hits the fast snapshot path.
  */
 const VM_GC_MAX_IDLE_MS = Number(
-  process.env.FIRECRACKER_GC_MAX_IDLE_MS ?? 24 * 60 * 60_000,
+  process.env.FIRECRACKER_GC_MAX_IDLE_MS ?? 72 * 60 * 60_000,
+);
+/**
+ * Filesystem reap ceiling — only after this much inactivity do we finally
+ * delete the sandbox.ext4 (losing node_modules) to reclaim disk for a project
+ * nobody has touched in a long time. Much longer than the snapshot ceiling
+ * because node_modules is the expensive thing to rebuild on reopen.
+ */
+const VM_FS_REAP_MAX_IDLE_MS = Number(
+  process.env.FIRECRACKER_FS_REAP_MAX_IDLE_MS ?? 14 * 24 * 60 * 60_000,
 );
 const BRIDGE_NAME = process.env.FIRECRACKER_BRIDGE ?? "fcbr0";
 const BRIDGE_GATEWAY = process.env.FIRECRACKER_GATEWAY ?? "172.16.0.1";
@@ -512,6 +525,46 @@ export async function destroy(projectId: string): Promise<void> {
   vms.delete(projectId);
 }
 
+/**
+ * Soft idle reclaim: free the firecracker process + the ~1 GiB snapshot/memory
+ * pair + the rootfs overlay (regenerable) + tap, and drop the in-memory record,
+ * but KEEP the sandbox.ext4 so the next reopen reattaches node_modules instead
+ * of cold-installing. This is what the idle sweeper runs at the GC ceiling.
+ */
+export async function reclaimVm(projectId: string): Promise<void> {
+  const vm = vms.get(projectId);
+  if (!vm) {
+    await reclaimOnDiskArtifacts(projectId).catch(() => {});
+    return;
+  }
+  if (vm.handle.state === "running" || vm.handle.state === "paused") {
+    try {
+      await vm.client.ctrlAltDel();
+    } catch {}
+    vm.fcClose();
+  }
+  await fs.rm(vm.handle.apiSocket, { force: true }).catch(() => {});
+  await fs.rm(vm.handle.vsockUds, { force: true }).catch(() => {});
+  await fs.rm(vm.handle.rootImagePath, { force: true }).catch(() => {});
+  const paths = snapshotPaths(vm.handle.projectId);
+  await fs.rm(paths.snapshot, { force: true }).catch(() => {});
+  await fs.rm(paths.memory, { force: true }).catch(() => {});
+  // NOTE: deliberately keep <projectId>.sandbox.ext4 (node_modules + state).
+  await teardownTap(vm.handle.tapDevice).catch(() => {});
+  vm.handle.state = "stopped";
+  vms.delete(projectId);
+}
+
+/** Reclaim disk for an orphan project (no in-memory record) but KEEP its ext4. */
+async function reclaimOnDiskArtifacts(projectId: string): Promise<void> {
+  const paths = snapshotPaths(projectId);
+  await fs.rm(paths.snapshot, { force: true }).catch(() => {});
+  await fs.rm(paths.memory, { force: true }).catch(() => {});
+  await fs.rm(projectRootImagePath(projectId), { force: true }).catch(() => {});
+  const { tapName } = allocateNetwork(projectId);
+  await teardownTap(tapName).catch(() => {});
+}
+
 /** Wipe everything we can name from a projectId without an in-memory record. */
 async function destroyOnDiskArtifacts(projectId: string): Promise<void> {
   const paths = snapshotPaths(projectId);
@@ -589,6 +642,9 @@ function runCmd(cmd: string, args: string[]): Promise<void> {
  */
 let sweeperStarted = false;
 let sweeperTimer: ReturnType<typeof setInterval> | null = null;
+let sweepTicks = 0;
+// Sweeper ticks every 30s; re-run the orphan sweep every ~30 min.
+const ORPHAN_GC_EVERY_TICKS = 60;
 export function startIdleSweeper(): void {
   if (sweeperStarted) return;
   sweeperStarted = true;
@@ -599,13 +655,20 @@ export function startIdleSweeper(): void {
   );
   sweeperTimer = setInterval(() => {
     const now = Date.now();
+    // Periodically re-run the orphan sweep (not just at startup) so a
+    // long-running process still reaps reclaimed projects' ext4 images.
+    sweepTicks += 1;
+    if (sweepTicks % ORPHAN_GC_EVERY_TICKS === 0) {
+      void gcOrphanedSnapshots().catch(() => {});
+    }
     for (const [, vm] of vms) {
       const idleMs = now - vm.handle.lastUsedAt;
       if (idleMs > VM_GC_MAX_IDLE_MS && vm.handle.state !== "running") {
         console.log(
-          `[fleet ${vm.handle.id}] idle ${Math.round(idleMs / 60_000)}m > GC ceiling, destroying`,
+          `[fleet ${vm.handle.id}] idle ${Math.round(idleMs / 60_000)}m > snapshot ceiling, ` +
+            `reclaiming (freeing RAM/snapshot disk, keeping node_modules)`,
         );
-        destroy(vm.handle.projectId).catch(() => {});
+        reclaimVm(vm.handle.projectId).catch(() => {});
         continue;
       }
       if (vm.handle.state === "running" && idleMs > IDLE_PAUSE_MS) {
@@ -655,18 +718,36 @@ async function gcOrphanedSnapshots(): Promise<void> {
     return;
   }
   const live = new Set<string>(Array.from(vms.keys()));
-  const cutoff = Date.now() - VM_GC_MAX_IDLE_MS;
+  const snapCutoff = Date.now() - VM_GC_MAX_IDLE_MS;
+  const fsCutoff = Date.now() - VM_FS_REAP_MAX_IDLE_MS;
   for (const f of entries) {
-    if (!f.endsWith(".snapshot")) continue;
-    const projectId = f.slice(0, -".snapshot".length);
-    if (live.has(projectId)) continue;
     const fullPath = path.join(STATE_DIR, f);
-    try {
-      const stat = await fs.stat(fullPath);
-      if (stat.mtimeMs > cutoff) continue;
-      await destroyOnDiskArtifacts(projectId);
-      console.log(`[fleet] GC removed orphan snapshot for ${projectId.slice(0, 8)}`);
-    } catch {}
+    // Snapshot/memory pairs older than the snapshot ceiling: reclaim the big
+    // disk (and rootfs overlay) but KEEP the sandbox.ext4 so node_modules
+    // survives an idle period or an orchestrator restart.
+    if (f.endsWith(".snapshot")) {
+      const projectId = f.slice(0, -".snapshot".length);
+      if (live.has(projectId)) continue;
+      try {
+        const stat = await fs.stat(fullPath);
+        if (stat.mtimeMs > snapCutoff) continue;
+        await reclaimOnDiskArtifacts(projectId);
+        console.log(`[fleet] GC reclaimed orphan snapshot for ${projectId.slice(0, 8)} (kept node_modules)`);
+      } catch {}
+      continue;
+    }
+    // Sandbox images untouched past the (much longer) FS reap ceiling: finally
+    // delete to reclaim disk for a project nobody has opened in a long time.
+    if (f.endsWith(".sandbox.ext4")) {
+      const projectId = f.slice(0, -".sandbox.ext4".length);
+      if (live.has(projectId)) continue;
+      try {
+        const stat = await fs.stat(fullPath);
+        if (stat.mtimeMs > fsCutoff) continue;
+        await fs.rm(fullPath, { force: true }).catch(() => {});
+        console.log(`[fleet] GC reaped stale sandbox image for ${projectId.slice(0, 8)}`);
+      } catch {}
+    }
   }
 }
 

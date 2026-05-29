@@ -76,6 +76,11 @@
   --dur-fast: 120ms;
   --dur-base: 200ms;
   --dur-slow: 300ms;
+  /* Easings — `out` for entrances/most UI (smooth deceleration), `spring` for
+     a gentle overshoot on pops (menus, toggles), `in-out` for moves. */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.5, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
 }
 
 /* ==========================================================================
@@ -139,6 +144,13 @@
 :root[data-theme="light"] .topnav { background: rgba(255, 255, 255, 0.85); }
 :root[data-theme="light"] .attachment-chip,
 :root[data-theme="light"] .message-attachment { background: rgba(0, 0, 0, 0.03); }
+/* The dashboard composer's deep shadow reads as muddy on a light page; soften
+   it and lighten the hero glow so the new-project card sits cleanly. */
+:root[data-theme="light"] .dash-hero .newproj-form,
+:root[data-theme="light"] .dash-hero .newproj-form:focus-within {
+  box-shadow: 0 8px 28px rgba(20, 16, 40, 0.10);
+}
+:root[data-theme="light"] .dash-hero::before { opacity: 0.5; }
 
 html, body {
   margin: 0;
@@ -308,6 +320,7 @@ code, pre, .mono {
   padding: 0 32px;
   border-bottom: 1px solid var(--border-default);
   background: rgba(12, 12, 17, 0.85);
+  -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
   position: sticky;
   top: 0;
@@ -1569,6 +1582,7 @@ section.band .sub {
   color: var(--text-muted);
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -1782,24 +1796,46 @@ section.band .sub {
   border-radius: var(--radius-md);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
   padding: 12px;
-  max-height: 60vh;
-  overflow-y: auto;
+  /* Content is short (Auto + More models + thinking); keep overflow visible so
+     the "More models" flyout can escape to the side without being clipped. */
+  overflow: visible;
 }
+/* "More models" row + its side flyout (the full model list). */
+.model-picker-more-wrap { position: relative; }
 .model-picker-more {
   display: inline-flex;
   align-items: center;
+  justify-content: space-between;
   gap: 6px;
-  width: fit-content;
+  width: 100%;
   background: transparent;
-  border: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
   color: var(--accent);
   font-family: inherit;
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
-  padding: 2px 0;
+  padding: 6px 8px;
 }
-.model-picker-more:hover { text-decoration: underline; }
+.model-picker-more:hover,
+.model-picker-more[data-open="true"] { background: var(--bg-surface-hover); }
+.model-picker-flyout {
+  position: absolute;
+  left: calc(100% + 8px);
+  top: -8px;
+  z-index: 61;
+  min-width: 240px;
+  max-height: 60vh;
+  overflow-y: auto;
+  display: grid;
+  gap: 8px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  padding: 10px;
+}
 .model-picker-option {
   display: flex;
   align-items: center;
@@ -1871,6 +1907,7 @@ section.band .sub {
   font-size: 12px;
   color: var(--text-muted);
   cursor: pointer;
+  -webkit-user-select: none;
   user-select: none;
   border-left: 2px solid transparent;
   width: 100%;
@@ -2438,7 +2475,7 @@ section.band .sub {
 }
 .dash-chip {
   border: 1px solid var(--border-default);
-  background: rgba(22, 22, 30, 0.6);
+  background: var(--bg-surface);
   color: var(--text-muted);
   border-radius: var(--radius-full);
   padding: 7px 14px;
@@ -2535,7 +2572,6 @@ section.band .sub {
     border-right: 0;
     border-bottom: 1px solid var(--border-default);
     padding: 10px 14px;
-    -webkit-overflow-scrolling: touch;
   }
   .dash-side .group {
     display: flex;
@@ -2859,12 +2895,14 @@ section.band .sub {
   font-size: 13px;
 }
 .doc-example.good {
+  border-color: var(--conf-high); /* fallback for engines without color-mix */
   border-color: color-mix(in srgb, var(--conf-high) 45%, var(--border-default));
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--conf-high) 9%, transparent), transparent 70%),
     var(--bg-surface);
 }
 .doc-template {
+  border-color: var(--brand-magenta); /* fallback for engines without color-mix */
   border-color: color-mix(in srgb, var(--brand-magenta) 45%, var(--border-default));
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--brand-magenta) 8%, transparent), transparent 75%),
@@ -2938,4 +2976,152 @@ section.band .sub {
   padding: 1px 6px;
   margin-left: 8px;
   vertical-align: middle;
+}
+
+/* ==========================================================================
+   Motion overhaul — consistent entrances, micro-interactions, reduced-motion.
+   Everything here animates only opacity/transform (compositor-cheap) and uses
+   the shared --dur-* / --ease-* tokens so motion feels of-a-piece. Entrances
+   use `both` fill so staggered items don't flash before their delay.
+   ========================================================================== */
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes popIn {
+  from { opacity: 0; transform: translateY(6px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes flyInRight {
+  from { opacity: 0; transform: translateX(-8px) scale(0.98); }
+  to   { opacity: 1; transform: translateX(0) scale(1); }
+}
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.9); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* ── Page shells settle in (opacity only — layout-safe) ──────────────────── */
+.dash-shell,
+.settings-wrap,
+.ide-shell,
+.marketing-shell,
+.doc {
+  animation: fadeIn var(--dur-slow) var(--ease-out) backwards;
+}
+
+/* ── Dashboard project tiles cascade in + lift on hover ─────────────────── */
+.proj,
+.proj-tile {
+  animation: fadeInUp var(--dur-slow) var(--ease-out) backwards;
+  /* Re-declare transition to include transform (the base rules only ease
+     border/background); appended last so it wins. */
+  transition:
+    transform var(--dur-base) var(--ease-out),
+    border-color var(--dur-base) ease,
+    background var(--dur-base) ease,
+    box-shadow var(--dur-base) ease;
+}
+.proj:hover,
+.proj-tile:hover { transform: translateY(-2px); }
+.proj-grid > *:nth-child(1) { animation-delay: 20ms; }
+.proj-grid > *:nth-child(2) { animation-delay: 55ms; }
+.proj-grid > *:nth-child(3) { animation-delay: 90ms; }
+.proj-grid > *:nth-child(4) { animation-delay: 125ms; }
+.proj-grid > *:nth-child(5) { animation-delay: 160ms; }
+.proj-grid > *:nth-child(6) { animation-delay: 195ms; }
+.proj-grid > *:nth-child(n + 7) { animation-delay: 230ms; }
+
+/* ── Dashboard suggestion chips ─────────────────────────────────────────── */
+.dash-chip { animation: fadeInUp var(--dur-base) var(--ease-out) backwards; }
+.dash-chips > *:nth-child(1) { animation-delay: 60ms; }
+.dash-chips > *:nth-child(2) { animation-delay: 110ms; }
+.dash-chips > *:nth-child(3) { animation-delay: 160ms; }
+.dash-chips > *:nth-child(n + 4) { animation-delay: 210ms; }
+
+/* ── Chat artifacts rise in (the .msg base already animates) ─────────────── */
+.tool-card,
+.reasoning-card,
+.plan-card,
+.ask-user-card {
+  animation: fadeInUp var(--dur-base) var(--ease-out) backwards;
+}
+.followups { animation: fadeIn var(--dur-base) var(--ease-out) backwards; }
+
+/* ── Settings cards ─────────────────────────────────────────────────────── */
+.settings-card { animation: fadeInUp var(--dur-base) var(--ease-out) backwards; }
+
+/* ── Popovers pop, the model flyout slides, menus pop ───────────────────── */
+.model-picker-pop {
+  transform-origin: bottom left;
+  animation: popIn var(--dur-base) var(--ease-spring) backwards;
+}
+.model-picker-flyout {
+  transform-origin: left center;
+  animation: flyInRight var(--dur-base) var(--ease-out) backwards;
+}
+.proj-menu {
+  transform-origin: top right;
+  animation: popIn var(--dur-fast) var(--ease-spring) backwards;
+}
+
+/* ── Composer attachment chips scale in ─────────────────────────────────── */
+.attachment-chip { animation: scaleIn var(--dur-fast) var(--ease-spring) backwards; }
+
+/* ── Tasks pane rows ────────────────────────────────────────────────────── */
+.tasks-inline-item { animation: fadeIn var(--dur-fast) var(--ease-out) backwards; }
+
+/* ── Disclosure reveals (tool output, reasoning trace) ──────────────────── */
+.tool-card pre,
+.reasoning-body { animation: fadeIn var(--dur-fast) var(--ease-out) backwards; }
+
+/* ── Smooth the interactive surfaces that had no transition ─────────────── */
+.tree-row,
+.nav-item,
+.dash-tabs button,
+.tab,
+.icon-btn,
+.icon-btn-sm,
+.toggle-btn,
+.model-picker-option,
+.model-picker-trigger,
+.ask-user-option,
+.proj-menu button,
+.proj-icon-choice,
+.attach-btn {
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+/* Tactile press on the primary action buttons. */
+.btn-primary:active,
+.btn-secondary:active,
+.btn-ghost:active,
+.composer .send-btn:active,
+.icon-btn:active,
+.icon-btn-sm:active,
+.model-picker-trigger:active {
+  transform: scale(0.96);
+}
+
+/* Smooth focus rings on text fields. */
+input,
+textarea,
+select {
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+
+/* ── Accessibility: honor reduced-motion everywhere ─────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

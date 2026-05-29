@@ -17,13 +17,13 @@ import type {
  * functionResponse to its call by function NAME, so we keep an id→name map
  * from the assistant's prior tool_use blocks.
  *
- * Web search: NOT enabled. Combining the built-in `googleSearch` grounding
- * tool with our custom functionDeclarations requires
- * `tool_config.include_server_side_tool_invocations`, and even then support is
- * uneven across the 2.5/3.x models we route here (3.x returns a 400 without
- * the flag; 2.5 can't combine the two at all). The agent needs function
- * calling, so we run function calling only and leave built-in search to the
- * Anthropic path.
+ * Web search: enabled on Gemini 3.x by attaching the built-in `googleSearch`
+ * grounding tool alongside our functionDeclarations and setting
+ * `toolConfig.includeServerSideToolInvocations` (3.x 400s on the combo without
+ * it). Gemini 2.5 genuinely can't combine search with function calling, so it
+ * runs function-calling only. Server-side search calls Gemini surfaces in the
+ * content are recognized by NOT matching one of our tool names — we show them
+ * as a web_search activity row and never execute them.
  *
  * Reasoning: Gemini 3.x uses `thinkingConfig.thinkingLevel` (low/medium/high);
  * Gemini 2.5 uses `thinkingConfig.thinkingBudget` (tokens) — sending a budget
@@ -72,13 +72,20 @@ export class GoogleAdapter implements ModelProviderAdapter {
   async streamAgentTurn(p: StreamTurnParams): Promise<StreamTurnResult> {
     const contents = toGeminiContents(p.messages);
     const thinkingConfig = thinkingConfigFor(p.model, p.thinkingEffort);
+    // Built-in Google Search grounding (3.x only — 2.5 can't combine it with
+    // function calling). Needs includeServerSideToolInvocations or 3.x 400s.
+    const useSearch = /^gemini-3/.test(p.model);
+    const tools = useSearch
+      ? [{ googleSearch: {} }, { functionDeclarations: toGeminiFunctionDeclarations(p.tools) }]
+      : [{ functionDeclarations: toGeminiFunctionDeclarations(p.tools) }];
     const stream = await this.ai.models.generateContentStream({
       model: p.model,
       contents,
       config: {
         systemInstruction: p.system,
         maxOutputTokens: p.maxTokens,
-        tools: [{ functionDeclarations: toGeminiFunctionDeclarations(p.tools) }],
+        tools,
+        ...(useSearch ? { toolConfig: { includeServerSideToolInvocations: true } } : {}),
         ...(thinkingConfig ? { thinkingConfig } : {}),
         abortSignal: p.signal,
       },
@@ -91,12 +98,30 @@ export class GoogleAdapter implements ModelProviderAdapter {
     // function calling, so we stash it on the tool_use block (see toGeminiContents).
     const calls: Array<{ id: string; name: string; args: unknown; signature?: string }> = [];
     const announced = new Set<string>();
+    // Our client tools (everything else in a functionCall part is a server-side
+    // tool like googleSearch — surfaced as web_search, never executed).
+    const ourTools = new Set(p.tools.map((t) => t.name));
+    let searchSurfaced = false;
 
     // Iterate raw parts (not the chunk.text / chunk.functionCalls accessors) so
     // we can (a) split thought-summary parts from the answer text and (b) read
     // the thoughtSignature that rides alongside each function-call part.
+    const surfaceSearch = (detail: unknown, result: string): void => {
+      if (searchSurfaced) return;
+      searchSurfaced = true;
+      const sid = `gem_search_${this.idSeq++}`;
+      p.onToolCallStarted?.(sid, "web_search");
+      p.onToolCall?.(sid, "web_search", detail);
+      p.onToolResult?.(sid, "web_search", detail, result, false);
+    };
+
     for await (const chunk of stream) {
       if (p.signal?.aborted) break;
+      // Server-side Google Search grounding — surface the queries as a
+      // web_search activity row (parity with the other providers).
+      const queries = chunk.candidates?.[0]?.groundingMetadata?.webSearchQueries;
+      if (queries && queries.length > 0) surfaceSearch({ queries }, queries.join("\n"));
+
       const parts = chunk.candidates?.[0]?.content?.parts;
       if (parts) {
         for (const part of parts) {
@@ -111,8 +136,15 @@ export class GoogleAdapter implements ModelProviderAdapter {
           }
           const fc = part.functionCall;
           if (!fc) continue;
-          const id = fc.id ?? `gem_${this.idSeq++}`;
           const name = fc.name ?? "";
+          // A functionCall whose name isn't one of ours is a server-side tool
+          // (googleSearch, included via includeServerSideToolInvocations). Show
+          // it as web_search and do NOT hand it to the loop to execute.
+          if (!ourTools.has(name)) {
+            surfaceSearch({ name }, "Searched the web.");
+            continue;
+          }
+          const id = fc.id ?? `gem_${this.idSeq++}`;
           if (!announced.has(id)) {
             announced.add(id);
             p.onToolCallStarted?.(id, name);

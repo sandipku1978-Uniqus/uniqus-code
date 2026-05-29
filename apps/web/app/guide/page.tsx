@@ -39,16 +39,10 @@ const quickPaths = [
 
 const projectModes = [
   {
-    title: "Blank project",
-    bestFor: "You know the first prompt you want to send.",
-    detail:
-      "Names an empty project and opens the workspace. Nothing is sent to the agent until you write the first message.",
-  },
-  {
     title: "Describe your idea",
     bestFor: "A new app, website, tool, automation, or prototype.",
     detail:
-      "Turns your paragraph into a project name and first agent turn. This is the fastest path when the project shape is clear enough to describe.",
+      "Write the project in plain English. Haiku names it (~200ms) and sharpens your words into the first agent turn, then the workspace opens and the agent starts — with a plan first for new projects. The fastest path when you can describe the shape.",
   },
   {
     title: "Upload .zip",
@@ -92,7 +86,7 @@ const workspaceAreas = [
 ] as const;
 
 const agentControls = [
-  ["Plan", "Ask Uniqus to propose editable steps before it changes files. New projects start this way by default."],
+  ["Plan", "Ask Uniqus to inspect the project with read-only tools and propose editable steps before it changes files — you watch it investigate in real time. New projects start this way by default."],
   ["Execute", "Let the agent act immediately for small, clear changes."],
   ["Files", "Attach images, PDFs, CSVs, design references, or other files the agent should use as evidence."],
   ["@ file", "Reference exact project files so the agent reads the right code before editing."],
@@ -213,8 +207,8 @@ export default function GuidePage() {
               <p className="doc-kicker">01</p>
               <h2 id="create-title">Create or import a project</h2>
               <p>
-                The dashboard gives you four starting modes. Pick the one that matches how
-                much source material you already have.
+                The new-project card on the dashboard has three tabs. Pick the one that
+                matches how much source material you already have.
               </p>
             </div>
             <div className="doc-grid two">
@@ -227,9 +221,10 @@ export default function GuidePage() {
               ))}
             </div>
             <div className="doc-callout">
-              <strong>Blank vs. Describe:</strong> Blank opens an empty workspace.
-              Describe sends the first turn for you. Choose Blank when you want full
-              control over the opening prompt; choose Describe when you want momentum.
+              <strong>Describe vs. import:</strong> <em>Describe your idea</em> is the
+              fastest start for something new — Uniqus names it and writes the first
+              prompt for you. Use <em>Upload .zip</em> or <em>Clone GitHub</em> when you
+              already have code to edit, run, and (for GitHub) push back.
             </div>
           </section>
 

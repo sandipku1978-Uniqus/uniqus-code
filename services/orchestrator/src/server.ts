@@ -2775,16 +2775,38 @@ async function runSession(
     : null;
   let finalMessage = messageWithRefs;
 
+  // Stream the planner's read-only investigation to the client using the same
+  // events the execute loop emits, so plan mode shows its work instead of
+  // spinning silently.
+  const planSandbox = { rootDir: sandboxDir, vm: vmHandle ?? undefined };
+  const planHooks = {
+    onText: (content: string) => send({ type: "text", content }),
+    onThinking: (content: string) => send({ type: "thinking", content }),
+    onToolCallStarted: (callId: string, name: string) =>
+      send({ type: "tool_call", call_id: callId, name, input: {} }),
+    onToolCall: (callId: string, name: string, input: unknown) =>
+      send({ type: "tool_call", call_id: callId, name, input }),
+    onToolResult: (
+      callId: string,
+      _name: string,
+      _input: unknown,
+      result: string,
+      isError: boolean,
+    ) => send({ type: "tool_result", call_id: callId, result, is_error: isError }),
+  };
+
   if (mode === "plan-then-execute") {
-    const plan = await proposePlan(
-      messageWithRefs,
+    const plan = await proposePlan(messageWithRefs, {
       apiKey,
+      sandbox: planSandbox,
       history,
-      skillsBody,
-      modelChoice,
-      undefined,
+      skills: skillsBody,
       accountPrompt,
-    );
+      modelChoice,
+      projectId,
+      signal,
+      hooks: planHooks,
+    });
     if (signal.aborted) {
       send({ type: "complete", tool_calls: 0, elapsed_ms: Date.now() - start, aborted: true });
       return;
@@ -2812,15 +2834,17 @@ async function runSession(
           // Empty history for the plan call: the live history ends with the
           // assistant's enter_plan_mode tool_use, which would need a paired
           // tool_result; the reason + original message carry the context.
-          const plan = await proposePlan(
-            planPrompt,
+          const plan = await proposePlan(planPrompt, {
             apiKey,
-            [],
-            skillsBody,
-            modelChoice,
-            undefined,
+            sandbox: planSandbox,
+            history: [],
+            skills: skillsBody,
             accountPrompt,
-          );
+            modelChoice,
+            projectId,
+            signal,
+            hooks: planHooks,
+          });
           if (signal.aborted) throw new Error("aborted before plan approval");
           send({ type: "plan_proposed", plan });
           const approved = await awaitPlanApproval();

@@ -829,6 +829,7 @@ export default function ProjectPicker({
                         value={selectedRepo}
                         onChange={(e) => setSelectedRepo(e.target.value)}
                         disabled={creating}
+                        aria-label="GitHub repository to clone"
                         // colorScheme tells the browser to render the native
                         // <option> popup in dark mode. Without it, options
                         // render on a white system background regardless of
@@ -899,6 +900,7 @@ export default function ProjectPicker({
                 <input
                   type="file"
                   accept=".zip,application/zip"
+                  aria-label="Project source .zip file"
                   onChange={(e) => setZipFile(e.target.files?.[0] ?? null)}
                   disabled={creating}
                   style={{ fontSize: 13, color: "var(--text-muted)" }}

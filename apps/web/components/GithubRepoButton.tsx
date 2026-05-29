@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useStore } from "@/lib/store";
 import { createGithubRepoApi, fetchGithubStatus } from "@/lib/api";
+import Modal from "./Modal";
 
 /**
  * Topbar button: create a fresh GitHub repo for this project (always private),
@@ -21,6 +22,9 @@ export default function GithubRepoButton({ projectId }: { projectId: string }) {
   const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Guard against accidental repo creation — confirm before the (irreversible,
+  // outward-facing) create + push.
+  const [confirming, setConfirming] = useState(false);
 
   useEffect(() => {
     let cancel = false;
@@ -77,44 +81,78 @@ export default function GithubRepoButton({ projectId }: { projectId: string }) {
     );
   }
 
+  async function doCreate(): Promise<void> {
+    if (busy || !project) return;
+    setConfirming(false);
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await createGithubRepoApi(projectId);
+      // Optimistically update the project in the store so the next render
+      // shows the linked-repo state without refetching.
+      setProject({
+        ...project,
+        github_repo_url: r.repo_url,
+        github_repo_full_name: r.repo_full_name,
+      });
+      if (r.pushed) {
+        addSystem(`GitHub repo created: ${r.repo_full_name} · pushed initial commit`);
+      } else {
+        addSystem(
+          `GitHub repo created: ${r.repo_full_name} · initial push skipped (${r.push_note ?? "unknown reason"}). ` +
+            `Push from the agent with: git remote add origin ${r.repo_url}.git ; git push -u origin ${r.default_branch}`,
+        );
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      addSystem(`GitHub repo creation failed: ${msg}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <button
-      onClick={async () => {
-        if (busy || !project) return;
-        setBusy(true);
-        setError(null);
-        try {
-          const r = await createGithubRepoApi(projectId);
-          // Optimistically update the project in the store so the next render
-          // shows the linked-repo state without refetching.
-          setProject({
-            ...project,
-            github_repo_url: r.repo_url,
-            github_repo_full_name: r.repo_full_name,
-          });
-          if (r.pushed) {
-            addSystem(`GitHub repo created: ${r.repo_full_name} · pushed initial commit`);
-          } else {
-            addSystem(
-              `GitHub repo created: ${r.repo_full_name} · initial push skipped (${r.push_note ?? "unknown reason"}). ` +
-                `Push from the agent with: git remote add origin ${r.repo_url}.git ; git push -u origin ${r.default_branch}`,
-            );
+    <>
+      <button
+        type="button"
+        onClick={() => !busy && project && setConfirming(true)}
+        disabled={busy || connected === null}
+        className="toggle-btn"
+        title="Create a fresh private GitHub repo for this project + push the initial commit"
+      >
+        <GithubIcon />
+        <span>{busy ? "Creating…" : "Create GitHub repo"}</span>
+      </button>
+
+      {confirming && (
+        <Modal
+          title="Create a GitHub repo?"
+          subtitle={project ? `For project “${project.name}”` : undefined}
+          onClose={() => setConfirming(false)}
+          width={460}
+          footer={
+            <>
+              <span className="modal-status">This can’t be undone from here.</span>
+              <div className="modal-actions">
+                <button type="button" className="btn-ghost" onClick={() => setConfirming(false)}>
+                  Cancel
+                </button>
+                <button type="button" className="btn-primary" onClick={doCreate}>
+                  Create repo
+                </button>
+              </div>
+            </>
           }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          setError(msg);
-          addSystem(`GitHub repo creation failed: ${msg}`);
-        } finally {
-          setBusy(false);
-        }
-      }}
-      disabled={busy || connected === null}
-      className="toggle-btn"
-      title="Create a fresh private GitHub repo for this project + push the initial commit"
-    >
-      <GithubIcon />
-      <span>{busy ? "Creating…" : "Create GitHub repo"}</span>
-    </button>
+        >
+          <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "var(--text-muted)" }}>
+            This creates a new <strong>private</strong> GitHub repository on your connected account
+            and pushes the current project as the initial commit. Use this once per project — if you
+            already have a repo, push to it from the agent instead.
+          </p>
+        </Modal>
+      )}
+    </>
   );
 }
 

@@ -3,7 +3,10 @@ import { TOOLS } from "./tools.js";
 import * as sb from "./sandbox.js";
 import type { Sandbox } from "./sandbox.js";
 import { ensureProjectDeps } from "../ensureDeps.js";
-import { normalizeMessageHistoryInPlace } from "./messageHistory.js";
+import {
+  normalizeMessageHistoryInPlace,
+  pruneStaleImagesInPlace,
+} from "./messageHistory.js";
 import { maybeCompact, type CompactionResult } from "./compact.js";
 import { formatAccountPromptForPrompt, formatSkillsForPrompt, readSkills } from "./skills.js";
 import { isImageAsset, listAssets, readAssetBase64, readAssetText } from "./assets.js";
@@ -27,9 +30,22 @@ const MAX_TOKENS = 16384*2;
 function buildSystemPrompt(
   skillsBody: string | null,
   accountPrompt: string | null,
+  hasWebSearch: boolean,
 ): string {
   const { name: shellName, isUnixLike } = sb.shellInfo();
   const platform = process.platform;
+
+  // Web search is only wired on the Anthropic path (server-side web_search);
+  // the OpenAI/Gemini adapters run function-calling only. Advertising a tool
+  // the model can't actually call makes it reason about the missing tool
+  // ("I don't seem to have web_search"), so the prompt has to match reality.
+  const webSearchToolLine = hasWebSearch
+    ? `- web_search — search the web for current information. Your training data has a fixed cutoff and goes stale fast, so treat ANY "latest / current / newest" fact as suspect: model names and version numbers, framework/library/SDK versions, API signatures, deprecations, pricing, release dates. Use web_search BEFORE writing such facts into code, copy, or config rather than relying on memory — a wrong-but-plausible version is worse than a search. Bias toward searching whenever the task touches fast-moving subjects (AI models, npm/pip packages, cloud APIs). Don't search for things that don't change (language syntax, stable algorithms, generic CSS).`
+    : `- (No web_search / browsing tool is available on this model. You cannot fetch live information — rely on your training knowledge, prefer well-established choices, and explicitly flag anything that may be out of date so the user can confirm.)`;
+
+  const currencyGuidance = hasWebSearch
+    ? `web_search the newest model names and version numbers FIRST, then write those into the code.`
+    : `You have NO web_search tool here, so you cannot verify the current lineup — rely on training knowledge but treat it as possibly stale: prefer well-established names, avoid inventing oddly-specific version numbers, and explicitly flag any model name, version, or price the user should double-check.`;
 
   const platformWarning = isUnixLike
     ? `Shell: ${shellName} (Unix-like — head, tail, grep, sed, awk are available).`
@@ -78,7 +94,7 @@ Tools you have:
 - run_command — short-lived shell commands (default timeout 60s; use 120000–300000 ms for installs/builds). stdin is closed.
 - start_server / stop_server / list_servers / read_server_log — long-running dev servers (Next.js, Flask, Express, etc.). The user sees a live preview when you start one. The tool result includes a "public_url" — quote that exact URL to the user. Do not tell them to use a raw dev-server localhost URL.
 - wait_for_port — wait for a TCP port on localhost.
-- web_search — search the web for current information. Your training data has a fixed cutoff and goes stale fast, so treat ANY "latest / current / newest" fact as suspect: model names and version numbers, framework/library/SDK versions, API signatures, deprecations, pricing, release dates. Use web_search BEFORE writing such facts into code, copy, or config rather than relying on memory — a wrong-but-plausible version is worse than a search. Bias toward searching whenever the task touches fast-moving subjects (AI models, npm/pip packages, cloud APIs). Don't search for things that don't change (language syntax, stable algorithms, generic CSS).
+${webSearchToolLine}
 - enter_plan_mode — when the user requests a large or risky change (new app, multi-file feature, big refactor, schema/data migration) WITHOUT having turned plan mode on, call this BEFORE editing anything. It drafts a plan, shows it to the user to edit/approve, and returns the approved plan for you to execute. Skip it for small, well-understood edits — just make those. Never call it if plan mode is already active.
 - ask_user — pause and ask the user a question when you need their input to proceed. Use it when: you're unsure which technology/framework to use, the user's request is ambiguous enough that two reasonable interpretations would produce very different results, you need a credential or API key, or the user asked you to check with them before a major decision. The user sees the question inline in the chat and can respond with buttons or free text.
 
@@ -111,7 +127,7 @@ Conventions:
 7. Use list_dir or grep to verify state when you're unsure (e.g., after a scaffold) instead of guessing paths.
 8. When the task is complete, briefly summarize what you built, include the public URL if you started a server, and describe how to use it inside Uniqus Code. Do not end by telling the user to run local terminal commands.
 9. File size: write_file content is part of your output token budget (~16k tokens). For files larger than ~500 lines, write a smaller version first then grow it with edit_file or additional write_file calls — do NOT try to dump 1000+ lines in a single tool call, the response will be truncated and the tool input will arrive without the content field. If that happens you'll see "write_file requires 'content' as a string" — split the work and retry.
-10. Currency of facts: when the task names specific products, models, versions, or prices — ESPECIALLY anything about AI/LLM models (benchmark dashboards, model pickers, "compare the latest models" apps) — do NOT trust your training data for the current lineup; it lags reality by months. web_search the newest model names and version numbers FIRST, then write those into the code. Naming a stale model (an old version when a newer one has shipped, or omitting a current flagship) is a failure the user will immediately notice. The same applies to "latest" library versions, framework releases, and API endpoints.${formatAccountPromptForPrompt(accountPrompt)}${formatSkillsForPrompt(skillsBody)}`;
+10. Currency of facts: when the task names specific products, models, versions, or prices — ESPECIALLY anything about AI/LLM models (benchmark dashboards, model pickers, "compare the latest models" apps) — do NOT trust your training data for the current lineup; it lags reality by months. ${currencyGuidance} Naming a stale model (an old version when a newer one has shipped, or omitting a current flagship) is a failure the user will immediately notice. The same applies to "latest" library versions, framework releases, and API endpoints.${formatAccountPromptForPrompt(accountPrompt)}${formatSkillsForPrompt(skillsBody)}`;
 }
 
 export interface LoopHooks {
@@ -241,7 +257,17 @@ export async function runAgentLoop(
   const provider = getProvider(resolved.provider, keys);
   const skillsBody =
     opts.skills !== undefined ? opts.skills : await readSkills(opts.sandbox.rootDir);
-  const systemPrompt = buildSystemPrompt(skillsBody, opts.accountPrompt ?? null);
+  // Web search is wired on Anthropic, OpenAI (Responses built-in), and Gemini
+  // 3.x (googleSearch); Gemini 2.5 can't combine search with function calling.
+  // Tell the prompt the truth for the resolved model so the agent neither
+  // reasons about a missing tool nor skips a search it could have run.
+  const hasWebSearch =
+    resolved.provider !== "google" || /^gemini-3/.test(resolved.model);
+  const systemPrompt = buildSystemPrompt(
+    skillsBody,
+    opts.accountPrompt ?? null,
+    hasWebSearch,
+  );
   const messages = opts.messages ?? [];
   messages.push({ role: "user", content: userMessage });
   normalizeMessageHistoryInPlace(messages);
@@ -263,6 +289,11 @@ export async function runAgentLoop(
       // splice landed adjacent to anything quirky in `messages`.
       normalizeMessageHistoryInPlace(messages);
     }
+
+    // Drop prior-turn screenshots from context (keep the current turn's) so
+    // base64 image blocks don't replay on every iteration / future turn — the
+    // dominant cause of runaway input tokens.
+    pruneStaleImagesInPlace(messages);
 
     // Stream one assistant turn through the resolved provider. The adapter
     // emits text + tool-start hooks as content arrives (so large write_file
@@ -347,7 +378,12 @@ export async function runAgentLoop(
             content: mm.content as any,
           });
         } else {
-          const text = (typeof result === "string" ? result : JSON.stringify(result)) || "(no output)";
+          const raw = (typeof result === "string" ? result : JSON.stringify(result)) || "(no output)";
+          // Cap any single tool result so one huge read_file/grep/log can't
+          // blow past the context window or get re-sent at full size every
+          // iteration. Not every tool truncates at the source (run_command
+          // does, grep/read_file historically didn't), so enforce it here too.
+          const text = truncateToolResultText(raw);
           opts.onToolResult?.(call.id, call.name, call.input, text, false);
           toolResults.push({
             type: "tool_result",
@@ -375,6 +411,20 @@ export async function runAgentLoop(
   );
 }
 
+/**
+ * Hard cap on a single tool result's text (head + tail kept). ~96 KB ≈ 24k
+ * tokens — generous for real output but a firm ceiling so one oversized
+ * read_file/grep/log can't overflow the context window or balloon the input
+ * cost when replayed across the loop's iterations.
+ */
+const MAX_TOOL_RESULT_CHARS = 96 * 1024;
+export function truncateToolResultText(s: string): string {
+  if (s.length <= MAX_TOOL_RESULT_CHARS) return s;
+  const half = Math.floor(MAX_TOOL_RESULT_CHARS / 2);
+  const dropped = s.length - half * 2;
+  return `${s.slice(0, half)}\n\n[... truncated ${dropped} characters — narrow your read/grep, or read the file in ranges ...]\n\n${s.slice(-half)}`;
+}
+
 function isAbortError(err: unknown): boolean {
   if (err instanceof Error) {
     return err.name === "AbortError" || /aborted/i.test(err.message);
@@ -382,7 +432,7 @@ function isAbortError(err: unknown): boolean {
   return false;
 }
 
-async function executeTool(
+export async function executeTool(
   sandbox: Sandbox,
   name: string,
   input: unknown,

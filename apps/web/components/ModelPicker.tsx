@@ -109,6 +109,7 @@ function CompactPicker() {
           <PickerBody
             model={curModel}
             thinking={curThinking}
+            flyout
             onPickModel={(m) => {
               setModel(m);
               setOpen(false);
@@ -163,20 +164,56 @@ function SettingsPicker() {
 
 // ── Shared body ─────────────────────────────────────────────────────────────
 
+function ModelList({
+  model,
+  onPick,
+}: {
+  model: string;
+  onPick: (m: string) => void;
+}) {
+  return (
+    <>
+      {PROVIDER_ORDER.map((provider) => {
+        const models = MODEL_CATALOG.filter((m) => m.provider === provider);
+        if (models.length === 0) return null;
+        return (
+          <div key={provider} style={{ display: "grid", gap: 4 }}>
+            <div className="label-micro" style={{ marginTop: 4 }}>
+              {PROVIDER_LABEL[provider]}
+            </div>
+            {models.map((m) => (
+              <OptionRow
+                key={m.id}
+                label={m.label}
+                sub={m.description}
+                active={model === m.id}
+                onClick={() => onPick(m.id)}
+              />
+            ))}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 function PickerBody({
   model,
   thinking,
   onPickModel,
   onPickThinking,
+  flyout = false,
 }: {
   model: string;
   thinking: ThinkingEffort;
   onPickModel: (m: string) => void;
   onPickThinking: (t: ThinkingEffort) => void;
+  /** Compact (composer) opens "More models" as a side flyout; settings inlines it. */
+  flyout?: boolean;
 }) {
-  // Auto-expand the full list when a specific model is already chosen, so the
-  // active one is visible without an extra click.
-  const [showAll, setShowAll] = useState(model !== "auto");
+  // Inline mode: auto-expand the list when a specific model is already chosen.
+  const [showInline, setShowInline] = useState(!flyout && model !== "auto");
+  const [flyoutOpen, setFlyoutOpen] = useState(false);
 
   return (
     <div style={{ display: "grid", gap: 8, minWidth: 248 }}>
@@ -189,41 +226,45 @@ function PickerBody({
         onClick={() => onPickModel("auto")}
       />
 
-      <button
-        type="button"
-        className="model-picker-more"
-        onClick={() => setShowAll((s) => !s)}
-        aria-expanded={showAll ? "true" : "false"}
-      >
-        {showAll ? "Hide models" : "More models"}
-        <span style={{ fontSize: 9, opacity: 0.6 }}>{showAll ? "▴" : "▾"}</span>
-      </button>
-
-      {showAll &&
-        PROVIDER_ORDER.map((provider) => {
-          const models = MODEL_CATALOG.filter((m) => m.provider === provider);
-          if (models.length === 0) return null;
-          return (
-            <div key={provider} style={{ display: "grid", gap: 4 }}>
-              <div className="label-micro" style={{ marginTop: 4 }}>
-                {PROVIDER_LABEL[provider]}
-              </div>
-              {models.map((m) => (
-                <OptionRow
-                  key={m.id}
-                  label={m.label}
-                  sub={m.description}
-                  active={model === m.id}
-                  onClick={() => onPickModel(m.id)}
-                />
-              ))}
+      {flyout ? (
+        <div
+          className="model-picker-more-wrap"
+          onMouseEnter={() => setFlyoutOpen(true)}
+          onMouseLeave={() => setFlyoutOpen(false)}
+        >
+          <button
+            type="button"
+            className="model-picker-more"
+            data-open={flyoutOpen ? "true" : "false"}
+            onClick={() => setFlyoutOpen((o) => !o)}
+            aria-haspopup="true"
+            aria-expanded={flyoutOpen ? "true" : "false"}
+          >
+            <span>More models</span>
+            <span style={{ fontSize: 9, opacity: 0.6 }}>▸</span>
+          </button>
+          {flyoutOpen && (
+            <div className="model-picker-flyout" role="menu">
+              <ModelList model={model} onPick={onPickModel} />
             </div>
-          );
-        })}
+          )}
+        </div>
+      ) : (
+        <>
+          <button
+            type="button"
+            className="model-picker-more"
+            onClick={() => setShowInline((s) => !s)}
+            aria-expanded={showInline ? "true" : "false"}
+          >
+            <span>{showInline ? "Hide models" : "More models"}</span>
+            <span style={{ fontSize: 9, opacity: 0.6 }}>{showInline ? "▴" : "▾"}</span>
+          </button>
+          {showInline && <ModelList model={model} onPick={onPickModel} />}
+        </>
+      )}
 
-      <div
-        style={{ borderTop: "1px solid var(--border-default)", margin: "4px 0" }}
-      />
+      <div style={{ borderTop: "1px solid var(--border-default)", margin: "4px 0" }} />
 
       <div className="label-micro">Thinking effort</div>
       <Segmented value={thinking} options={THINKING_OPTIONS} onChange={onPickThinking} />
