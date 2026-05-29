@@ -42,6 +42,8 @@ export default function Workspace({
   // fire on it would suppress the brief on every brand-new project.
   const hasHistory = useStore((s) => s.chat.some((i) => i.kind !== "system"));
   const mode = useStore((s) => s.mode);
+  const modeTouched = useStore((s) => s.modeTouched);
+  const setMode = useStore((s) => s.setMode);
   const addUserMessage = useStore((s) => s.addUserMessage);
   const setBusy = useStore((s) => s.setBusy);
   // account_type arrives on the WS session_started event. Guests get full
@@ -67,13 +69,45 @@ export default function Workspace({
     return () => clearInterval(t);
   }, []);
 
+  // First-turn plan-mode default (#2a). A brand-new project (no real history)
+  // opens with plan mode ON for its first turn; once that turn's message is
+  // sent it falls back to execute-only. A manual toggle (modeTouched) opts out
+  // of both behaviors. Refs are reset per project below.
+  const firstTurnDecidedRef = useRef(false);
+  const sentFirstTurnRef = useRef(false);
+  const [firstTurnModeReady, setFirstTurnModeReady] = useState(false);
+
   useEffect(() => {
     reset();
+    firstTurnDecidedRef.current = false;
+    sentFirstTurnRef.current = false;
+    setFirstTurnModeReady(false);
     connect(projectId, sessionParam);
     return () => {
       disconnect();
     };
   }, [projectId, sessionParam, reset]);
+
+  // Decide the first-turn mode once the session is ready. Runs before the brief
+  // auto-fire below (which waits on firstTurnModeReady) so the brief is sent
+  // with the resolved mode, not the stale default.
+  useEffect(() => {
+    if (!connected || !project) return;
+    if (firstTurnDecidedRef.current) return;
+    firstTurnDecidedRef.current = true;
+    if (!hasHistory && !modeTouched) {
+      setMode("plan-then-execute");
+    }
+    setFirstTurnModeReady(true);
+  }, [connected, project, hasHistory, modeTouched, setMode]);
+
+  // After the first real message exists, default subsequent turns back to
+  // execute-only (unless the user explicitly chose a mode).
+  useEffect(() => {
+    if (!hasHistory || sentFirstTurnRef.current) return;
+    sentFirstTurnRef.current = true;
+    if (!modeTouched) setMode("execute-only");
+  }, [hasHistory, modeTouched, setMode]);
 
   // One-sentence project creation: the picker passes the brief through
   // ?brief=…; once the WS is up, the project loaded, and the chat is
@@ -83,6 +117,10 @@ export default function Workspace({
   useEffect(() => {
     if (!briefParam) return;
     if (!connected || !project) return;
+    // Wait until the first-turn mode is resolved so the brief fires with the
+    // intended mode (plan-then-execute on a new project) rather than the stale
+    // default.
+    if (!firstTurnModeReady) return;
     if (hasHistory) {
       // History exists — strip the param without firing. Avoids
       // surprise-re-running an old brief on re-open.
@@ -106,6 +144,7 @@ export default function Workspace({
     connected,
     project,
     hasHistory,
+    firstTurnModeReady,
     mode,
     addUserMessage,
     setBusy,

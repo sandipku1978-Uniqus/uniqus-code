@@ -266,9 +266,18 @@ code, pre, .mono {
   color: var(--text-primary);
   font-size: 13px;
   line-height: 1.55;
+  /* `.msg-body` is `white-space: pre-wrap` so plain user text keeps its
+     newlines. The assistant's markdown, though, is structured HTML — letting
+     it inherit pre-wrap makes every source newline between blocks render as an
+     extra blank line on top of the normal block margins (the "lots of space
+     between text" bug). Reset to normal so the CSS rhythm below is what shows. */
+  white-space: normal;
 }
 .md p { margin: 0 0 0.6em 0; }
 .md p:last-child { margin-bottom: 0; }
+.md p:empty { display: none; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
 .md h1, .md h2, .md h3, .md h4 {
   font-weight: 600;
   margin: 0.8em 0 0.4em;
@@ -427,8 +436,25 @@ code, pre, .mono {
    Marketing page
    ========================================================================== */
 .marketing-shell { width: 100%; }
-.hero { padding: 140px 32px 96px; overflow: hidden; }
-.hero-inner { max-width: 960px; margin: 0 auto; }
+.hero { padding: 140px 32px 96px; overflow: hidden; position: relative; isolation: isolate; }
+/* Brand radial glow behind the hero copy — same purple→magenta language as the
+   dashboard hero, for consistency across surfaces. */
+.hero::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  left: 50%;
+  top: 30%;
+  transform: translate(-50%, -50%);
+  width: min(1100px, 100%);
+  height: 640px;
+  background:
+    radial-gradient(60% 60% at 50% 40%, rgba(178, 30, 125, 0.22), transparent 70%),
+    radial-gradient(70% 70% at 35% 55%, rgba(72, 40, 121, 0.22), transparent 72%);
+  filter: blur(44px);
+  pointer-events: none;
+}
+.hero-inner { max-width: 960px; margin: 0 auto; position: relative; }
 .hero h1 {
   font-size: clamp(40px, 5vw, 60px);
   line-height: 1.05;
@@ -664,7 +690,12 @@ section.band .sub {
 .dash-shell {
   display: grid;
   grid-template-columns: 240px 1fr;
-  min-height: calc(100vh - 64px);
+  /* Fixed to the viewport (not min-height) so the page itself doesn't grow
+     taller than the screen. `.dash-main` scrolls internally instead — which
+     keeps the sidebar full-height and its bottom-pinned `.usage` card inside
+     the visible frame instead of below the fold. */
+  height: calc(100vh - 64px);
+  overflow: hidden;
 }
 .dash-side {
   border-right: 1px solid var(--border-default);
@@ -672,6 +703,9 @@ section.band .sub {
   background: #0e0e14;
   display: flex;
   flex-direction: column;
+  /* Long nav lists scroll within the sidebar without pushing the usage card
+     (margin-top:auto) out of view. */
+  overflow-y: auto;
 }
 .dash-side .group { margin-bottom: 28px; }
 .dash-side .nav-item {
@@ -684,6 +718,13 @@ section.band .sub {
   cursor: pointer;
   transition: all var(--dur-base) ease;
   margin-bottom: 2px;
+  text-decoration: none;
+  /* nav-item is used on <button> and <a> alike; normalize the link styling */
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  font-family: inherit;
 }
 .dash-side .nav-item:hover { background: var(--bg-surface-hover); color: var(--text-primary); }
 .dash-side .nav-item.soon {
@@ -726,7 +767,7 @@ section.band .sub {
 .dash-side .usage .bar { height: 4px; background: var(--bg-surface-active); border-radius: 2px; overflow: hidden; margin-top: 8px; }
 .dash-side .usage .bar .fill { height: 100%; background: var(--text-muted); }
 
-.dash-main { padding: 32px 40px 64px; }
+.dash-main { padding: 32px 40px 64px; overflow-y: auto; }
 .pagehead {
   display: flex; align-items: flex-end; justify-content: space-between;
   margin-bottom: 32px;
@@ -750,7 +791,15 @@ section.band .sub {
   border-radius: var(--radius-md);
   padding: 14px 16px;
   display: flex; align-items: center; gap: 12px;
+  width: 100%;
+  box-sizing: border-box;
 }
+/* Make every direct field/column inside the form span the row. Guards against
+   a single flex child collapsing to its content width and leaving dead space
+   to the right of the composer. */
+.newproj-form > .newproj-blank,
+.newproj-form > input,
+.newproj-form > textarea { flex: 1 1 auto; width: 100%; min-width: 0; }
 .newproj-form input {
   background: transparent; border: 0; outline: none;
   color: var(--text-primary); flex: 1; font-size: 14px;
@@ -2099,4 +2148,299 @@ section.band .sub {
   margin-top: 24px;
   font-size: 11px;
   color: var(--text-dim);
+}
+
+/* ==========================================================================
+   Dashboard hero (new-project)
+   ========================================================================== */
+.dash-hero {
+  position: relative;
+  isolation: isolate;
+  padding: 72px 24px 44px;
+  text-align: center;
+  margin-bottom: 8px;
+}
+/* Brand radial glow behind the composer — purple→magenta, soft and low. */
+.dash-hero::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  left: 50%;
+  top: 46%;
+  transform: translate(-50%, -50%);
+  width: min(960px, 96%);
+  height: 560px;
+  background:
+    radial-gradient(60% 60% at 50% 45%, rgba(178, 30, 125, 0.30), transparent 70%),
+    radial-gradient(70% 70% at 38% 60%, rgba(72, 40, 121, 0.28), transparent 72%);
+  filter: blur(36px);
+  pointer-events: none;
+  opacity: 0.9;
+}
+.dash-hero h1 {
+  font-size: clamp(28px, 3.4vw, 44px);
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  line-height: 1.1;
+  margin: 0 0 10px;
+}
+.dash-hero h1 .grad {
+  background: var(--brand-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.dash-hero .lede {
+  color: var(--text-muted);
+  font-size: 15px;
+  margin: 0 0 26px;
+}
+.dash-hero-card {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+/* Centered segmented tab control with a gradient-filled active pill. */
+.dash-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  margin: 0 0 16px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+}
+.dash-tabs button {
+  padding: 7px 15px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: all var(--dur-base) ease;
+  font-family: inherit;
+}
+.dash-tabs button[aria-selected="true"] {
+  background: var(--brand-gradient);
+  color: #fff;
+}
+.dash-tabs button:hover:not([aria-selected="true"]) { color: var(--text-primary); }
+
+/* The composer gets a prominent, elevated treatment inside the hero, with a
+   magenta focus ring that picks up the brand gradient. */
+.dash-hero .newproj-form {
+  border-radius: 16px;
+  background: var(--bg-surface);
+  box-shadow: 0 10px 44px rgba(0, 0, 0, 0.45);
+  transition: border-color var(--dur-base) ease, box-shadow var(--dur-base) ease;
+  text-align: left;
+}
+.dash-hero .newproj-form:focus-within {
+  border-color: var(--brand-magenta);
+  box-shadow: 0 10px 44px rgba(0, 0, 0, 0.45), 0 0 0 3px rgba(178, 30, 125, 0.20);
+}
+.dash-hero .newproj-blank textarea,
+.dash-hero .newproj-blank input {
+  background: transparent;
+  border: 0;
+  width: 100%;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: inherit;
+  padding: 8px 4px;
+}
+.dash-hero .newproj-blank textarea:focus,
+.dash-hero .newproj-blank input:focus { outline: none; }
+.dash-hero .newproj-blank textarea::placeholder,
+.dash-hero .newproj-blank input::placeholder { color: var(--text-muted); }
+.dash-hero .newproj-extra { text-align: left; max-width: 720px; margin-left: auto; margin-right: auto; }
+
+/* Example-prompt chips + starter-template cards */
+.dash-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 18px;
+}
+.dash-chip {
+  border: 1px solid var(--border-default);
+  background: rgba(22, 22, 30, 0.6);
+  color: var(--text-muted);
+  border-radius: var(--radius-full);
+  padding: 7px 14px;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: all var(--dur-base) ease;
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: inherit;
+}
+.dash-chip:hover {
+  color: var(--text-primary);
+  border-color: var(--brand-magenta);
+  background: var(--bg-surface-hover);
+}
+
+.starter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.starter-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  padding: 16px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  cursor: pointer;
+  transition: all var(--dur-base) ease;
+  font-family: inherit;
+}
+.starter-card:hover { border-color: var(--brand-magenta); background: var(--bg-surface-hover); transform: translateY(-1px); }
+.starter-card .ic { font-size: 20px; }
+.starter-card .t { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.starter-card .d { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+
+/* Small chips on the home project tiles (live / repo) */
+.tile-chips { display: inline-flex; gap: 6px; align-items: center; }
+.tile-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px;
+  font-family: var(--font-mono-stack);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+.tile-chip.live { color: var(--conf-high); }
+
+/* Usage card upgrade CTA */
+.dash-side .usage .upgrade {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  text-align: center;
+  padding: 7px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface-active);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: default;
+}
+
+/* ==========================================================================
+   Docs / Guide + Settings pages
+   ========================================================================== */
+.doc-shell {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 820px);
+  gap: 48px;
+  justify-content: center;
+  padding: 40px 32px 96px;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .doc-shell { grid-template-columns: 1fr; gap: 24px; padding: 24px 20px 64px; }
+  .doc-toc { display: none; }
+}
+.doc-toc {
+  position: sticky;
+  top: 88px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.doc-toc .label-micro { margin-bottom: 6px; padding: 0; }
+.doc-toc a {
+  color: var(--text-muted);
+  font-size: 12.5px;
+  text-decoration: none;
+  padding: 3px 0;
+  border-left: 2px solid transparent;
+  padding-left: 10px;
+  margin-left: -12px;
+  transition: color var(--dur-base) ease, border-color var(--dur-base) ease;
+}
+.doc-toc a:hover { color: var(--text-primary); border-color: var(--border-default); }
+
+.doc { color: var(--text-primary); line-height: 1.65; }
+.doc h1 { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 10px; }
+.doc .doc-lede { color: var(--text-muted); font-size: 15px; margin: 0 0 8px; }
+.doc section { margin-top: 36px; scroll-margin-top: 88px; }
+.doc h2 { font-size: 18px; font-weight: 600; margin: 0 0 10px; }
+.doc p { font-size: 14px; color: var(--text-secondary, var(--text-primary)); margin: 0 0 12px; }
+.doc ul { margin: 0 0 14px; padding-left: 20px; }
+.doc li { font-size: 14px; margin: 6px 0; }
+.doc code {
+  font-family: var(--font-mono-stack);
+  font-size: 12.5px;
+  background: var(--bg-surface-active);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.doc kbd {
+  font-family: var(--font-mono-stack);
+  font-size: 11px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.doc .doc-tip {
+  border-left: 3px solid var(--brand-magenta);
+  background: var(--bg-surface);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.doc .doc-foot { margin-top: 48px; font-size: 13px; }
+.doc .doc-foot a, .doc a { color: var(--brand-magenta); text-decoration: none; }
+.doc .doc-foot a:hover { text-decoration: underline; }
+
+/* Settings */
+.settings-wrap { max-width: 760px; margin: 0 auto; padding: 40px 32px 96px; }
+.settings-wrap h1 { font-size: 24px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.02em; }
+.settings-wrap .settings-lede { color: var(--text-muted); font-size: 14px; margin: 0 0 28px; }
+.settings-card {
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  border-radius: var(--radius-lg);
+  padding: 20px 22px;
+  margin-bottom: 16px;
+}
+.settings-card h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+.settings-card .settings-card-sub { color: var(--text-muted); font-size: 12.5px; margin: 0 0 16px; }
+.settings-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border-default);
+  font-size: 13px;
+}
+.settings-row:first-of-type { border-top: 0; }
+.settings-row .k { color: var(--text-muted); }
+.settings-row .v { color: var(--text-primary); font-family: var(--font-mono-stack); font-size: 12.5px; }
+.settings-card.soon { opacity: 0.7; }
+.settings-soon-badge {
+  display: inline-block;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-left: 8px;
+  vertical-align: middle;
 }

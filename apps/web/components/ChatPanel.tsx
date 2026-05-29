@@ -18,7 +18,7 @@ export default function ChatPanel() {
   const chat = useStore((s) => s.chat);
   const busy = useStore((s) => s.busy);
   const mode = useStore((s) => s.mode);
-  const setMode = useStore((s) => s.setMode);
+  const setModeManual = useStore((s) => s.setModeManual);
   const addUserMessage = useStore((s) => s.addUserMessage);
   const addSystem = useStore((s) => s.addSystem);
   const setBusy = useStore((s) => s.setBusy);
@@ -574,10 +574,10 @@ export default function ChatPanel() {
             <button
               type="button"
               onClick={() =>
-                setMode(mode === "plan-then-execute" ? "execute-only" : "plan-then-execute")
+                setModeManual(mode === "plan-then-execute" ? "execute-only" : "plan-then-execute")
               }
               className={`plan-toggle ${mode === "plan-then-execute" ? "on" : ""}`}
-              title="Plan mode — Uniqus proposes a plan you can edit before it executes"
+              title="Plan mode — Uniqus proposes a plan you can edit before it executes. On by default for a brand-new project's first turn."
             >
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <polyline points="20 6 9 17 4 12" />

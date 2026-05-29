@@ -2,6 +2,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { safeChildEnv } from "./safeEnv.js";
+import * as sb from "./agent/sandbox.js";
+import type { Sandbox } from "./agent/sandbox.js";
 
 /**
  * Whether the project's dependencies need to be installed before its dev
@@ -121,4 +123,133 @@ async function exists(p: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+// ── Unified, VM-aware, serialized installer ──────────────────────────────────
+
+export interface EnsureDepsResult {
+  /** Whether we actually ran an install (false = nothing to do / already present). */
+  attempted: boolean;
+  /** False only when an attempted install exited non-zero. */
+  ok: boolean;
+  manager: "npm" | "pnpm" | "yarn" | null;
+  durationMs: number;
+  stderr: string;
+}
+
+const installChains = new Map<string, Promise<unknown>>();
+
+/**
+ * Serialize installs per project. Concurrent `npm install` runs in the SAME
+ * directory race each other — npm prunes "extraneous" packages mid-flight, so
+ * two installs firing at once (e.g. the session-start auto-install and an
+ * agent-issued `npm install`) can leave node_modules half-deleted. That's the
+ * "node_modules disappeared" symptom. We funnel every install for a project
+ * through one chain so they run back-to-back instead of stomping each other.
+ */
+function withInstallLock<T>(projectId: string | null, fn: () => Promise<T>): Promise<T> {
+  if (!projectId) return fn();
+  const prev = installChains.get(projectId) ?? Promise.resolve();
+  // Run fn whether or not the previous link settled cleanly.
+  const next = prev.then(fn, fn);
+  // Store a non-rejecting tail so the next waiter never inherits a rejection.
+  installChains.set(
+    projectId,
+    next.then(
+      () => {},
+      () => {},
+    ),
+  );
+  return next;
+}
+
+/**
+ * Ensure the project's dependencies are installed wherever its dev server will
+ * actually run. In Firecracker mode that's INSIDE the VM (a separate
+ * filesystem from the orchestrator host) — installing on the host there is the
+ * "node_modules disappeared" footgun, since the host copy is invisible to the
+ * VM. We dispatch through {@link sb.runCommand}, which routes to the VM when
+ * `sandbox.vm` is set and to the host otherwise. All installs are serialized
+ * per project via {@link withInstallLock}.
+ */
+export function ensureProjectDeps(
+  sandbox: Sandbox,
+  projectId: string | null,
+  opts: {
+    signal?: AbortSignal;
+    onStderr?: (s: string) => void;
+    /** Fired with the chosen manager right before the install command runs. */
+    onStart?: (manager: "npm" | "pnpm" | "yarn") => void;
+  } = {},
+): Promise<EnsureDepsResult> {
+  return withInstallLock(projectId, () => ensureDepsOnce(sandbox, opts));
+}
+
+async function ensureDepsOnce(
+  sandbox: Sandbox,
+  opts: {
+    signal?: AbortSignal;
+    onStderr?: (s: string) => void;
+    onStart?: (manager: "npm" | "pnpm" | "yarn") => void;
+  },
+): Promise<EnsureDepsResult> {
+  const start = Date.now();
+  const none = (): EnsureDepsResult => ({
+    attempted: false,
+    ok: true,
+    manager: null,
+    durationMs: Date.now() - start,
+    stderr: "",
+  });
+
+  if (sandbox.vm) {
+    // Probe the VM filesystem: no package.json → nothing to do; a non-empty
+    // node_modules → already installed; otherwise pick the manager from the
+    // lockfile (mirrors needsInstall, but inside the guest).
+    const probe = await sb.runCommand(
+      sandbox,
+      "if [ ! -f package.json ]; then echo none; " +
+        'elif [ -d node_modules ] && [ -n "$(ls -A node_modules 2>/dev/null)" ]; then echo present; ' +
+        "elif [ -f pnpm-lock.yaml ]; then echo pnpm; " +
+        "elif [ -f yarn.lock ]; then echo yarn; else echo npm; fi",
+      30_000,
+      opts.signal,
+    );
+    const out = probe.stdout;
+    const manager: "npm" | "pnpm" | "yarn" | null = out.includes("pnpm")
+      ? "pnpm"
+      : out.includes("yarn")
+        ? "yarn"
+        : out.includes("npm")
+          ? "npm"
+          : null;
+    if (!manager) return none();
+    opts.onStart?.(manager);
+    const args =
+      manager === "pnpm"
+        ? "install --prefer-offline"
+        : manager === "yarn"
+          ? "install --frozen-lockfile"
+          : "install --no-audit --no-fund --prefer-offline";
+    const r = await sb.runCommand(sandbox, `${manager} ${args}`, 5 * 60_000, opts.signal);
+    return {
+      attempted: true,
+      ok: r.exitCode === 0,
+      manager,
+      durationMs: Date.now() - start,
+      stderr: r.stderr || r.stdout,
+    };
+  }
+
+  const manager = await needsInstall(sandbox.rootDir);
+  if (!manager) return none();
+  opts.onStart?.(manager);
+  const result = await runInstall(sandbox.rootDir, manager, opts.onStderr, opts.signal);
+  return {
+    attempted: true,
+    ok: result.ok,
+    manager,
+    durationMs: result.durationMs,
+    stderr: result.stderr,
+  };
 }

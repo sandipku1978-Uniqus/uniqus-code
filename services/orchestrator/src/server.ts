@@ -63,10 +63,9 @@ import {
   startServer as sandboxStartServer,
   stopServer as sandboxStopServer,
   writeFile as sandboxWriteFile,
-  runCommand as sandboxRunCommand,
 } from "./agent/sandbox.js";
 import { readRunConfig, writeRunConfig, detectRunConfig } from "./runConfig.js";
-import { needsInstall, runInstall } from "./ensureDeps.js";
+import { ensureProjectDeps } from "./ensureDeps.js";
 import {
   upsertUser,
   getUserById,
@@ -1414,76 +1413,33 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       }
     }
 
-    // node_modules disappears every Railway redeploy because Storage sync
-    // skips it (size). If we have a package.json with no node_modules, npm
-    // run dev will fail with "<binary>: not found". Install first.
+    // node_modules disappears every redeploy / fresh VM because Storage sync
+    // skips it (size). If we have a package.json with no node_modules, the dev
+    // server fails with "<binary>: not found". Install first.
     //
-    // In Firecracker mode the install must happen inside the VM (where the
-    // dev server will run); otherwise we'd install into the orchestrator
-    // host's filesystem and the VM would still be missing modules. Both
-    // paths use the unified sandboxRunCommand which dispatches through the
-    // VM when a handle is set.
-    let installer = await needsInstall(dest);
-    // needsInstall() inspects the HOST sandbox dir, but in Firecracker mode the
-    // dev server runs INSIDE the VM — a separate filesystem. A stale host
-    // node_modules (or a VM that cold-booted without one, e.g. after an
-    // orchestrator restart) makes the host check lie: the install gets skipped
-    // and `npm run dev` then fails with "<binary>: not found". When we have a
-    // VM, probe IT for a package.json and install there regardless of host
-    // state. (Storage sync skips node_modules, so the VM never starts with it.)
-    if (runVm && !installer) {
-      try {
-        const probe = await sandboxRunCommand(
-          { rootDir: dest, vm: runVm },
-          "[ -f package.json ] && { [ -f pnpm-lock.yaml ] && echo pnpm || { [ -f yarn.lock ] && echo yarn || echo npm; }; } || echo none",
-          30_000,
-        );
-        const out = probe.stdout;
-        installer = out.includes("pnpm")
-          ? "pnpm"
-          : out.includes("yarn")
-            ? "yarn"
-            : out.includes("npm")
-              ? "npm"
-              : null;
-      } catch (err) {
-        console.error(`[run ${projectId}] VM dependency probe failed:`, err);
-      }
-    }
-    if (installer) {
-      broadcastToProject(projectId, {
-        type: "text",
-        content: `\n[run] installing dependencies (${installer} install) — this can take a minute…\n`,
+    // ensureProjectDeps dispatches to the right filesystem: in Firecracker
+    // mode it probes + installs INSIDE the VM (where the dev server runs),
+    // otherwise on the host. It also serializes installs per project so this
+    // Run click can't race the session-start auto-install or an agent-issued
+    // `npm install` (concurrent installs corrupt node_modules).
+    const dep = await ensureProjectDeps({ rootDir: dest, vm: runVm }, projectId, {
+      onStart: (mgr) =>
+        broadcastToProject(projectId, {
+          type: "text",
+          content: `\n[run] installing dependencies (${mgr} install) — this can take a minute…\n`,
+        }),
+    });
+    if (dep.attempted && !dep.ok) {
+      return json(res, 400, {
+        error: `${dep.manager} install failed (${Math.round(dep.durationMs / 1000)}s)${
+          runVm ? " in VM" : ""
+        }:\n${dep.stderr.slice(-2000)}`,
       });
-      const installStart = Date.now();
-      if (runVm) {
-        const args =
-          installer === "pnpm"
-            ? "install --prefer-offline"
-            : installer === "yarn"
-              ? "install --frozen-lockfile"
-              : "install --no-audit --no-fund --prefer-offline";
-        const r = await sandboxRunCommand(
-          { rootDir: dest, vm: runVm },
-          `${installer} ${args}`,
-          5 * 60_000,
-        );
-        if (r.exitCode !== 0) {
-          return json(res, 400, {
-            error: `${installer} install failed (${Math.round((Date.now() - installStart) / 1000)}s) in VM:\n${(r.stderr || r.stdout).slice(-2000)}`,
-          });
-        }
-      } else {
-        const result = await runInstall(dest, installer);
-        if (!result.ok) {
-          return json(res, 400, {
-            error: `${installer} install failed (${Math.round(result.durationMs / 1000)}s):\n${result.stderr.slice(-2000)}`,
-          });
-        }
-      }
+    }
+    if (dep.attempted) {
       broadcastToProject(projectId, {
         type: "text",
-        content: `[run] dependencies installed in ${((Date.now() - installStart) / 1000).toFixed(1)}s\n`,
+        content: `[run] dependencies installed in ${(dep.durationMs / 1000).toFixed(1)}s\n`,
       });
     }
 
@@ -2501,32 +2457,34 @@ async function maybeAutoInstall(
   sandboxDir: string,
   send: Sender,
 ): Promise<void> {
+  // In Firecracker mode the dev server runs inside the VM (booted lazily on
+  // the first user message), not on this host — a host-side install here would
+  // land in the wrong filesystem and just waste a minute. The VM gets its deps
+  // from start_server / the Run button, both of which install inside the VM.
+  if (isFirecrackerEnabled()) return;
   if (installInFlight.has(projectId)) return;
-  let manager;
-  try {
-    manager = await needsInstall(sandboxDir);
-  } catch {
-    return;
-  }
-  if (!manager) return;
   installInFlight.add(projectId);
-  send({
-    type: "text",
-    content: `\n[setup] installing dependencies (${manager} install) — Railway redeploys wipe node_modules, this only runs once per session…\n`,
-  });
   try {
-    const result = await runInstall(sandboxDir, manager);
-    if (result.ok) {
+    const dep = await ensureProjectDeps({ rootDir: sandboxDir }, projectId, {
+      onStart: (mgr) =>
+        send({
+          type: "text",
+          content: `\n[setup] installing dependencies (${mgr} install) — redeploys wipe node_modules, this only runs once per session…\n`,
+        }),
+    });
+    if (dep.attempted && dep.ok) {
       send({
         type: "text",
-        content: `[setup] dependencies installed in ${(result.durationMs / 1000).toFixed(1)}s — Run is ready.\n`,
+        content: `[setup] dependencies installed in ${(dep.durationMs / 1000).toFixed(1)}s — Run is ready.\n`,
       });
-    } else {
+    } else if (dep.attempted) {
       send({
         type: "text",
-        content: `[setup] ${manager} install FAILED in ${(result.durationMs / 1000).toFixed(1)}s — ask the agent to fix package.json:\n${result.stderr.slice(-1500)}\n`,
+        content: `[setup] ${dep.manager} install FAILED in ${(dep.durationMs / 1000).toFixed(1)}s — ask the agent to fix package.json:\n${dep.stderr.slice(-1500)}\n`,
       });
     }
+  } catch {
+    // best-effort — a failed probe shouldn't break session startup
   } finally {
     installInFlight.delete(projectId);
   }
@@ -2720,6 +2678,28 @@ async function runSession(
     finalMessage = `${messageWithRefs}\n\n${formatPlanForExecution(approved)}`;
   }
 
+  // Agent-initiated plan mode (#2b / enter_plan_mode tool). Only offered when
+  // the user did NOT already enable plan mode — otherwise we'd plan twice. The
+  // agent calls the tool mid-loop when it judges the change large/risky; we
+  // draft a plan from its `reason`, surface it for approval (same UI path as
+  // user-initiated plan mode), and hand the approved plan back to the loop.
+  const requestPlan =
+    mode === "plan-then-execute"
+      ? undefined
+      : async (reason: string): Promise<string> => {
+          const planPrompt = `${messageWithRefs}\n\nThe engineer chose to plan before making changes. Their stated intent and approach:\n${reason}\n\nProduce a structured implementation plan for this work.`;
+          // Empty history for the plan call: the live history ends with the
+          // assistant's enter_plan_mode tool_use, which would need a paired
+          // tool_result; the reason + original message carry the context.
+          const plan = await proposePlan(planPrompt, apiKey, [], skillsBody);
+          if (signal.aborted) throw new Error("aborted before plan approval");
+          send({ type: "plan_proposed", plan });
+          const approved = await awaitPlanApproval();
+          if (signal.aborted) throw new Error("aborted during plan approval");
+          send({ type: "plan_running" });
+          return formatPlanForExecution(approved);
+        };
+
   const turnStartLength = history.length;
 
   // Coalesce storage_synced broadcasts so we don't flood the UI on
@@ -2744,6 +2724,7 @@ async function runSession(
     userId,
     onTodoWrite: (items) => broadcastToProject(projectId, { type: "todos_updated", todos: items }),
     requestUserAnswer: registerUserAnswer,
+    requestPlan,
     onCompacted: (info) =>
       send({
         type: "history_compacted",

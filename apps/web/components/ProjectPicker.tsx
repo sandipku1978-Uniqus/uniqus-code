@@ -27,28 +27,50 @@ const ICON_CHOICES = [
   "💼", "🛠️", "🧪", "📝", "📦", "🎯",
 ];
 
-/**
- * Auto-derive a short display name from a free-form brief. Takes the
- * first ~5 words, lowercases, and joins with hyphens — close to how a
- * dev would name a repo. Caps at 40 chars; if the brief is too short
- * to derive anything, falls back to "untitled-project-<short id>".
- */
-function deriveNameFromBrief(brief: string): string {
-  const words = brief
-    .toLowerCase()
-    .replace(/[^\w\s-]+/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 0 && !STOP_WORDS.has(w));
-  const head = words.slice(0, 5).join("-");
-  const trimmed = head.slice(0, 40).replace(/-+$/, "");
-  if (trimmed.length >= 3) return trimmed;
-  return `untitled-${Math.random().toString(36).slice(2, 7)}`;
-}
+/** Short example prompts shown as chips under the hero composer. */
+const EXAMPLE_PROMPTS = [
+  "A dashboard comparing the latest AI models",
+  "A booking page with available time slots",
+  "An invoice tracker with due-date reminders",
+  "A landing page for my bakery with a menu",
+];
 
-const STOP_WORDS = new Set([
-  "a", "an", "the", "i", "want", "need", "build", "make", "create", "to", "for",
-  "with", "and", "or", "of", "in", "on", "that", "this", "it", "is", "are",
-]);
+/** Starter templates shown in the empty state. Each seeds the describe box. */
+const STARTERS: ReadonlyArray<{
+  icon: string;
+  title: string;
+  blurb: string;
+  prompt: string;
+}> = [
+  {
+    icon: "📊",
+    title: "Internal dashboard",
+    blurb: "Charts + a filterable data table for your team's metrics.",
+    prompt:
+      "Build an internal dashboard that shows our key metrics with charts and a filterable, sortable data table.",
+  },
+  {
+    icon: "🤖",
+    title: "Slack bot",
+    blurb: "Responds to commands and posts daily summaries.",
+    prompt:
+      "Build a Slack bot that responds to slash commands and posts a daily summary message to a channel.",
+  },
+  {
+    icon: "🧾",
+    title: "CRUD app",
+    blurb: "Create, edit, search and manage records.",
+    prompt:
+      "Build a CRUD app to manage records with create/edit/delete, search, and a clean list and detail view.",
+  },
+  {
+    icon: "🌐",
+    title: "Landing page",
+    blurb: "Hero, features, pricing and a contact form.",
+    prompt:
+      "Build a modern marketing landing page with a hero, features, pricing, and a contact form.",
+  },
+];
 
 /**
  * Close a popover when the user clicks anywhere outside `ref.current`.
@@ -113,13 +135,6 @@ export default function ProjectPicker({
   const [creating, setCreating] = useState(false);
   const [mode, setMode] = useState<Mode>("blank");
   const [name, setName] = useState("");
-
-  // One-sentence project creation: blank mode collapses name+brief into
-  // a single textarea. The user types what they want; we derive a name
-  // and pass the brief through ?brief= so the workspace fires it as the
-  // first turn once the WS connects.
-  const [brief, setBrief] = useState("");
-  const [showNameOverride, setShowNameOverride] = useState(false);
 
   // Describe mode: a fuller-paragraph brief that's run through Haiku 4.5
   // server-side to extract a sane project name and a refined first prompt.
@@ -215,6 +230,15 @@ export default function ProjectPicker({
     }
   }
 
+  // Chip / starter-card click: switch to Describe mode and seed the brief.
+  // Switching from another tab remounts the describe textarea, whose autoFocus
+  // pulls it into view — so a click from the empty-state cards scrolls up too.
+  function startFromExample(prompt: string): void {
+    setError(null);
+    setMode("describe");
+    setDescribeText(prompt);
+  }
+
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     if (creating) return;
@@ -241,22 +265,18 @@ export default function ProjectPicker({
       }
     }
 
-    // Blank mode now leads with a brief. Either (a) brief alone — derive
-    // the name from it; (b) brief + manual name override; (c) name only
-    // (legacy path, still supported by toggling "Set name manually").
+    // Blank mode is name-only: create an empty project and open it WITHOUT
+    // sending anything to the agent. (The brief→first-turn flow lives in
+    // "Describe in detail".) This keeps the two modes distinct and stops a
+    // blank project from silently firing the typed text as turn one.
     if (mode === "blank") {
-      const trimmedBrief = brief.trim();
       const trimmedName = name.trim();
-      if (!trimmedBrief && !trimmedName) return;
-      const finalName = trimmedName || deriveNameFromBrief(trimmedBrief);
+      if (!trimmedName) return;
       setCreating(true);
       setError(null);
       try {
-        const { project } = await createProjectApi(finalName);
-        const target = trimmedBrief
-          ? `/projects/${project.id}?brief=${encodeURIComponent(trimmedBrief)}`
-          : `/projects/${project.id}`;
-        router.push(target);
+        const { project } = await createProjectApi(trimmedName);
+        router.push(`/projects/${project.id}`);
         return;
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
@@ -504,17 +524,54 @@ export default function ProjectPicker({
             </div>
           </div>
 
+          <div className="group">
+            <div className="label-micro">Help &amp; account</div>
+            <Link href="/guide" className="nav-item">
+              <span className="ic">
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <circle cx="12" cy="12" r="10" />
+                  <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+                  <line x1="12" y1="17" x2="12.01" y2="17" />
+                </svg>
+              </span>
+              User guide
+            </Link>
+            <Link href="/settings" className="nav-item">
+              <span className="ic">
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                </svg>
+              </span>
+              Settings
+            </Link>
+          </div>
+
           <div className="usage">
-            <div className="row">
-              <span>Projects</span>
-              <span className="v">{projects?.length ?? 0}</span>
-            </div>
             <div className="row">
               <span>Plan</span>
               <span className="v">{isGuest ? "Guest" : "Free"}</span>
             </div>
-            <div className="bar">
-              <div className="fill" style={{ width: "20%" }} />
+            <div className="row">
+              <span>Projects</span>
+              <span className="v">{projects?.length ?? 0}</span>
+            </div>
+            <div className="upgrade" title="Higher limits and team features are on the way.">
+              {isGuest ? "Sign in to save your work" : "More on Pro — coming soon"}
             </div>
           </div>
         </aside>
@@ -530,58 +587,34 @@ export default function ProjectPicker({
             />
           ) : (
             <>
-          <div className="pagehead">
-            <div>
-              <h1>
-                Welcome back, {displayLabel.split(" ")[0] || "friend"}.
-              </h1>
-              <p>Pick up where you left off — or describe a new one below.</p>
-            </div>
-          </div>
+          <div className="dash-hero">
+            <h1>
+              Let&apos;s build something,{" "}
+              <span className="grad">{displayLabel.split(" ")[0] || "friend"}</span>
+            </h1>
+            <p className="lede">
+              Describe what you want to build, or bring an existing codebase.
+            </p>
 
-          <div className="newproj">
-            <h2>Start a new project.</h2>
-            <p className="lede">Describe what you want, or bring an existing codebase.</p>
-
-            <div
-              role="tablist"
-              style={{
-                display: "flex",
-                gap: 4,
-                marginBottom: 12,
-                borderBottom: "1px solid var(--border-default)",
-              }}
-            >
-              {MODE_TABS.filter(
-                ([m]) => !isGuest || m !== "github",
-              ).map(([m, label]) => (
-                <button
-                  key={m}
-                  type="button"
-                  role="tab"
-                  aria-selected={mode === m}
-                  onClick={() => {
-                    setMode(m);
-                    setError(null);
-                  }}
-                  style={{
-                    padding: "8px 12px",
-                    background: "transparent",
-                    border: "none",
-                    color: mode === m ? "var(--text-primary)" : "var(--text-muted)",
-                    borderBottom:
-                      mode === m
-                        ? "2px solid var(--text-primary)"
-                        : "2px solid transparent",
-                    fontSize: 13,
-                    cursor: "pointer",
-                    marginBottom: -1,
-                  }}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
+            <div className="dash-hero-card">
+              <div role="tablist" className="dash-tabs">
+                {MODE_TABS.filter(
+                  ([m]) => !isGuest || m !== "github",
+                ).map(([m, label]) => (
+                  <button
+                    key={m}
+                    type="button"
+                    role="tab"
+                    aria-selected={mode === m}
+                    onClick={() => {
+                      setMode(m);
+                      setError(null);
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
 
             <form onSubmit={handleCreate} className="newproj-form">
               {mode === "describe" ? (
@@ -621,55 +654,26 @@ export default function ProjectPicker({
                 </div>
               ) : mode === "blank" ? (
                 <div className="newproj-blank">
-                  <textarea
+                  <input
                     autoFocus
-                    value={brief}
-                    onChange={(e) => setBrief(e.target.value)}
-                    placeholder="Describe what you want — e.g. a website for my bakery with a menu, photos, and a contact form."
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="Project name — e.g. acme-billing-portal"
                     disabled={creating}
-                    rows={3}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                        e.preventDefault();
-                        void handleCreate(e as unknown as React.FormEvent);
-                      }
-                    }}
                   />
                   <div className="newproj-blank-row">
-                    <button
-                      type="button"
-                      className="btn-ghost"
-                      onClick={() => setShowNameOverride((v) => !v)}
-                      disabled={creating}
-                      style={{ fontSize: 11 }}
-                    >
-                      {showNameOverride ? "Hide name override" : "Set name manually"}
-                    </button>
+                    <span className="newproj-hint" style={{ margin: 0 }}>
+                      Creates an empty project and opens it — nothing is sent to the
+                      agent until you type your first message.
+                    </span>
                     <button
                       type="submit"
                       className="btn-primary"
-                      disabled={
-                        creating ||
-                        (!brief.trim() && !name.trim())
-                      }
+                      disabled={creating || !name.trim()}
                     >
-                      {creating ? "Creating…" : "Start building →"}
+                      {creating ? "Creating…" : "Create project →"}
                     </button>
                   </div>
-                  {showNameOverride && (
-                    <input
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                      placeholder="Project name (auto-derived from brief if blank)"
-                      disabled={creating}
-                      style={fieldStyle}
-                    />
-                  )}
-                  <p className="newproj-hint">
-                    {brief.trim()
-                      ? `Uniqus will run this as your first turn. Project name will be "${name.trim() || deriveNameFromBrief(brief)}".`
-                      : "Press ⌘/Ctrl + Enter to submit. Uniqus picks up from your brief on the next screen."}
-                  </p>
                 </div>
               ) : (
                 <>
@@ -704,7 +708,7 @@ export default function ProjectPicker({
             </form>
 
             {!isGuest && mode === "github" && (
-              <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
+              <div className="newproj-extra" style={{ display: "grid", gap: 10, marginTop: 10 }}>
                 {github === null ? (
                   <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
                     checking GitHub connection…
@@ -880,7 +884,7 @@ export default function ProjectPicker({
             )}
 
             {mode === "zip" && (
-              <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+              <div className="newproj-extra" style={{ display: "grid", gap: 8, marginTop: 10 }}>
                 <input
                   type="file"
                   accept=".zip,application/zip"
@@ -900,6 +904,23 @@ export default function ProjectPicker({
                 {error}
               </div>
             )}
+
+              {(mode === "blank" || mode === "describe") && (
+                <div className="dash-chips">
+                  {EXAMPLE_PROMPTS.map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      className="dash-chip"
+                      title={`Use: ${p}`}
+                      onClick={() => startFromExample(p)}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="section-title">
@@ -911,8 +932,24 @@ export default function ProjectPicker({
           )}
 
           {projects !== null && projects.length === 0 && (
-            <div className="empty-state">
-              No projects yet. Describe what you want above to start one.
+            <div className="empty-state" style={{ textAlign: "left", padding: "24px" }}>
+              <p style={{ margin: "0 0 14px", color: "var(--text-muted)", fontSize: 13 }}>
+                No projects yet — start from a template, or describe your own above.
+              </p>
+              <div className="starter-grid">
+                {STARTERS.map((s) => (
+                  <button
+                    key={s.title}
+                    type="button"
+                    className="starter-card"
+                    onClick={() => startFromExample(s.prompt)}
+                  >
+                    <span className="ic">{s.icon}</span>
+                    <span className="t">{s.title}</span>
+                    <span className="d">{s.blurb}</span>
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 
@@ -1030,12 +1067,29 @@ function ProjectTile({
         <h3>{project.name}</h3>
         <p className="desc">{project.description ?? "No description"}</p>
         <div className="meta">
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <span className="status">
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span
+              className="status"
+              title="Saved and ready to open — the sandbox is restored when you open it, so you can chat with the agent and Run a preview."
+            >
               <span className="d" /> Ready
             </span>
+            <span className="tile-chips">
+              {project.vercel_project_name && (
+                <span className="tile-chip live" title="Published to Vercel">
+                  ▲ live
+                </span>
+              )}
+              {project.github_repo_url && (
+                <span className="tile-chip" title="Linked to a GitHub repo">
+                  ◉ repo
+                </span>
+              )}
+            </span>
           </div>
-          <span>{relativeTime(project.updated_at)}</span>
+          <span title={`Last edited ${relativeTime(project.updated_at)}`}>
+            {relativeTime(project.updated_at)}
+          </span>
         </div>
       </Link>
     </div>
@@ -1343,10 +1397,10 @@ function RichProjectCard({
           </Link>
           <span
             className="status"
-            title={`Last activity: ${updated}`}
+            title="Saved and ready to open — sandbox restored on open. Dot is green when the project is in a good state."
             style={{ fontSize: 11, color: "var(--text-muted)" }}
           >
-            <span className="d" /> Ready · {updated}
+            <span className="d" /> Ready · edited {updated}
           </span>
         </div>
         <div

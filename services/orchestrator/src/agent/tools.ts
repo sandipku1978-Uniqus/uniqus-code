@@ -311,6 +311,22 @@ export const TOOLS: Anthropic.Tool[] = [
     },
   },
   {
+    name: "enter_plan_mode",
+    description:
+      "Switch into plan mode: pause, draft a structured implementation plan, and present it to the user to review, edit, and approve BEFORE you make any changes. Call this when the user asked for a substantial or risky change — a brand-new app, a multi-file feature, a large refactor, a schema/data migration, anything touching many files or hard to undo — AND plan mode was not already enabled AND you have not yet edited files this turn. Do NOT use it for small, well-understood edits (a copy tweak, a one-file fix) — just do those. The tool blocks until the user approves; it then returns the approved plan for you to execute step by step. If plan mode is already active, do not call this.",
+    input_schema: {
+      type: "object",
+      properties: {
+        reason: {
+          type: "string",
+          description:
+            "A thorough restatement of what the user wants and the approach you intend to take. This seeds the plan, so be specific about scope, files, and the end state.",
+        },
+      },
+      required: ["reason"],
+    },
+  },
+  {
     name: "ask_user",
     description:
       "Pause execution and ask the user a clarifying question. Use when: (1) the user's request is ambiguous and the answer changes what you'll build (e.g. \"Should this run on a schedule or on demand?\", \"Postgres or SQLite?\", \"Which page should this component go on?\"), (2) you need a credential, API key, or external URL, (3) the user asked you to confirm before a destructive or major change, (4) you've encountered an issue and want the user's preference on how to proceed. Provide structured options when the answer is one of a small set; allow_free_text=true (the default) lets the user type something else. Returns the user's answer as a string. The loop blocks until they respond. Prefer asking over guessing when the wrong guess would waste significant work.",

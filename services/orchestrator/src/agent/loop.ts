@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { TOOLS, WEB_SEARCH_TOOL } from "./tools.js";
 import * as sb from "./sandbox.js";
 import type { Sandbox } from "./sandbox.js";
-import { needsInstall, runInstall } from "../ensureDeps.js";
+import { ensureProjectDeps } from "../ensureDeps.js";
 import { normalizeMessageHistoryInPlace } from "./messageHistory.js";
 import { maybeCompact, type CompactionResult } from "./compact.js";
 import { formatSkillsForPrompt, readSkills } from "./skills.js";
@@ -73,7 +73,8 @@ Tools you have:
 - run_command — short-lived shell commands (default timeout 60s; use 120000–300000 ms for installs/builds). stdin is closed.
 - start_server / stop_server / list_servers / read_server_log — long-running dev servers (Next.js, Flask, Express, etc.). The user sees a live preview when you start one. The tool result includes a "public_url" — quote that exact URL to the user. Do not tell them to use a raw dev-server localhost URL.
 - wait_for_port — wait for a TCP port on localhost.
-- web_search — search the web for current info, recent docs, library versions, error messages, or anything you don't already know. Use sparingly (each call is billed); prefer it over guessing when you need facts that may have changed since training.
+- web_search — search the web for current information. Your training data has a fixed cutoff and goes stale fast, so treat ANY "latest / current / newest" fact as suspect: model names and version numbers, framework/library/SDK versions, API signatures, deprecations, pricing, release dates. Use web_search BEFORE writing such facts into code, copy, or config rather than relying on memory — a wrong-but-plausible version is worse than a search. Bias toward searching whenever the task touches fast-moving subjects (AI models, npm/pip packages, cloud APIs). Don't search for things that don't change (language syntax, stable algorithms, generic CSS).
+- enter_plan_mode — when the user requests a large or risky change (new app, multi-file feature, big refactor, schema/data migration) WITHOUT having turned plan mode on, call this BEFORE editing anything. It drafts a plan, shows it to the user to edit/approve, and returns the approved plan for you to execute. Skip it for small, well-understood edits — just make those. Never call it if plan mode is already active.
 - ask_user — pause and ask the user a question when you need their input to proceed. Use it when: you're unsure which technology/framework to use, the user's request is ambiguous enough that two reasonable interpretations would produce very different results, you need a credential or API key, or the user asked you to check with them before a major decision. The user sees the question inline in the chat and can respond with buttons or free text.
 
 User uploads:
@@ -91,7 +92,7 @@ Conventions:
    Prefer binding dev servers to 127.0.0.1 or localhost unless the framework requires a host flag for the preview proxy. The proxy reaches the server from the orchestrator host, so broad LAN exposure is not required.
 
    Preview-server reliability checklist — go through this BEFORE the first start_server call, not after it fails:
-   • Run \`npm install\` (or the project's package manager) BEFORE start_server. A missing node_modules is the #1 cause of "next: not found" / "vite: not found" failures. Use run_command with timeout_ms=180000.
+   • Dependencies: when package.json is at the SANDBOX ROOT, start_server auto-installs missing deps as part of starting — do NOT run your own \`npm install\` first. A manual install (especially via run_in_background) races the auto-install in the same directory and can corrupt node_modules (the "disappearing modules" failure). The ONE case where you must install yourself is a project in a SUBDIRECTORY (auto-install only sees the root): then run a single \`cd <subdir> && npm install\` once. Never have two installs running in the same directory at the same time.
    • Pass the SAME port the framework actually listens on. The default ports differ: Next.js → 3000, Vite → 5173, Astro → 4321, Nuxt → 3000, SvelteKit dev → 5173, Remix → 3000, Flask → 5000, Django → 8000, FastAPI/uvicorn → 8000, Streamlit → 8501, Express convention → 3000. If you're not sure, read the framework's config (vite.config.* / next.config.* / astro.config.* / package.json scripts) instead of guessing.
    • If the project uses a non-default port, either pass that exact port to start_server, or pin the port via a CLI flag (\`vite --port 3000\`, \`next dev -p 3000\`, \`uvicorn ... --port 3000\`).
    • All paths in the sandbox are RELATIVE to the sandbox root. If your project lives in a subdirectory (e.g. "my-app/"), you must run \`npm install\` and \`start_server\` from INSIDE that directory. Use: command = "cd my-app && npm run dev", NOT just "npm run dev". Check where package.json actually is with list_dir before running.
@@ -104,7 +105,8 @@ Conventions:
 6. After a non-zero exit, read the error and fix the root cause before retrying. Do not retry blindly — if the same command fails twice, change your approach.
 7. Use list_dir or grep to verify state when you're unsure (e.g., after a scaffold) instead of guessing paths.
 8. When the task is complete, briefly summarize what you built, include the public URL if you started a server, and describe how to use it inside Uniqus Code. Do not end by telling the user to run local terminal commands.
-9. File size: write_file content is part of your output token budget (~16k tokens). For files larger than ~500 lines, write a smaller version first then grow it with edit_file or additional write_file calls — do NOT try to dump 1000+ lines in a single tool call, the response will be truncated and the tool input will arrive without the content field. If that happens you'll see "write_file requires 'content' as a string" — split the work and retry.${formatSkillsForPrompt(skillsBody)}`;
+9. File size: write_file content is part of your output token budget (~16k tokens). For files larger than ~500 lines, write a smaller version first then grow it with edit_file or additional write_file calls — do NOT try to dump 1000+ lines in a single tool call, the response will be truncated and the tool input will arrive without the content field. If that happens you'll see "write_file requires 'content' as a string" — split the work and retry.
+10. Currency of facts: when the task names specific products, models, versions, or prices — ESPECIALLY anything about AI/LLM models (benchmark dashboards, model pickers, "compare the latest models" apps) — do NOT trust your training data for the current lineup; it lags reality by months. web_search the newest model names and version numbers FIRST, then write those into the code. Naming a stale model (an old version when a newer one has shipped, or omitting a current flagship) is a failure the user will immediately notice. The same applies to "latest" library versions, framework releases, and API endpoints.${formatSkillsForPrompt(skillsBody)}`;
 }
 
 export interface LoopHooks {
@@ -138,6 +140,14 @@ export interface LoopHooks {
     callId: string,
     payload: { question: string; options?: string[]; allow_free_text: boolean },
   ) => Promise<string>;
+  /**
+   * Fires when the agent calls `enter_plan_mode` (Plan §3.1, agent-initiated).
+   * The server drafts a plan from `reason`, surfaces it for approval, and
+   * resolves with the approved plan formatted for execution. Rejecting (abort)
+   * surfaces as a tool error so the loop can recover. Absent ⇒ the tool is
+   * unavailable (e.g. plan mode already active) and reports so to the model.
+   */
+  requestPlan?: (reason: string) => Promise<string>;
   /** Fires when the agent calls `todo_write`. UI rerenders the Tasks pane. */
   onTodoWrite?: (items: TodoItem[]) => void;
 }
@@ -342,6 +352,7 @@ export async function runAgentLoop(
           opts.previewBaseUrl,
           opts.signal,
           opts.requestUserAnswer,
+          opts.requestPlan,
           opts.onTodoWrite,
           opts.userId ?? null,
         );
@@ -400,6 +411,7 @@ async function executeTool(
   previewBaseUrl: string | undefined,
   signal: AbortSignal | undefined,
   requestUserAnswer: LoopHooks["requestUserAnswer"],
+  requestPlan: LoopHooks["requestPlan"],
   onTodoWrite: LoopHooks["onTodoWrite"],
   userId: string | null,
 ): Promise<string | { __multimodal: true; content: unknown[] }> {
@@ -455,18 +467,21 @@ async function executeTool(
       // start_server is reliably "press go and a server appears".
       let installNote: string | undefined;
       try {
-        const manager = await needsInstall(sandbox.rootDir);
-        if (manager) {
-          const result = await runInstall(sandbox.rootDir, manager, undefined, signal);
-          if (signal?.aborted) {
-            throw new Error("start_server aborted by user during install");
-          }
-          if (!result.ok) {
-            throw new Error(
-              `auto-install (${manager}) failed in ${(result.durationMs / 1000).toFixed(1)}s — fix package.json before calling start_server again:\n${result.stderr.slice(-1500)}`,
-            );
-          }
-          installNote = `auto-installed deps with ${manager} in ${(result.durationMs / 1000).toFixed(1)}s before starting the server`;
+        // VM-aware + serialized: in Firecracker mode this installs INSIDE the
+        // VM (where the dev server runs), not on the orchestrator host. The
+        // old host-only check would see a stale host node_modules and skip,
+        // leaving the VM without deps ("<binary>: not found").
+        const dep = await ensureProjectDeps(sandbox, projectId, { signal });
+        if (signal?.aborted) {
+          throw new Error("start_server aborted by user during install");
+        }
+        if (dep.attempted && !dep.ok) {
+          throw new Error(
+            `auto-install (${dep.manager}) failed in ${(dep.durationMs / 1000).toFixed(1)}s — fix package.json before calling start_server again:\n${dep.stderr.slice(-1500)}`,
+          );
+        }
+        if (dep.attempted) {
+          installNote = `auto-installed deps with ${dep.manager} in ${(dep.durationMs / 1000).toFixed(1)}s before starting the server`;
         }
       } catch (err) {
         // Re-throw so the agent sees the install failure as a tool error,
@@ -690,6 +705,20 @@ async function executeTool(
           `read_asset failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
+    }
+    case "enter_plan_mode": {
+      if (!requestPlan) {
+        throw new Error(
+          "enter_plan_mode is not available right now (plan mode may already be active). Proceed with the work directly — no need to plan again.",
+        );
+      }
+      const reason = typeof args.reason === "string" ? args.reason.trim() : "";
+      if (!reason) {
+        throw new Error("enter_plan_mode requires 'reason' — a clear restatement of the goal and intended approach.");
+      }
+      const planText = await requestPlan(reason);
+      if (signal?.aborted) throw new Error("enter_plan_mode aborted by user");
+      return `The user reviewed and approved a plan. Execute it now, step by step, using your tools; fix errors as they arise and summarize at the end.\n\n${planText}`;
     }
     case "ask_user": {
       if (!requestUserAnswer) {

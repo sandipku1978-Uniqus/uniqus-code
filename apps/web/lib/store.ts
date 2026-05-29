@@ -84,6 +84,13 @@ interface State {
   connected: boolean;
   busy: boolean;
   mode: "plan-then-execute" | "execute-only";
+  /**
+   * Whether the user has explicitly chosen a plan/execute mode this session
+   * (via the Plan toggle). Auto-defaults — e.g. "plan mode on for the first
+   * turn of a brand-new project" — only apply when this is false, so we never
+   * override a deliberate choice. Reset per project in `reset()`.
+   */
+  modeTouched: boolean;
   chat: ChatItem[];
   tree: TreeEntry[];
   selectedFile: string | null;
@@ -129,7 +136,10 @@ interface State {
 
   setConnected(c: boolean): void;
   setBusy(b: boolean): void;
+  /** Set mode programmatically (auto-defaults). Does NOT mark modeTouched. */
   setMode(m: "plan-then-execute" | "execute-only"): void;
+  /** Set mode from a user action (the Plan toggle). Marks modeTouched. */
+  setModeManual(m: "plan-then-execute" | "execute-only"): void;
   addUserMessage(
     content: string,
     attachments?: UploadedFileSummary[],
@@ -183,6 +193,7 @@ export const useStore = create<State>((set, get) => ({
   connected: false,
   busy: false,
   mode: "execute-only",
+  modeTouched: false,
   chat: [],
   tree: [],
   selectedFile: null,
@@ -210,6 +221,7 @@ export const useStore = create<State>((set, get) => ({
   setConnected: (c) => set({ connected: c }),
   setBusy: (b) => set({ busy: b }),
   setMode: (m) => set({ mode: m }),
+  setModeManual: (m) => set({ mode: m, modeTouched: true }),
 
   addUserMessage: (content, attachments, fileRefs) =>
     set((s) => ({
@@ -430,6 +442,9 @@ export const useStore = create<State>((set, get) => ({
     }),
   reset: () =>
     set({
+      // Per-project fresh start so the first-turn plan default re-evaluates.
+      mode: "execute-only",
+      modeTouched: false,
       chat: [],
       tree: [],
       selectedFile: null,

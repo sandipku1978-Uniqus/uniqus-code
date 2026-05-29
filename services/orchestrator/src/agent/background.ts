@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import treeKill from "tree-kill";
 import { safeChildEnv } from "../safeEnv.js";
+import * as fcAgent from "../firecracker/agentRpc.js";
 import type { Sandbox } from "./sandbox.js";
 
 /**
@@ -20,11 +21,18 @@ import type { Sandbox } from "./sandbox.js";
  */
 
 const MAX_LOG = 64 * 1024;
+/**
+ * Hard cap for VM-backed background jobs. In Firecracker mode we run the job
+ * as a single in-VM run_command RPC (no streaming-job RPC exists), so we need
+ * an upper bound — installs/builds/tests all finish well inside 10 min.
+ */
+const VM_JOB_TIMEOUT_MS = 10 * 60_000;
 
 interface ManagedJob {
   id: string;
   command: string;
-  proc: ChildProcess;
+  /** null for VM-backed jobs (no host child process). */
+  proc: ChildProcess | null;
   log: { value: string };
   exit_code: number | null;
   started_at: number;
@@ -67,33 +75,12 @@ export function startBackgroundJob(
   command: string,
   projectId: string | null = null,
 ): BackgroundJobInfo {
-  const choice = pickShell();
-  const proc = spawn(choice.shell, [...choice.prefix, command], {
-    cwd: sandbox.rootDir,
-    env: safeChildEnv(),
-    stdio: ["ignore", "pipe", "pipe"],
-  });
   const id = `job_${randomUUID().slice(0, 8)}`;
   const log = { value: "" };
-  const append = (chunk: Buffer): void => {
-    log.value = (log.value + chunk.toString()).slice(-MAX_LOG);
-  };
-  proc.stdout?.on("data", append);
-  proc.stderr?.on("data", append);
-  // Crucially: spawn errors must not crash the orchestrator. `error` fires
-  // before `exit` for things like ENOENT.
-  proc.once("error", (err) => {
-    log.value = `${log.value}\n[spawn error] ${err.message}`.slice(-MAX_LOG);
-    const job = jobs.get(id);
-    if (job) {
-      job.exit_code = 1;
-      job.finished_at = Date.now();
-    }
-  });
   const job: ManagedJob = {
     id,
     command,
-    proc,
+    proc: null,
     log,
     exit_code: null,
     started_at: Date.now(),
@@ -101,6 +88,53 @@ export function startBackgroundJob(
     project_id: projectId,
   };
   jobs.set(id, job);
+
+  if (sandbox.vm) {
+    // Firecracker mode: every other exec tool (run_command, start_server)
+    // runs INSIDE the VM, so a background job MUST too. Otherwise an
+    // `npm install` here installs into the orchestrator host's filesystem
+    // while the dev server runs in the VM — and the freshly-installed
+    // node_modules is invisible at run time (the "node_modules disappeared"
+    // bug). The in-VM agent has no streaming-job RPC, so we fire a single
+    // run_command RPC and record its result when it resolves: the log isn't
+    // incremental, but the job semantics (poll status / exit code) hold.
+    const vm = sandbox.vm;
+    fcAgent
+      .runCommand(vm, command, VM_JOB_TIMEOUT_MS)
+      .then((r) => {
+        job.log.value = `${r.stdout}${r.stderr ? `\n${r.stderr}` : ""}`.slice(-MAX_LOG);
+        job.exit_code = r.exitCode;
+        job.finished_at = Date.now();
+      })
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        job.log.value = `${job.log.value}\n[vm error] ${msg}`.slice(-MAX_LOG);
+        job.exit_code = 1;
+        job.finished_at = Date.now();
+      });
+    return toInfo(job);
+  }
+
+  // Process backend: spawn on the host (cwd = sandbox root).
+  const choice = pickShell();
+  const proc = spawn(choice.shell, [...choice.prefix, command], {
+    cwd: sandbox.rootDir,
+    env: safeChildEnv(),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  job.proc = proc;
+  const append = (chunk: Buffer): void => {
+    job.log.value = (job.log.value + chunk.toString()).slice(-MAX_LOG);
+  };
+  proc.stdout?.on("data", append);
+  proc.stderr?.on("data", append);
+  // Crucially: spawn errors must not crash the orchestrator. `error` fires
+  // before `exit` for things like ENOENT.
+  proc.once("error", (err) => {
+    job.log.value = `${job.log.value}\n[spawn error] ${err.message}`.slice(-MAX_LOG);
+    job.exit_code = 1;
+    job.finished_at = Date.now();
+  });
   proc.on("exit", (code) => {
     job.exit_code = code;
     job.finished_at = Date.now();
@@ -131,7 +165,10 @@ export function listJobs(projectId?: string | null): BackgroundJobInfo[] {
 export function killJob(id: string): void {
   const job = jobs.get(id);
   if (!job) throw new Error(`No background job with id ${id}`);
-  if (job.proc.pid) treeKill(job.proc.pid, "SIGKILL");
+  // VM-backed jobs (proc === null) run inside the guest via a single
+  // run_command RPC — there's no kill RPC, so we can only stop tracking it
+  // here; it exits on its own or hits VM_JOB_TIMEOUT_MS inside the VM.
+  if (job.proc?.pid) treeKill(job.proc.pid, "SIGKILL");
   job.exit_code = job.exit_code ?? -1;
   job.finished_at = job.finished_at ?? Date.now();
 }
@@ -150,7 +187,7 @@ function toInfo(j: ManagedJob): BackgroundJobInfo {
 export function killAllJobs(): void {
   for (const j of jobs.values()) {
     try {
-      if (j.proc.pid) treeKill(j.proc.pid, "SIGKILL");
+      if (j.proc?.pid) treeKill(j.proc.pid, "SIGKILL");
     } catch {}
   }
   jobs.clear();
