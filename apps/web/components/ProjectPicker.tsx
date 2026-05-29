@@ -1307,11 +1307,17 @@ function RichProjectCard({
     : relativeTime(project.updated_at);
   const cardRef = useRef<HTMLDivElement>(null);
   useOutsideClick(cardRef, menuOpen, () => onOpenMenu(false));
+  const router = useRouter();
 
   return (
     <div
       ref={cardRef}
       className="proj proj-tile"
+      // Whole card is clickable. Inner links/buttons stopPropagation so they
+      // keep their own behavior (open repo/deploy URL, open the menu) instead
+      // of also firing this navigation. The title Link below keeps keyboard
+      // users a real, focusable link.
+      onClick={() => router.push(`/projects/${project.id}`)}
       style={{
         display: "grid",
         gridTemplateColumns: "auto 1fr auto",
@@ -1325,6 +1331,7 @@ function RichProjectCard({
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
           <Link
             href={`/projects/${project.id}`}
+            onClick={(e) => e.stopPropagation()}
             style={{
               color: "var(--text-primary)",
               textDecoration: "none",
@@ -1391,6 +1398,7 @@ function RichProjectCard({
       <div style={{ position: "relative", display: "flex", gap: 8, alignSelf: "center" }}>
         <Link
           href={`/projects/${project.id}`}
+          onClick={(e) => e.stopPropagation()}
           className="btn-primary"
           style={{ fontSize: 12, padding: "6px 12px", textDecoration: "none" }}
         >
@@ -1478,7 +1486,14 @@ function CardChip({
   };
   if (href) {
     return (
-      <a href={href} target="_blank" rel="noreferrer" title={title} style={style}>
+      <a
+        href={href}
+        target="_blank"
+        rel="noreferrer"
+        title={title}
+        style={style}
+        onClick={(e) => e.stopPropagation()}
+      >
         <span aria-hidden>{icon}</span>
         <span style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis" }}>
           {label}

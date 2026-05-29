@@ -741,9 +741,6 @@ section.band .sub {
   padding: 24px 28px;
   margin-bottom: 40px;
   background: var(--bg-surface);
-  /* Cap the width so the composer doesn't sprawl into dead space on wide
-     viewports; stays left-aligned with the project grid below. */
-  max-width: 880px;
 }
 .newproj h2 { font-size: 16px; margin: 0 0 4px; font-weight: 500; }
 .newproj .lede { color: var(--text-muted); font-size: 13px; margin: 0 0 16px; }
