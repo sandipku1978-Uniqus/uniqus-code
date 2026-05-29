@@ -8,6 +8,7 @@ import type {
   Plan,
   PreviewServer,
   ProjectSummary,
+  ThinkingEffort,
   TodoItem,
   TreeEntry,
   UploadedFileSummary,
@@ -40,6 +41,36 @@ function persistModel(model: ModelChoice): void {
     window.localStorage.setItem(MODEL_STORAGE_KEY, model);
   } catch {
     /* private mode / quota — non-fatal, the choice just won't persist */
+  }
+}
+
+/**
+ * Reasoning effort is an account-wide default like the model choice: the
+ * composer's thinking control and (potentially) Settings both edit it, so it's
+ * persisted to localStorage rather than reset per project. "medium" is the
+ * default — a balance of quality and latency/cost.
+ */
+const THINKING_STORAGE_KEY = "uniqus.thinking";
+const THINKING_LEVELS: ThinkingEffort[] = ["low", "medium", "high"];
+
+function readStoredThinking(): ThinkingEffort {
+  if (typeof window === "undefined") return "medium";
+  try {
+    const stored = window.localStorage.getItem(THINKING_STORAGE_KEY);
+    return THINKING_LEVELS.includes(stored as ThinkingEffort)
+      ? (stored as ThinkingEffort)
+      : "medium";
+  } catch {
+    return "medium";
+  }
+}
+
+function persistThinking(thinking: ThinkingEffort): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(THINKING_STORAGE_KEY, thinking);
+  } catch {
+    /* private mode / quota — non-fatal */
   }
 }
 
@@ -122,6 +153,16 @@ export type ChatItem =
     }
   | { kind: "assistant_text"; id: string; content: string }
   | {
+      /**
+       * The model's reasoning trace (Anthropic adaptive thinking / Gemini
+       * thought summaries), accumulated from `thinking` events. Rendered as a
+       * collapsible block ahead of the assistant's answer for that step.
+       */
+      kind: "reasoning";
+      id: string;
+      content: string;
+    }
+  | {
       kind: "tool";
       id: string;
       call_id: string;
@@ -198,6 +239,12 @@ interface State {
    */
   theme: ThemeChoice;
   density: DensityChoice;
+  /**
+   * Reasoning effort for the agent (account-wide default, localStorage-backed).
+   * Sent with each turn; the orchestrator maps it to the provider's native
+   * reasoning control. Edited from the composer's thinking picker.
+   */
+  thinking: ThinkingEffort;
   chat: ChatItem[];
   tree: TreeEntry[];
   selectedFile: string | null;
@@ -253,12 +300,16 @@ interface State {
   setTheme(t: ThemeChoice): void;
   /** Set the UI density; persists + applies to <html data-density>. */
   setDensity(d: DensityChoice): void;
+  /** Set the agent reasoning effort and persist it as the account-wide default. */
+  setThinking(t: ThinkingEffort): void;
   addUserMessage(
     content: string,
     attachments?: UploadedFileSummary[],
     fileRefs?: string[],
   ): void;
   appendText(content: string): void;
+  /** Append a reasoning/thinking delta to the current reasoning block. */
+  appendThinking(content: string): void;
   addToolCall(callId: string, name: string, input: unknown): void;
   setToolResult(callId: string, result: string, isError: boolean): void;
   addUserQuestion(
@@ -314,6 +365,7 @@ export const useStore = create<State>((set, get) => ({
   // desync the first client render from the server HTML.
   theme: "dark",
   density: "comfortable",
+  thinking: readStoredThinking(),
   chat: [],
   tree: [],
   selectedFile: null,
@@ -356,6 +408,10 @@ export const useStore = create<State>((set, get) => ({
     applyDensity(d);
     set({ density: d });
   },
+  setThinking: (t) => {
+    persistThinking(t);
+    set({ thinking: t });
+  },
 
   addUserMessage: (content, attachments, fileRefs) =>
     set((s) => ({
@@ -387,6 +443,20 @@ export const useStore = create<State>((set, get) => ({
         redeploySuggested:
           s.redeploySuggested || /\bredeploy\b|\bdeploy again\b/i.test(content),
       };
+    }),
+
+  appendThinking: (content) =>
+    set((s) => {
+      const last = s.chat[s.chat.length - 1];
+      // Coalesce consecutive thinking deltas into one reasoning block. A new
+      // block starts whenever anything else (text, a tool call) has landed
+      // since — i.e. the model began a fresh reasoning pass for the next step.
+      if (last && last.kind === "reasoning") {
+        return {
+          chat: [...s.chat.slice(0, -1), { ...last, content: last.content + content }],
+        };
+      }
+      return { chat: [...s.chat, { kind: "reasoning", id: id(), content }] };
     }),
 
   addToolCall: (callId, name, input) =>

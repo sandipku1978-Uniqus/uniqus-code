@@ -21,6 +21,7 @@ export default function ChatPanel() {
   const mode = useStore((s) => s.mode);
   const setModeManual = useStore((s) => s.setModeManual);
   const model = useStore((s) => s.model);
+  const thinking = useStore((s) => s.thinking);
   const addUserMessage = useStore((s) => s.addUserMessage);
   const addSystem = useStore((s) => s.addSystem);
   const setBusy = useStore((s) => s.setBusy);
@@ -217,6 +218,7 @@ export default function ChatPanel() {
       content,
       mode,
       model: model !== "auto" ? model : undefined,
+      thinking: thinking !== "medium" ? thinking : undefined,
       attachments,
       file_refs: fileRefs.length > 0 ? fileRefs : undefined,
     });
@@ -831,6 +833,9 @@ function ChatItemView({ item }: { item: ChatItem }) {
       </div>
     );
   }
+  if (item.kind === "reasoning") {
+    return <ReasoningCard item={item} />;
+  }
   if (item.kind === "tool") {
     return <ToolCard item={item} />;
   }
@@ -960,6 +965,30 @@ function CompleteRow({
       {onToggle ? (expanded ? "▾ " : "▸ ") : ""}
       {summary}
     </button>
+  );
+}
+
+function ReasoningCard({
+  item,
+}: {
+  item: Extract<ChatItem, { kind: "reasoning" }>;
+}) {
+  // Default open so the live trace is visible as it streams; collapsible since
+  // past steps' reasoning is mostly noise once the answer has landed.
+  const [expanded, setExpanded] = useState(true);
+  return (
+    <div className="reasoning-card">
+      <button
+        type="button"
+        className="reasoning-toggle"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded ? "true" : "false"}
+      >
+        <span>💭 Thinking</span>
+        <span className="reasoning-chevron">{expanded ? "▾" : "▸"}</span>
+      </button>
+      {expanded && <div className="reasoning-body">{item.content}</div>}
+    </div>
   );
 }
 

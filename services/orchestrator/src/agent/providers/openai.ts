@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import type Anthropic from "@anthropic-ai/sdk";
+import type { ThinkingEffort } from "@uniqus/api-types";
 import type {
   ForcedToolParams,
   ModelProviderAdapter,
@@ -14,8 +15,13 @@ import type {
  * on the way in, and synthesizes Anthropic content blocks (text + tool_use)
  * on the way out so the loop and persisted history stay provider-agnostic.
  *
- * Web search: enabled via `web_search_options` on the GPT-5.5 family (the
- * model decides when to search; citations come back inline in the text).
+ * Web search: NOT enabled. The Chat Completions API rejects `web_search_options`
+ * for the general GPT-5.x models we route here ("Unknown parameter:
+ * 'web_search_options'") — built-in search there is a Responses-API / dedicated
+ * search-model feature. So these models run with our custom tools only; only
+ * the Anthropic path keeps a built-in web_search.
+ *
+ * Reasoning: `reasoning_effort` maps the per-turn thinking-effort control.
  *
  * Image previews: OpenAI's `tool` role can't carry images, so image blocks
  * inside a tool_result (e.g. the screenshot tool) ride on a following user
@@ -23,14 +29,22 @@ import type {
  * plain user messages are forwarded the same way.
  */
 
-/** GPT-5.5-family models support built-in web search; the codex model doesn't. */
-function supportsWebSearch(model: string): boolean {
-  return !model.includes("codex");
-}
-
 /** GPT-5.5 Pro supports Chat Completions, but not streaming. */
 function supportsStreaming(model: string): boolean {
   return model !== "gpt-5.5-pro";
+}
+
+/**
+ * Map the thinking-effort control to OpenAI's `reasoning_effort`. The `*-pro`
+ * models only accept "high" (low/medium return a 400), so clamp them. Returns
+ * an empty object when no effort was requested, to spread into the request.
+ */
+function reasoningEffortParam(
+  model: string,
+  effort: ThinkingEffort | undefined,
+): { reasoning_effort: ThinkingEffort } | Record<string, never> {
+  if (!effort) return {};
+  return { reasoning_effort: model.includes("-pro") ? "high" : effort };
 }
 export class OpenAIAdapter implements ModelProviderAdapter {
   readonly provider = "openai" as const;
@@ -54,9 +68,7 @@ export class OpenAIAdapter implements ModelProviderAdapter {
         tools: toOpenAITools(p.tools),
         messages,
         stream: true,
-        // Built-in web search: the model searches when it judges it useful and
-        // weaves cited results into its answer. Parity with the Anthropic path.
-        ...(supportsWebSearch(p.model) ? { web_search_options: {} } : {}),
+        ...reasoningEffortParam(p.model, p.thinkingEffort),
       },
       p.signal ? { signal: p.signal } : undefined,
     );
@@ -121,7 +133,7 @@ export class OpenAIAdapter implements ModelProviderAdapter {
         max_completion_tokens: p.maxTokens,
         tools: toOpenAITools(p.tools),
         messages,
-        ...(supportsWebSearch(p.model) ? { web_search_options: {} } : {}),
+        ...reasoningEffortParam(p.model, p.thinkingEffort),
       },
       p.signal ? { signal: p.signal } : undefined,
     );

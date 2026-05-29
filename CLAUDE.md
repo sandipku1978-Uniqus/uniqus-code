@@ -24,11 +24,35 @@
   router. Low tiers (Haiku, Flash-Lite, mini/nano) are intentionally excluded.
 - Provider adapters live in `services/orchestrator/src/agent/providers/`.
   Canonical message shape is Anthropic's; the OpenAI/Gemini adapters translate
-  in/out. Web search + image/screenshot previews work on all three: Anthropic
-  server-side `web_search`; OpenAI `web_search_options` (GPT-5.5 family);
-  Gemini `googleSearch` grounding (3.x only — 2.5 can't combine it with
-  function calling). Tool-result images ride on a follow-up user message
-  (OpenAI) or `inlineData` parts (Gemini).
+  in/out.
+- **Built-in web search: Anthropic only.** The OpenAI/Gemini built-in search
+  was removed — Chat Completions rejects `web_search_options` for the GPT-5.x
+  models we route (it's a Responses-API/search-model feature), and Gemini's
+  `googleSearch` can't combine with function calling without
+  `tool_config.include_server_side_tool_invocations` (and is uneven across
+  2.5/3.x). Both run function-calling only; only the Anthropic path keeps a
+  server-side `web_search`. Image/screenshot previews still work on all three
+  (tool-result images ride a follow-up user message on OpenAI, `inlineData`
+  parts on Gemini).
+- **Thinking effort** (`ThinkingEffort` = low/medium/high in `api-types`): a
+  per-turn reasoning control set in the composer's model picker, account-wide
+  default in the store (localStorage), default "medium". Plumbed
+  composer → `user_message.thinking` → `runSession` → loop `thinkingEffort` →
+  each adapter (params verified against provider docs):
+  - **Anthropic** → `output_config.effort` (low/medium/high) + adaptive
+    thinking (`thinking:{type:"adaptive"}`). Manual `thinking.budget_tokens`
+    returns a **400 on Opus 4.8** — don't use it. Needs `@anthropic-ai/sdk`
+    ≥ ~0.100 (we bumped from 0.39) so the stream parser handles adaptive
+    thinking blocks. `thinking_delta` events stream the reasoning trace.
+  - **OpenAI** → `reasoning_effort` (Chat Completions). `*-pro` models only
+    accept `"high"`, so we clamp them. (`web_search_options` is unsupported on
+    Chat Completions for GPT-5.x — that's why built-in search was removed.)
+  - **Gemini** → `thinkingConfig.thinkingLevel` (low/medium/high) on **3.x**;
+    `thinkingConfig.thinkingBudget` (tokens) on **2.5** — sending a budget to a
+    3.x model degrades it. Thought signatures on function-call parts are
+    preserved across turns (`tool_use.thought_signature`), required for 3.x
+    multi-turn function calling.
+  - Not applied to forced-tool (plan) calls.
 - **Env keys on the orchestrator (Hetzner):** `ANTHROPIC_API_KEY` (required,
   also used for compaction). `OPENAI_API_KEY` and `GOOGLE_API_KEY`
   (or `GEMINI_API_KEY`) are **optional** — only needed when a user picks an

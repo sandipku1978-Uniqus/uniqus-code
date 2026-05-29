@@ -11,7 +11,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
+    "@anthropic-ai/sdk": "^0.100.1",
     "@google/genai": "^2.7.0",
     "@supabase/supabase-js": "^2.47.10",
     "@uniqus/api-types": "*",

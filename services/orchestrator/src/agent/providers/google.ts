@@ -1,5 +1,6 @@
 import { FunctionCallingConfigMode, GoogleGenAI } from "@google/genai";
 import type Anthropic from "@anthropic-ai/sdk";
+import type { ThinkingEffort } from "@uniqus/api-types";
 import type {
   ForcedToolParams,
   ModelProviderAdapter,
@@ -16,19 +17,49 @@ import type {
  * functionResponse to its call by function NAME, so we keep an id→name map
  * from the assistant's prior tool_use blocks.
  *
- * Web search: Gemini 3.x can combine the built-in `googleSearch` grounding
- * tool with our custom functionDeclarations in one request, so we add it for
- * those models (2.5 can't combine the two, so it keeps function calling only).
+ * Web search: NOT enabled. Combining the built-in `googleSearch` grounding
+ * tool with our custom functionDeclarations requires
+ * `tool_config.include_server_side_tool_invocations`, and even then support is
+ * uneven across the 2.5/3.x models we route here (3.x returns a 400 without
+ * the flag; 2.5 can't combine the two at all). The agent needs function
+ * calling, so we run function calling only and leave built-in search to the
+ * Anthropic path.
+ *
+ * Reasoning: Gemini 3.x uses `thinkingConfig.thinkingLevel` (low/medium/high);
+ * Gemini 2.5 uses `thinkingConfig.thinkingBudget` (tokens) — sending a budget
+ * to a 3.x model degrades it, so we branch on the model. Thought signatures
+ * returned on function-call parts are preserved across turns (required for
+ * 3.x multi-turn function calling).
  *
  * Image previews: image blocks inside a tool_result (e.g. the screenshot tool)
  * are forwarded as inlineData parts alongside the functionResponse, so the
  * model sees the preview. Images in plain user messages are forwarded too.
  */
 
-/** Gemini 3.x can combine googleSearch grounding with function declarations. */
-function supportsGoogleSearch(model: string): boolean {
-  return /^gemini-3/.test(model);
+/** 2.5 thinkingBudget (tokens) per effort level; 3.x uses thinkingLevel instead. */
+const GEMINI_2_5_BUDGET: Record<ThinkingEffort, number> = {
+  low: 2048,
+  medium: 8192,
+  high: 16384,
+};
+
+/**
+ * The right thinkingConfig for this model: Gemini 3.x takes a semantic
+ * `thinkingLevel`; 2.5 takes a `thinkingBudget` token count. Returns undefined
+ * when no effort was requested (provider default).
+ */
+function thinkingConfigFor(
+  model: string,
+  effort: ThinkingEffort | undefined,
+): Record<string, unknown> | undefined {
+  if (!effort) return undefined;
+  // includeThoughts returns thought-summary parts we surface as the live
+  // reasoning trace (see the `part.thought` handling in streamAgentTurn).
+  const base = { includeThoughts: true };
+  if (/^gemini-3/.test(model)) return { ...base, thinkingLevel: effort };
+  return { ...base, thinkingBudget: GEMINI_2_5_BUDGET[effort] };
 }
+
 export class GoogleAdapter implements ModelProviderAdapter {
   readonly provider = "google" as const;
   private ai: GoogleGenAI;
@@ -40,55 +71,53 @@ export class GoogleAdapter implements ModelProviderAdapter {
 
   async streamAgentTurn(p: StreamTurnParams): Promise<StreamTurnResult> {
     const contents = toGeminiContents(p.messages);
-    // Built-in Google Search grounding (3.x only) + our custom tools.
-    const tools: Array<Record<string, unknown>> = [
-      { functionDeclarations: toGeminiFunctionDeclarations(p.tools) },
-    ];
-    if (supportsGoogleSearch(p.model)) tools.unshift({ googleSearch: {} });
+    const thinkingConfig = thinkingConfigFor(p.model, p.thinkingEffort);
     const stream = await this.ai.models.generateContentStream({
       model: p.model,
       contents,
       config: {
         systemInstruction: p.system,
         maxOutputTokens: p.maxTokens,
-        tools,
+        tools: [{ functionDeclarations: toGeminiFunctionDeclarations(p.tools) }],
+        ...(thinkingConfig ? { thinkingConfig } : {}),
         abortSignal: p.signal,
       },
     });
 
     let text = "";
     let finishReason: string | undefined;
-    const calls: Array<{ id: string; name: string; args: unknown }> = [];
+    // Capture the thought signature that rides on each function-call part —
+    // Gemini 3.x requires it echoed back on the next turn for multi-turn
+    // function calling, so we stash it on the tool_use block (see toGeminiContents).
+    const calls: Array<{ id: string; name: string; args: unknown; signature?: string }> = [];
     const announced = new Set<string>();
-    let searchSurfaced = false;
 
+    // Iterate raw parts (not the chunk.text / chunk.functionCalls accessors) so
+    // we can (a) split thought-summary parts from the answer text and (b) read
+    // the thoughtSignature that rides alongside each function-call part.
     for await (const chunk of stream) {
       if (p.signal?.aborted) break;
-      const t = chunk.text;
-      if (t) {
-        text += t;
-        p.onText?.(t);
-      }
-      // Surface Google Search grounding as a web_search activity row, once,
-      // so the UI reflects that the model searched (parity with Anthropic).
-      const queries = chunk.candidates?.[0]?.groundingMetadata?.webSearchQueries;
-      if (!searchSurfaced && queries && queries.length > 0) {
-        searchSurfaced = true;
-        const id = `gem_search_${this.idSeq++}`;
-        p.onToolCallStarted?.(id, "web_search");
-        p.onToolCall?.(id, "web_search", { queries });
-        p.onToolResult?.(id, "web_search", { queries }, queries.join("\n"), false);
-      }
-      const fnCalls = chunk.functionCalls;
-      if (fnCalls && fnCalls.length > 0) {
-        for (const fc of fnCalls) {
+      const parts = chunk.candidates?.[0]?.content?.parts;
+      if (parts) {
+        for (const part of parts) {
+          if (part.text) {
+            // `thought: true` → reasoning trace; otherwise it's answer text.
+            if (part.thought) p.onThinking?.(part.text);
+            else {
+              text += part.text;
+              p.onText?.(part.text);
+            }
+            continue;
+          }
+          const fc = part.functionCall;
+          if (!fc) continue;
           const id = fc.id ?? `gem_${this.idSeq++}`;
           const name = fc.name ?? "";
           if (!announced.has(id)) {
             announced.add(id);
             p.onToolCallStarted?.(id, name);
           }
-          calls.push({ id, name, args: fc.args ?? {} });
+          calls.push({ id, name, args: fc.args ?? {}, signature: part.thoughtSignature });
         }
       }
       const fr = chunk.candidates?.[0]?.finishReason;
@@ -102,7 +131,14 @@ export class GoogleAdapter implements ModelProviderAdapter {
     if (text) content.push({ type: "text", text });
     const toolCalls: StreamTurnResult["toolCalls"] = [];
     for (const c of calls) {
-      content.push({ type: "tool_use", id: c.id, name: c.name, input: c.args } as Anthropic.ToolUseBlockParam);
+      const block = { type: "tool_use", id: c.id, name: c.name, input: c.args } as Record<
+        string,
+        unknown
+      >;
+      // Non-standard field, preserved verbatim through history; re-attached to
+      // the Gemini functionCall part on the next turn. Ignored by other providers.
+      if (c.signature) block.thought_signature = c.signature;
+      content.push(block as unknown as Anthropic.ToolUseBlockParam);
       p.onToolCall?.(c.id, c.name, c.args);
       toolCalls.push({ id: c.id, name: c.name, input: c.args });
     }
@@ -193,7 +229,14 @@ function toGeminiContents(messages: Anthropic.MessageParam[]): Array<Record<stri
         for (const b of msg.content) {
           if (b.type === "text") parts.push({ text: b.text });
           else if (b.type === "tool_use") {
-            parts.push({ functionCall: { name: b.name, args: (b.input ?? {}) as object } });
+            const part: Record<string, unknown> = {
+              functionCall: { name: b.name, args: (b.input ?? {}) as object },
+            };
+            // Echo back the thought signature captured on the way out, so 3.x
+            // multi-turn function calling keeps its reasoning context.
+            const sig = (b as { thought_signature?: string }).thought_signature;
+            if (sig) part.thoughtSignature = sig;
+            parts.push(part);
           }
         }
       }

@@ -24,6 +24,14 @@ export type ModelProvider = "anthropic" | "openai" | "google";
 export type ModelChoice = "auto" | string;
 
 /**
+ * Per-turn reasoning/thinking effort for the agent. Maps to each provider's
+ * native control: Anthropic extended-thinking budget, OpenAI `reasoning_effort`,
+ * Gemini `thinkingConfig.thinkingBudget`. Account-wide default like the model
+ * choice; also overridable per turn from the composer.
+ */
+export type ThinkingEffort = "low" | "medium" | "high";
+
+/**
  * One selectable model in the Advanced picker. The curated `MODEL_CATALOG`
  * below is the single source of truth shared by the web UI (to render the
  * picker) and the orchestrator (to validate an override and route it to the
@@ -132,6 +140,11 @@ export type ClientEvent =
        * A catalog id ("<provider>:<model>") ⇒ explicit Advanced override.
        */
       model?: ModelChoice;
+      /**
+       * Reasoning effort for this turn. Omitted ⇒ the orchestrator's default
+       * ("medium"). Higher = more internal reasoning before answering.
+       */
+      thinking?: ThinkingEffort;
       attachments?: UploadedFileSummary[];
       /**
        * Sandbox-relative paths the user explicitly @-referenced in the
@@ -203,6 +216,15 @@ export type ServerEvent =
     }
   | { type: "iteration"; iter: number }
   | { type: "text"; content: string }
+  | {
+      /**
+       * Reasoning/thinking delta — the model's internal reasoning trace, shown
+       * in a collapsible block separate from the answer text. Not every model
+       * exposes it (e.g. OpenAI Chat Completions hides reasoning content).
+       */
+      type: "thinking";
+      content: string;
+    }
   | {
       /**
        * Non-agent system message — VM lifecycle, storage sync notices, etc.

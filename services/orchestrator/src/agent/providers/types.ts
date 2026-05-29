@@ -10,6 +10,7 @@
  */
 
 import type Anthropic from "@anthropic-ai/sdk";
+import type { ThinkingEffort } from "@uniqus/api-types";
 
 /** API keys for whichever providers are configured. */
 export interface ProviderKeys {
@@ -35,9 +36,22 @@ export interface StreamTurnParams {
   /** Conversation so far, canonical (Anthropic-shaped) form. */
   messages: Anthropic.MessageParam[];
   maxTokens: number;
+  /**
+   * Reasoning effort for this turn (the composer's thinking control). Each
+   * adapter maps it to its provider's native reasoning param. Undefined ⇒ the
+   * provider's own default (no reasoning param sent).
+   */
+  thinkingEffort?: ThinkingEffort;
   signal?: AbortSignal;
   /** Fires for each streamed text delta. */
   onText?: (delta: string) => void;
+  /**
+   * Fires for each streamed reasoning/thinking delta (Anthropic adaptive
+   * thinking, Gemini thought summaries). Surfaced as a collapsible trace,
+   * separate from the answer text. Not all providers expose reasoning
+   * content (e.g. OpenAI Chat Completions hides it).
+   */
+  onThinking?: (delta: string) => void;
   /** Fires once when a tool block first appears (UI shows a "running…" row). */
   onToolCallStarted?: (id: string, name: string) => void;
   /** Fires with the full parsed input once a tool block finishes streaming. */

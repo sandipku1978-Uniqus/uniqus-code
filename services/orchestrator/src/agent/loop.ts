@@ -16,7 +16,7 @@ import {
 import { takeScreenshot } from "./screenshot.js";
 import { resolveModel } from "./router.js";
 import { getProvider, providerKeysFromEnv, type ProviderKeys } from "./providers/index.js";
-import type { ModelChoice } from "@uniqus/api-types";
+import type { ModelChoice, ThinkingEffort } from "@uniqus/api-types";
 import { setTodos, type TodoItem } from "./todos.js";
 import { listProjectSecrets, plumbSecretToEnvFile } from "../secrets.js";
 import { callConnector, listProjectConnectors } from "../connectors/index.js";
@@ -116,6 +116,8 @@ Conventions:
 
 export interface LoopHooks {
   onText?: (text: string) => void;
+  /** Fires for each reasoning/thinking delta (surfaced as a collapsible trace). */
+  onThinking?: (text: string) => void;
   onToolCallStarted?: (callId: string, name: string) => void;
   onToolCall?: (callId: string, name: string, input: unknown) => void;
   onToolResult?: (
@@ -207,6 +209,12 @@ export interface LoopOptions extends LoopHooks {
    */
   modelChoice?: ModelChoice;
   /**
+   * Reasoning effort for the agent turn (the composer's thinking control).
+   * Passed through to the provider adapter, which maps it to its native
+   * reasoning param. Undefined ⇒ provider default (no reasoning param).
+   */
+  thinkingEffort?: ThinkingEffort;
+  /**
    * Provider API keys. Defaults to reading them from the environment; passed
    * explicitly mainly for tests. `apiKey` above remains the Anthropic key used
    * for compaction and as the Anthropic provider key.
@@ -269,8 +277,10 @@ export async function runAgentLoop(
         tools: TOOLS as Anthropic.Tool[],
         messages,
         maxTokens: MAX_TOKENS,
+        thinkingEffort: opts.thinkingEffort,
         signal: opts.signal,
         onText: opts.onText,
+        onThinking: opts.onThinking,
         onToolCallStarted: opts.onToolCallStarted,
         onToolCall: opts.onToolCall,
         onToolResult: opts.onToolResult,

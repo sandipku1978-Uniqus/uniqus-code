@@ -23,6 +23,7 @@ import type {
   ProjectSummary,
   UploadedFileSummary,
   ModelChoice,
+  ThinkingEffort,
 } from "@uniqus/api-types";
 import { runAgentLoop } from "./agent/loop.js";
 import { proposePlan, formatPlanForExecution } from "./agent/plan.js";
@@ -2428,6 +2429,7 @@ async function handleConnection(
             event.file_refs,
             event.mode,
             event.model,
+            event.thinking,
             send,
             apiKey,
             history,
@@ -2732,6 +2734,7 @@ async function runSession(
   fileRefs: string[] | undefined,
   mode: "plan-then-execute" | "execute-only",
   modelChoice: ModelChoice | undefined,
+  thinkingEffort: ThinkingEffort | undefined,
   send: Sender,
   apiKey: string,
   history: Anthropic.MessageParam[],
@@ -2749,6 +2752,8 @@ async function runSession(
 ): Promise<void> {
   const start = Date.now();
   let toolCalls = 0;
+  // Default reasoning effort when the composer didn't specify one.
+  const effort: ThinkingEffort = thinkingEffort ?? "medium";
   const slashed = await expandSlashCommand(sandboxDir, userMessage);
   if (slashed.matched) {
     send({
@@ -2847,6 +2852,7 @@ async function runSession(
     previewBaseUrl: PREVIEW_BASE_URL,
     skills: skillsBody,
     accountPrompt,
+    thinkingEffort: effort,
     userId,
     onTodoWrite: (items) => broadcastToProject(projectId, { type: "todos_updated", todos: items }),
     requestUserAnswer: registerUserAnswer,
@@ -2859,6 +2865,7 @@ async function runSession(
         after_tokens: info.afterTokens,
       }),
     onText: (content) => send({ type: "text", content }),
+    onThinking: (content) => send({ type: "thinking", content }),
     onIteration: (iter) => send({ type: "iteration", iter }),
     onToolCallStarted: (callId, name) => {
       toolCalls++;

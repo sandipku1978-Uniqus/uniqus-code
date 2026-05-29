@@ -160,6 +160,9 @@ function handleEvent(event: ServerEvent): void {
     case "text":
       s.appendText(event.content);
       break;
+    case "thinking":
+      s.appendThinking(event.content);
+      break;
     case "system":
       // Non-agent infra messages — VM lifecycle, storage notices, etc. Render
       // muted so the user doesn't read them as agent output.

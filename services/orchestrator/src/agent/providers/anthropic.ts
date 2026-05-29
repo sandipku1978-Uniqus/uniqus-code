@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import type { ThinkingEffort } from "@uniqus/api-types";
 import { WEB_SEARCH_TOOL } from "../tools.js";
 import type {
   ForcedToolParams,
@@ -6,6 +7,25 @@ import type {
   StreamTurnParams,
   StreamTurnResult,
 } from "./types.js";
+
+/**
+ * Map the thinking-effort control to Claude's `effort` levels (low/medium/high
+ * line up 1:1). On Opus 4.8 / Sonnet 4.6, `effort` (under `output_config`) is
+ * the supported control — manual `thinking.budget_tokens` returns a 400 on 4.8
+ * — paired with adaptive thinking (`thinking: {type:"adaptive"}`) so the model
+ * actually reasons; `effort` then governs how deeply. Applied via a runtime
+ * cast since these fields may post-date the SDK's typings. Only on the agent
+ * turn — forced-tool (plan) calls can't combine with thinking.
+ * See https://platform.claude.com/docs/en/build-with-claude/effort
+ */
+function applyEffort(
+  params: Record<string, unknown>,
+  effort: ThinkingEffort | undefined,
+): void {
+  if (!effort) return;
+  params.thinking = { type: "adaptive" };
+  params.output_config = { effort };
+}
 
 /**
  * Anthropic adapter. This is the native path — the canonical message shape IS
@@ -21,14 +41,17 @@ export class AnthropicAdapter implements ModelProviderAdapter {
   }
 
   async streamAgentTurn(p: StreamTurnParams): Promise<StreamTurnResult> {
+    const params = {
+      model: p.model,
+      max_tokens: p.maxTokens,
+      system: [{ type: "text", text: p.system, cache_control: { type: "ephemeral" } }],
+      tools: [...p.tools, WEB_SEARCH_TOOL] as Anthropic.MessageCreateParams["tools"],
+      messages: p.messages,
+    } as Anthropic.MessageCreateParamsStreaming;
+    applyEffort(params as unknown as Record<string, unknown>, p.thinkingEffort);
+
     const stream = this.client.messages.stream(
-      {
-        model: p.model,
-        max_tokens: p.maxTokens,
-        system: [{ type: "text", text: p.system, cache_control: { type: "ephemeral" } }],
-        tools: [...p.tools, WEB_SEARCH_TOOL] as Anthropic.MessageCreateParams["tools"],
-        messages: p.messages,
-      },
+      params,
       p.signal ? { signal: p.signal } : undefined,
     );
 
@@ -42,6 +65,9 @@ export class AnthropicAdapter implements ModelProviderAdapter {
         }
       } else if (event.type === "content_block_delta") {
         if (event.delta.type === "text_delta") p.onText?.(event.delta.text);
+        // Adaptive/extended thinking streams as thinking_delta — surface it as
+        // the live reasoning trace (separate from the final answer text).
+        else if (event.delta.type === "thinking_delta") p.onThinking?.(event.delta.thinking);
       }
     });
 

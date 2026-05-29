@@ -1753,6 +1753,109 @@ section.band .sub {
   cursor: not-allowed;
 }
 
+/* ── Model + thinking picker (components/ModelPicker.tsx) ─────────────────── */
+.model-picker-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  border: 1px solid var(--border-default);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: inherit;
+  max-width: 200px;
+}
+.model-picker-trigger:hover {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+.model-picker-pop {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  padding: 12px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.model-picker-more {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  background: transparent;
+  border: 0;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.model-picker-more:hover { text-decoration: underline; }
+.model-picker-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.model-picker-option:hover { background: var(--bg-surface-hover); }
+.model-picker-option[data-active="true"] {
+  border-color: var(--accent);
+  background: rgba(178, 30, 125, 0.08);
+}
+
+/* ── Reasoning trace (the model's live thinking) ─────────────────────────── */
+.reasoning-card {
+  margin: 4px 0 6px 30px;
+  border-left: 2px solid var(--border-active);
+  background: rgba(72, 40, 121, 0.06);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  overflow: hidden;
+}
+.reasoning-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  padding: 6px 10px;
+}
+.reasoning-toggle:hover { color: var(--text-primary); }
+.reasoning-chevron { color: var(--text-dim); font-size: 9px; }
+.reasoning-body {
+  padding: 4px 12px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  max-height: 280px;
+  overflow-y: auto;
+  font-style: italic;
+}
+
 /* ── File Explorer ─────────────────────────────────────────────────────── */
 .tree-list {
   flex: 1;
