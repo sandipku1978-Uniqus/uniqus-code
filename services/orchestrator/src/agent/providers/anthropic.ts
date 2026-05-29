@@ -28,6 +28,38 @@ function applyEffort(
 }
 
 /**
+ * Strip provider-specific extras the canonical history may carry that the
+ * Anthropic API rejects. The Gemini adapter stamps `thought_signature` onto
+ * tool_use blocks (it needs them echoed back); when a conversation switches to
+ * Claude, those blocks reach the Messages API, which 400s on the unknown field
+ * ("tool_use.thought_signature: Extra inputs are not permitted"). We send a
+ * shallow-cleaned copy and leave the stored history untouched (Gemini still
+ * needs the signature). Only clones messages/blocks that actually carry it.
+ */
+function stripForeignFields(
+  messages: Anthropic.MessageParam[],
+): Anthropic.MessageParam[] {
+  return messages.map((m) => {
+    if (!Array.isArray(m.content)) return m;
+    let touched = false;
+    const content = m.content.map((block) => {
+      if (
+        block &&
+        typeof block === "object" &&
+        (block as { type?: string }).type === "tool_use" &&
+        "thought_signature" in block
+      ) {
+        touched = true;
+        const { thought_signature: _drop, ...rest } = block as Record<string, unknown>;
+        return rest as unknown as Anthropic.ContentBlockParam;
+      }
+      return block;
+    });
+    return touched ? ({ ...m, content } as Anthropic.MessageParam) : m;
+  });
+}
+
+/**
  * Anthropic adapter. This is the native path — the canonical message shape IS
  * Anthropic's, so there's no translation. It also keeps the server-side
  * web_search tool, which only Anthropic offers; the other adapters omit it.
@@ -46,7 +78,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
       max_tokens: p.maxTokens,
       system: [{ type: "text", text: p.system, cache_control: { type: "ephemeral" } }],
       tools: [...p.tools, WEB_SEARCH_TOOL] as Anthropic.MessageCreateParams["tools"],
-      messages: p.messages,
+      messages: stripForeignFields(p.messages),
     } as Anthropic.MessageCreateParamsStreaming;
     applyEffort(params as unknown as Record<string, unknown>, p.thinkingEffort);
 
@@ -119,7 +151,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
         system: p.system,
         tools: [p.tool],
         tool_choice: { type: "tool", name: p.tool.name },
-        messages: p.messages,
+        messages: stripForeignFields(p.messages),
       },
       p.signal ? { signal: p.signal } : undefined,
     );

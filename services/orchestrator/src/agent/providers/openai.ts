@@ -9,47 +9,49 @@ import type {
 } from "./types.js";
 
 /**
- * OpenAI adapter (Chat Completions API + function calling).
+ * OpenAI adapter — Responses API (`/v1/responses`).
  *
- * Translates the canonical Anthropic-shaped history to OpenAI's message list
- * on the way in, and synthesizes Anthropic content blocks (text + tool_use)
- * on the way out so the loop and persisted history stay provider-agnostic.
+ * We use Responses rather than Chat Completions because reasoning effort
+ * (`reasoning.effort`) is NOT supported alongside function tools on Chat
+ * Completions for the GPT-5.x models we route ("...not supported for gpt-5.5
+ * in /v1/chat/completions. Please use /v1/responses instead.") — and the agent
+ * always passes tools. Responses supports both, and streams reasoning
+ * summaries we surface as the live thinking trace.
  *
- * Web search: NOT enabled. The Chat Completions API rejects `web_search_options`
- * for the general GPT-5.x models we route here ("Unknown parameter:
- * 'web_search_options'") — built-in search there is a Responses-API / dedicated
- * search-model feature. So these models run with our custom tools only; only
- * the Anthropic path keeps a built-in web_search.
+ * Translation: the canonical Anthropic-shaped history maps to Responses `input`
+ * items (assistant text → output_text message; tool_use → function_call item;
+ * tool_result → function_call_output item) and the output items map back to
+ * Anthropic content blocks, so the loop and persisted history stay
+ * provider-agnostic. We run stateless (`store: false`) and do NOT round-trip
+ * reasoning items, which keeps multi-turn function calling free of
+ * dangling-reasoning-item errors.
  *
- * Reasoning: `reasoning_effort` maps the per-turn thinking-effort control.
- *
- * Image previews: OpenAI's `tool` role can't carry images, so image blocks
- * inside a tool_result (e.g. the screenshot tool) ride on a following user
- * message as image_url parts — the model still sees the screenshot. Images in
- * plain user messages are forwarded the same way.
+ * Image previews: a `function_call_output` can't carry images, so tool-result
+ * images ride on a trailing user message as `input_image` parts (same approach
+ * as before). Images in plain user messages are forwarded the same way.
  */
 
-/** GPT-5.5 Pro supports Chat Completions, but not streaming. */
+/** GPT-5.5 Pro supports the Responses API, but not streaming. */
 function supportsStreaming(model: string): boolean {
   return model !== "gpt-5.5-pro";
 }
 
 /**
- * Map the thinking-effort control to OpenAI's `reasoning_effort`. The `*-pro`
- * models only accept "high" (low/medium return a 400), so clamp them. Returns
- * an empty object when no effort was requested, to spread into the request.
+ * Build the `reasoning` request field from the thinking-effort control. The
+ * `*-pro` models only accept "high" (low/medium 400), so clamp them. `summary:
+ * "auto"` asks for a reasoning summary we stream as the thinking trace.
  */
-function reasoningEffortParam(
+function reasoningParam(
   model: string,
   effort: ThinkingEffort | undefined,
-): { reasoning_effort: ThinkingEffort } | Record<string, never> {
-  if (!effort) return {};
-  return { reasoning_effort: model.includes("-pro") ? "high" : effort };
+): OpenAI.Responses.ResponseCreateParams["reasoning"] | undefined {
+  if (!effort) return undefined;
+  return { effort: model.includes("-pro") ? "high" : effort, summary: "auto" };
 }
+
 export class OpenAIAdapter implements ModelProviderAdapter {
   readonly provider = "openai" as const;
   private client: OpenAI;
-  private idSeq = 0;
 
   constructor(apiKey: string) {
     this.client = new OpenAI({ apiKey });
@@ -60,132 +62,129 @@ export class OpenAIAdapter implements ModelProviderAdapter {
       return this.completeAgentTurn(p);
     }
 
-    const messages = toOpenAIMessages(p.system, p.messages);
-    const stream = await this.client.chat.completions.create(
+    const reasoning = reasoningParam(p.model, p.thinkingEffort);
+    const stream = await this.client.responses.create(
       {
         model: p.model,
-        max_completion_tokens: p.maxTokens,
-        tools: toOpenAITools(p.tools),
-        messages,
+        instructions: p.system,
+        input: toResponsesInput(p.messages),
+        tools: toResponsesTools(p.tools),
+        max_output_tokens: p.maxTokens,
+        store: false,
+        ...(reasoning ? { reasoning } : {}),
         stream: true,
-        ...reasoningEffortParam(p.model, p.thinkingEffort),
       },
       p.signal ? { signal: p.signal } : undefined,
     );
 
     let text = "";
-    let finishReason: string | null = null;
-    // Accumulate streamed tool calls by their position index.
-    const acc = new Map<number, { id: string; name: string; args: string; announced: boolean }>();
+    const announced = new Set<string>();
+    const calls: Array<{ callId: string; name: string; args: string }> = [];
 
-    for await (const chunk of stream) {
-      const choice = chunk.choices[0];
-      if (!choice) continue;
-      const delta = choice.delta;
-      if (delta?.content) {
-        text += delta.content;
-        p.onText?.(delta.content);
-      }
-      if (delta?.tool_calls) {
-        for (const tc of delta.tool_calls) {
-          const idx = tc.index ?? 0;
-          let cur = acc.get(idx);
-          if (!cur) {
-            cur = { id: tc.id ?? "", name: "", args: "", announced: false };
-            acc.set(idx, cur);
+    for await (const event of stream) {
+      switch (event.type) {
+        case "response.output_text.delta":
+          text += event.delta;
+          p.onText?.(event.delta);
+          break;
+        case "response.reasoning_summary_text.delta":
+          p.onThinking?.(event.delta);
+          break;
+        case "response.output_item.added":
+          if (event.item.type === "function_call" && !announced.has(event.item.call_id)) {
+            announced.add(event.item.call_id);
+            p.onToolCallStarted?.(event.item.call_id, event.item.name);
           }
-          if (tc.id) cur.id = tc.id;
-          if (tc.function?.name) cur.name += tc.function.name;
-          if (tc.function?.arguments) cur.args += tc.function.arguments;
-          if (!cur.announced && cur.name) {
-            cur.announced = true;
-            if (!cur.id) cur.id = `oai_${this.idSeq++}`;
-            p.onToolCallStarted?.(cur.id, cur.name);
+          break;
+        case "response.output_item.done":
+          if (event.item.type === "function_call") {
+            calls.push({
+              callId: event.item.call_id,
+              name: event.item.name,
+              args: event.item.arguments,
+            });
           }
-        }
+          break;
       }
-      if (choice.finish_reason) finishReason = choice.finish_reason;
     }
 
     const content: Anthropic.ContentBlockParam[] = [];
     if (text) content.push({ type: "text", text });
     const toolCalls: StreamTurnResult["toolCalls"] = [];
-    for (const cur of [...acc.values()]) {
-      if (!cur.id) cur.id = `oai_${this.idSeq++}`;
-      const input = safeParseJson(cur.args);
-      content.push({ type: "tool_use", id: cur.id, name: cur.name, input } as Anthropic.ToolUseBlockParam);
-      p.onToolCall?.(cur.id, cur.name, input);
-      toolCalls.push({ id: cur.id, name: cur.name, input });
+    for (const c of calls) {
+      const input = safeParseJson(c.args);
+      content.push({ type: "tool_use", id: c.callId, name: c.name, input } as Anthropic.ToolUseBlockParam);
+      p.onToolCall?.(c.callId, c.name, input);
+      toolCalls.push({ id: c.callId, name: c.name, input });
     }
 
     return {
       content,
-      stopReason: mapStopReason(finishReason, toolCalls.length > 0),
+      stopReason: toolCalls.length > 0 ? "tool_use" : "end_turn",
       toolCalls,
     };
   }
 
   private async completeAgentTurn(p: StreamTurnParams): Promise<StreamTurnResult> {
-    const messages = toOpenAIMessages(p.system, p.messages);
-    const response = await this.client.chat.completions.create(
+    const reasoning = reasoningParam(p.model, p.thinkingEffort);
+    const response = await this.client.responses.create(
       {
         model: p.model,
-        max_completion_tokens: p.maxTokens,
-        tools: toOpenAITools(p.tools),
-        messages,
-        ...reasoningEffortParam(p.model, p.thinkingEffort),
+        instructions: p.system,
+        input: toResponsesInput(p.messages),
+        tools: toResponsesTools(p.tools),
+        max_output_tokens: p.maxTokens,
+        store: false,
+        ...(reasoning ? { reasoning } : {}),
       },
       p.signal ? { signal: p.signal } : undefined,
     );
 
-    const choice = response.choices[0];
-    const message = choice?.message;
+    let text = "";
     const content: Anthropic.ContentBlockParam[] = [];
-    const text = textFromOpenAIContent(message?.content);
-    if (text) {
-      content.push({ type: "text", text });
-      p.onText?.(text);
-    }
-
     const toolCalls: StreamTurnResult["toolCalls"] = [];
-    for (const call of message?.tool_calls ?? []) {
-      if (call.type !== "function") continue;
-      const input = safeParseJson(call.function.arguments);
-      content.push({
-        type: "tool_use",
-        id: call.id,
-        name: call.function.name,
-        input,
-      } as Anthropic.ToolUseBlockParam);
-      p.onToolCallStarted?.(call.id, call.function.name);
-      p.onToolCall?.(call.id, call.function.name, input);
-      toolCalls.push({ id: call.id, name: call.function.name, input });
+    for (const item of response.output ?? []) {
+      if (item.type === "message") {
+        for (const part of item.content) {
+          if (part.type === "output_text") text += part.text;
+        }
+      } else if (item.type === "function_call") {
+        const input = safeParseJson(item.arguments);
+        content.push({ type: "tool_use", id: item.call_id, name: item.name, input } as Anthropic.ToolUseBlockParam);
+        p.onToolCallStarted?.(item.call_id, item.name);
+        p.onToolCall?.(item.call_id, item.name, input);
+        toolCalls.push({ id: item.call_id, name: item.name, input });
+      } else if (item.type === "reasoning") {
+        for (const s of item.summary) p.onThinking?.(s.text);
+      }
+    }
+    if (text) {
+      content.unshift({ type: "text", text });
+      p.onText?.(text);
     }
 
     return {
       content,
-      stopReason: mapStopReason(choice?.finish_reason ?? null, toolCalls.length > 0),
+      stopReason: toolCalls.length > 0 ? "tool_use" : "end_turn",
       toolCalls,
     };
   }
 
   async callForcedTool(p: ForcedToolParams): Promise<unknown> {
-    const messages = toOpenAIMessages(p.system, p.messages);
-    const response = await this.client.chat.completions.create(
-      {
-        model: p.model,
-        max_completion_tokens: p.maxTokens,
-        tools: toOpenAITools([p.tool]),
-        tool_choice: { type: "function", function: { name: p.tool.name } },
-        messages,
-      },
-      p.signal ? { signal: p.signal } : undefined,
-    );
-    const call = response.choices[0]?.message?.tool_calls?.[0];
-    if (!call || call.type !== "function" || call.function.name !== p.tool.name) {
+    const response = await this.client.responses.create({
+      model: p.model,
+      instructions: p.system,
+      input: toResponsesInput(p.messages),
+      tools: toResponsesTools([p.tool]),
+      tool_choice: { type: "function", name: p.tool.name },
+      max_output_tokens: p.maxTokens,
+      store: false,
+    });
+    const call = (response.output ?? []).find((i) => i.type === "function_call");
+    if (!call || call.type !== "function_call" || call.name !== p.tool.name) {
       throw new Error(`Model did not return a ${p.tool.name} tool call`);
     }
-    return safeParseJson(call.function.arguments);
+    return safeParseJson(call.arguments);
   }
 }
 
@@ -198,124 +197,92 @@ function safeParseJson(s: string): unknown {
   }
 }
 
-function textFromOpenAIContent(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => {
-      if (typeof part === "string") return part;
-      if (
-        part &&
-        typeof part === "object" &&
-        "text" in part &&
-        typeof (part as { text?: unknown }).text === "string"
-      ) {
-        return (part as { text: string }).text;
-      }
-      return "";
-    })
-    .join("");
-}
-
-function mapStopReason(
-  reason: string | null,
-  hadToolCalls: boolean,
-): StreamTurnResult["stopReason"] {
-  if (reason === "tool_calls" || (hadToolCalls && reason !== "length")) return "tool_use";
-  if (reason === "length") return "max_tokens";
-  if (reason === "stop") return "end_turn";
-  return hadToolCalls ? "tool_use" : "end_turn";
-}
-
-function toOpenAITools(tools: Anthropic.Tool[]): OpenAI.Chat.Completions.ChatCompletionTool[] {
+/** Anthropic tool schema → Responses API flat function-tool shape. */
+function toResponsesTools(tools: Anthropic.Tool[]): OpenAI.Responses.Tool[] {
   return tools.map((t) => ({
     type: "function",
-    function: {
-      name: t.name,
-      description: t.description,
-      parameters: t.input_schema as Record<string, unknown>,
-    },
+    name: t.name,
+    description: t.description ?? null,
+    parameters: t.input_schema as Record<string, unknown>,
+    strict: false,
   }));
 }
 
 /**
- * Build a map from tool_use id → tool name across the assistant history so we
- * can label tool messages. OpenAI doesn't need the name on tool messages, but
- * we keep this symmetrical with the Gemini adapter.
+ * Canonical (Anthropic-shaped) history → Responses API input items. Assistant
+ * text becomes an output_text message; tool_use blocks become top-level
+ * function_call items; tool_result blocks become function_call_output items,
+ * with any images forwarded on a trailing user message.
  */
-function toOpenAIMessages(
-  system: string,
+function toResponsesInput(
   messages: Anthropic.MessageParam[],
-): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
-  const out: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-    { role: "system", content: system },
-  ];
+): OpenAI.Responses.ResponseInputItem[] {
+  const out: OpenAI.Responses.ResponseInputItem[] = [];
 
   for (const msg of messages) {
     if (msg.role === "assistant") {
-      out.push(assistantToOpenAI(msg.content));
+      if (typeof msg.content === "string") {
+        if (msg.content) out.push({ role: "assistant", content: msg.content });
+        continue;
+      }
+      let text = "";
+      const fnCalls: OpenAI.Responses.ResponseInputItem[] = [];
+      for (const block of msg.content) {
+        if (block.type === "text") text += block.text;
+        else if (block.type === "tool_use") {
+          fnCalls.push({
+            type: "function_call",
+            call_id: block.id,
+            name: block.name,
+            arguments: JSON.stringify(block.input ?? {}),
+          });
+        }
+      }
+      // Assistant text as a plain string (an output_text content part would
+      // require annotations); function_call items ride as top-level items.
+      if (text) out.push({ role: "assistant", content: text });
+      out.push(...fnCalls);
       continue;
     }
-    // role === "user": may be a real user turn or a batch of tool_results.
+
+    // role === "user": real user turn or a batch of tool_results.
     if (typeof msg.content === "string") {
       out.push({ role: "user", content: msg.content });
       continue;
     }
-    const userParts: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [];
-    // Images found inside tool_results — the `tool` role can't carry images,
-    // so we forward them on a trailing user message (the model still sees them).
+    const userParts: OpenAI.Responses.ResponseInputContent[] = [];
     const toolImageUrls: string[] = [];
     for (const block of msg.content) {
       if (block.type === "tool_result") {
         const { text, images } = splitToolResult(block);
-        out.push({ role: "tool", tool_call_id: block.tool_use_id, content: text });
+        out.push({ type: "function_call_output", call_id: block.tool_use_id, output: text });
         toolImageUrls.push(...images);
       } else if (block.type === "text") {
-        userParts.push({ type: "text", text: block.text });
+        userParts.push({ type: "input_text", text: block.text });
       } else if (block.type === "image") {
         const url = imageBlockToDataUrl(block);
-        if (url) userParts.push({ type: "image_url", image_url: { url } });
+        if (url) userParts.push({ type: "input_image", image_url: url, detail: "auto" });
       }
     }
     if (toolImageUrls.length > 0) {
-      const parts: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [
-        { type: "text", text: "Image output from the preceding tool call(s):" },
-        ...toolImageUrls.map(
-          (url): OpenAI.Chat.Completions.ChatCompletionContentPart => ({
-            type: "image_url",
-            image_url: { url },
-          }),
-        ),
-      ];
-      out.push({ role: "user", content: parts });
+      out.push({
+        role: "user",
+        content: [
+          { type: "input_text", text: "Image output from the preceding tool call(s):" },
+          ...toolImageUrls.map(
+            (url): OpenAI.Responses.ResponseInputContent => ({
+              type: "input_image",
+              image_url: url,
+              detail: "auto",
+            }),
+          ),
+        ],
+      });
     }
     if (userParts.length > 0) out.push({ role: "user", content: userParts });
   }
-  return out;
-}
 
-function assistantToOpenAI(
-  content: Anthropic.MessageParam["content"],
-): OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam {
-  if (typeof content === "string") return { role: "assistant", content };
-  let text = "";
-  const toolCalls: OpenAI.Chat.Completions.ChatCompletionMessageToolCall[] = [];
-  for (const block of content) {
-    if (block.type === "text") text += block.text;
-    else if (block.type === "tool_use") {
-      toolCalls.push({
-        id: block.id,
-        type: "function",
-        function: { name: block.name, arguments: JSON.stringify(block.input ?? {}) },
-      });
-    }
-  }
-  const msg: OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam = {
-    role: "assistant",
-    content: text || null,
-  };
-  if (toolCalls.length > 0) msg.tool_calls = toolCalls;
-  return msg;
+  return out;
 }
 
 /** Split a tool_result into its text and any image data URLs it carries. */
