@@ -2156,7 +2156,7 @@ section.band .sub {
 .dash-hero {
   position: relative;
   isolation: isolate;
-  padding: 72px 24px 44px;
+  padding: 104px 24px 56px;
   text-align: center;
   margin-bottom: 8px;
 }
@@ -2168,21 +2168,21 @@ section.band .sub {
   left: 50%;
   top: 46%;
   transform: translate(-50%, -50%);
-  width: min(960px, 96%);
-  height: 560px;
+  width: min(1100px, 98%);
+  height: 660px;
   background:
     radial-gradient(60% 60% at 50% 45%, rgba(178, 30, 125, 0.30), transparent 70%),
     radial-gradient(70% 70% at 38% 60%, rgba(72, 40, 121, 0.28), transparent 72%);
-  filter: blur(36px);
+  filter: blur(40px);
   pointer-events: none;
   opacity: 0.9;
 }
 .dash-hero h1 {
-  font-size: clamp(28px, 3.4vw, 44px);
+  font-size: clamp(34px, 4.4vw, 56px);
   font-weight: 500;
   letter-spacing: -0.025em;
-  line-height: 1.1;
-  margin: 0 0 10px;
+  line-height: 1.08;
+  margin: 0 0 14px;
 }
 .dash-hero h1 .grad {
   background: var(--brand-gradient);
@@ -2192,13 +2192,17 @@ section.band .sub {
 }
 .dash-hero .lede {
   color: var(--text-muted);
-  font-size: 15px;
-  margin: 0 0 26px;
+  font-size: 16px;
+  margin: 0 0 32px;
 }
 .dash-hero-card {
-  max-width: 720px;
+  max-width: 800px;
   margin: 0 auto;
 }
+/* Slightly roomier composer to match the larger hero. */
+.dash-hero .newproj-form { padding: 18px 18px; }
+.dash-hero .newproj-blank textarea,
+.dash-hero .newproj-blank input { font-size: 15px; }
 
 /* Centered segmented tab control with a gradient-filled active pill. */
 .dash-tabs {
@@ -2336,6 +2340,58 @@ section.band .sub {
   font-size: 11px;
   font-weight: 500;
   cursor: default;
+}
+
+/* ==========================================================================
+   Dashboard — mobile (≤760px). The workspace is intentionally left for a
+   later overhaul; this only covers the project dashboard.
+   ========================================================================== */
+@media (max-width: 760px) {
+  .topnav { padding: 0 16px; }
+
+  /* Collapse the two-column shell to a single scrolling column. Drop the
+     fixed viewport height so the page scrolls naturally on touch. */
+  .dash-shell {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: calc(100vh - 64px);
+    overflow: visible;
+  }
+
+  /* Sidebar becomes a horizontal, scrollable nav strip above the content. */
+  .dash-side {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-default);
+    padding: 10px 14px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .dash-side .group {
+    display: flex;
+    flex-direction: row;
+    gap: 6px;
+    margin-bottom: 0;
+    align-items: center;
+  }
+  .dash-side .label-micro,
+  .dash-side .usage,
+  .dash-side .nav-item.soon { display: none; } /* secondary items off on mobile */
+  .dash-side .nav-item { white-space: nowrap; margin-bottom: 0; padding: 7px 11px; }
+  .dash-side .nav-item .count { margin-left: 6px; }
+
+  .dash-main { padding: 20px 16px 56px; overflow: visible; }
+
+  .dash-hero { padding: 44px 4px 28px; }
+  .dash-hero h1 { font-size: clamp(26px, 8vw, 38px); }
+  .dash-hero .lede { font-size: 14px; margin-bottom: 24px; }
+  .dash-tabs { max-width: 100%; overflow-x: auto; flex-wrap: nowrap; }
+  .newproj-blank-row { flex-wrap: wrap; }
+  .starter-grid { grid-template-columns: 1fr; }
+  .proj .desc { min-height: 0; }
 }
 
 /* ==========================================================================

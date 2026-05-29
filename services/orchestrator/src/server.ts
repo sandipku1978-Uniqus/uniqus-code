@@ -602,6 +602,10 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       branch?: string;
       pat?: string;
       use_oauth?: boolean;
+      /** When true, link the new project to the cloned repo (sets github_repo_*). */
+      link_repo?: boolean;
+      /** owner/repo, when the caller already knows it (OAuth repo picker). */
+      repo_full_name?: string;
     }>(req);
     const name = (body.name ?? "").trim();
     const repoUrl = (body.repo_url ?? "").trim();
@@ -644,7 +648,27 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         dest,
       );
       await getTracker(project.id, dest).syncChanges();
-      return json(res, 201, { project: toProjectSummary(project), import: result });
+
+      // Optionally link the project to the cloned repo so the workspace shows
+      // it and can push back later. Only meaningful when we can resolve
+      // owner/repo (from the OAuth picker's full_name, else parsed from the
+      // URL). Best-effort: a link failure must not fail the whole import — the
+      // clone already succeeded — so we just log and return the unlinked project.
+      let linkedProject = project;
+      if (body.link_repo) {
+        const fullName =
+          body.repo_full_name?.trim() || parseGithubFullName(repoUrl);
+        if (fullName) {
+          try {
+            const htmlUrl = `https://github.com/${fullName}`;
+            await setGithubRepo(project.id, user.id, htmlUrl, fullName);
+            linkedProject = (await getProject(project.id, user.id)) ?? project;
+          } catch (err) {
+            console.error(`[import-github] link repo failed for ${project.id}:`, err);
+          }
+        }
+      }
+      return json(res, 201, { project: toProjectSummary(linkedProject), import: result });
     } catch (err) {
       // Roll back the empty project + sandbox dir so the user can retry
       // cleanly. Best-effort: a deleteProject failure is logged but doesn't
@@ -1985,6 +2009,28 @@ function validateCloneUrl(repoUrl: string): string | null {
     return "repo_url is missing a hostname";
   }
   return null;
+}
+
+/**
+ * Extract `owner/repo` from a GitHub clone/HTML URL, or null if it isn't a
+ * github.com URL with at least two path segments. Used when linking an
+ * imported project to its source repo (the OAuth picker hands us the
+ * full_name directly; manual-URL clones get parsed here instead).
+ */
+function parseGithubFullName(repoUrl: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(repoUrl);
+  } catch {
+    return null;
+  }
+  if (!/(^|\.)github\.com$/i.test(parsed.hostname)) return null;
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  if (segments.length < 2) return null;
+  const owner = segments[0];
+  const repo = segments[1].replace(/\.git$/i, "");
+  if (!owner || !repo) return null;
+  return `${owner}/${repo}`;
 }
 
 /**

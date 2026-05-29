@@ -172,6 +172,10 @@ export const importGithubApi = (input: {
   branch?: string;
   pat?: string;
   use_oauth?: boolean;
+  /** When true, link the created project to the cloned repo. */
+  link_repo?: boolean;
+  /** owner/repo, when known (OAuth repo picker). */
+  repo_full_name?: string;
 }): Promise<{ project: ProjectSummary; import: ImportResultMeta }> =>
   api("/api/projects/import-github", {
     method: "POST",

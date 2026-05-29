@@ -94,6 +94,27 @@ function useOutsideClick(
   }, [enabled, onOutside, ref]);
 }
 
+/**
+ * Extract `owner/repo` from a github.com clone/HTML URL, or null if it isn't
+ * a GitHub URL with at least two path segments. Mirrors the orchestrator's
+ * parser so the link-choice modal can show the repo name before submitting.
+ */
+function parseGithubFullName(repoUrl: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(repoUrl);
+  } catch {
+    return null;
+  }
+  if (!/(^|\.)github\.com$/i.test(parsed.hostname)) return null;
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  if (segments.length < 2) return null;
+  const owner = segments[0];
+  const repo = segments[1].replace(/\.git$/i, "");
+  if (!owner || !repo) return null;
+  return `${owner}/${repo}`;
+}
+
 function fallbackTileColor(projectId: string): string {
   let hash = 0;
   for (let i = 0; i < projectId.length; i++) {
@@ -163,6 +184,14 @@ export default function ProjectPicker({
   const [branch, setBranch] = useState("");
   const [pat, setPat] = useState("");
   const [zipFile, setZipFile] = useState<File | null>(null);
+
+  // Clone-GitHub link choice: when set, the "Connect this project to the repo?"
+  // modal is open and the import is paused until the user answers.
+  const [linkPrompt, setLinkPrompt] = useState<{
+    resolvedUrl: string;
+    fullName: string | null;
+    useOauth: boolean;
+  } | null>(null);
 
   // GitHub OAuth state
   const [github, setGithub] = useState<GithubStatus | null>(null);
@@ -287,39 +316,41 @@ export default function ProjectPicker({
 
     // Import flows still require a manual project name.
     if (!name.trim()) return;
+
+    // GitHub clone is special: before we create anything, ask whether to link
+    // the project to the source repo. Resolve the clone URL + owner/repo here,
+    // then open the intrusive choice modal — the actual import runs from
+    // doGithubImport once the user answers.
+    if (mode === "github") {
+      // Two paths: OAuth (user picked from their connected-account dropdown)
+      // or PAT/manual URL fallback. The OAuth path resolves the URL from the
+      // selected repo's clone_url.
+      const useOauth = githubAuthMode === "oauth" && !!github?.connected;
+      let resolvedUrl = repoUrl.trim();
+      let fullName: string | null = null;
+      if (useOauth) {
+        const repo = repos?.find((r) => r.full_name === selectedRepo);
+        if (!repo) {
+          setError("pick a repository from the list");
+          return;
+        }
+        resolvedUrl = repo.clone_url;
+        fullName = repo.full_name;
+      } else {
+        if (!resolvedUrl) {
+          setError("repo URL is required");
+          return;
+        }
+        fullName = parseGithubFullName(resolvedUrl);
+      }
+      setError(null);
+      setLinkPrompt({ resolvedUrl, fullName, useOauth });
+      return;
+    }
+
     setCreating(true);
     setError(null);
     try {
-      if (mode === "github") {
-        // Two paths: OAuth (user picked from their connected-account dropdown)
-        // or PAT/manual URL fallback. The OAuth path doesn't ask the user
-        // to type a URL — we resolve it from the selected repo's clone_url.
-        const useOauth = githubAuthMode === "oauth" && github?.connected;
-        let resolvedUrl = repoUrl.trim();
-        if (useOauth) {
-          const repo = repos?.find((r) => r.full_name === selectedRepo);
-          if (!repo) {
-            setError("pick a repository from the list");
-            setCreating(false);
-            return;
-          }
-          resolvedUrl = repo.clone_url;
-        }
-        if (!resolvedUrl) {
-          setError("repo URL is required");
-          setCreating(false);
-          return;
-        }
-        const { project } = await importGithubApi({
-          name: name.trim(),
-          repo_url: resolvedUrl,
-          branch: branch.trim() || undefined,
-          pat: !useOauth ? pat.trim() || undefined : undefined,
-          use_oauth: useOauth || undefined,
-        });
-        router.push(`/projects/${project.id}`);
-        return;
-      }
       if (mode === "zip") {
         if (!zipFile) {
           setError("please pick a .zip file");
@@ -333,6 +364,31 @@ export default function ProjectPicker({
         router.push(`/projects/${project.id}`);
         return;
       }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setCreating(false);
+    }
+  }
+
+  // Runs the actual GitHub import once the user has answered the link-choice
+  // modal. `linkRepo` true → the server records github_repo_* on the project.
+  async function doGithubImport(linkRepo: boolean): Promise<void> {
+    if (!linkPrompt || creating) return;
+    const { resolvedUrl, fullName, useOauth } = linkPrompt;
+    setLinkPrompt(null);
+    setCreating(true);
+    setError(null);
+    try {
+      const { project } = await importGithubApi({
+        name: name.trim(),
+        repo_url: resolvedUrl,
+        branch: branch.trim() || undefined,
+        pat: !useOauth ? pat.trim() || undefined : undefined,
+        use_oauth: useOauth || undefined,
+        link_repo: linkRepo || undefined,
+        repo_full_name: linkRepo && fullName ? fullName : undefined,
+      });
+      router.push(`/projects/${project.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setCreating(false);
@@ -992,6 +1048,14 @@ export default function ProjectPicker({
           )}
             </>
           )}
+
+          {linkPrompt && (
+            <LinkRepoDialog
+              repoFullName={linkPrompt.fullName}
+              onChoice={(link) => void doGithubImport(link)}
+              onCancel={() => setLinkPrompt(null)}
+            />
+          )}
         </main>
       </div>
     </>
@@ -1238,6 +1302,64 @@ function DeleteDialog({
             className="btn-danger"
           >
             Delete project
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Intrusive choice shown before a Clone-GitHub project is created: connect the
+ * new project to the source repo, or not. "Yes" records github_repo_* (the
+ * workspace then shows the repo and can push back, given GitHub is connected);
+ * "No" leaves it as the default unconnected project.
+ */
+function LinkRepoDialog({
+  repoFullName,
+  onChoice,
+  onCancel,
+}: {
+  repoFullName: string | null;
+  onChoice: (link: boolean) => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="proj-dialog-overlay" onClick={onCancel}>
+      <div className="proj-dialog" onClick={(e) => e.stopPropagation()}>
+        <h3>Connect this project to GitHub?</h3>
+        <p className="proj-dialog-warn" style={{ color: "var(--text-muted)" }}>
+          {repoFullName ? (
+            <>
+              Link this project to <strong>{repoFullName}</strong> so the
+              workspace shows the repo and can push changes back to it (pushing
+              needs your GitHub connected). Choose <strong>No</strong> to start
+              unconnected — you can link a repo later from the workspace.
+            </>
+          ) : (
+            <>
+              Link this project to the repo you&apos;re cloning so the workspace
+              shows it and can push changes back. Choose <strong>No</strong> to
+              start unconnected — you can link a repo later from the workspace.
+            </>
+          )}
+        </p>
+        <div className="proj-dialog-actions">
+          <button type="button" onClick={() => onChoice(false)} className="btn-ghost">
+            No, don&apos;t connect
+          </button>
+          <button
+            type="button"
+            onClick={() => onChoice(true)}
+            className="btn-primary"
+            disabled={!repoFullName}
+            title={
+              repoFullName
+                ? `Link to ${repoFullName}`
+                : "Couldn't determine the repo — clone will proceed unconnected"
+            }
+          >
+            Yes, connect repo
           </button>
         </div>
       </div>
