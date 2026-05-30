@@ -14,6 +14,7 @@ import { send } from "@/lib/ws-client";
 import PlanReview from "./PlanReview";
 import ChatSessionDropdown from "./ChatSessionDropdown";
 import ModelPicker from "./ModelPicker";
+import { ErrorBoundary } from "./ErrorBoundary";
 
 export default function ChatPanel() {
   const chat = useStore((s) => s.chat);
@@ -33,6 +34,13 @@ export default function ChatPanel() {
   const liveUsage = useStore((s) => s.liveUsage);
   const [tasksExpanded, setTasksExpanded] = useState(false);
   const [input, setInput] = useState("");
+  // Persist the composer draft per-project so a reload or a client-side crash
+  // doesn't lose typed-but-unsent text. Cleared on successful send.
+  const draftKey = project ? `uniqus.draft.${project.id}` : null;
+  // The key the current `input` value belongs to. Set synchronously when we
+  // (re)hydrate for a new key so the persist effect can never write one
+  // project's text under another project's key during a switch.
+  const draftKeyRef = useRef<string | null>(null);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -80,6 +88,38 @@ export default function ChatPanel() {
   useEffect(() => {
     autoResize();
   }, [input, autoResize]);
+
+  // Hydrate whenever the key changes (first load OR a project switch). Always
+  // replaces `input` with the new key's saved value (or "") so stale text from
+  // the previous project can't linger — and marks which key `input` now holds.
+  useEffect(() => {
+    if (!draftKey) return;
+    let saved = "";
+    try {
+      saved = localStorage.getItem(draftKey) ?? "";
+    } catch {
+      // localStorage can throw in private mode / when disabled — drafts are a
+      // nicety, never block the composer over it.
+    }
+    draftKeyRef.current = draftKey;
+    setInput(saved);
+  }, [draftKey]);
+
+  // Persist on input change only — NOT on draftKey change. This runs after the
+  // hydrate effect above has settled `input` for the current key, so it always
+  // writes under the key `input` actually belongs to (draftKeyRef), never the
+  // previous project's leftover text under the new key.
+  useEffect(() => {
+    const key = draftKeyRef.current;
+    if (!key) return;
+    try {
+      if (input) localStorage.setItem(key, input);
+      else localStorage.removeItem(key);
+    } catch {
+      /* ignore — see note above */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [input]);
 
   // Drag-and-drop handlers
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -212,8 +252,10 @@ export default function ChatPanel() {
 
     const content = trimmed || "Use the attached file(s).";
     const fileRefs = extractFileRefs(content, validFilePaths);
-    addUserMessage(content, attachments, fileRefs);
-    setBusy(true);
+    // Send is synchronous, so check the result BEFORE echoing/clearing. On a
+    // closed socket we keep the composer text (and its saved draft) and don't
+    // echo a bubble — otherwise the user would lose the exact text the draft
+    // feature exists to protect, with a misleading "sent" bubble left behind.
     const ok = send({
       type: "user_message",
       content,
@@ -224,14 +266,16 @@ export default function ChatPanel() {
       file_refs: fileRefs.length > 0 ? fileRefs : undefined,
     });
     if (!ok) {
-      // Socket is closed — the message never left the browser. Surface that
-      // instead of leaving the UI stuck on "Uniqus is running…" forever, and
-      // unblock the composer so the user can retry once we reconnect.
-      setBusy(false);
       addSystem(
         "disconnected — message not sent. We'll reconnect automatically; try again in a moment.",
       );
+      setUploading(false);
+      return;
     }
+    // Sent — echo the message, mark the turn busy, and clear the composer +
+    // its persisted draft.
+    addUserMessage(content, attachments, fileRefs);
+    setBusy(true);
     setInput("");
     setPendingFiles([]);
     setUploading(false);
@@ -314,12 +358,25 @@ export default function ChatPanel() {
           const completeId = turn.complete?.id;
           const expanded = completeId ? !!expandedTurns[completeId] : true;
           return (
-            <Turn
+            // Per-turn boundary: a single malformed message (bad markdown,
+            // unexpected tool payload) renders a small inline fallback instead
+            // of throwing and blanking the entire conversation.
+            <ErrorBoundary
               key={turn.key}
-              turn={turn}
-              expanded={expanded || isLast && !turn.complete}
-              onToggle={completeId ? () => toggleTurn(completeId) : undefined}
-            />
+              variant="inline"
+              label="message"
+              // Include content-identity signals (not just the positional key)
+              // so a boundary that caught a transient mid-stream error clears
+              // itself once the turn advances or completes — rather than staying
+              // stuck until the manual Retry.
+              resetKeys={[turn.key, turn.body.length, turn.complete?.id ?? null]}
+            >
+              <Turn
+                turn={turn}
+                expanded={expanded || isLast && !turn.complete}
+                onToggle={completeId ? () => toggleTurn(completeId) : undefined}
+              />
+            </ErrorBoundary>
           );
         })}
         {busy && (() => {

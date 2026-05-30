@@ -1161,6 +1161,15 @@ section.band .sub {
   color: var(--text-primary);
 }
 
+/* Active/pressed toggled state for icon buttons (preview phone toggle, mobile
+   ⋯ menu). The base buttons only have a hover style, so data-on had no visible
+   effect without this. */
+.icon-btn[data-on="true"],
+.icon-btn-sm[data-on="true"] {
+  background: rgba(178, 30, 125, 0.14);
+  color: var(--brand-magenta);
+}
+
 .ide-grid {
   flex: 1;
   min-height: 0;
@@ -2391,6 +2400,172 @@ section.band .sub {
   background: #fff;
 }
 
+/* ── Preview phone mode ───────────────────────────────────────────────────
+   The stage + device-frame are always in the DOM; `data-phone` flips them
+   between a transparent pass-through (iframe fills the pane, exactly as the
+   plain preview) and a centered phone-proportioned device on a dark backdrop.
+   Because the iframe element never moves in the tree, toggling does not reload
+   the running app. */
+.preview-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.preview-stage > .device-frame {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.preview-stage[data-phone="true"] {
+  overflow: auto;
+  padding: 20px;
+  background: radial-gradient(90% 90% at 50% 0%, #15151c, #0a0a0e);
+}
+.device-frame[data-phone="true"] {
+  position: relative;
+  flex: 0 0 auto;
+  /* Drive the size from WIDTH (capped to the pane) and derive height from the
+     aspect ratio, so the frame can never overflow horizontally — even in a
+     narrow desktop preview pane. On panes shorter than the derived height the
+     stage scrolls vertically. `margin:auto` (rather than the parent's
+     align/justify center) keeps it centered while staying fully scrollable in
+     the overflow direction. */
+  margin: auto;
+  width: min(390px, 100%);
+  height: auto;
+  aspect-ratio: 390 / 844;
+  padding: 12px;
+  background: #0b0b0f;
+  border: 1px solid #30303c;
+  border-radius: 44px;
+  box-shadow:
+    0 30px 70px rgba(0, 0, 0, 0.55),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+/* Notch */
+.device-frame[data-phone="true"]::before {
+  content: "";
+  position: absolute;
+  top: 13px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 36%;
+  max-width: 150px;
+  height: 20px;
+  background: #0b0b0f;
+  border-radius: 0 0 14px 14px;
+  z-index: 2;
+}
+.device-frame[data-phone="true"] > .preview-iframe {
+  border-radius: 30px;
+  /* The iframe's own scroll keeps content inside the rounded corners. */
+  overflow: hidden;
+}
+
+/* ── Error boundaries ──────────────────────────────────────────────────────
+   Fallback UI shown by <ErrorBoundary> when a subtree throws, instead of
+   crashing the whole app. The pane variant fills its panel; the inline variant
+   is a compact row for a single chat message. */
+.error-fallback {
+  height: 100%;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 28px;
+  text-align: center;
+  color: var(--text-muted);
+}
+.error-fallback svg { color: var(--conf-medium); }
+.error-fallback h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.error-fallback p { margin: 0; font-size: 12.5px; line-height: 1.6; max-width: 38ch; }
+.error-fallback-msg {
+  margin: 2px 0 0;
+  max-width: 100%;
+  max-height: 96px;
+  overflow: auto;
+  padding: 8px 10px;
+  background: var(--bg-code);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono-stack);
+  font-size: 11px;
+  color: var(--conf-low);
+  white-space: pre-wrap;
+  text-align: left;
+}
+.error-fallback-inline {
+  flex: none;
+  height: auto;
+  flex-direction: row;
+  gap: 8px;
+  padding: 10px 12px;
+  margin: 6px 0 6px 30px;
+  width: calc(100% - 30px);
+  justify-content: flex-start;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  font-size: 12px;
+}
+.error-fallback-retry {
+  background: transparent;
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  padding: 3px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.error-fallback-retry:hover { background: var(--bg-surface-hover); border-color: var(--text-muted); }
+
+/* Route-level error screen (app/projects/[id]/error.tsx). */
+.route-error {
+  height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--bg-dark);
+}
+.route-error-card {
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+}
+.route-error-card svg { color: var(--conf-medium); }
+.route-error-card h1 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.01em; }
+.route-error-card p { margin: 0; color: var(--text-muted); font-size: 14px; line-height: 1.6; }
+.route-error-msg {
+  width: 100%;
+  max-height: 120px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg-code);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono-stack);
+  font-size: 11.5px;
+  color: var(--conf-low);
+  white-space: pre-wrap;
+  text-align: left;
+}
+.route-error-actions { display: flex; gap: 10px; margin-top: 6px; }
+
 /* ── Terminal ──────────────────────────────────────────────────────────── */
 .terminal-pane {
   background: var(--bg-code);
@@ -2685,8 +2860,164 @@ section.band .sub {
 }
 
 /* ==========================================================================
-   Dashboard — mobile (≤760px). The workspace is intentionally left for a
-   later overhaul; this only covers the project dashboard.
+   IDE workspace — mobile (≤760px). The horizontal Chat | Files | Editor split
+   can't sit side-by-side on a phone, so Workspace.tsx (gated by useIsMobile on
+   the same 760px breakpoint) renders one full-screen pane at a time and a
+   bottom tab bar switches between them, while the topbar's secondary actions
+   fold into a ⋯ overflow menu. Everything below only exists in the DOM on
+   mobile, so it can't affect the desktop layout.
+   ========================================================================== */
+@media (max-width: 760px) {
+  /* dvh tracks the real visible height as the mobile browser chrome shows /
+     hides, so the bottom tab bar isn't pushed under the URL bar. The
+     `.ide-shell { height: 100vh }` base rule is the fallback. */
+  .ide-shell { height: 100dvh; }
+
+  .ide-topbar { gap: 8px; padding: 0 10px; }
+  /* Trim the breadcrumb down to just the project name so the Run button + ⋯
+     menu fit on a narrow topbar. */
+  .ide-topbar .crumbs .sep,
+  .ide-topbar .crumbs .branch,
+  .ide-topbar .crumbs .lockup .code,
+  .ide-topbar .crumbs .lockup .slash { display: none; }
+  .ide-topbar .crumbs { gap: 6px; min-width: 0; }
+  .ide-topbar .crumbs .proj {
+    max-width: 44vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .ide-topbar .actions { gap: 4px; }
+
+  /* Single-pane body: the active pane fills; the others are display:none but
+     stay mounted, so their state (editor, scroll, live preview) survives. */
+  .ide-mobile { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .ide-mobile-pane { flex: 1; min-height: 0; flex-direction: column; }
+  .ide-mobile-pane[data-active="false"] { display: none; }
+  .ide-mobile-pane[data-active="true"] { display: flex; }
+
+  /* Bottom tab bar — full-screen pane switcher pinned to the bottom edge. */
+  .mobile-tabbar {
+    flex-shrink: 0;
+    display: flex;
+    align-items: stretch;
+    border-top: 1px solid var(--border-default);
+    background: var(--bg-pane);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .mobile-tab {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    padding: 8px 2px 7px;
+    border: 0;
+    background: transparent;
+    color: var(--text-dim);
+    font-family: inherit;
+    font-size: 10px;
+    font-weight: 500;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .mobile-tab[data-active="true"] { color: var(--brand-magenta); }
+  .mobile-tab:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .mobile-tab[data-active="true"]::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 22%;
+    right: 22%;
+    height: 2px;
+    border-radius: 0 0 3px 3px;
+    background: var(--brand-magenta);
+  }
+  .mobile-tab-icon { position: relative; display: flex; }
+  .mobile-tab-label { line-height: 1; letter-spacing: 0.01em; }
+  .mobile-tab-badge {
+    position: absolute;
+    top: -2px;
+    right: -4px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--conf-high);
+    border: 1.5px solid var(--bg-pane);
+  }
+
+  /* Topbar ⋯ overflow menu. */
+  .topbar-overflow-wrap { position: relative; display: inline-flex; }
+  .topbar-overflow-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    cursor: default;
+  }
+  .topbar-overflow {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 61;
+    min-width: 196px;
+    max-width: min(280px, 90vw);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+    animation: popIn var(--dur-fast) var(--ease-spring) backwards;
+  }
+  /* Lay the assorted action buttons out as full-width, left-aligned menu rows
+     regardless of which element each component renders (button / a / chip). */
+  .topbar-overflow > .toggle-btn,
+  .topbar-overflow > a.toggle-btn,
+  .topbar-overflow > .repo-link-group,
+  .topbar-overflow > .repo-link-group > .toggle-btn {
+    width: 100%;
+    justify-content: flex-start;
+  }
+  /* Linked-repo state: the group holds the repo link + a fixed-size unlink ✕.
+     Let the link flex and ellipsize a long org/repo name so it can't overflow
+     or shove the ✕ out of the menu. */
+  .topbar-overflow > .repo-link-group {
+    gap: 4px;
+  }
+  .topbar-overflow > .repo-link-group > .toggle-btn {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .topbar-overflow > .repo-link-group > .toggle-btn span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .topbar-overflow > .repo-link-group > .repo-unlink-btn {
+    flex: 0 0 auto;
+  }
+  .topbar-overflow-sep {
+    height: 1px;
+    margin: 4px 2px;
+    background: var(--border-default);
+  }
+}
+
+/* ==========================================================================
+   Dashboard — mobile (≤760px). Covers the project dashboard; the workspace
+   has its own mobile section above.
    ========================================================================== */
 @media (max-width: 760px) {
   .topnav { padding: 0 16px; }

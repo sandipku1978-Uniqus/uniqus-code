@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { PreviewServer } from "@uniqus/api-types";
+import { useIsMobile } from "@/lib/use-is-mobile";
 
 // Match the page's TLS state for the dev fallback so the iframe doesn't get
 // mixed-content blocked when the app is loaded over HTTPS. Production should
@@ -32,6 +33,16 @@ function isPreviewNavMessage(data: unknown): data is PreviewNavMessage {
 
 export default function PreviewPanel({ server }: { server: PreviewServer }) {
   const [reloadKey, setReloadKey] = useState(0);
+  // Phone-preview mode: constrain the iframe to a phone-sized device frame
+  // instead of filling the pane. Purely presentational — it toggles classes
+  // on the wrappers and never remounts the iframe, so the running app keeps
+  // its state across toggles.
+  const [phoneMode, setPhoneMode] = useState(false);
+  // On a phone the pane is already phone-width, so framing a device-in-a-device
+  // is pointless (and the fixed frame would be cramped) — hide the toggle and
+  // never apply the frame there.
+  const isMobile = useIsMobile();
+  const framed = phoneMode && !isMobile;
   // In-app path the iframe is currently showing — updated via postMessage
   // from the navigation reporter the proxy injects into every HTML response.
   // Starts at "/" because that's what we load. Cross-origin is fine: the
@@ -77,6 +88,21 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
         <span className="url" title={displayedUrl}>
           {displayedUrl}
         </span>
+        {!isMobile && (
+          <button
+            type="button"
+            onClick={() => setPhoneMode((v) => !v)}
+            className="icon-btn-sm"
+            data-on={phoneMode}
+            title={phoneMode ? "Exit phone preview" : "Phone preview"}
+            aria-pressed={phoneMode}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="6" y="2" width="12" height="20" rx="2" />
+              <line x1="11" y1="18" x2="13" y2="18" />
+            </svg>
+          </button>
+        )}
         <a
           href={displayedUrl}
           target="_blank"
@@ -92,12 +118,19 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
           </svg>
         </a>
       </div>
-      <iframe
-        key={reloadKey}
-        src={baseUrl}
-        className="preview-iframe"
-        title={`preview ${server.port}`}
-      />
+      {/* Stage + device-frame stay in the DOM in both modes so toggling phone
+          mode only restyles them — the iframe never remounts (and the running
+          app keeps its state). `data-phone` switches fill ⇄ framed styling. */}
+      <div className="preview-stage" data-phone={framed}>
+        <div className="device-frame" data-phone={framed}>
+          <iframe
+            key={reloadKey}
+            src={baseUrl}
+            className="preview-iframe"
+            title={`preview ${server.port}`}
+          />
+        </div>
+      </div>
     </div>
   );
 }

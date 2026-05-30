@@ -9,7 +9,8 @@ import {
   PanelResizeHandle,
 } from "react-resizable-panels";
 import { connect, disconnect, send } from "@/lib/ws-client";
-import { useStore } from "@/lib/store";
+import { useStore, previewTabId, fileTabId } from "@/lib/store";
+import { useIsMobile } from "@/lib/use-is-mobile";
 import { runProjectApi } from "@/lib/api";
 import ChatPanel from "./ChatPanel";
 import FileExplorer from "./FileExplorer";
@@ -22,6 +23,7 @@ import GuestBanner from "./GuestBanner";
 import SkillsModal from "./SkillsModal";
 import SecretsModal from "./SecretsModal";
 import CheckpointsModal from "./CheckpointsModal";
+import { ErrorBoundary } from "./ErrorBoundary";
 
 export default function Workspace({
   projectId,
@@ -60,6 +62,75 @@ export default function Workspace({
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [secretsOpen, setSecretsOpen] = useState(false);
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
+
+  // ── Mobile (≤760px) layout ──────────────────────────────────────────────
+  // On a phone the horizontal Chat | Files | Editor split is unusable, so we
+  // render one full-screen pane at a time and switch between them with a
+  // bottom tab bar. `useIsMobile` is SSR-safe (desktop is the server default,
+  // mobile swaps in after mount) so there's no hydration mismatch.
+  const isMobile = useIsMobile();
+  const [mobileView, setMobileView] = useState<
+    "chat" | "editor" | "files" | "logs"
+  >("chat");
+  const [overflowOpen, setOverflowOpen] = useState(false);
+  // Selectors that drive the bottom-nav Code/Preview state. The editor surface
+  // is shared between "Code" and "Preview"; which one is highlighted depends on
+  // whether the active editor tab is a preview. Mirrors the fallback order in
+  // EditorPreviewArea so the highlight matches what's actually shown.
+  const previews = useStore((s) => s.previews);
+  const openFiles = useStore((s) => s.openFiles);
+  const editorTab = useStore((s) => s.editorTab);
+  const setEditorTab = useStore((s) => s.setEditorTab);
+
+  const hasPreview = previews.length > 0;
+  const effectiveTab =
+    editorTab ||
+    (previews[0]
+      ? previewTabId(previews[0].id)
+      : openFiles[0]
+      ? fileTabId(openFiles[0])
+      : "");
+  const activeTabIsPreview = effectiveTab.startsWith("preview:");
+  // Highlight intent. With no running preview the editor can only show code /
+  // its empty state, so "Code" is the active editor view regardless. The
+  // Preview tab is disabled when nothing is running, so previewActive only
+  // holds once a server exists AND the editor is actually showing it.
+  const codeActive = mobileView === "editor" && (!hasPreview || !activeTabIsPreview);
+  const previewActive = mobileView === "editor" && hasPreview && activeTabIsPreview;
+
+  // Topbar overflow (⋯) menu plumbing. Refs drive focus management (move focus
+  // into the menu on open, restore to the trigger on close).
+  const overflowTriggerRef = useRef<HTMLButtonElement>(null);
+  const overflowMenuRef = useRef<HTMLDivElement>(null);
+  const closeOverflow = () => {
+    setOverflowOpen(false);
+    overflowTriggerRef.current?.focus();
+  };
+  // Close the menu when leaving mobile so it can't linger as a stray popover
+  // after a resize back to desktop.
+  useEffect(() => {
+    if (!isMobile) setOverflowOpen(false);
+  }, [isMobile]);
+  // Move focus to the first item when the menu opens (a11y).
+  useEffect(() => {
+    if (!overflowOpen) return;
+    const first = overflowMenuRef.current?.querySelector<HTMLElement>(
+      'button:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+    );
+    first?.focus();
+  }, [overflowOpen]);
+
+  const goCode = () => {
+    setMobileView("editor");
+    // If we're sitting on a preview tab but have a file open, surface the file.
+    if (activeTabIsPreview && openFiles[0]) {
+      setEditorTab(fileTabId(openFiles[0]));
+    }
+  };
+  const goPreview = () => {
+    setMobileView("editor");
+    if (previews[0]) setEditorTab(previewTabId(previews[0].id));
+  };
 
   // Tick so the "synced 12s ago" label increments without waiting for the
   // next sync event. 10s cadence is plenty — the label rounds to seconds/min.
@@ -152,8 +223,61 @@ export default function Workspace({
     router,
   ]);
 
+  // Secondary topbar actions, shared between the desktop topbar (inline) and
+  // the mobile overflow (⋯) menu so there's a single source for each button.
+  const secondaryActions = (
+    <>
+      {!isGuest && <DeployButton projectId={projectId} />}
+      {!isGuest && <GithubRepoButton projectId={projectId} />}
+      <button
+        onClick={() => {
+          setSkillsOpen(true);
+          setOverflowOpen(false);
+        }}
+        className="toggle-btn"
+        title="Edit project Skills (instructions prepended to the agent's system prompt)"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <polyline points="14 2 14 8 20 8" />
+          <line x1="9" y1="13" x2="15" y2="13" />
+          <line x1="9" y1="17" x2="15" y2="17" />
+        </svg>
+        <span>Skills</span>
+      </button>
+      <button
+        onClick={() => {
+          setSecretsOpen(true);
+          setOverflowOpen(false);
+        }}
+        className="toggle-btn"
+        title="Manage project secrets (encrypted at rest; the agent gets values via get_secret only)"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <rect x="3" y="11" width="18" height="11" rx="2" />
+          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+        </svg>
+        <span>Secrets</span>
+      </button>
+      <button
+        onClick={() => {
+          setCheckpointsOpen(true);
+          setOverflowOpen(false);
+        }}
+        className="toggle-btn"
+        title="Browse + restore agent-made checkpoints"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <polyline points="1 4 1 10 7 10" />
+          <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+        </svg>
+        <span>Rewind</span>
+      </button>
+    </>
+  );
+
   return (
-    <div className="ide-shell">
+    <div className="ide-shell" data-mobile={isMobile}>
       {/* Topbar */}
       <div className="ide-topbar">
         <div className="crumbs">
@@ -177,77 +301,111 @@ export default function Workspace({
 
         <div className="actions">
           <RunButton projectId={projectId} />
-          {!isGuest && <DeployButton projectId={projectId} />}
-          {!isGuest && <GithubRepoButton projectId={projectId} />}
-          <button
-            onClick={() => setSkillsOpen(true)}
-            className="toggle-btn"
-            title="Edit project Skills (instructions prepended to the agent's system prompt)"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <polyline points="14 2 14 8 20 8" />
-              <line x1="9" y1="13" x2="15" y2="13" />
-              <line x1="9" y1="17" x2="15" y2="17" />
-            </svg>
-            <span>Skills</span>
-          </button>
-          <button
-            onClick={() => setSecretsOpen(true)}
-            className="toggle-btn"
-            title="Manage project secrets (encrypted at rest; the agent gets values via get_secret only)"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="3" y="11" width="18" height="11" rx="2" />
-              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-            </svg>
-            <span>Secrets</span>
-          </button>
-          <button
-            onClick={() => setCheckpointsOpen(true)}
-            className="toggle-btn"
-            title="Browse + restore agent-made checkpoints"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polyline points="1 4 1 10 7 10" />
-              <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
-            </svg>
-            <span>Rewind</span>
-          </button>
-          <ToggleButton
-            on={panels.files}
-            onClick={() => togglePanel("files")}
-            label="Files"
-            icon={
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-              </svg>
-            }
-          />
-          <ToggleButton
-            on={panels.terminal}
-            onClick={() => togglePanel("terminal")}
-            label="Logs"
-            icon={
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <polyline points="4 17 10 11 4 5" />
-                <line x1="12" y1="19" x2="20" y2="19" />
-              </svg>
-            }
-          />
-          <span style={{ width: 1, height: 18, background: "var(--border-default)" }} />
-          <a
-            href={signOutUrl}
-            className="icon-btn"
-            title="Sign out"
-            style={{ textDecoration: "none" }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-              <polyline points="16 17 21 12 16 7" />
-              <line x1="21" y1="12" x2="9" y2="12" />
-            </svg>
-          </a>
+
+          {isMobile ? (
+            /* Phone: keep Run inline; fold the rest into a ⋯ overflow menu.
+               The Files/Logs toggles are dropped here — the bottom tab bar
+               navigates to those panes instead. */
+            <div
+              className="topbar-overflow-wrap"
+              onKeyDown={(e) => {
+                if (e.key === "Escape" && overflowOpen) {
+                  e.stopPropagation();
+                  closeOverflow();
+                }
+              }}
+            >
+              <button
+                ref={overflowTriggerRef}
+                type="button"
+                onClick={() => setOverflowOpen((v) => !v)}
+                className="icon-btn"
+                title="More"
+                aria-label="More actions"
+                aria-haspopup="true"
+                aria-expanded={overflowOpen}
+                data-on={overflowOpen}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                  <circle cx="5" cy="12" r="2" />
+                  <circle cx="12" cy="12" r="2" />
+                  <circle cx="19" cy="12" r="2" />
+                </svg>
+              </button>
+              {overflowOpen && (
+                <>
+                  <button
+                    type="button"
+                    className="topbar-overflow-backdrop"
+                    aria-label="Close menu"
+                    tabIndex={-1}
+                    onClick={closeOverflow}
+                  />
+                  {/* Not a true role="menu" — it hosts components (Deploy /
+                      GitHub) that render their own dialogs, so we keep native
+                      tab order rather than the menu/menuitem keyboard model.
+                      Deploy & GitHub intentionally DON'T close the menu on click:
+                      their modals render inside this subtree, so unmounting the
+                      menu would unmount the dialog. Their full-screen overlay
+                      covers the menu instead. */}
+                  <div ref={overflowMenuRef} className="topbar-overflow">
+                    {secondaryActions}
+                    <span className="topbar-overflow-sep" />
+                    <a
+                      href={signOutUrl}
+                      className="toggle-btn"
+                      style={{ textDecoration: "none" }}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                        <polyline points="16 17 21 12 16 7" />
+                        <line x1="21" y1="12" x2="9" y2="12" />
+                      </svg>
+                      <span>Sign out</span>
+                    </a>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (
+            <>
+              {secondaryActions}
+              <ToggleButton
+                on={panels.files}
+                onClick={() => togglePanel("files")}
+                label="Files"
+                icon={
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                  </svg>
+                }
+              />
+              <ToggleButton
+                on={panels.terminal}
+                onClick={() => togglePanel("terminal")}
+                label="Logs"
+                icon={
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="4 17 10 11 4 5" />
+                    <line x1="12" y1="19" x2="20" y2="19" />
+                  </svg>
+                }
+              />
+              <span style={{ width: 1, height: 18, background: "var(--border-default)" }} />
+              <a
+                href={signOutUrl}
+                className="icon-btn"
+                title="Sign out"
+                style={{ textDecoration: "none" }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                  <polyline points="16 17 21 12 16 7" />
+                  <line x1="21" y1="12" x2="9" y2="12" />
+                </svg>
+              </a>
+            </>
+          )}
         </div>
       </div>
 
@@ -255,42 +413,147 @@ export default function Workspace({
 
       {/* Main grid */}
       <div className="ide-grid">
-        <PanelGroup direction="horizontal" autoSaveId={`uniqus-h-${panels.files ? "f" : "nf"}`}>
-          <Panel id="chat" defaultSize={panels.files ? 35 : 45} minSize={25} order={1}>
-            <ChatPanel />
-          </Panel>
-
-          {panels.files && (
-            <>
-              <PanelResizeHandle className="resize-handle-h" />
-              <Panel id="files" defaultSize={20} minSize={12} maxSize={35} order={2}>
-                <FileExplorer onClose={() => togglePanel("files")} />
-              </Panel>
-            </>
-          )}
-
-          <PanelResizeHandle className="resize-handle-h" />
-
-          <Panel id="main" defaultSize={panels.files ? 45 : 55} minSize={30} order={3}>
-            <PanelGroup
-              direction="vertical"
-              autoSaveId={`uniqus-v-${panels.terminal ? "t" : "nt"}`}
-            >
-              <Panel id="editor" defaultSize={panels.terminal ? 60 : 100} minSize={20} order={1}>
+        {isMobile ? (
+          /* Phone: every pane is mounted at once and shown/hidden via CSS
+             `display` (not conditional render) so each keeps its state across
+             tab switches — the Monaco cursor, chat scroll, and crucially the
+             running preview iframe all survive. The bottom tab bar picks which
+             one is visible. */
+          <div className="ide-mobile">
+            <div className="ide-mobile-pane" data-active={mobileView === "chat"}>
+              <ErrorBoundary label="chat">
+                <ChatPanel />
+              </ErrorBoundary>
+            </div>
+            <div className="ide-mobile-pane" data-active={mobileView === "editor"}>
+              <ErrorBoundary label="editor">
                 <EditorPreviewArea />
-              </Panel>
-              {panels.terminal && (
-                <>
-                  <PanelResizeHandle className="resize-handle-v" />
-                  <Panel id="terminal" defaultSize={30} minSize={15} order={3}>
-                    <TerminalPanel onClose={() => togglePanel("terminal")} />
-                  </Panel>
-                </>
-              )}
-            </PanelGroup>
-          </Panel>
-        </PanelGroup>
+              </ErrorBoundary>
+            </div>
+            <div className="ide-mobile-pane" data-active={mobileView === "files"}>
+              <ErrorBoundary label="files">
+                <FileExplorer
+                  onClose={() => setMobileView("chat")}
+                  onFileOpened={() => setMobileView("editor")}
+                />
+              </ErrorBoundary>
+            </div>
+            <div className="ide-mobile-pane" data-active={mobileView === "logs"}>
+              <ErrorBoundary label="logs">
+                <TerminalPanel onClose={() => setMobileView("chat")} />
+              </ErrorBoundary>
+            </div>
+          </div>
+        ) : (
+          <PanelGroup direction="horizontal" autoSaveId={`uniqus-h-${panels.files ? "f" : "nf"}`}>
+            <Panel id="chat" defaultSize={panels.files ? 35 : 45} minSize={25} order={1}>
+              <ErrorBoundary label="chat">
+                <ChatPanel />
+              </ErrorBoundary>
+            </Panel>
+
+            {panels.files && (
+              <>
+                <PanelResizeHandle className="resize-handle-h" />
+                <Panel id="files" defaultSize={20} minSize={12} maxSize={35} order={2}>
+                  <ErrorBoundary label="files">
+                    <FileExplorer onClose={() => togglePanel("files")} />
+                  </ErrorBoundary>
+                </Panel>
+              </>
+            )}
+
+            <PanelResizeHandle className="resize-handle-h" />
+
+            <Panel id="main" defaultSize={panels.files ? 45 : 55} minSize={30} order={3}>
+              <PanelGroup
+                direction="vertical"
+                autoSaveId={`uniqus-v-${panels.terminal ? "t" : "nt"}`}
+              >
+                <Panel id="editor" defaultSize={panels.terminal ? 60 : 100} minSize={20} order={1}>
+                  <ErrorBoundary label="editor">
+                    <EditorPreviewArea />
+                  </ErrorBoundary>
+                </Panel>
+                {panels.terminal && (
+                  <>
+                    <PanelResizeHandle className="resize-handle-v" />
+                    <Panel id="terminal" defaultSize={30} minSize={15} order={3}>
+                      <ErrorBoundary label="logs">
+                        <TerminalPanel onClose={() => togglePanel("terminal")} />
+                      </ErrorBoundary>
+                    </Panel>
+                  </>
+                )}
+              </PanelGroup>
+            </Panel>
+          </PanelGroup>
+        )}
       </div>
+
+      {/* Mobile bottom tab bar — full-screen pane switcher. */}
+      {isMobile && (
+        <nav className="mobile-tabbar" aria-label="Workspace panes">
+          <MobileTab
+            active={mobileView === "chat"}
+            onClick={() => setMobileView("chat")}
+            label="Chat"
+            icon={
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+              </svg>
+            }
+          />
+          <MobileTab
+            active={codeActive}
+            onClick={goCode}
+            label="Code"
+            icon={
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="16 18 22 12 16 6" />
+                <polyline points="8 6 2 12 8 18" />
+              </svg>
+            }
+          />
+          <MobileTab
+            active={previewActive}
+            onClick={goPreview}
+            label="Preview"
+            badge={hasPreview}
+            disabled={!hasPreview}
+            disabledTitle="Run the project to get a live preview"
+            accessibleLabel={hasPreview ? "Preview (running)" : undefined}
+            icon={
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="2" y1="12" x2="22" y2="12" />
+                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+              </svg>
+            }
+          />
+          <MobileTab
+            active={mobileView === "files"}
+            onClick={() => setMobileView("files")}
+            label="Files"
+            icon={
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              </svg>
+            }
+          />
+          <MobileTab
+            active={mobileView === "logs"}
+            onClick={() => setMobileView("logs")}
+            label="Logs"
+            icon={
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="4 17 10 11 4 5" />
+                <line x1="12" y1="19" x2="20" y2="19" />
+              </svg>
+            }
+          />
+        </nav>
+      )}
 
       {skillsOpen && (
         <SkillsModal projectId={projectId} onClose={() => setSkillsOpen(false)} />
@@ -302,7 +565,9 @@ export default function Workspace({
         <CheckpointsModal projectId={projectId} onClose={() => setCheckpointsOpen(false)} />
       )}
 
-      {/* Status bar */}
+      {/* Status bar — hidden on mobile, where the bottom tab bar owns the
+          bottom edge and vertical space is at a premium. */}
+      {!isMobile && (
       <div className="status-bar">
         <span className="seg">
           <span
@@ -324,6 +589,7 @@ export default function Workspace({
           <span className="seg">utf-8</span>
         </div>
       </div>
+      )}
     </div>
   );
 }
@@ -428,6 +694,51 @@ function ToggleButton({
     >
       {icon}
       <span>{label}</span>
+    </button>
+  );
+}
+
+function MobileTab({
+  active,
+  onClick,
+  label,
+  icon,
+  badge,
+  disabled,
+  disabledTitle,
+  accessibleLabel,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  icon: React.ReactNode;
+  /** Small dot indicating activity (e.g. a running preview server). */
+  badge?: boolean;
+  /** Dim + block the tab (e.g. Preview before any server is running). */
+  disabled?: boolean;
+  /** Tooltip explaining why the tab is disabled. */
+  disabledTitle?: string;
+  /** Overrides the announced name (e.g. "Preview (running)") so state that's
+   *  only shown as a colored dot is still perceivable to screen readers. */
+  accessibleLabel?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={disabled ? undefined : onClick}
+      className="mobile-tab"
+      data-active={active}
+      disabled={disabled}
+      aria-disabled={disabled || undefined}
+      title={disabled ? disabledTitle : undefined}
+      aria-label={accessibleLabel}
+      aria-current={active ? "page" : undefined}
+    >
+      <span className="mobile-tab-icon">
+        {icon}
+        {badge && <span className="mobile-tab-badge" aria-hidden="true" />}
+      </span>
+      <span className="mobile-tab-label">{label}</span>
     </button>
   );
 }

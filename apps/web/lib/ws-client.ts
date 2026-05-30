@@ -120,8 +120,17 @@ export function disconnect(): void {
  */
 export function send(event: ClientEvent): boolean {
   if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify(event));
-    return true;
+    try {
+      socket.send(JSON.stringify(event));
+      return true;
+    } catch (err) {
+      // socket.send can still throw (e.g. the socket flipped to CLOSING between
+      // the readyState check and here). Treat it as "not sent" so callers'
+      // `if (!ok)` recovery branches engage instead of an uncaught exception
+      // escaping into a click handler (which no error boundary would catch).
+      console.error("ws send failed", err);
+      return false;
+    }
   }
   return false;
 }

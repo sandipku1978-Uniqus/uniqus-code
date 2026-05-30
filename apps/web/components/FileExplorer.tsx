@@ -251,7 +251,15 @@ function fileIconMeta(name: string): { kind: FileIconKind; color: string; label?
   }
 }
 
-export default function FileExplorer({ onClose }: { onClose: () => void }) {
+export default function FileExplorer({
+  onClose,
+  onFileOpened,
+}: {
+  onClose: () => void;
+  /** Fired after a file is opened. On mobile, the workspace uses this to jump
+   *  from the files pane to the editor so the opened file is actually shown. */
+  onFileOpened?: () => void;
+}) {
   const tree = useStore((s) => s.tree);
   const selected = useStore((s) => s.selectedFile);
   const openFile = useStore((s) => s.openFile);
@@ -295,6 +303,7 @@ export default function FileExplorer({ onClose }: { onClose: () => void }) {
   const reqOpen = (path: string): void => {
     openFile(path);
     send({ type: "request_file", path });
+    onFileOpened?.();
   };
 
   const wrapAction = async (fn: () => Promise<void>): Promise<void> => {

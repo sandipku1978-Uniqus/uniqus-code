@@ -49,6 +49,13 @@ echo "=== last 20 log lines ==="
 journalctl -u uniqus-orchestrator -n 20 --no-pager'
 ```
 
+(Alternate after ssh-ing into the hetzner box.)
+
+``` sh
+cd /opt/uniqus-code && git checkout -- package-lock.json && git pull --ff-only && systemctl restart uniqus-orchestrator
+sleep 2; echo "service: $(systemctl is-active uniqus-orchestrator)"; journalctl -u uniqus-orchestrator -n 20 --no-pager
+```
+
 Then summarize back to the user:
 
 - Were there commits to pull? (list them if so)
