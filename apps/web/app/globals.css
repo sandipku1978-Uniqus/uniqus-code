@@ -1823,10 +1823,13 @@ section.band .sub {
 .model-picker-flyout {
   position: absolute;
   left: calc(100% + 8px);
-  top: -8px;
+  /* Anchor to the bottom so the list grows UPWARD, matching the popover that
+     opens above the composer — otherwise a top-anchored list runs off the
+     bottom of the screen. Capped + scrollable so it always fits the viewport. */
+  bottom: -10px;
   z-index: 61;
   min-width: 240px;
-  max-height: 60vh;
+  max-height: min(440px, 65vh);
   overflow-y: auto;
   display: grid;
   gap: 8px;
@@ -3054,13 +3057,26 @@ section.band .sub {
   animation: popIn var(--dur-base) var(--ease-spring) backwards;
 }
 .model-picker-flyout {
-  transform-origin: left center;
+  transform-origin: left bottom;
   animation: flyInRight var(--dur-base) var(--ease-out) backwards;
 }
 .proj-menu {
   transform-origin: top right;
   animation: popIn var(--dur-fast) var(--ease-spring) backwards;
 }
+
+/* ── Editor tabs open in; the content panel fades on switch ─────────────── */
+@keyframes tabIn {
+  from { opacity: 0; transform: scale(0.9); }
+  to   { opacity: 1; transform: scale(1); }
+}
+.tab {
+  transform-origin: left center;
+  animation: tabIn var(--dur-base) var(--ease-out) backwards;
+}
+/* On-demand panels (preview / markdown / image) fade in when their tab opens.
+   The code editor stays mounted across switches, so it isn't re-faded. */
+.editor-content > * { animation: fadeIn var(--dur-base) var(--ease-out) backwards; }
 
 /* ── Composer attachment chips scale in ─────────────────────────────────── */
 .attachment-chip { animation: scaleIn var(--dur-fast) var(--ease-spring) backwards; }
