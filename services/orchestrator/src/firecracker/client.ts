@@ -82,8 +82,27 @@ export class FirecrackerClient {
     mem_backend: { backend_type: "File" | "Uffd"; backend_path: string };
     enable_diff_snapshots?: boolean;
     resume_vm?: boolean;
+    /**
+     * Remap a network interface's host-side TAP at restore time. The guest-side
+     * config (IP/MAC) is frozen in the snapshot, so when restoring MANY clones
+     * from one base snapshot we point each clone's eth0 at its own host tap.
+     * (Firecracker v1.6+ SnapshotLoadParams.network_overrides.)
+     */
+    network_overrides?: { iface_id: string; host_dev_name: string }[];
   }): Promise<void> {
     await this.req("PUT", "/snapshot/load", opts);
+  }
+
+  /**
+   * Update a drive's backing file at runtime (Firecracker only allows patching
+   * `path_on_host` + the rate limiter). NOTE: the base-snapshot restore path
+   * deliberately does NOT use this — it gives each clone its own disk via a
+   * RELATIVE drive path resolved against the per-VM firecracker cwd, the
+   * documented bug-free clone pattern. Kept for runtime drive swaps / hot
+   * resize, where the new image must match the size the guest already saw.
+   */
+  async patchDrive(opts: { drive_id: string; path_on_host: string }): Promise<void> {
+    await this.req("PATCH", `/drives/${encodeURIComponent(opts.drive_id)}`, opts);
   }
 
   async getInstanceInfo(): Promise<{ state: string; vmm_version: string; app_name: string }> {
@@ -147,6 +166,15 @@ export async function spawnFirecracker(opts: {
   socketPath: string;
   logFifo?: string;
   binaryPath?: string;
+  /**
+   * Working directory for the firecracker process. Drives configured with a
+   * RELATIVE `path_on_host` resolve against this dir — both when a snapshot is
+   * taken and when it's loaded — which is how one base snapshot fans out to many
+   * clones each backed by their own per-project disk (Firecracker's documented
+   * "relative paths + per-sandbox cwd" pattern). Absolute drive paths (the
+   * shared read-only rootfs) are unaffected.
+   */
+  cwd?: string;
 }): Promise<{ pid: number; close: () => void }> {
   const { spawn } = await import("node:child_process");
   await fs.mkdir(path.dirname(opts.socketPath), { recursive: true }).catch(() => {});
@@ -157,8 +185,10 @@ export async function spawnFirecracker(opts: {
   if (opts.logFifo) args.push("--log-path", opts.logFifo);
 
   const binaryPath = opts.binaryPath ?? process.env.FIRECRACKER_BIN ?? "firecracker";
+  if (opts.cwd) await fs.mkdir(opts.cwd, { recursive: true }).catch(() => {});
   const proc = spawn(binaryPath, args, {
     stdio: ["ignore", "pipe", "pipe"],
+    cwd: opts.cwd,
   });
   // Capture spawn errors (most commonly ENOENT when the binary isn't on PATH
   // for systemd's stripped environment). Without this listener, the error

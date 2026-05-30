@@ -9,6 +9,7 @@
  *
  * Endpoints (mirror agentRpc.ts):
  *   GET  /health                     → { ok: true, kind: "node" }
+ *   POST /net/configure              body: { ip, gw, mac?, mount_sandbox?, seed?, time_ms? } → { ok: true }
  *   GET  /fs/file?path=…             → { content }
  *   PUT  /fs/file                    body: { path, content, encoding? }
  *   POST /fs/edit                    body: { path, old_string, new_string }
@@ -31,7 +32,7 @@
 import http from "node:http";
 import net from "node:net";
 import { promises as fs } from "node:fs";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -65,20 +66,58 @@ function configureNetwork() {
     console.error(`[uniqus-agent] uniqus_ip/uniqus_gw missing from /proc/cmdline; eth0 will not be configured. cmdline=${cmdline.trim()}`);
     return;
   }
-  const run = (cmd, args) => {
-    const r = spawnSync(cmd, args, { encoding: "utf-8" });
-    if (r.status !== 0) {
-      console.error(`[uniqus-agent] ${cmd} ${args.join(" ")} → ${r.status} ${r.stderr?.trim() ?? ""}`);
-    } else {
-      console.log(`[uniqus-agent] ${cmd} ${args.join(" ")} ok`);
-    }
-    return r.status === 0;
-  };
-  run("ip", ["link", "set", "lo", "up"]);
-  run("ip", ["link", "set", "eth0", "up"]);
-  run("ip", ["addr", "add", ip, "dev", "eth0"]);
-  run("ip", ["route", "add", "default", "via", gw, "dev", "eth0"]);
-  console.log(`[uniqus-agent] eth0 configured: ip=${ip} gw=${gw}`);
+  // Cold boot keeps the Firecracker-assigned MAC (pass null).
+  applyNetwork(ip, gw, null);
+  console.log(`[uniqus-agent] eth0 configured from cmdline: ip=${ip} gw=${gw}`);
+}
+
+/** Run a host command synchronously, logging the outcome. */
+function runSync(cmd, args) {
+  const r = spawnSync(cmd, args, { encoding: "utf-8" });
+  if (r.status !== 0) {
+    console.error(`[uniqus-agent] ${cmd} ${args.join(" ")} → ${r.status} ${r.stderr?.trim() ?? ""}`);
+  } else {
+    console.log(`[uniqus-agent] ${cmd} ${args.join(" ")} ok`);
+  }
+  return r.status === 0;
+}
+
+/**
+ * Apply a static config to eth0. Mirrors main.rs `apply_network`: flush first
+ * (so re-stamping a restored clone converges), set MAC while DOWN, then addr +
+ * default route. `mac`/`ip`/`gw` may be empty/null to skip that step.
+ */
+function applyNetwork(ip, gw, mac) {
+  runSync("ip", ["link", "set", "eth0", "down"]);
+  if (mac) runSync("ip", ["link", "set", "dev", "eth0", "address", mac]);
+  runSync("ip", ["addr", "flush", "dev", "eth0"]);
+  runSync("ip", ["route", "flush", "dev", "eth0"]);
+  runSync("ip", ["link", "set", "lo", "up"]);
+  runSync("ip", ["link", "set", "eth0", "up"]);
+  if (ip) runSync("ip", ["addr", "add", ip, "dev", "eth0"]);
+  if (gw) runSync("ip", ["route", "add", "default", "via", gw, "dev", "eth0"]);
+  console.log(`[uniqus-agent] eth0 set: ip=${ip} gw=${gw} mac=${mac ?? "(unchanged)"}`);
+}
+
+/** Mount the per-project sandbox volume on a base-snapshot restore. */
+function mountSandbox() {
+  runSync("mkdir", ["-p", SANDBOX_DIR]);
+  runSync("mount", ["-t", "ext4", "/dev/vdb", SANDBOX_DIR]);
+}
+
+/** Mix orchestrator-supplied entropy into the clone's RNG (base64). */
+function reseedUrandom(seedB64) {
+  try {
+    const buf = Buffer.from(String(seedB64), "base64");
+    if (buf.length) writeFileSync("/dev/urandom", buf);
+  } catch (err) {
+    console.error(`[uniqus-agent] reseed /dev/urandom failed: ${err.message}`);
+  }
+}
+
+/** Correct the frozen guest clock from host epoch millis. */
+function setClock(ms) {
+  runSync("date", ["-s", `@${Math.floor(ms / 1000)}`]);
 }
 
 configureNetwork();
@@ -115,6 +154,21 @@ async function handleRequest(req, res) {
     const method = req.method ?? "GET";
 
     if (method === "GET" && url.pathname === "/health") return json(res, 200, { ok: true, kind: "node" });
+    if (method === "POST" && url.pathname === "/net/configure") {
+      const body = await readBody(req);
+      // Base-snapshot restore. Safe-now steps: mount this project's sandbox drive
+      // (golden left it unmounted) and de-correlate clock + RNG. Mirrors main.rs.
+      if (body.mount_sandbox) mountSandbox();
+      if (body.seed) reseedUrandom(body.seed);
+      if (typeof body.time_ms === "number") setClock(body.time_ms);
+      // Re-stamp eth0 only AFTER this reply is flushed — applyNetwork drops the
+      // link + changes the MAC, killing the bootstrap connection we answer over.
+      const ip = String(body.ip ?? "");
+      const gw = String(body.gw ?? "");
+      const mac = body.mac ? String(body.mac) : null;
+      setTimeout(() => applyNetwork(ip, gw, mac), 250);
+      return json(res, 200, { ok: true, restamp: "scheduled" });
+    }
     if (method === "GET" && url.pathname === "/fs/file") {
       const p = resolveSandbox(url.searchParams.get("path") ?? "");
       const content = await fs.readFile(p, "utf-8");

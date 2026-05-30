@@ -113,7 +113,11 @@ output_log="/var/log/uniqus-agent.log"
 error_log="/var/log/uniqus-agent.log"
 
 depend() {
-  need net localmount
+  # Deliberately NOT `need net`. The agent configures eth0 itself (from the
+  # kernel cmdline on a cold boot, or via the orchestrator's /net/configure
+  # RPC on a snapshot restore), so gating on OpenRC's `net` only serves to
+  # block boot behind the doomed eth0 DHCP attempt (no DHCP server on fcbr0).
+  need localmount
   after sandbox-mount
 }
 EOF
@@ -138,7 +142,11 @@ output_log="/var/log/uniqus-agent.log"
 error_log="/var/log/uniqus-agent.log"
 
 depend() {
-  need net localmount
+  # Deliberately NOT `need net`. The agent configures eth0 itself (from the
+  # kernel cmdline on a cold boot, or via the orchestrator's /net/configure
+  # RPC on a snapshot restore), so gating on OpenRC's `net` only serves to
+  # block boot behind the doomed eth0 DHCP attempt (no DHCP server on fcbr0).
+  need localmount
   after sandbox-mount
 }
 EOF
@@ -156,6 +164,14 @@ depend() {
 }
 
 start() {
+  # Golden base-snapshot build (FIRECRACKER_BASE_SNAPSHOT): leave /sandbox
+  # UNMOUNTED so the snapshot captures no placeholder filesystem. Every restored
+  # clone mounts its OWN per-project disk after resume (agent /net/configure with
+  # mount_sandbox), which reads a fresh superblock with no stale page cache.
+  if grep -q 'uniqus_golden=1' /proc/cmdline 2>/dev/null; then
+    einfo "uniqus_golden=1 → skipping /sandbox mount (clone mounts its own disk)"
+    return 0
+  fi
   ebegin "Mounting /sandbox from /dev/vdb"
   mkdir -p /sandbox
   if blkid /dev/vdb >/dev/null 2>&1; then
@@ -183,14 +199,30 @@ chroot "${MNT}" /sbin/rc-update add uniqus-agent  default
 echo "nameserver 1.1.1.1" >  "${MNT}/etc/resolv.conf"
 echo "nameserver 8.8.8.8" >> "${MNT}/etc/resolv.conf"
 
-# Network: DHCP on eth0. Most rootfs's already have this; force it for safety.
+# Network: loopback only. eth0 is owned entirely by the in-VM agent, which
+# assigns a static address (cold boot: from the kernel cmdline uniqus_ip/_gw;
+# snapshot restore: from the orchestrator's /net/configure RPC). We do NOT put
+# `iface eth0 inet dhcp` here: there is no DHCP server on the fcbr0 bridge, so
+# udhcpc would block the `networking` service for ~10-15s (its discover
+# timeout) on every cold boot — the single biggest chunk of the old ~18s
+# cold-start. The agent no longer waits on `net`, but dropping eth0 here also
+# stops `networking` itself from stalling.
 mkdir -p "${MNT}/etc/network"
 cat > "${MNT}/etc/network/interfaces" <<'EOF'
 auto lo
 iface lo inet loopback
+EOF
 
-auto eth0
-iface eth0 inet dhcp
+# Keep all mutable runtime state off the root filesystem. With these on tmpfs,
+# the base rootfs is never written after boot, so a single read-only base image
+# can be SHARED by every snapshot-restored clone (FIRECRACKER_BASE_SNAPSHOT)
+# instead of copied per project — and it's harmless in the plain read-write
+# cold-boot path too. localmount mounts these before sandbox-mount + the agent.
+mkdir -p "${MNT}/tmp" "${MNT}/run" "${MNT}/var/log"
+cat >> "${MNT}/etc/fstab" <<'EOF'
+tmpfs /tmp     tmpfs nodev,nosuid,mode=1777 0 0
+tmpfs /run     tmpfs nodev,nosuid,mode=0755 0 0
+tmpfs /var/log tmpfs nodev,nosuid,mode=0755 0 0
 EOF
 
 # Tighten root: passwordless console for boot debugging only. SSH is disabled.

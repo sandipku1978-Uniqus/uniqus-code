@@ -141,34 +141,96 @@ fn configure_network() {
             return;
         }
     };
-    let run = |cmd: &str, args: &[&str]| {
-        let out = Command::new(cmd).args(args).output();
-        match out {
-            Ok(o) if o.status.success() => {
-                eprintln!("[uniqus-agent] {} {} ok", cmd, args.join(" "));
-                true
-            }
-            Ok(o) => {
-                eprintln!(
-                    "[uniqus-agent] {} {} → {} {}",
-                    cmd,
-                    args.join(" "),
-                    o.status,
-                    String::from_utf8_lossy(&o.stderr).trim()
-                );
-                false
-            }
-            Err(e) => {
-                eprintln!("[uniqus-agent] {} spawn failed: {}", cmd, e);
-                false
-            }
+    // Cold boot: Firecracker already assigned the per-VM MAC via guest_mac, so
+    // keep it (pass None) and just bring the link up with the cmdline address.
+    apply_network(&ip, &gw, None);
+    eprintln!("[uniqus-agent] eth0 configured from cmdline: ip={} gw={}", ip, gw);
+}
+
+/// Run a host command, logging the outcome. Returns whether it succeeded.
+fn run_cmd(cmd: &str, args: &[&str]) -> bool {
+    match Command::new(cmd).args(args).output() {
+        Ok(o) if o.status.success() => {
+            eprintln!("[uniqus-agent] {} {} ok", cmd, args.join(" "));
+            true
         }
-    };
-    run("ip", &["link", "set", "lo", "up"]);
-    run("ip", &["link", "set", "eth0", "up"]);
-    run("ip", &["addr", "add", &ip, "dev", "eth0"]);
-    run("ip", &["route", "add", "default", "via", &gw, "dev", "eth0"]);
-    eprintln!("[uniqus-agent] eth0 configured: ip={} gw={}", ip, gw);
+        Ok(o) => {
+            eprintln!(
+                "[uniqus-agent] {} {} → {} {}",
+                cmd,
+                args.join(" "),
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("[uniqus-agent] {} spawn failed: {}", cmd, e);
+            false
+        }
+    }
+}
+
+/// Apply a static config to eth0. `ip` is "addr/prefix" (e.g. 172.16.3.4/16),
+/// `gw` the default gateway. If `mac` is given it is set while the link is DOWN
+/// (required to change a MAC). Idempotent: addresses + routes on eth0 are
+/// flushed first so re-running — a snapshot restore over a golden image whose
+/// eth0 was left down, or a re-stamp — always converges instead of stacking
+/// addresses/routes.
+fn apply_network(ip: &str, gw: &str, mac: Option<&str>) {
+    run_cmd("ip", &["link", "set", "eth0", "down"]);
+    if let Some(mac) = mac {
+        run_cmd("ip", &["link", "set", "dev", "eth0", "address", mac]);
+    }
+    run_cmd("ip", &["addr", "flush", "dev", "eth0"]);
+    run_cmd("ip", &["route", "flush", "dev", "eth0"]);
+    run_cmd("ip", &["link", "set", "lo", "up"]);
+    run_cmd("ip", &["link", "set", "eth0", "up"]);
+    run_cmd("ip", &["addr", "add", ip, "dev", "eth0"]);
+    run_cmd("ip", &["route", "add", "default", "via", gw, "dev", "eth0"]);
+    eprintln!(
+        "[uniqus-agent] eth0 set: ip={} gw={} mac={}",
+        ip,
+        gw,
+        mac.unwrap_or("(unchanged)")
+    );
+}
+
+/// Mix orchestrator-supplied entropy into the guest RNG so clones restored from
+/// one base snapshot don't share an identical /dev/urandom stream. `seed` is
+/// base64 (falls back to raw bytes). Best-effort.
+fn reseed_urandom(seed: &str) {
+    let bytes = base64_decode(seed).unwrap_or_else(|_| seed.as_bytes().to_vec());
+    if bytes.is_empty() {
+        return;
+    }
+    match fs::OpenOptions::new().write(true).open("/dev/urandom") {
+        Ok(mut f) => {
+            let _ = f.write_all(&bytes);
+            eprintln!("[uniqus-agent] reseeded /dev/urandom with {} bytes", bytes.len());
+        }
+        Err(e) => eprintln!("[uniqus-agent] reseed /dev/urandom failed: {}", e),
+    }
+}
+
+/// Set the wall clock from epoch millis. Clones resume holding the snapshot's
+/// frozen clock; a stale clock breaks TLS, npm, and git. BusyBox `date -s`.
+fn set_clock_ms(ms: u64) {
+    let secs = ms / 1000;
+    run_cmd("date", &["-s", &format!("@{}", secs)]);
+}
+
+/// Mount the per-project sandbox volume (/dev/vdb) at the sandbox dir on a
+/// base-snapshot restore. The golden image left it unmounted, and the backing
+/// file is this project's own ext4 (already formatted host-side), so a fresh
+/// mount reads the correct superblock — no stale page-cache from the golden's
+/// placeholder disk. Idempotent enough: if something is already mounted there a
+/// second mount just fails harmlessly and we keep serving the existing one.
+fn mount_sandbox() {
+    let dir = sandbox_dir();
+    let dir = dir.to_string_lossy();
+    let _ = fs::create_dir_all(&*dir);
+    run_cmd("mount", &["-t", "ext4", "/dev/vdb", &*dir]);
 }
 
 fn handle(mut req: Request, servers: ServerTable) -> std::io::Result<()> {
@@ -179,6 +241,43 @@ fn handle(mut req: Request, servers: ServerTable) -> std::io::Result<()> {
     let result: Result<Response<std::io::Cursor<Vec<u8>>>, AgentError> = (|| {
         match (&method, path.as_str()) {
             (Method::Get, "/health") => Ok(json_response(200, &json!({ "ok": true, "kind": "rust" }))),
+            (Method::Post, "/net/configure") => {
+                // Used on a base-snapshot restore: the golden snapshot freezes
+                // eth0 DOWN with a placeholder MAC, identical across every clone.
+                // The orchestrator calls this right after resume to stamp THIS
+                // project's unique MAC + IP + route before the link goes up, so
+                // there is never a moment where two clones share a MAC/IP on the
+                // bridge. Also (best-effort) de-correlates clock + RNG state that
+                // would otherwise be identical across clones.
+                let body = read_body(&mut req)?;
+                let ip = require_str(&body, "ip")?;
+                let gw = require_str(&body, "gw")?;
+                let mac = body.get("mac").and_then(|v| v.as_str()).map(str::to_string);
+                // These don't disturb the link we're replying over, so do them now:
+                // mount the project's sandbox drive (golden left it unmounted; the
+                // drive was repointed at this project's image via the relative path
+                // resolved against this firecracker's cwd before resume), then
+                // de-correlate clock + RNG.
+                if body.get("mount_sandbox").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    mount_sandbox();
+                }
+                if let Some(seed) = body.get("seed").and_then(|v| v.as_str()) {
+                    reseed_urandom(seed);
+                }
+                if let Some(ms) = body.get("time_ms").and_then(|v| v.as_u64()) {
+                    set_clock_ms(ms);
+                }
+                // Re-stamp eth0 only AFTER this response is flushed: apply_network
+                // takes the link DOWN and changes the MAC, which would kill the very
+                // connection we're answering over (we're reachable here only on the
+                // shared bootstrap IP). The orchestrator then finds us on the new
+                // per-project IP and releases the bootstrap lock.
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(250));
+                    apply_network(&ip, &gw, mac.as_deref());
+                });
+                Ok(json_response(200, &json!({ "ok": true, "restamp": "scheduled" })))
+            }
             (Method::Get, "/fs/file") => {
                 let p = require_query(&query, "path")?;
                 let full = resolve_sandbox(&p)?;

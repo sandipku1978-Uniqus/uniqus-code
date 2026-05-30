@@ -1,9 +1,9 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, randomBytes } from "node:crypto";
 import { FirecrackerClient, spawnFirecracker } from "./client.js";
-import { pingAgent, pushFile } from "./agentRpc.js";
+import { pingAgent, pushFile, finalizeRestore, pingAt } from "./agentRpc.js";
 import type { VmHandle } from "./types.js";
 
 /**
@@ -79,6 +79,25 @@ const BRIDGE_NAME = process.env.FIRECRACKER_BRIDGE ?? "fcbr0";
 const BRIDGE_GATEWAY = process.env.FIRECRACKER_GATEWAY ?? "172.16.0.1";
 const BRIDGE_NETMASK = process.env.FIRECRACKER_NETMASK ?? "255.255.0.0";
 
+// ── base ("golden") snapshot: sub-second FIRST boots for brand-new projects ──
+// Opt-in (FIRECRACKER_BASE_SNAPSHOT=1). When enabled and a golden snapshot
+// exists, ensureVm restores a clone from it (≈ an mmap of the memory file,
+// sub-second) instead of a full ~15-20s Alpine+OpenRC cold boot. The golden is
+// ONE VM booted to "agent ready" on a SHARED, read-only base rootfs; every clone
+// reuses that same rootfs (no per-project 2 GiB copy) plus its own sandbox.ext4
+// (resolved via the firecracker process cwd — Firecracker's "relative paths +
+// per-sandbox cwd" clone pattern). On ANY failure we fall back to bootNew(), so
+// the flag is safe to ship dark and flip on after validating on the host.
+const BASE_SNAPSHOT_ENABLED = process.env.FIRECRACKER_BASE_SNAPSHOT === "1";
+// Identity the golden image is frozen with — IDENTICAL on every clone until the
+// orchestrator re-stamps it (agent /net/configure). Reserved out of the project
+// IP range (allocateNetwork skips it) and the project MAC range (02:fc:<hash>).
+const BOOTSTRAP_IP = process.env.FIRECRACKER_BOOTSTRAP_IP ?? "172.16.255.254";
+const BOOTSTRAP_MAC = "02:fc:ff:ff:ff:fe";
+const BOOTSTRAP_TAP = "tap-uniqus-base";
+const BASE_DIR = path.join(STATE_DIR, "base");
+const RUN_DIR = path.join(STATE_DIR, "run");
+
 interface ManagedVm {
   handle: VmHandle;
   client: FirecrackerClient;
@@ -118,6 +137,20 @@ export async function ensureVm(opts: BootOpts): Promise<VmHandle> {
   // a fresh ~15 s cold boot.
   const rehydrated = await tryRehydrateSnapshot(opts);
   if (rehydrated) return rehydrated;
+  // Brand-new (or GC'd) project: no per-project snapshot exists. If the golden
+  // base snapshot is enabled, restore a sub-second clone from it instead of a
+  // full OpenRC cold boot. Any failure falls through to the cold path.
+  if (BASE_SNAPSHOT_ENABLED) {
+    try {
+      return await restoreFromGolden(opts);
+    } catch (err) {
+      console.error(
+        `[fleet] base-snapshot restore failed for ${opts.projectId.slice(0, 8)}; ` +
+          `falling back to cold boot:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
   return await bootNew(opts);
 }
 
@@ -225,11 +258,11 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
     lastUsedAt: Date.now(),
   };
 
-  // Wait until the in-VM agent answers /health. Alpine + OpenRC takes
-  // 10-20s on a cold-boot to finish sysinit + boot + default runlevels
-  // and start the uniqus-agent service, so 60s is a safe ceiling. Once
-  // the rootfs is warm in page cache, second-and-onwards boots are
-  // sub-5s.
+  // Wait until the in-VM agent answers /health. With the boot-blocking DHCP
+  // stall removed (the agent no longer `need net`s, and eth0 has no DHCP
+  // stanza), a cold Alpine+OpenRC boot to agent-ready is now ~3-8s; 60s stays
+  // as a generous failure ceiling. Poll tightly so we detect readiness within
+  // ~150ms of the agent binding instead of overshooting by a quarter second.
   const deadline = Date.now() + 60_000;
   let healthy = false;
   let pingAttempts = 0;
@@ -241,7 +274,7 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
       healthy = true;
       break;
     }
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 150));
   }
   if (!healthy) {
     console.error(`[fleet ${id}] agent /health unreachable after ${pingAttempts} attempts in 60s`);
@@ -299,6 +332,260 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
     hostSandboxDir: opts.hostSandboxDir,
   });
   return handle;
+}
+
+// ── base ("golden") snapshot build + restore ────────────────────────────────
+
+function baseSnapshotPaths(): { snapshot: string; memory: string; sandbox: string } {
+  return {
+    snapshot: path.join(BASE_DIR, "base.snapshot"),
+    memory: path.join(BASE_DIR, "base.memory"),
+    sandbox: path.join(BASE_DIR, "sandbox.ext4"),
+  };
+}
+
+/**
+ * The bootstrap identity (IP + MAC) is shared by every just-resumed clone, so
+ * only ONE clone may wear it at a time — from `resume` until it has re-stamped
+ * its real per-project identity and become reachable there. This promise chain
+ * serializes that window across all concurrent restores. The window is ~0.3-1s,
+ * so it bounds new-VM creation throughput; if that ever bites, the upgrade is a
+ * netns-per-clone scheme (then no shared identity, no lock).
+ */
+let bootstrapChain: Promise<void> = Promise.resolve();
+function withBootstrapLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = bootstrapChain.then(fn, fn);
+  bootstrapChain = run.then(
+    () => {},
+    () => {},
+  );
+  return run;
+}
+
+let baseSnapshotBuild: Promise<void> | null = null;
+/**
+ * Build the golden snapshot once. Idempotent and de-duped: concurrent callers
+ * share one in-flight build, and a completed build short-circuits on the files.
+ * Safe to call eagerly (sweeper start) or lazily (first restore).
+ */
+export async function ensureBaseSnapshot(): Promise<void> {
+  const p = baseSnapshotPaths();
+  if ((await pathExists(p.snapshot)) && (await pathExists(p.memory))) return;
+  if (!baseSnapshotBuild) {
+    baseSnapshotBuild = buildBaseSnapshot().finally(() => {
+      baseSnapshotBuild = null;
+    });
+  }
+  return baseSnapshotBuild;
+}
+
+async function buildBaseSnapshot(): Promise<void> {
+  await fs.mkdir(BASE_DIR, { recursive: true });
+  const p = baseSnapshotPaths();
+  const apiSocket = path.join(BASE_DIR, "builder.api.sock");
+  console.log(`[fleet base] building golden base snapshot (shared rootfs=${ROOTFS_BASE_PATH})`);
+  // Placeholder sandbox at a RELATIVE drive path ("sandbox.ext4"), so at restore
+  // each clone's firecracker resolves it against its own cwd → its own disk.
+  // Never mounted in the golden (uniqus_golden=1 makes the in-guest sandbox-mount
+  // service skip it), so a clone mounting its real disk after restore reads a
+  // fresh superblock with no stale page-cache from this placeholder.
+  await runCmd("truncate", ["-s", "1G", p.sandbox]);
+  await runCmd("mkfs.ext4", ["-F", "-q", p.sandbox]);
+  await ensureBridge();
+  await ensureTapDevice(BOOTSTRAP_TAP);
+  const fc = await spawnFirecracker({ socketPath: apiSocket, cwd: BASE_DIR });
+  const client = new FirecrackerClient(apiSocket);
+  try {
+    // track_dirty_pages keeps the door open for future diff snapshots.
+    await client.putMachineConfig({
+      vcpu_count: VM_VCPUS,
+      mem_size_mib: VM_MEM_MIB,
+      track_dirty_pages: true,
+    });
+    await client.putBootSource({
+      kernel_image_path: KERNEL_PATH,
+      // `ro`: the shared base rootfs is mounted read-only (mutable dirs are
+      // tmpfs — see build-rootfs.sh) so one image safely backs every clone.
+      // uniqus_golden=1: skip the sandbox mount + come up on the bootstrap IP.
+      boot_args:
+        `console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on ro ` +
+        `uniqus_ip=${BOOTSTRAP_IP}/16 uniqus_gw=${BRIDGE_GATEWAY} uniqus_golden=1 ` +
+        `i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd`,
+    });
+    await client.putDrive({
+      drive_id: "rootfs",
+      path_on_host: ROOTFS_BASE_PATH,
+      is_root_device: true,
+      is_read_only: true,
+    });
+    await client.putDrive({
+      drive_id: "sandbox",
+      path_on_host: "sandbox.ext4",
+      is_root_device: false,
+      is_read_only: false,
+    });
+    await client.putNetworkInterface({
+      iface_id: "eth0",
+      host_dev_name: BOOTSTRAP_TAP,
+      guest_mac: BOOTSTRAP_MAC,
+    });
+    await client.startInstance();
+    const deadline = Date.now() + 60_000;
+    let ready = false;
+    while (Date.now() < deadline) {
+      if (await pingAt(BOOTSTRAP_IP, 51_000)) {
+        ready = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    if (!ready) {
+      throw new Error(
+        `golden base builder agent never answered /health at ${BOOTSTRAP_IP}:51000 within 60s ` +
+          `(check the rootfs boots read-only with the tmpfs mounts from build-rootfs.sh)`,
+      );
+    }
+    // Snapshots can only be taken on a Paused VM.
+    await client.pauseInstance();
+    await client.createSnapshot({
+      snapshot_path: p.snapshot,
+      mem_file_path: p.memory,
+      snapshot_type: "Full",
+    });
+    console.log(`[fleet base] golden snapshot written → ${p.snapshot} (+ ${p.memory})`);
+  } finally {
+    fc.close();
+    await fs.rm(apiSocket, { force: true }).catch(() => {});
+    await teardownTap(BOOTSTRAP_TAP).catch(() => {});
+  }
+}
+
+/**
+ * Restore a brand-new project's VM from the golden snapshot instead of a full
+ * cold boot. Spawns a firecracker whose cwd holds this project's sandbox.ext4
+ * (under the relative name the snapshot froze), loads the golden memory + state
+ * with the project's TAP swapped in (network_overrides), then — holding the
+ * bootstrap lock — resumes and re-stamps the clone onto its own IP/MAC and
+ * mounts its disk. Sub-second versus ~15-20s.
+ */
+async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
+  await ensureBaseSnapshot();
+  const p = baseSnapshotPaths();
+  const id = `vm_${opts.projectId.slice(0, 8)}_${randomUUID().slice(0, 4)}`;
+  const runDir = path.join(RUN_DIR, id);
+  await fs.mkdir(runDir, { recursive: true });
+  const apiSocket = path.join(runDir, "api.sock");
+  const { ip, gatewayIp, mac, tapName } = allocateNetwork(opts.projectId);
+
+  // Per-project sandbox image (created + formatted on first use), exposed to
+  // this firecracker under the relative name the snapshot expects.
+  const sandboxImage = await ensureSandboxImage(opts.projectId, opts.hostSandboxDir);
+  const linkPath = path.join(runDir, "sandbox.ext4");
+  await fs.rm(linkPath, { force: true }).catch(() => {});
+  await fs.symlink(path.resolve(sandboxImage), linkPath);
+
+  await ensureBridge();
+  await ensureTapDevice(tapName);
+  const fc = await spawnFirecracker({ socketPath: apiSocket, cwd: runDir });
+  const client = new FirecrackerClient(apiSocket);
+  const handle: VmHandle = {
+    id,
+    projectId: opts.projectId,
+    rootImagePath: ROOTFS_BASE_PATH, // shared read-only base; nothing to clean up per-project
+    guestCid: ++cidSeq,
+    agentPort: 51_000,
+    apiSocket,
+    vsockUds: path.join(runDir, "vsock"),
+    tapDevice: tapName,
+    ip,
+    gatewayIp,
+    guestMac: mac,
+    state: "running",
+    lastUsedAt: Date.now(),
+  };
+
+  try {
+    // Load paused (resume_vm:false) so the clone has no bridge presence until we
+    // resume it inside the bootstrap lock. network_overrides points eth0 at this
+    // project's tap; the guest IP/MAC are still the frozen bootstrap pair.
+    await client.loadSnapshot({
+      snapshot_path: p.snapshot,
+      mem_backend: { backend_type: "File", backend_path: p.memory },
+      network_overrides: [{ iface_id: "eth0", host_dev_name: tapName }],
+      resume_vm: false,
+    });
+
+    await withBootstrapLock(async () => {
+      await client.resumeInstance();
+      // Re-stamp + mount over the bootstrap IP. Packet loss right after resume is
+      // expected, so retry briefly. The agent acks immediately and re-stamps
+      // ~250ms later (it can't change its own MAC/IP while answering us).
+      const seed = randomBytes(32).toString("base64");
+      let finalized = false;
+      let lastErr: unknown = null;
+      const fdl = Date.now() + 8_000;
+      while (Date.now() < fdl) {
+        try {
+          await finalizeRestore(BOOTSTRAP_IP, 51_000, {
+            ip: `${ip}/16`,
+            gw: gatewayIp,
+            mac,
+            mount_sandbox: true,
+            seed,
+            time_ms: Date.now(),
+          });
+          finalized = true;
+          break;
+        } catch (err) {
+          lastErr = err;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
+      if (!finalized) {
+        throw new Error(
+          `finalizeRestore never succeeded over bootstrap ${BOOTSTRAP_IP}: ` +
+            `${lastErr instanceof Error ? lastErr.message : lastErr}`,
+        );
+      }
+      // Hold the lock until the clone has actually LEFT the bootstrap identity
+      // (reachable on its own project IP), so the next clone can safely reuse it.
+      let healthy = false;
+      const hdl = Date.now() + 8_000;
+      while (Date.now() < hdl) {
+        if ((await pingAgent(handle)) !== null) {
+          healthy = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      if (!healthy) {
+        throw new Error(`restored clone unreachable on project IP ${ip} after re-stamp`);
+      }
+    });
+
+    handle.agentKind = "rust";
+    // Seed project files (cheap/empty for a brand-new project; the per-project
+    // sandbox.ext4 persists node_modules across reopens just like the cold path).
+    await hydrateInto(handle, opts.hostSandboxDir).catch((err) => {
+      console.error(`[vm ${id}] hydration after restore failed:`, err);
+    });
+    vms.set(opts.projectId, {
+      handle,
+      client,
+      fcPid: fc.pid,
+      fcClose: fc.close,
+      hostSandboxDir: opts.hostSandboxDir,
+    });
+    console.log(
+      `[fleet ${id}] restored from golden snapshot → ${ip} (project ${opts.projectId.slice(0, 8)})`,
+    );
+    return handle;
+  } catch (err) {
+    fc.close();
+    await teardownTap(tapName).catch(() => {});
+    await fs.rm(runDir, { recursive: true, force: true }).catch(() => {});
+    throw err;
+  }
 }
 
 const HYDRATE_MAX_FILES = 5_000;
@@ -513,7 +800,13 @@ export async function destroy(projectId: string): Promise<void> {
   }
   await fs.rm(vm.handle.apiSocket, { force: true }).catch(() => {});
   await fs.rm(vm.handle.vsockUds, { force: true }).catch(() => {});
-  await fs.rm(vm.handle.rootImagePath, { force: true }).catch(() => {});
+  // A base-snapshot clone shares the read-only base rootfs (rootImagePath ===
+  // ROOTFS_BASE_PATH) — never delete that. Only per-project cold-boot overlays
+  // are removed. The clone's per-VM run dir (tap symlink + sockets) goes too.
+  if (vm.handle.rootImagePath !== ROOTFS_BASE_PATH) {
+    await fs.rm(vm.handle.rootImagePath, { force: true }).catch(() => {});
+  }
+  await fs.rm(path.join(RUN_DIR, vm.handle.id), { recursive: true, force: true }).catch(() => {});
   const paths = snapshotPaths(vm.handle.projectId);
   await fs.rm(paths.snapshot, { force: true }).catch(() => {});
   await fs.rm(paths.memory, { force: true }).catch(() => {});
@@ -545,7 +838,13 @@ export async function reclaimVm(projectId: string): Promise<void> {
   }
   await fs.rm(vm.handle.apiSocket, { force: true }).catch(() => {});
   await fs.rm(vm.handle.vsockUds, { force: true }).catch(() => {});
-  await fs.rm(vm.handle.rootImagePath, { force: true }).catch(() => {});
+  // A base-snapshot clone shares the read-only base rootfs (rootImagePath ===
+  // ROOTFS_BASE_PATH) — never delete that. Only per-project cold-boot overlays
+  // are removed. The clone's per-VM run dir (tap symlink + sockets) goes too.
+  if (vm.handle.rootImagePath !== ROOTFS_BASE_PATH) {
+    await fs.rm(vm.handle.rootImagePath, { force: true }).catch(() => {});
+  }
+  await fs.rm(path.join(RUN_DIR, vm.handle.id), { recursive: true, force: true }).catch(() => {});
   const paths = snapshotPaths(vm.handle.projectId);
   await fs.rm(paths.snapshot, { force: true }).catch(() => {});
   await fs.rm(paths.memory, { force: true }).catch(() => {});
@@ -653,6 +952,16 @@ export function startIdleSweeper(): void {
   void gcOrphanedSnapshots().catch((err) =>
     console.error(`[fleet] orphan GC failed:`, err instanceof Error ? err.message : err),
   );
+  // Build the golden base snapshot ahead of demand so the first new project of
+  // the process restores instantly instead of paying the one-time build.
+  if (BASE_SNAPSHOT_ENABLED) {
+    void ensureBaseSnapshot().catch((err) =>
+      console.error(
+        `[fleet] golden base snapshot build failed (new projects will cold-boot):`,
+        err instanceof Error ? err.message : err,
+      ),
+    );
+  }
   sweeperTimer = setInterval(() => {
     const now = Date.now();
     // Periodically re-run the orphan sweep (not just at startup) so a
@@ -807,7 +1116,10 @@ function allocateNetwork(projectId: string): NetAlloc {
   // Reserve .0 (network), .1 (gateway), .255 (broadcast). Skip 1..2.
   const a = h[0];
   const bRaw = h[1];
-  const b = bRaw <= 1 ? 2 : bRaw === 255 ? 254 : bRaw;
+  let b = bRaw <= 1 ? 2 : bRaw === 255 ? 254 : bRaw;
+  // Reserve BOOTSTRAP_IP (default 172.16.255.254) so no project can be handed
+  // the address the golden snapshot is frozen with.
+  if (a === 255 && b === 254) b = 253;
   const ip = `172.16.${a}.${b}`;
   // Locally-administered MAC: 02:FC:<projectHash[2..6]>
   const hex = (n: number): string => n.toString(16).padStart(2, "0");

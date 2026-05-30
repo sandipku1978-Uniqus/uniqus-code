@@ -26,6 +26,24 @@
   Firecracker rootfs only rebuilds when `services/sandbox-agent/` or
   `infra/firecracker/build-rootfs.sh` changes.
 
+## VM cold start (Firecracker)
+- A NEW project with no prior VM/snapshot hits `bootNew()` in `fleet.ts` — the
+  only path that matters for new-project latency. The "faster reopen" /
+  "keep-warm" / pause-resume work all only speed REOPENING a project that
+  already booted once; none of it touches first boot. See
+  `infra/firecracker/README.md` ("Cold start: the two paths").
+- Boot fixes are always on: no `iface eth0 inet dhcp` and the agent no longer
+  `need net`s (a doomed DHCP lease used to block OpenRC ~10-15s); mutable dirs
+  are tmpfs so the base rootfs can be shared read-only.
+- **Golden base snapshot** (`FIRECRACKER_BASE_SNAPSHOT=1`, default OFF) makes
+  new-project boots sub-second by restoring a clone of a pre-booted VM. It
+  requires a **rootfs rebuild** (the golden boots the rootfs read-only and uses
+  the `uniqus_golden=1` cmdline) and must be **validated on the host** before
+  trusting it — see the README's "Enabling + validating" steps. Falls back to
+  cold boot on any error, so shipping it dark is safe. The agent gained
+  `POST /net/configure` (re-stamp IP/MAC + mount sandbox + reseed/clock on
+  restore) — mirrored in BOTH `main.rs` and the Node `agent.mjs`.
+
 ## Model providers (multi-provider agent)
 - The coding agent runs on a model resolved by `services/orchestrator/src/agent/router.ts`.
   Default is **Auto** (Claude Opus). Users override per-turn / as an account

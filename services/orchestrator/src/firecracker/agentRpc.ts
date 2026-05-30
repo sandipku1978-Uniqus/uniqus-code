@@ -168,6 +168,96 @@ export async function pushFile(
   });
 }
 
+/**
+ * One-off control call to an agent at an EXPLICIT ip:port (not a VmHandle).
+ *
+ * A base-snapshot clone resumes holding the golden image's frozen "bootstrap"
+ * identity (a fixed IP + MAC, identical on every clone). The orchestrator
+ * reaches the clone on that bootstrap IP and calls `/net/configure` to stamp
+ * THIS project's real MAC + IP + default route, mount its sandbox drive, and
+ * de-correlate the clock/RNG — after which the clone lives under its own unique
+ * identity and all further RPC uses the normal per-project `vm.ip` path.
+ *
+ * Because the bootstrap identity is shared, callers must hold the fleet's global
+ * bootstrap lock around resume→finalize so only one clone wears it at a time.
+ */
+export async function finalizeRestore(
+  bootstrapIp: string,
+  port: number,
+  body: {
+    /** Per-project address as "addr/prefix", e.g. "172.16.3.4/16". */
+    ip: string;
+    gw: string;
+    /** Per-project locally-administered MAC. */
+    mac: string;
+    /** Mount the (just-repointed) sandbox drive at /sandbox. */
+    mount_sandbox: boolean;
+    /** Base64 entropy mixed into the clone's /dev/urandom. */
+    seed: string;
+    /** Host wall-clock (epoch millis) to correct the frozen guest clock. */
+    time_ms: number;
+  },
+  readTimeoutMs = 4_000,
+): Promise<void> {
+  await rawRequest(bootstrapIp, port, "POST", "/net/configure", body, readTimeoutMs);
+}
+
+/** Probe an agent at an explicit ip:port (used while waiting on a restored clone). */
+export async function pingAt(ip: string, port: number, readTimeoutMs = 500): Promise<boolean> {
+  try {
+    await rawRequest(ip, port, "GET", "/health", undefined, readTimeoutMs);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Minimal HTTP helper for VM-handle-less control calls (no idle-touch). */
+function rawRequest(
+  host: string,
+  port: number,
+  method: string,
+  urlPath: string,
+  body: unknown,
+  readTimeoutMs: number,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
+    const req = http.request(
+      {
+        host,
+        port,
+        method,
+        path: urlPath,
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          ...(payload ? { "Content-Length": String(payload.length) } : {}),
+        },
+        timeout: readTimeoutMs,
+      },
+      (res) => {
+        res.resume();
+        res.on("end", () => {
+          const status = res.statusCode ?? 0;
+          if (status >= 400 || status === 0) {
+            reject(new Error(`${method} ${host}:${port}${urlPath} → HTTP ${status}`));
+          } else {
+            resolve();
+          }
+        });
+      },
+    );
+    req.once("timeout", () => {
+      req.destroy();
+      reject(new Error(`${method} ${host}:${port}${urlPath} read timeout (${readTimeoutMs}ms)`));
+    });
+    req.once("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
 // ── transport ──────────────────────────────────────────────────────────────
 
 interface RpcOpts {

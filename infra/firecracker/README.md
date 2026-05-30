@@ -43,7 +43,11 @@ FIRECRACKER_IDLE_PAUSE_MS=300000
 
 - Per-project Alpine microVM, ~125 ms boot cold, ~5 ms resume from pause.
 - Per-VM `/sandbox` ext4 image at `/var/lib/uniqus/firecracker/<projectId>.sandbox.ext4`.
-- DHCP'd VM with a 172.16/16 private IP, NAT'd egress through the host NIC.
+- Static-IP VM with a 172.16/16 private IP, NAT'd egress through the host NIC.
+  There is **no DHCP** on the bridge: the agent configures eth0 itself from the
+  kernel cmdline (`uniqus_ip`/`uniqus_gw`). A stray `iface eth0 inet dhcp` in the
+  guest used to make `udhcpc` block OpenRC ~10-15s waiting for a lease that never
+  comes — the single biggest chunk of the old ~18s cold start, now removed.
 - Idle VMs auto-pause after `FIRECRACKER_IDLE_PAUSE_MS` (default 5 min).
 - KVM access scoped to the `kvm` group; orchestrator runs as a non-root
   user added to that group by `host-setup.sh`.
@@ -68,11 +72,75 @@ idle VMs in tiers, all env-tunable:
 This keeps "reopen after a day or two" fast (snapshot restore) and "reopen after
 a couple weeks" merely a cold boot rather than a full reinstall.
 
+## New-project cold start: the two paths
+
+The retention tiers above all speed REOPENING a project that already booted once.
+A brand-NEW project has no per-project VM or snapshot, so it hits `bootNew()` —
+the only path that governs new-project latency. Two changes attack it:
+
+1. **Boot fixes (always on).** No DHCP stall (see "What this gives you"); the
+   agent owns eth0; `/tmp`, `/run`, `/var/log` are tmpfs so the base rootfs is
+   never written after boot. A cold boot drops from ~15-20s to ~3-8s.
+2. **Golden base snapshot (opt-in: `FIRECRACKER_BASE_SNAPSHOT=1`).** On startup
+   the fleet boots ONE VM to "agent ready" on the **read-only, shared** base
+   rootfs and snapshots it. Every new project then restores a clone from that
+   snapshot (≈ mmap of the memory file — **sub-second**) instead of booting.
+   Clones share the read-only rootfs (no per-project 2 GiB copy) and each get
+   their own `sandbox.ext4`, resolved via the per-VM firecracker working dir
+   (Firecracker's "relative paths + per-sandbox cwd" clone pattern).
+
+   The golden is frozen with a shared **bootstrap identity** (`uniqus_ip`
+   = `172.16.255.254`, MAC `02:fc:ff:ff:ff:fe`, cmdline `uniqus_golden=1` so the
+   sandbox is left unmounted). On restore the orchestrator loads the snapshot
+   with `network_overrides` pointing eth0 at the project's TAP, resumes, then —
+   holding a global lock so only one clone wears the bootstrap identity at a time
+   — calls the agent's **`POST /net/configure`** over the bootstrap IP to mount
+   the project disk, reseed RNG, fix the clock, and re-stamp eth0 to the
+   project's own MAC/IP. The agent acks first and re-stamps ~250ms later (it
+   can't reconfigure the link it's answering over). On ANY failure the fleet
+   falls back to the cold-boot path, so the flag is safe to ship dark.
+
+### Enabling + validating the golden snapshot
+
+```sh
+# 1. Rebuild the rootfs (adds tmpfs mounts + the no-DHCP / golden changes).
+sudo REPO_ROOT=/path/to/uniqus-code ./build-rootfs.sh
+
+# 2. Turn the flag on PERSISTENTLY via a systemd drop-in (an env prefix on
+#    `systemctl restart` does NOT reach the service — that env goes to systemctl,
+#    not the unit), then restart and watch the one-time golden build.
+#    If this hangs / never reports "golden snapshot written", the rootfs likely
+#    can't boot READ-ONLY — add more tmpfs lines to build-rootfs.sh for whatever
+#    dir a service wants to write, rebuild, retry. (Until then, new projects just
+#    cold-boot — nothing breaks.)
+sudo mkdir -p /etc/systemd/system/uniqus-orchestrator.service.d
+printf '[Service]\nEnvironment=FIRECRACKER_BASE_SNAPSHOT=1\n' \
+  | sudo tee /etc/systemd/system/uniqus-orchestrator.service.d/golden.conf
+sudo systemctl daemon-reload && sudo systemctl restart uniqus-orchestrator
+journalctl -u uniqus-orchestrator -f | grep '\[fleet base\]'
+#    → expect: "golden snapshot written → .../base/base.snapshot"
+
+# 3. Create a brand-new project in the UI and watch:
+journalctl -u uniqus-orchestrator -f | grep '\[fleet'
+#    → expect: "restored from golden snapshot → 172.16.x.y" in well under 1s.
+#      A "falling back to cold boot" line means investigate before relying on it.
+```
+
+Tunable: `FIRECRACKER_BOOTSTRAP_IP` (default `172.16.255.254`, reserved out of
+the project IP range). Delete `…/firecracker/base/` to force a golden rebuild
+after a rootfs change.
+
 ## What's deliberately not here yet
 
 - **ZFS** for the host filesystem. Plan §1 specifies it for snapshot
   density. Phase-2 uses ext4 + reflink (XFS-friendly) — adequate at
-  10–100 VMs/host, not at 1000+.
+  10–100 VMs/host, not at 1000+. (The base-snapshot path sidesteps the
+  per-project rootfs copy entirely by sharing one read-only base image, so
+  reflink only matters for the cold-boot fallback now.)
+- **netns-per-clone networking.** The base-snapshot restore serializes the
+  ~0.3-1s bootstrap re-stamp window. If new-VM throughput ever needs to exceed
+  that, move each clone into its own network namespace (same frozen guest IP,
+  no shared identity, no lock) — Firecracker's documented clone model.
 - **Falco / per-VM cgroups / egress allowlist** beyond a basic
   link-local-blocking rule. Plan §6 (Risk #2) — Phase-3.
 - **Public preview routing**. The dev server starts inside the VM; the
