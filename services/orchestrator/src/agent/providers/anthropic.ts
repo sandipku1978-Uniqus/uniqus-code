@@ -120,8 +120,26 @@ export class AnthropicAdapter implements ModelProviderAdapter {
     );
 
     const announced = new Set<string>();
+    // Live token usage: message_start carries the input (+ cache) token count;
+    // each message_delta carries the running output_tokens. Surface both as
+    // they arrive so the composer's counter ticks up during the stream.
+    let inputTokens = 0;
+    let outputTokens = 0;
     stream.on("streamEvent", (event) => {
-      if (event.type === "content_block_start") {
+      if (event.type === "message_start") {
+        const u = event.message.usage;
+        inputTokens =
+          (u.input_tokens ?? 0) +
+          (u.cache_read_input_tokens ?? 0) +
+          (u.cache_creation_input_tokens ?? 0);
+        outputTokens = u.output_tokens ?? 0;
+        p.onUsage?.({ inputTokens, outputTokens });
+      } else if (event.type === "message_delta") {
+        if (event.usage?.output_tokens != null) {
+          outputTokens = event.usage.output_tokens;
+          p.onUsage?.({ inputTokens, outputTokens });
+        }
+      } else if (event.type === "content_block_start") {
         const block = event.content_block;
         if (block.type === "tool_use" && !announced.has(block.id)) {
           announced.add(block.id);
@@ -136,6 +154,15 @@ export class AnthropicAdapter implements ModelProviderAdapter {
     });
 
     const finalMessage = await stream.finalMessage();
+    const fu = finalMessage.usage;
+    const finalUsage = {
+      inputTokens:
+        (fu.input_tokens ?? 0) +
+        (fu.cache_read_input_tokens ?? 0) +
+        (fu.cache_creation_input_tokens ?? 0),
+      outputTokens: fu.output_tokens ?? 0,
+    };
+    p.onUsage?.(finalUsage);
 
     const toolCalls: StreamTurnResult["toolCalls"] = [];
     for (const block of finalMessage.content) {
@@ -172,6 +199,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
       content: finalMessage.content,
       stopReason: mapStopReason(finalMessage.stop_reason),
       toolCalls,
+      usage: finalUsage,
     };
   }
 

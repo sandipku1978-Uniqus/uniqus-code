@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   MODEL_CATALOG,
   type ModelProvider,
@@ -70,7 +71,13 @@ function CompactPicker() {
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      const target = e.target as Element | null;
+      // The "More models" flyout is portaled to <body>, so it's outside `ref`.
+      // Don't treat a click inside it (e.g. picking a model) as an outside
+      // click — that would unmount the popover before the option's onClick
+      // could fire.
+      if (target?.closest?.(".model-picker-flyout")) return;
+      if (ref.current && !ref.current.contains(target as Node)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
@@ -197,6 +204,122 @@ function ModelList({
   );
 }
 
+/**
+ * The composer's "More models" flyout. Rendered into a portal at <body> with
+ * fixed positioning so it can't be clipped by the chat pane's overflow or
+ * painted under the editor / file panes to its right (the bug this fixes). It
+ * opens to the right of the trigger and flips to the left when there isn't room,
+ * and is clamped vertically to the viewport with an internal scroll.
+ */
+function ModelFlyout({
+  model,
+  onPick,
+}: {
+  model: string;
+  onPick: (m: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number; maxHeight: number } | null>(
+    null,
+  );
+  const btnRef = useRef<HTMLButtonElement>(null);
+
+  const computePos = (): { top: number; left: number; maxHeight: number } | null => {
+    const r = btnRef.current?.getBoundingClientRect();
+    if (!r) return null;
+    const width = 248;
+    const gap = 8;
+    const margin = 8;
+    const maxHeight = Math.min(440, window.innerHeight - margin * 2);
+    // Horizontal: open to the right; flip to the left if it would overflow.
+    let left = r.right + gap;
+    if (left + width > window.innerWidth - margin) left = r.left - gap - width;
+    if (left < margin) left = margin;
+    // Vertical: align to the trigger's top, then clamp so the whole list stays
+    // on screen (it grows downward from `top`, capped at maxHeight).
+    let top = r.top;
+    if (top + maxHeight > window.innerHeight - margin) {
+      top = window.innerHeight - margin - maxHeight;
+    }
+    if (top < margin) top = margin;
+    return { top, left, maxHeight };
+  };
+
+  const toggle = (): void => {
+    if (open) {
+      setOpen(false);
+    } else {
+      setPos(computePos());
+      setOpen(true);
+    }
+  };
+
+  // Reposition on resize/scroll while open, and close on an outside pointer-down
+  // (anything that isn't the trigger or the flyout itself).
+  useEffect(() => {
+    if (!open) return;
+    const reflow = () => setPos(computePos());
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Element | null;
+      if (btnRef.current?.contains(t as Node)) return;
+      if (t?.closest?.(".model-picker-flyout")) return;
+      setOpen(false);
+    };
+    window.addEventListener("resize", reflow);
+    window.addEventListener("scroll", reflow, true);
+    document.addEventListener("mousedown", onDown);
+    return () => {
+      window.removeEventListener("resize", reflow);
+      window.removeEventListener("scroll", reflow, true);
+      document.removeEventListener("mousedown", onDown);
+    };
+  }, [open]);
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        className="model-picker-more"
+        data-open={open ? "true" : "false"}
+        onClick={toggle}
+        aria-haspopup="true"
+        aria-expanded={open ? "true" : "false"}
+      >
+        <span>More models</span>
+        <span style={{ fontSize: 9, opacity: 0.6 }}>▸</span>
+      </button>
+      {open &&
+        pos &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <div
+            className="model-picker-flyout"
+            role="menu"
+            style={{
+              position: "fixed",
+              top: pos.top,
+              left: pos.left,
+              bottom: "auto",
+              maxHeight: pos.maxHeight,
+              overflowY: "auto",
+              zIndex: 120,
+            }}
+          >
+            <ModelList
+              model={model}
+              onPick={(m) => {
+                setOpen(false);
+                onPick(m);
+              }}
+            />
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+}
+
 function PickerBody({
   model,
   thinking,
@@ -213,7 +336,6 @@ function PickerBody({
 }) {
   // Inline mode: auto-expand the list when a specific model is already chosen.
   const [showInline, setShowInline] = useState(!flyout && model !== "auto");
-  const [flyoutOpen, setFlyoutOpen] = useState(false);
 
   return (
     <div style={{ display: "grid", gap: 8, minWidth: 248 }}>
@@ -227,28 +349,7 @@ function PickerBody({
       />
 
       {flyout ? (
-        <div
-          className="model-picker-more-wrap"
-          onMouseEnter={() => setFlyoutOpen(true)}
-          onMouseLeave={() => setFlyoutOpen(false)}
-        >
-          <button
-            type="button"
-            className="model-picker-more"
-            data-open={flyoutOpen ? "true" : "false"}
-            onClick={() => setFlyoutOpen((o) => !o)}
-            aria-haspopup="true"
-            aria-expanded={flyoutOpen ? "true" : "false"}
-          >
-            <span>More models</span>
-            <span style={{ fontSize: 9, opacity: 0.6 }}>▸</span>
-          </button>
-          {flyoutOpen && (
-            <div className="model-picker-flyout" role="menu">
-              <ModelList model={model} onPick={onPickModel} />
-            </div>
-          )}
-        </div>
+        <ModelFlyout model={model} onPick={onPickModel} />
       ) : (
         <>
           <button

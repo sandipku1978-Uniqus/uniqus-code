@@ -898,6 +898,92 @@ section.band .sub {
 @media (max-width: 1100px) { .proj-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 700px)  { .proj-grid { grid-template-columns: 1fr; } }
 
+/* ── Dashboard usage widgets ─────────────────────────────────────────────── */
+.usage-widgets { margin-top: 8px; }
+.usage-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+}
+@media (max-width: 1100px) { .usage-stat-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px)  { .usage-stat-grid { grid-template-columns: 1fr; } }
+
+.stat-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px 18px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg, 12px);
+}
+.stat-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.stat-value {
+  font-size: 26px;
+  font-weight: 650;
+  line-height: 1.1;
+  color: var(--text-primary);
+  font-family: var(--font-mono-stack);
+}
+.stat-sub { font-size: 11px; color: var(--text-dim); }
+
+.top-models {
+  margin-top: 14px;
+  padding: 16px 18px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg, 12px);
+}
+.top-models-title {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+.top-models-list { display: grid; gap: 10px; }
+.top-model-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) 1fr auto;
+  align-items: center;
+  gap: 12px;
+}
+.top-model-name {
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.top-model-bar {
+  height: 6px;
+  background: var(--bg-surface-active);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.top-model-fill {
+  display: block;
+  height: 100%;
+  background: var(--brand-gradient);
+  border-radius: 3px;
+}
+.top-model-tokens {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono-stack);
+  white-space: nowrap;
+}
+@media (max-width: 560px) {
+  .top-model-row { grid-template-columns: 1fr auto; }
+  .top-model-bar { display: none; }
+}
+
 .proj {
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
@@ -1005,6 +1091,29 @@ section.band .sub {
   background: var(--bg-surface);
   color: var(--text-primary);
 }
+
+/* Linked-repo chip + its disconnect (✕) affordance in the workspace topbar. */
+.repo-link-group { display: inline-flex; align-items: center; gap: 2px; }
+.repo-unlink-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm, 6px);
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all var(--dur-base) ease;
+}
+.repo-unlink-btn:hover:not(:disabled) {
+  background: var(--conf-low-bg);
+  color: var(--conf-low);
+}
+.repo-unlink-btn:disabled { cursor: default; opacity: 0.6; }
 .toggle-btn[data-on="true"] {
   background: rgba(72, 40, 121, 0.18);
   border-color: var(--brand-purple);
@@ -1274,6 +1383,32 @@ section.band .sub {
 }
 
 /* Composer */
+/* Live token counter — sits just above the composer while the agent runs. */
+.live-usage {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  font-family: var(--font-mono-stack);
+  background: var(--bg-pane);
+  border-top: 1px solid var(--border-light);
+}
+.live-usage strong { color: var(--text-primary); font-weight: 600; }
+.live-usage-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+
 .composer {
   border-top: 1px solid var(--border-default);
   padding: 10px 12px 12px;

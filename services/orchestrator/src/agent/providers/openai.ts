@@ -6,6 +6,7 @@ import type {
   ModelProviderAdapter,
   StreamTurnParams,
   StreamTurnResult,
+  TokenUsage,
 } from "./types.js";
 
 /**
@@ -85,12 +86,24 @@ export class OpenAIAdapter implements ModelProviderAdapter {
     let text = "";
     const announced = new Set<string>();
     const calls: Array<{ callId: string; name: string; args: string }> = [];
+    // OpenAI's Responses stream only reports usage once, on the terminal
+    // `response.completed` event (no incremental token counts mid-stream).
+    let usage: TokenUsage | undefined;
 
     for await (const event of stream) {
       switch (event.type) {
         case "response.output_text.delta":
           text += event.delta;
           p.onText?.(event.delta);
+          break;
+        case "response.completed":
+          if (event.response.usage) {
+            usage = {
+              inputTokens: event.response.usage.input_tokens ?? 0,
+              outputTokens: event.response.usage.output_tokens ?? 0,
+            };
+            p.onUsage?.(usage);
+          }
           break;
         case "response.reasoning_summary_text.delta":
           p.onThinking?.(event.delta);
@@ -140,6 +153,7 @@ export class OpenAIAdapter implements ModelProviderAdapter {
       content,
       stopReason: toolCalls.length > 0 ? "tool_use" : "end_turn",
       toolCalls,
+      usage,
     };
   }
 
@@ -191,10 +205,20 @@ export class OpenAIAdapter implements ModelProviderAdapter {
       p.onText?.(text);
     }
 
+    let usage: TokenUsage | undefined;
+    if (response.usage) {
+      usage = {
+        inputTokens: response.usage.input_tokens ?? 0,
+        outputTokens: response.usage.output_tokens ?? 0,
+      };
+      p.onUsage?.(usage);
+    }
+
     return {
       content,
       stopReason: toolCalls.length > 0 ? "tool_use" : "end_turn",
       toolCalls,
+      usage,
     };
   }
 

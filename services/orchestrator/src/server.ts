@@ -24,7 +24,10 @@ import type {
   UploadedFileSummary,
   ModelChoice,
   ThinkingEffort,
+  AccountUsageStats,
+  ModelProvider,
 } from "@uniqus/api-types";
+import { MODEL_CATALOG, estimateCostUsd } from "@uniqus/api-types";
 import { runAgentLoop } from "./agent/loop.js";
 import { proposePlan, formatPlanForExecution } from "./agent/plan.js";
 import { getTodos, clearTodos } from "./agent/todos.js";
@@ -84,8 +87,10 @@ import {
   deleteProject,
   updateProject,
   setGithubRepo,
+  clearGithubRepo,
 } from "./db/projects.js";
 import { loadHistory, appendMessage, clearHistory } from "./db/messages.js";
+import { recordUsageEvent, getUsageAggregate } from "./db/usage.js";
 import {
   ensureDefaultSession,
   listSessions,
@@ -552,6 +557,13 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // to both standard and guest accounts — both drive the agent.
   if (req.url === "/api/account/settings" && req.method === "GET") {
     return json(res, 200, { settings: await getAccountSettings(user.id) });
+  }
+
+  // Account-wide usage rollup for the dashboard widgets (total tokens, est.
+  // cost, time spent, top models). Aggregated from usage_events; cost + labels
+  // are layered on here from the shared catalog/pricing table.
+  if (req.url === "/api/account/usage-stats" && req.method === "GET") {
+    return json(res, 200, { stats: await accountUsageStats(user.id) });
   }
   if (req.url === "/api/account/settings" && req.method === "PUT") {
     const body = await readJsonBody<{ custom_prompt?: string; default_skills?: string }>(req);
@@ -1209,6 +1221,21 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (req.url === "/api/github/disconnect" && req.method === "POST") {
     if (guestForbidden(res, user)) return;
     await githubDisconnect(user);
+    return json(res, 200, { ok: true });
+  }
+
+  // Disconnect a project's linked GitHub repo. The link is purely metadata
+  // (we never auto-push), so this just nulls the columns — it does NOT delete
+  // the repo on GitHub. Lets a user who deleted/renamed the repo on GitHub's
+  // side clear the stale link and create/link a different one.
+  const repoDisconnectMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/github-repo$/,
+  );
+  if (repoDisconnectMatch && req.method === "DELETE") {
+    const projectId = repoDisconnectMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    await clearGithubRepo(projectId, user.id);
     return json(res, 200, { ok: true });
   }
 
@@ -2119,6 +2146,49 @@ function slugifyForVercel(name: string): string | null {
   return slug.length > 0 ? slug : null;
 }
 
+/**
+ * Build the dashboard usage rollup: the DB aggregate plus an estimated USD cost
+ * (per-model pricing from the shared catalog) and human model labels. Never
+ * throws — a failed lookup yields a zeroed rollup so the dashboard still renders.
+ */
+async function accountUsageStats(ownerId: string): Promise<AccountUsageStats> {
+  let agg;
+  try {
+    agg = await getUsageAggregate(ownerId);
+  } catch (err) {
+    console.error("accountUsageStats: getUsageAggregate failed:", err);
+    return {
+      total_input_tokens: 0,
+      total_output_tokens: 0,
+      total_cost_usd: 0,
+      total_time_ms: 0,
+      turns: 0,
+      top_models: [],
+    };
+  }
+  let totalCost = 0;
+  const topModels = agg.per_model.map((m) => {
+    totalCost += estimateCostUsd(m.model, m.input_tokens, m.output_tokens);
+    const catalog = MODEL_CATALOG.find((c) => c.model === m.model);
+    return {
+      model: m.model,
+      provider: (catalog?.provider ?? (m.provider as ModelProvider)) as ModelProvider,
+      label: catalog?.label ?? m.model,
+      input_tokens: m.input_tokens,
+      output_tokens: m.output_tokens,
+      turns: m.turns,
+    };
+  });
+  return {
+    total_input_tokens: agg.total_input_tokens,
+    total_output_tokens: agg.total_output_tokens,
+    total_cost_usd: totalCost,
+    total_time_ms: agg.total_time_ms,
+    turns: agg.turns,
+    top_models: topModels,
+  };
+}
+
 function toProjectSummary(p: {
   id: string;
   name: string;
@@ -2513,9 +2583,7 @@ async function handleConnection(
     chat_session: { id: session.id, title: session.title },
   });
 
-  for (const msg of history) {
-    replayMessage(send, msg);
-  }
+  replayHistory(send, history);
 
   for (const s of listServers(project.id)) {
     send({ type: "server_started", id: s.id, command: s.command, port: s.port });
@@ -2592,34 +2660,130 @@ async function maybeAutoInstall(
   }
 }
 
-function replayMessage(send: Sender, msg: Anthropic.MessageParam): void {
-  if (msg.role === "user") {
-    if (typeof msg.content === "string") {
-      send({ type: "text", content: `\n[replay] you: ${msg.content}\n` });
+// Trailers the orchestrator appends to a user message before persisting (upload
+// hints, inlined @file contents, the approved plan). On replay we want to show
+// just the user's own words — the live composer bubble never showed these — so
+// we cut the persisted text at the first marker we recognize.
+const REPLAY_TRAILER_MARKERS = [
+  "\n\nUploaded files are already available in the project sandbox.",
+  "\n\nThe user @-referenced these files; their current contents are inlined below.",
+  "\n\nApproved plan:",
+];
+
+/**
+ * The user's display text for a persisted message, or null if the message is
+ * NOT a real user prompt (i.e. it's a batch of tool_result blocks). Mirrors
+ * `isUserTurnMessage` in messageHistory.ts: real prompts are a string or carry
+ * at least one text block.
+ */
+function replayUserText(content: Anthropic.MessageParam["content"]): string | null {
+  let text: string | null = null;
+  if (typeof content === "string") {
+    text = content;
+  } else if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const block of content) {
+      if (block && typeof block === "object" && (block as { type?: string }).type === "text") {
+        parts.push((block as { text: string }).text);
+      }
     }
-    // Tool results in user-role blocks aren't surfaced on replay (too verbose).
-    return;
+    text = parts.length > 0 ? parts.join("\n") : null;
   }
-  if (msg.role === "assistant" && Array.isArray(msg.content)) {
-    for (const block of msg.content) {
-      if (block.type === "text") {
-        send({ type: "text", content: block.text });
-      } else if (block.type === "tool_use") {
-        send({
-          type: "tool_call",
-          call_id: block.id,
-          name: block.name,
-          input: block.input,
-        });
-        send({
-          type: "tool_result",
-          call_id: block.id,
-          result: "(replayed from history)",
-          is_error: false,
-        });
+  if (text === null) return null;
+  let cut = text.length;
+  for (const marker of REPLAY_TRAILER_MARKERS) {
+    const i = text.indexOf(marker);
+    if (i >= 0 && i < cut) cut = i;
+  }
+  const trimmed = text.slice(0, cut).trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/** Flatten a persisted tool_result's content (string | block[]) to text. */
+function replayToolResultText(content: Anthropic.ToolResultBlockParam["content"]): string {
+  if (typeof content === "string") return content || "(no output)";
+  if (Array.isArray(content)) {
+    const texts: string[] = [];
+    for (const c of content) {
+      if (c && typeof c === "object") {
+        const t = (c as { type?: string }).type;
+        if (t === "text") texts.push((c as { text: string }).text);
+        else if (t === "image") texts.push("[image]");
+      }
+    }
+    return texts.join("\n") || "(no output)";
+  }
+  return "(no output)";
+}
+
+/**
+ * Reconstruct the chat UI from persisted history when a project/session loads.
+ *
+ * Emits the SAME event sequence the live agent loop does — a `replay_user_message`
+ * for each real prompt, `text`/`tool_call`/`tool_result` for the assistant's
+ * work, and a synthetic `complete` marker to close each turn. The complete
+ * markers are what let the client collapse past turns (so the "hide tool calls"
+ * fold works after a reload); without them every replayed turn stayed expanded.
+ */
+function replayHistory(send: Sender, history: Anthropic.MessageParam[]): void {
+  let inTurn = false;
+  let toolCalls = 0;
+
+  const closeTurn = (): void => {
+    if (!inTurn) return;
+    // elapsed_ms 0 → the client renders the marker without a "0.0s" timing,
+    // since we don't persist per-turn wall-clock.
+    send({ type: "complete", tool_calls: toolCalls, elapsed_ms: 0 });
+    inTurn = false;
+    toolCalls = 0;
+  };
+
+  for (const msg of history) {
+    if (msg.role === "user") {
+      const display = replayUserText(msg.content);
+      if (display !== null) {
+        // A real prompt — open a fresh turn (closing the previous one first).
+        closeTurn();
+        send({ type: "replay_user_message", content: display });
+        inTurn = true;
+        continue;
+      }
+      // Otherwise a batch of tool_results — surface each so its tool card shows
+      // the real persisted output instead of a "(replayed from history)" stub.
+      if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block && typeof block === "object" && (block as { type?: string }).type === "tool_result") {
+            const tr = block as Anthropic.ToolResultBlockParam;
+            send({
+              type: "tool_result",
+              call_id: tr.tool_use_id,
+              result: replayToolResultText(tr.content),
+              is_error: tr.is_error === true,
+            });
+          }
+        }
+      }
+      continue;
+    }
+
+    if (msg.role === "assistant") {
+      inTurn = true;
+      if (typeof msg.content === "string") {
+        if (msg.content) send({ type: "text", content: msg.content });
+      } else if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block.type === "text") {
+            send({ type: "text", content: block.text });
+          } else if (block.type === "tool_use") {
+            toolCalls++;
+            send({ type: "tool_call", call_id: block.id, name: block.name, input: block.input });
+          }
+        }
       }
     }
   }
+
+  closeTurn();
 }
 
 function formatUserMessageWithUploads(
@@ -2773,6 +2937,16 @@ async function runSession(
         .then((s) => s.custom_prompt)
         .catch(() => null)
     : null;
+  // Linked GitHub repo (per-turn read so connect/disconnect takes effect on the
+  // next turn without a reconnect). Injected into the system prompt so the agent
+  // knows the project has a repo. Non-fatal if the lookup fails.
+  const repo = await getProject(projectId, userId)
+    .then((p) =>
+      p?.github_repo_url
+        ? { fullName: p.github_repo_full_name ?? p.github_repo_url, url: p.github_repo_url }
+        : null,
+    )
+    .catch(() => null);
   let finalMessage = messageWithRefs;
 
   // Stream the planner's read-only investigation to the client using the same
@@ -2866,6 +3040,27 @@ async function runSession(
     }, 500);
   };
 
+  // Throttle the live token counter — onUsage can fire on every output-token
+  // delta (Anthropic). Coalesce to at most one `usage` event per ~300ms, but
+  // always remember the latest so the final figure isn't lost to the timer.
+  let latestUsage = { inputTokens: 0, outputTokens: 0 };
+  let usageEmitTimer: NodeJS.Timeout | null = null;
+  const flushUsage = (): void => {
+    send({
+      type: "usage",
+      input_tokens: latestUsage.inputTokens,
+      output_tokens: latestUsage.outputTokens,
+    });
+  };
+  const emitUsage = (u: { inputTokens: number; outputTokens: number }): void => {
+    latestUsage = u;
+    if (usageEmitTimer) return;
+    usageEmitTimer = setTimeout(() => {
+      usageEmitTimer = null;
+      flushUsage();
+    }, 300);
+  };
+
   const result = await runAgentLoop(finalMessage, {
     sandbox: { rootDir: sandboxDir, vm: vmHandle ?? undefined },
     apiKey,
@@ -2878,7 +3073,9 @@ async function runSession(
     accountPrompt,
     thinkingEffort: effort,
     userId,
+    repo,
     onTodoWrite: (items) => broadcastToProject(projectId, { type: "todos_updated", todos: items }),
+    onUsage: emitUsage,
     requestUserAnswer: registerUserAnswer,
     requestPlan,
     onCompacted: (info) =>
@@ -3029,11 +3226,37 @@ async function runSession(
     }
   });
 
+  // Stop any pending throttled usage tick — the final figure rides on
+  // `complete` below, so a late `usage` event would be redundant.
+  if (usageEmitTimer) {
+    clearTimeout(usageEmitTimer);
+    usageEmitTimer = null;
+  }
+
+  const elapsedMs = Date.now() - start;
+
+  // Record the turn's usage for the dashboard rollups. Best-effort — a failed
+  // analytics write must never break the turn. Skipped when nothing was billed
+  // (e.g. an instant abort before the first token).
+  if (result.usage.inputTokens > 0 || result.usage.outputTokens > 0) {
+    void recordUsageEvent({
+      projectId,
+      userId,
+      provider: result.provider,
+      model: result.model,
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+      elapsedMs,
+    }).catch((err) => console.error("recordUsageEvent failed:", err));
+  }
+
   send({
     type: "complete",
     tool_calls: toolCalls,
-    elapsed_ms: Date.now() - start,
+    elapsed_ms: elapsedMs,
     aborted: result.aborted || undefined,
+    input_tokens: result.usage.inputTokens,
+    output_tokens: result.usage.outputTokens,
   });
 }
 

@@ -122,6 +122,71 @@ export const MODEL_CATALOG: ReadonlyArray<ModelOption> = [
   },
 ];
 
+/**
+ * Approximate published list prices in USD per 1,000,000 tokens, keyed by the
+ * provider-native model id (what the orchestrator persists on each usage row).
+ * Used only to render the dashboard's "estimated cost" widget — it is a
+ * best-effort estimate, NOT a billing figure: it ignores prompt-cache discounts
+ * (cached input is much cheaper) and tier nuances, so it over-estimates. Update
+ * these as provider pricing changes; unknown models fall back to DEFAULT_PRICE.
+ */
+export const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+  // Anthropic
+  "claude-opus-4-8": { input: 5, output: 25 },
+  "claude-sonnet-4-6": { input: 3, output: 15 },
+  // OpenAI
+  "gpt-5.5": { input: 1.25, output: 10 },
+  "gpt-5.5-pro": { input: 15, output: 120 },
+  "gpt-5.3-codex": { input: 1.25, output: 10 },
+  // Google
+  "gemini-3.1-pro-preview-customtools": { input: 2, output: 12 },
+  "gemini-3.5-flash": { input: 0.3, output: 2.5 },
+  "gemini-2.5-pro": { input: 1.25, output: 10 },
+};
+
+/** Fallback $/1M when a model id isn't in MODEL_PRICING (mid-tier estimate). */
+export const DEFAULT_PRICE = { input: 3, output: 15 } as const;
+
+/** Estimated USD cost for a token count on a given model (see MODEL_PRICING). */
+export function estimateCostUsd(
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+): number {
+  const p = MODEL_PRICING[model] ?? DEFAULT_PRICE;
+  return (inputTokens * p.input + outputTokens * p.output) / 1_000_000;
+}
+
+/** Per-model rollup for the dashboard "top models" widget. */
+export interface ModelUsageRollup {
+  /** Provider-native model id, e.g. "claude-opus-4-8". */
+  model: string;
+  provider: ModelProvider;
+  /** Human label from MODEL_CATALOG, or the raw model id if not catalogued. */
+  label: string;
+  input_tokens: number;
+  output_tokens: number;
+  /** Number of agent turns served by this model. */
+  turns: number;
+}
+
+/**
+ * Account-wide usage rollup powering the dashboard widgets. Aggregated from the
+ * `usage_events` the orchestrator records at the end of each agent turn.
+ */
+export interface AccountUsageStats {
+  total_input_tokens: number;
+  total_output_tokens: number;
+  /** Estimated spend in USD (see estimateCostUsd — not a billing figure). */
+  total_cost_usd: number;
+  /** Total agent wall-clock across all turns, milliseconds. */
+  total_time_ms: number;
+  /** Number of agent turns recorded. */
+  turns: number;
+  /** Models ranked by total tokens, most-used first. */
+  top_models: ModelUsageRollup[];
+}
+
 export interface UploadedFileSummary {
   name: string;
   path: string;
@@ -218,6 +283,18 @@ export type ServerEvent =
   | { type: "text"; content: string }
   | {
       /**
+       * Replay of a persisted USER message when a project's history is loaded
+       * (reconnect / project open). Distinct from `text` (which is assistant
+       * output) so the client renders it as the user's own bubble instead of
+       * dumping the raw text into an assistant message. Carries just the user's
+       * words — the orchestrator strips the inlined upload/file-ref/plan
+       * trailers it added before persisting.
+       */
+      type: "replay_user_message";
+      content: string;
+    }
+  | {
+      /**
        * Reasoning/thinking delta — the model's internal reasoning trace, shown
        * in a collapsible block separate from the answer text. Not every model
        * exposes it (e.g. OpenAI Chat Completions hides reasoning content).
@@ -244,7 +321,26 @@ export type ServerEvent =
   | { type: "server_started"; id: string; command: string; port: number }
   | { type: "server_stopped"; id: string }
   | { type: "session_reset" }
-  | { type: "complete"; tool_calls: number; elapsed_ms: number; aborted?: boolean }
+  | {
+      /**
+       * Live cumulative token usage for the in-flight turn (Plan §5). Emitted
+       * (throttled) as the agent streams so the composer can show a running
+       * "X in · Y out" counter. Cumulative across every iteration of the turn
+       * — i.e. total tokens billed so far this turn, not per-iteration.
+       */
+      type: "usage";
+      input_tokens: number;
+      output_tokens: number;
+    }
+  | {
+      type: "complete";
+      tool_calls: number;
+      elapsed_ms: number;
+      aborted?: boolean;
+      /** Final cumulative token usage for the turn (absent on replayed turns). */
+      input_tokens?: number;
+      output_tokens?: number;
+    }
   | { type: "storage_synced"; at: number }
   | { type: "client_write_ack"; path: string; ok: boolean; error?: string }
   | {

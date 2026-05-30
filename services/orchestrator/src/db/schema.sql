@@ -295,3 +295,66 @@ create index if not exists audit_project_idx
   on audit_events (project_id, created_at desc);
 
 alter table audit_events enable row level security;
+
+-- Per-turn token usage (Plan §5 — dashboard usage widgets). One row per
+-- completed agent turn. user_id is the acting user (the project owner), so the
+-- dashboard can aggregate per account without a join. Purely analytics — no
+-- plaintext, no secrets. project_id/user_id cascade-delete with their parents.
+create table if not exists usage_events (
+  id bigserial primary key,
+  project_id uuid references projects(id) on delete cascade,
+  user_id uuid references users(id) on delete cascade,
+  provider text not null,
+  model text not null,
+  input_tokens integer not null default 0,
+  output_tokens integer not null default 0,
+  elapsed_ms integer not null default 0,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists usage_events_user_idx
+  on usage_events (user_id, created_at desc);
+
+alter table usage_events enable row level security;
+
+-- Account-wide usage rollup for the dashboard. Aggregated in Postgres so the
+-- totals aren't capped by PostgREST's per-request row limit. Returns a single
+-- jsonb blob: grand totals plus a per-model breakdown ordered by total tokens.
+create or replace function account_usage_stats(uid uuid)
+returns jsonb language sql stable as $$
+  with rows as (
+    select provider, model, input_tokens, output_tokens, elapsed_ms
+    from usage_events where user_id = uid
+  ),
+  totals as (
+    select
+      coalesce(sum(input_tokens), 0)::bigint  as total_input_tokens,
+      coalesce(sum(output_tokens), 0)::bigint as total_output_tokens,
+      coalesce(sum(elapsed_ms), 0)::bigint    as total_time_ms,
+      count(*)::bigint                         as turns
+    from rows
+  ),
+  per_model as (
+    select
+      provider, model,
+      sum(input_tokens)::bigint  as input_tokens,
+      sum(output_tokens)::bigint as output_tokens,
+      count(*)::bigint           as turns
+    from rows
+    group by provider, model
+    order by (sum(input_tokens) + sum(output_tokens)) desc
+  )
+  select jsonb_build_object(
+    'total_input_tokens',  (select total_input_tokens  from totals),
+    'total_output_tokens', (select total_output_tokens from totals),
+    'total_time_ms',       (select total_time_ms       from totals),
+    'turns',               (select turns               from totals),
+    'per_model', coalesce(
+      (select jsonb_agg(jsonb_build_object(
+        'model', model, 'provider', provider,
+        'input_tokens', input_tokens, 'output_tokens', output_tokens, 'turns', turns
+      )) from per_model),
+      '[]'::jsonb
+    )
+  );
+$$;

@@ -132,6 +132,25 @@ export async function setGithubRepo(
 }
 
 /**
+ * Clear the GitHub repo link from a project. Used by the workspace topbar's
+ * "Disconnect repo" action — e.g. after the user deleted the repo on GitHub and
+ * is otherwise stuck pointing at a now-404 URL with no way to relink. Nulls both
+ * columns so the create-repo path (which 409s when a repo is already linked) is
+ * available again.
+ */
+export async function clearGithubRepo(id: string, ownerId: string): Promise<void> {
+  const { error } = await db()
+    .from("projects")
+    .update({
+      github_repo_url: null,
+      github_repo_full_name: null,
+    })
+    .eq("id", id)
+    .eq("owner_id", ownerId);
+  if (error) throw new Error(`clearGithubRepo failed: ${error.message}`);
+}
+
+/**
  * Stamp the Vercel project link onto the row after the first successful deploy.
  * Subsequent deploys hit the same project so the dashboard URL stays stable
  * and Vercel doesn't create per-deploy projects.

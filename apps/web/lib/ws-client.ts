@@ -160,6 +160,12 @@ function handleEvent(event: ServerEvent): void {
     case "text":
       s.appendText(event.content);
       break;
+    case "replay_user_message":
+      // Persisted user prompt being replayed on load — render it as the user's
+      // own bubble (live turns add this client-side; replay can't, so the
+      // server re-sends it).
+      s.addUserMessage(event.content);
+      break;
     case "thinking":
       s.appendThinking(event.content);
       break;
@@ -213,8 +219,17 @@ function handleEvent(event: ServerEvent): void {
       s.removePreview(event.id);
       s.addSystem(`server stopped`);
       break;
+    case "usage":
+      s.setLiveUsage({ input: event.input_tokens, output: event.output_tokens });
+      break;
     case "complete":
-      s.addCompleteMarker(event.tool_calls, event.elapsed_ms, event.aborted === true);
+      s.addCompleteMarker(
+        event.tool_calls,
+        event.elapsed_ms,
+        event.aborted === true,
+        event.input_tokens,
+        event.output_tokens,
+      );
       s.setBusy(false);
       send({ type: "request_tree" });
       // Agent just went idle — drain any user edits that were deferred while

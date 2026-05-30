@@ -2,7 +2,11 @@
 
 import { useEffect, useState } from "react";
 import { useStore } from "@/lib/store";
-import { createGithubRepoApi, fetchGithubStatus } from "@/lib/api";
+import {
+  createGithubRepoApi,
+  disconnectProjectRepoApi,
+  fetchGithubStatus,
+} from "@/lib/api";
 import Modal from "./Modal";
 
 /**
@@ -25,6 +29,8 @@ export default function GithubRepoButton({ projectId }: { projectId: string }) {
   // Guard against accidental repo creation — confirm before the (irreversible,
   // outward-facing) create + push.
   const [confirming, setConfirming] = useState(false);
+  // "Disconnect repo" confirm — clears the stale link so the user can relink.
+  const [unlinking, setUnlinking] = useState(false);
 
   useEffect(() => {
     let cancel = false;
@@ -51,19 +57,86 @@ export default function GithubRepoButton({ projectId }: { projectId: string }) {
   const repoUrl = project?.github_repo_url ?? null;
   const repoFullName = project?.github_repo_full_name ?? null;
 
+  async function doDisconnect(): Promise<void> {
+    if (busy || !project) return;
+    setUnlinking(false);
+    setBusy(true);
+    setError(null);
+    try {
+      await disconnectProjectRepoApi(projectId);
+      // Clear the link in the store so the button drops back to the
+      // create/connect state — without this the user is stuck pointing at a
+      // repo that may no longer exist.
+      setProject({
+        ...project,
+        github_repo_url: null,
+        github_repo_full_name: null,
+      });
+      addSystem(`Disconnected GitHub repo${repoFullName ? ` (${repoFullName})` : ""}.`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      addSystem(`Disconnecting GitHub repo failed: ${msg}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (repoUrl) {
     return (
-      <a
-        href={repoUrl}
-        target="_blank"
-        rel="noreferrer"
-        className="toggle-btn"
-        title={`Open ${repoFullName ?? repoUrl} on github.com`}
-        style={{ textDecoration: "none" }}
-      >
-        <GithubIcon />
-        <span>{repoFullName ?? "GitHub"}</span>
-      </a>
+      <>
+        <span className="repo-link-group">
+          <a
+            href={repoUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="toggle-btn"
+            title={`Open ${repoFullName ?? repoUrl} on github.com`}
+            style={{ textDecoration: "none" }}
+          >
+            <GithubIcon />
+            <span>{repoFullName ?? "GitHub"}</span>
+          </a>
+          <button
+            type="button"
+            onClick={() => !busy && setUnlinking(true)}
+            disabled={busy}
+            className="repo-unlink-btn"
+            title="Disconnect this repo (e.g. it was deleted/renamed on GitHub). Doesn't delete anything on GitHub."
+            aria-label="Disconnect GitHub repo"
+          >
+            {busy ? "…" : "✕"}
+          </button>
+        </span>
+
+        {unlinking && (
+          <Modal
+            title="Disconnect this GitHub repo?"
+            subtitle={repoFullName ?? repoUrl ?? undefined}
+            onClose={() => setUnlinking(false)}
+            width={460}
+            footer={
+              <>
+                <span className="modal-status">Doesn’t delete anything on GitHub.</span>
+                <div className="modal-actions">
+                  <button type="button" className="btn-ghost" onClick={() => setUnlinking(false)}>
+                    Cancel
+                  </button>
+                  <button type="button" className="btn-primary" onClick={doDisconnect}>
+                    Disconnect
+                  </button>
+                </div>
+              </>
+            }
+          >
+            <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "var(--text-muted)" }}>
+              This only removes the link stored on this project — the repository on
+              github.com is left untouched. Use it if the repo was deleted or renamed
+              on GitHub and you want to create or link a different one.
+            </p>
+          </Modal>
+        )}
+      </>
     );
   }
 

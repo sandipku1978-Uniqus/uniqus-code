@@ -8,6 +8,7 @@ import BrandLockup from "./BrandLockup";
 import GuestBanner from "./GuestBanner";
 import {
   fetchProjects,
+  fetchUsageStatsApi,
   createProjectFromBriefApi,
   importGithubApi,
   importZipApi,
@@ -17,6 +18,7 @@ import {
   fetchGithubRepos,
   disconnectGithubApi,
   githubOauthStartUrl,
+  type AccountUsageStats,
   type GithubStatus,
   type GithubRepoSummary,
 } from "@/lib/api";
@@ -150,6 +152,7 @@ export default function ProjectPicker({
   const displayLabel = userName ?? userEmail ?? "there";
   const searchParams = useSearchParams();
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
+  const [usage, setUsage] = useState<AccountUsageStats | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [mode, setMode] = useState<Mode>("describe");
@@ -202,6 +205,11 @@ export default function ProjectPicker({
     fetchProjects()
       .then((r) => setProjects(r.projects))
       .catch((e) => setError(e.message));
+    // Usage rollup for the dashboard widgets. Best-effort — a failure (e.g.
+    // the usage table not yet migrated) just leaves the widgets at zero.
+    fetchUsageStatsApi()
+      .then((r) => setUsage(r.stats))
+      .catch(() => {});
   }, []);
 
   // Pull GitHub connection state on mount, and again whenever the query
@@ -936,8 +944,22 @@ export default function ProjectPicker({
             </div>
           </div>
 
+          {projects !== null && projects.length > 0 && (
+            <DashboardWidgets stats={usage} projectCount={projects.length} />
+          )}
+
           <div className="section-title">
-            <h2>Your projects</h2>
+            <h2>Recent projects</h2>
+            {projects !== null && projects.length > 3 && (
+              <button
+                type="button"
+                className="btn-ghost"
+                style={{ fontSize: 12 }}
+                onClick={() => setView("all")}
+              >
+                View all {projects.length} →
+              </button>
+            )}
           </div>
 
           {projects === null && (
@@ -968,7 +990,9 @@ export default function ProjectPicker({
 
           {projects !== null && projects.length > 0 && (
             <div className="proj-grid">
-              {projects.map((p) => (
+              {/* Three most-recently-active projects (listProjects sorts by
+                  updated_at desc). The full list lives in the All projects view. */}
+              {projects.slice(0, 3).map((p) => (
                 <ProjectTile
                   key={p.id}
                   project={p}
@@ -1016,6 +1040,134 @@ export default function ProjectPicker({
         </main>
       </div>
     </>
+  );
+}
+
+// ── Dashboard usage widgets ───────────────────────────────────────────────────
+
+/** Compact token count: 980 → "980", 10800 → "10.8k", 1_250_000 → "1.25M". */
+function formatTokens(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  if (n < 1000) return String(Math.round(n));
+  if (n < 1_000_000) {
+    const k = n / 1000;
+    return `${k >= 100 ? Math.round(k) : k.toFixed(1).replace(/\.0$/, "")}k`;
+  }
+  return `${(n / 1_000_000).toFixed(2).replace(/\.?0+$/, "")}M`;
+}
+
+/** USD with a sensible floor: tiny non-zero spend shows "<$0.01". */
+function formatUsd(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "$0.00";
+  if (n < 0.01) return "<$0.01";
+  return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+/** Agent wall-clock: "0s" / "45s" / "12m" / "3h 20m". */
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0s";
+  const totalSec = Math.round(ms / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const totalMin = Math.round(totalSec / 60);
+  if (totalMin < 60) return `${totalMin}m`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+function StatCard({
+  label,
+  value,
+  sub,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+}) {
+  return (
+    <div className="stat-card">
+      <span className="stat-label">{label}</span>
+      <span className="stat-value">{value}</span>
+      {sub && <span className="stat-sub">{sub}</span>}
+    </div>
+  );
+}
+
+/**
+ * The dashboard's "Your usage" block: headline stat cards (tokens, est. cost,
+ * agent time, turns) plus a "Top models" breakdown. Powered by the account-wide
+ * usage rollup; renders zeros gracefully while the stats load or before any
+ * agent turns have been recorded.
+ */
+function DashboardWidgets({
+  stats,
+  projectCount,
+}: {
+  stats: AccountUsageStats | null;
+  projectCount: number;
+}) {
+  const totalTokens =
+    (stats?.total_input_tokens ?? 0) + (stats?.total_output_tokens ?? 0);
+  const topModels = (stats?.top_models ?? []).slice(0, 4);
+  const maxModelTokens = topModels.reduce(
+    (max, m) => Math.max(max, m.input_tokens + m.output_tokens),
+    0,
+  );
+
+  return (
+    <section className="usage-widgets">
+      <div className="section-title">
+        <h2>Your usage</h2>
+        <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+          across {projectCount} project{projectCount === 1 ? "" : "s"} · cost is an estimate
+        </span>
+      </div>
+      <div className="usage-stat-grid">
+        <StatCard
+          label="Tokens"
+          value={formatTokens(totalTokens)}
+          sub={`${formatTokens(stats?.total_input_tokens ?? 0)} in · ${formatTokens(
+            stats?.total_output_tokens ?? 0,
+          )} out`}
+        />
+        <StatCard label="Est. cost" value={formatUsd(stats?.total_cost_usd ?? 0)} sub="approximate" />
+        <StatCard
+          label="Agent time"
+          value={formatDuration(stats?.total_time_ms ?? 0)}
+          sub="total run time"
+        />
+        <StatCard
+          label="Turns"
+          value={String(stats?.turns ?? 0)}
+          sub="agent responses"
+        />
+      </div>
+
+      {topModels.length > 0 && (
+        <div className="top-models">
+          <span className="top-models-title">Top models</span>
+          <div className="top-models-list">
+            {topModels.map((m) => {
+              const total = m.input_tokens + m.output_tokens;
+              const pct = maxModelTokens > 0 ? (total / maxModelTokens) * 100 : 0;
+              return (
+                <div key={`${m.provider}:${m.model}`} className="top-model-row">
+                  <span className="top-model-name" title={m.model}>
+                    {m.label}
+                  </span>
+                  <span className="top-model-bar">
+                    <span className="top-model-fill" style={{ width: `${pct}%` }} />
+                  </span>
+                  <span className="top-model-tokens">
+                    {formatTokens(total)} · {m.turns} turn{m.turns === 1 ? "" : "s"}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 

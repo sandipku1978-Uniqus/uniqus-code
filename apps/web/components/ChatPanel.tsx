@@ -30,6 +30,7 @@ export default function ChatPanel() {
   const expandedTurns = useStore((s) => s.expandedTurns);
   const toggleTurn = useStore((s) => s.toggleTurn);
   const todos = useStore((s) => s.todos);
+  const liveUsage = useStore((s) => s.liveUsage);
   const [tasksExpanded, setTasksExpanded] = useState(false);
   const [input, setInput] = useState("");
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
@@ -380,6 +381,16 @@ export default function ChatPanel() {
               })}
             </div>
           )}
+        </div>
+      )}
+
+      {busy && liveUsage && (liveUsage.input > 0 || liveUsage.output > 0) && (
+        <div className="live-usage" title="Live token usage for this response">
+          <span className="live-usage-dot" />
+          <span>
+            <strong>{formatTokens(liveUsage.input)}</strong> tokens in ·{" "}
+            <strong>{formatTokens(liveUsage.output)}</strong> tokens out
+          </span>
         </div>
       )}
 
@@ -750,6 +761,17 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** Compact token count: 980 → "980", 10800 → "10.8k", 1_250_000 → "1.25M". */
+function formatTokens(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  if (n < 1000) return String(Math.round(n));
+  if (n < 1_000_000) {
+    const k = n / 1000;
+    return `${k >= 100 ? Math.round(k) : k.toFixed(1).replace(/\.0$/, "")}k`;
+  }
+  return `${(n / 1_000_000).toFixed(2).replace(/\.?0+$/, "")}M`;
+}
+
 const FILE_REF_PATTERN = /(?:^|\s)@([\w./-][\w./-]*)/g;
 
 /**
@@ -943,9 +965,19 @@ function CompleteRow({
   expanded: boolean;
   onToggle?: () => void;
 }) {
-  const summary = item.aborted
-    ? `aborted · ${item.tool_calls} tool calls · ${(item.elapsed_ms / 1000).toFixed(1)}s`
-    : `done · ${item.tool_calls} tool calls · ${(item.elapsed_ms / 1000).toFixed(1)}s`;
+  const parts = [
+    item.aborted ? "aborted" : "done",
+    `${item.tool_calls} tool calls`,
+  ];
+  // elapsed_ms is 0 on replayed turns (we don't persist per-turn wall-clock) —
+  // skip it rather than show a misleading "0.0s".
+  if (item.elapsed_ms > 0) parts.push(`${(item.elapsed_ms / 1000).toFixed(1)}s`);
+  if (item.input_tokens !== undefined || item.output_tokens !== undefined) {
+    parts.push(
+      `${formatTokens(item.input_tokens ?? 0)} in · ${formatTokens(item.output_tokens ?? 0)} out`,
+    );
+  }
+  const summary = parts.join(" · ");
   return (
     <button
       type="button"

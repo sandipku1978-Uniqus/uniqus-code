@@ -6,6 +6,7 @@ import type {
   ModelProviderAdapter,
   StreamTurnParams,
   StreamTurnResult,
+  TokenUsage,
 } from "./types.js";
 
 /**
@@ -93,6 +94,9 @@ export class GoogleAdapter implements ModelProviderAdapter {
 
     let text = "";
     let finishReason: string | undefined;
+    // Gemini reports usage as cumulative `usageMetadata` on (typically the
+    // final) chunks. Track the latest and surface it as it updates.
+    let usage: TokenUsage | undefined;
     // Capture the thought signature that rides on each function-call part —
     // Gemini 3.x requires it echoed back on the next turn for multi-turn
     // function calling, so we stash it on the tool_use block (see toGeminiContents).
@@ -154,6 +158,16 @@ export class GoogleAdapter implements ModelProviderAdapter {
       }
       const fr = chunk.candidates?.[0]?.finishReason;
       if (fr) finishReason = String(fr);
+
+      const um = chunk.usageMetadata;
+      if (um) {
+        usage = {
+          inputTokens: um.promptTokenCount ?? 0,
+          // Reasoning ("thoughts") tokens are billed as output — include them.
+          outputTokens: (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0),
+        };
+        p.onUsage?.(usage);
+      }
     }
     if (p.signal?.aborted) {
       throw new Error("aborted");
@@ -179,6 +193,7 @@ export class GoogleAdapter implements ModelProviderAdapter {
       content,
       stopReason: mapStopReason(finishReason, toolCalls.length > 0),
       toolCalls,
+      usage,
     };
   }
 

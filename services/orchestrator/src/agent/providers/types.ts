@@ -67,6 +67,20 @@ export interface StreamTurnParams {
     result: string,
     isError: boolean,
   ) => void;
+  /**
+   * Fires as token usage for THIS provider call becomes known (live during the
+   * stream where the provider supports it — Anthropic streams output tokens
+   * incrementally; OpenAI/Gemini only report at the end). Counts are for this
+   * single call; the loop accumulates across iterations. Drives the live
+   * "X in · Y out" counter in the composer.
+   */
+  onUsage?: (usage: TokenUsage) => void;
+}
+
+/** Token usage for one model call (cumulative for the call, not a delta). */
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
 }
 
 export interface StreamTurnResult {
@@ -78,6 +92,8 @@ export interface StreamTurnResult {
   stopReason: "end_turn" | "tool_use" | "max_tokens" | "other";
   /** Client tool calls the loop must execute. Excludes provider-side tools. */
   toolCalls: AgentToolCall[];
+  /** Final token usage for this call, if the provider reported it. */
+  usage?: TokenUsage;
 }
 
 export interface ForcedToolParams {

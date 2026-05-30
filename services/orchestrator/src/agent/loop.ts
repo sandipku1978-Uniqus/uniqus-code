@@ -31,6 +31,7 @@ function buildSystemPrompt(
   skillsBody: string | null,
   accountPrompt: string | null,
   hasWebSearch: boolean,
+  repo: { fullName: string; url: string } | null,
 ): string {
   const { name: shellName, isUnixLike } = sb.shellInfo();
   const platform = process.platform;
@@ -50,6 +51,18 @@ function buildSystemPrompt(
   const platformWarning = isUnixLike
     ? `Shell: ${shellName} (Unix-like — head, tail, grep, sed, awk are available).`
     : `Shell: ${shellName}. IMPORTANT: this is NOT a Unix shell. Tools like tail, head, grep, sed, awk are NOT available. Avoid pipes to those utilities. Use Node one-liners (\`node -e\`) or PowerShell when you need text processing.`;
+
+  // Tell the agent about a linked GitHub repo so it actually knows the project
+  // has one (otherwise it never mentions git). Be honest about push auth — the
+  // sandbox may not hold credentials, so we don't promise `git push` works.
+  const repoSection = repo
+    ? `
+
+Project repository:
+- This project is linked to the GitHub repository ${repo.fullName} (${repo.url}). When the user refers to "the repo", "the branch", "committing", or "pushing", this is what they mean — acknowledge it rather than acting as if there's no repo.
+- Use git through run_command for local operations: \`git status\`, \`git log\`, \`git diff\`, \`git add\`, \`git commit\`, and \`git branch\` work in the sandbox. Check \`git status\` before assuming the working tree's state.
+- Pushing back to GitHub may require credentials the sandbox does not hold. If \`git push\` fails on authentication, do NOT retry blindly — tell the user the push needs auth (they can push from their own machine, or re-link the repo) instead of reporting success.`
+    : "";
 
   return `You are the Uniqus AI engineer embedded inside Uniqus Code, a browser-based application builder. You are not a standalone chat bot: your job is to modify project files, run commands through tools, start previews through tools, and report useful results back to the user.
 
@@ -87,7 +100,7 @@ Environment:
 - ${platformWarning}
 - Node.js, npm, npx are available. Other languages depend on what's installed locally.
 - All paths are relative to the sandbox root.
-- The sandbox is shared with the user — files persist across your turns.
+- The sandbox is shared with the user — files persist across your turns.${repoSection}
 
 Tools you have:
 - read_file / write_file / edit_file / list_dir / grep — file ops in the sandbox.
@@ -173,6 +186,12 @@ export interface LoopHooks {
   requestPlan?: (reason: string) => Promise<string>;
   /** Fires when the agent calls `todo_write`. UI rerenders the Tasks pane. */
   onTodoWrite?: (items: TodoItem[]) => void;
+  /**
+   * Fires as token usage accrues, with the CUMULATIVE totals for the whole
+   * turn so far (summed across every iteration of the loop). The server
+   * forwards this (throttled) as the live "X in · Y out" composer counter.
+   */
+  onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
 }
 
 export interface LoopOptions extends LoopHooks {
@@ -236,10 +255,23 @@ export interface LoopOptions extends LoopHooks {
    * for compaction and as the Anthropic provider key.
    */
   providerKeys?: ProviderKeys;
+  /**
+   * The GitHub repo linked to this project, if any. Injected into the system
+   * prompt so the agent knows it has a repo (and talks about git accordingly).
+   * Resolved by the caller per turn so connect/disconnect takes effect on the
+   * next turn without a reconnect.
+   */
+  repo?: { fullName: string; url: string } | null;
 }
 
 export interface LoopResult {
   aborted: boolean;
+  /** Cumulative token usage for the turn (summed across every iteration). */
+  usage: { inputTokens: number; outputTokens: number };
+  /** The provider-native model id the turn actually ran on (for usage records). */
+  model: string;
+  /** The provider that served the turn. */
+  provider: "anthropic" | "openai" | "google";
 }
 
 export async function runAgentLoop(
@@ -255,6 +287,17 @@ export async function runAgentLoop(
     anthropic: opts.apiKey,
   };
   const provider = getProvider(resolved.provider, keys);
+  // Cumulative token usage across every iteration of this turn. Committed after
+  // each provider call; the live figure (committed + the in-flight call's
+  // running counts) is forwarded by the onUsage hook passed to the adapter.
+  let usageIn = 0;
+  let usageOut = 0;
+  const finish = (aborted: boolean): LoopResult => ({
+    aborted,
+    usage: { inputTokens: usageIn, outputTokens: usageOut },
+    model: resolved.model,
+    provider: resolved.provider,
+  });
   const skillsBody =
     opts.skills !== undefined ? opts.skills : await readSkills(opts.sandbox.rootDir);
   // Web search is wired on Anthropic, OpenAI (Responses built-in), and Gemini
@@ -267,13 +310,14 @@ export async function runAgentLoop(
     skillsBody,
     opts.accountPrompt ?? null,
     hasWebSearch,
+    opts.repo ?? null,
   );
   const messages = opts.messages ?? [];
   messages.push({ role: "user", content: userMessage });
   normalizeMessageHistoryInPlace(messages);
 
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
-    if (opts.signal?.aborted) return { aborted: true };
+    if (opts.signal?.aborted) return finish(true);
     opts.onIteration?.(iter);
     normalizeMessageHistoryInPlace(messages);
 
@@ -315,20 +359,32 @@ export async function runAgentLoop(
         onToolCallStarted: opts.onToolCallStarted,
         onToolCall: opts.onToolCall,
         onToolResult: opts.onToolResult,
+        // Live counter: forward committed totals + this call's running counts.
+        onUsage: (u) =>
+          opts.onUsage?.({
+            inputTokens: usageIn + u.inputTokens,
+            outputTokens: usageOut + u.outputTokens,
+          }),
       });
     } catch (err) {
       // Treat any error as "aborted" if the user has actually pressed Stop.
       // The SDK's abort error class isn't always named the way our matcher
       // expects, so checking the signal directly is more reliable.
-      if (opts.signal?.aborted || isAbortError(err)) return { aborted: true };
+      if (opts.signal?.aborted || isAbortError(err)) return finish(true);
       throw err;
     }
+
+    // Commit this iteration's usage into the running totals, then emit the
+    // settled cumulative figure.
+    usageIn += turn.usage?.inputTokens ?? 0;
+    usageOut += turn.usage?.outputTokens ?? 0;
+    opts.onUsage?.({ inputTokens: usageIn, outputTokens: usageOut });
 
     const toolCalls = turn.toolCalls;
     messages.push({ role: "assistant", content: turn.content });
 
     if (turn.stopReason === "end_turn" || toolCalls.length === 0) {
-      return { aborted: false };
+      return finish(false);
     }
 
     // NOTE: do NOT short-circuit here on signal.aborted. The assistant

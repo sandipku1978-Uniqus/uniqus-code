@@ -2,6 +2,7 @@
 
 import type {
   AccountSettings,
+  AccountUsageStats,
   CurrentUser,
   DeploymentState,
   ProjectSummary,
@@ -61,6 +62,13 @@ export const updateAccountSettingsApi = (
 export const fetchProjects = (): Promise<{ projects: ProjectSummary[] }> =>
   api("/api/projects");
 
+// ── Account usage rollup (dashboard widgets) ──────────────────────────────────
+
+export type { AccountUsageStats } from "@uniqus/api-types";
+
+export const fetchUsageStatsApi = (): Promise<{ stats: AccountUsageStats }> =>
+  api("/api/account/usage-stats");
+
 export const createProjectApi = (
   name: string,
   description?: string,
@@ -107,6 +115,16 @@ export const createGithubRepoApi = (
     method: "POST",
     body: JSON.stringify(body),
   });
+
+/**
+ * Clear a project's linked GitHub repo (metadata only — does NOT delete the
+ * repo on GitHub). Lets a user unstick a project that points at a repo they
+ * deleted/renamed on GitHub's side, then create or link a different one.
+ */
+export const disconnectProjectRepoApi = (
+  projectId: string,
+): Promise<{ ok: true }> =>
+  api(`/api/projects/${projectId}/github-repo`, { method: "DELETE" });
 
 // ── Chat sessions (Phase 2.x) ────────────────────────────────────────────────
 

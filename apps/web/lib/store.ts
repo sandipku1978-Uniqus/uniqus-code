@@ -193,7 +193,16 @@ export type ChatItem =
    * between a user message and the next complete) is foldable in the UI.
    * Inserted client-side when the `complete` server event fires.
    */
-  | { kind: "complete"; id: string; tool_calls: number; elapsed_ms: number; aborted: boolean };
+  | {
+      kind: "complete";
+      id: string;
+      tool_calls: number;
+      elapsed_ms: number;
+      aborted: boolean;
+      /** Final token usage for the turn; absent on replayed turns. */
+      input_tokens?: number;
+      output_tokens?: number;
+    };
 
 /** Per-file save status for the user-edit auto-save flow. */
 export type SaveStatus =
@@ -287,6 +296,12 @@ interface State {
   redeploySuggested: boolean;
   /** Agent-maintained todo list (Plan §5). Updated via `todos_updated` WS events. */
   todos: TodoItem[];
+  /**
+   * Live cumulative token usage for the in-flight turn (Plan §5), updated from
+   * `usage` WS events. Null when no turn is running. The composer shows it as a
+   * running "X in · Y out" counter; cleared when the turn completes.
+   */
+  liveUsage: { input: number; output: number } | null;
 
   setConnected(c: boolean): void;
   setBusy(b: boolean): void;
@@ -322,7 +337,14 @@ interface State {
   addPlanProposal(plan: Plan): void;
   approvePendingPlan(plan: Plan): void;
   addSystem(content: string): void;
-  addCompleteMarker(toolCalls: number, elapsedMs: number, aborted: boolean): void;
+  addCompleteMarker(
+    toolCalls: number,
+    elapsedMs: number,
+    aborted: boolean,
+    inputTokens?: number,
+    outputTokens?: number,
+  ): void;
+  setLiveUsage(usage: { input: number; output: number } | null): void;
   setTree(entries: TreeEntry[]): void;
   setFile(path: string | null, content: string): void;
   appendTerminalLine(line: string): void;
@@ -389,6 +411,7 @@ export const useStore = create<State>((set, get) => ({
   deployment: null,
   redeploySuggested: false,
   todos: [],
+  liveUsage: null,
 
   setConnected: (c) => set({ connected: c }),
   setBusy: (b) => set({ busy: b }),
@@ -546,8 +569,11 @@ export const useStore = create<State>((set, get) => ({
   addSystem: (content) =>
     set((s) => ({ chat: [...s.chat, { kind: "system", id: id(), content }] })),
 
-  addCompleteMarker: (toolCalls, elapsedMs, aborted) =>
+  addCompleteMarker: (toolCalls, elapsedMs, aborted, inputTokens, outputTokens) =>
     set((s) => ({
+      // Turn finished — drop the live counter; the final figure rides on the
+      // complete marker below.
+      liveUsage: null,
       chat: [
         ...s.chat,
         {
@@ -556,9 +582,12 @@ export const useStore = create<State>((set, get) => ({
           tool_calls: toolCalls,
           elapsed_ms: elapsedMs,
           aborted,
+          input_tokens: inputTokens,
+          output_tokens: outputTokens,
         },
       ],
     })),
+  setLiveUsage: (usage) => set({ liveUsage: usage }),
 
   setTree: (entries) => set({ tree: entries }),
   setFile: (path, content) => set({ selectedFile: path, fileContent: content }),
@@ -643,6 +672,7 @@ export const useStore = create<State>((set, get) => ({
       terminalLines: [],
       expandedTurns: {},
       redeploySuggested: false,
+      liveUsage: null,
     }),
   reset: () =>
     set({
@@ -668,6 +698,7 @@ export const useStore = create<State>((set, get) => ({
       deployment: null,
       redeploySuggested: false,
       todos: [],
+      liveUsage: null,
     }),
 }));
 
