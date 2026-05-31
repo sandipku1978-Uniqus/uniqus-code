@@ -126,9 +126,11 @@ export const MODEL_CATALOG: ReadonlyArray<ModelOption> = [
  * Approximate published list prices in USD per 1,000,000 tokens, keyed by the
  * provider-native model id (what the orchestrator persists on each usage row).
  * Used only to render the dashboard's "estimated cost" widget — it is a
- * best-effort estimate, NOT a billing figure: it ignores prompt-cache discounts
- * (cached input is much cheaper) and tier nuances, so it over-estimates. Update
- * these as provider pricing changes; unknown models fall back to DEFAULT_PRICE.
+ * best-effort estimate, NOT a billing figure. The `input` rate applies to
+ * FRESH (uncached) input tokens; cached prompt tokens are billed far cheaper
+ * and are priced separately via the cache multipliers below (see
+ * estimateCostUsd). Update these as provider pricing changes; unknown models
+ * fall back to DEFAULT_PRICE.
  */
 export const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   // Anthropic
@@ -147,14 +149,36 @@ export const MODEL_PRICING: Record<string, { input: number; output: number }> = 
 /** Fallback $/1M when a model id isn't in MODEL_PRICING (mid-tier estimate). */
 export const DEFAULT_PRICE = { input: 3, output: 15 } as const;
 
-/** Estimated USD cost for a token count on a given model (see MODEL_PRICING). */
+/**
+ * Cache-token price multipliers relative to the model's fresh `input` rate.
+ * A cache READ is ~10% of fresh input across providers (Anthropic 0.1×,
+ * OpenAI/Gemini also deep discounts); a cache WRITE (Anthropic-only — the
+ * one-time cost of populating the 5-minute cache) is 1.25× fresh input.
+ * Best-effort, not a billing figure — see estimateCostUsd.
+ */
+export const CACHE_READ_MULTIPLIER = 0.1;
+export const CACHE_WRITE_MULTIPLIER = 1.25;
+
+/**
+ * Estimated USD cost for a turn's token counts on a given model. Fresh input
+ * bills at the full `input` rate; cached reads and writes bill at their
+ * discounted multipliers (see CACHE_*_MULTIPLIER). Passing only input/output
+ * (cache args defaulting to 0) reproduces the old full-price estimate, so
+ * callers that don't track the cache split stay correct — just pessimistic.
+ */
 export function estimateCostUsd(
   model: string,
   inputTokens: number,
   outputTokens: number,
+  cacheReadTokens = 0,
+  cacheCreationTokens = 0,
 ): number {
   const p = MODEL_PRICING[model] ?? DEFAULT_PRICE;
-  return (inputTokens * p.input + outputTokens * p.output) / 1_000_000;
+  const inputCost =
+    inputTokens * p.input +
+    cacheReadTokens * p.input * CACHE_READ_MULTIPLIER +
+    cacheCreationTokens * p.input * CACHE_WRITE_MULTIPLIER;
+  return (inputCost + outputTokens * p.output) / 1_000_000;
 }
 
 /** Per-model rollup for the dashboard "top models" widget. */
@@ -164,8 +188,13 @@ export interface ModelUsageRollup {
   provider: ModelProvider;
   /** Human label from MODEL_CATALOG, or the raw model id if not catalogued. */
   label: string;
+  /** FRESH (uncached) input tokens — billed at the full input rate. */
   input_tokens: number;
   output_tokens: number;
+  /** Prompt tokens served from cache (billed ~0.1×). 0 if not tracked. */
+  cache_read_tokens: number;
+  /** Tokens written to the cache (Anthropic, billed ~1.25×). 0 otherwise. */
+  cache_creation_tokens: number;
   /** Number of agent turns served by this model. */
   turns: number;
 }
@@ -175,9 +204,18 @@ export interface ModelUsageRollup {
  * `usage_events` the orchestrator records at the end of each agent turn.
  */
 export interface AccountUsageStats {
+  /** FRESH (uncached) input tokens — billed at the full input rate. */
   total_input_tokens: number;
   total_output_tokens: number;
-  /** Estimated spend in USD (see estimateCostUsd — not a billing figure). */
+  /** Prompt tokens served from cache across all turns (billed ~0.1×). */
+  total_cache_read_tokens: number;
+  /** Tokens written to the cache across all turns (Anthropic, ~1.25×). */
+  total_cache_creation_tokens: number;
+  /**
+   * Estimated spend in USD (see estimateCostUsd — not a billing figure).
+   * Cache reads/writes are priced at their discounted multipliers, so this is
+   * far lower than pricing every processed token at the full input rate.
+   */
   total_cost_usd: number;
   /** Total agent wall-clock across all turns, milliseconds. */
   total_time_ms: number;
@@ -185,6 +223,10 @@ export interface AccountUsageStats {
   turns: number;
   /** Models ranked by total tokens, most-used first. */
   top_models: ModelUsageRollup[];
+  /** Per-day spend/usage for a trend chart, oldest-first. */
+  daily?: Array<{ date: string; cost_usd: number; tokens: number }>;
+  /** Per-project spend/usage rollup, highest-spend first. */
+  by_project?: Array<{ project_id: string; project_name: string; cost_usd: number; tokens: number }>;
 }
 
 export interface UploadedFileSummary {
@@ -241,6 +283,12 @@ export interface ProjectSummary {
   github_repo_full_name?: string | null;
   /** Vercel-side project name, populated after the first Vercel deploy. */
   vercel_project_name?: string | null;
+  /** Git branch this project's sandbox is currently tracking, if known. */
+  linked_branch?: string | null;
+  /** State of the project's most recent deploy, if it has ever deployed. */
+  latest_deploy_state?: DeploymentState | null;
+  /** ISO timestamp of the project's most recent deploy, if any. */
+  latest_deploy_at?: string | null;
 }
 
 export interface CurrentUser {

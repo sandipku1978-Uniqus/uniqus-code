@@ -179,8 +179,8 @@ export default async function MarketingPage() {
           <span className="label-eyebrow">Meet the agent</span>
           <h2>Uniqus. One agent, every part of your stack.</h2>
           <p className="sub">
-            Built on Claude Sonnet 4.6 with Opus 4.7 for planning. Reads everything, cites
-            everything, never ships the destructive change quietly.
+            Multi-provider: build with Claude, GPT, or Gemini — your choice, per turn. Reads
+            everything, cites everything, never ships the destructive change quietly.
           </p>
         </div>
         <div className="agent-grid">
@@ -328,15 +328,15 @@ const STEPS = [
 
 const STATS = [
   {
-    num: "SOC 2 II",
-    lbl: "Independently audited controls. Every action logged, every artifact retrievable for seven years.",
+    num: "Isolated VMs",
+    lbl: "Every project runs in its own Firecracker microVM. Your code never shares a sandbox with anyone else's.",
   },
   {
-    num: "0 data train",
-    lbl: "Your code is never used to train models. Sandboxes are wiped on disconnect; secrets stay in your vault.",
+    num: "Encrypted secrets",
+    lbl: "API keys and OAuth tokens are sealed with AES-256-GCM. Every credential read and write is written to an audit log.",
   },
   {
-    num: "42 sec",
-    lbl: "Median time from prompt to a passing test on our internal benchmark. P90 under three minutes.",
+    num: "Your model",
+    lbl: "Bring frontier models from Anthropic, OpenAI, and Google — pick the one you want per turn, no lock-in.",
   },
 ];

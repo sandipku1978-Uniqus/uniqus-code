@@ -1,4 +1,5 @@
 import { db } from "./client.js";
+import type { DeploymentState } from "./deployments.js";
 
 export interface ProjectRecord {
   id: string;
@@ -12,16 +13,55 @@ export interface ProjectRecord {
   vercel_project_name?: string | null;
   github_repo_url?: string | null;
   github_repo_full_name?: string | null;
+  /** Branch the project is linked to on its remote. Null = unknown (UI falls back to 'main'). */
+  linked_branch?: string | null;
+  /** State of the most recent deployment row, surfaced in the All Projects view. */
+  latest_deploy_state?: DeploymentState | null;
+  /** created_at of the most recent deployment row. */
+  latest_deploy_at?: string | null;
+}
+
+/**
+ * Shape of the latest-deployment fields PostgREST embeds via the
+ * `deployments(...)` relation. We pull ALL of a project's deployment rows
+ * (just state + created_at) and pick the most recent in JS, since PostgREST
+ * can't express "the single most recent related row" inline.
+ */
+type EmbeddedDeploymentRow = { state: DeploymentState; created_at: string };
+
+/**
+ * Collapse the embedded `deployments` array onto a project row: find the most
+ * recent by created_at and stamp latest_deploy_state/latest_deploy_at. Strips
+ * the embedded relation so the returned record matches ProjectRecord exactly.
+ */
+function withLatestDeploy(
+  row: Record<string, unknown> & { deployments?: EmbeddedDeploymentRow[] | null },
+): ProjectRecord {
+  const { deployments, ...rest } = row;
+  let latest: EmbeddedDeploymentRow | null = null;
+  for (const d of deployments ?? []) {
+    if (!latest || d.created_at > latest.created_at) latest = d;
+  }
+  return {
+    ...(rest as Omit<ProjectRecord, "latest_deploy_state" | "latest_deploy_at">),
+    latest_deploy_state: latest?.state ?? null,
+    latest_deploy_at: latest?.created_at ?? null,
+  };
 }
 
 export async function listProjects(ownerId: string): Promise<ProjectRecord[]> {
+  // Embed every deployment's state + created_at via the FK relation; the most
+  // recent one is collapsed onto latest_deploy_* in withLatestDeploy. `*` also
+  // pulls linked_branch.
   const { data, error } = await db()
     .from("projects")
-    .select("*")
+    .select("*, deployments(state, created_at)")
     .eq("owner_id", ownerId)
     .order("updated_at", { ascending: false });
   if (error) throw new Error(`listProjects failed: ${error.message}`);
-  return (data ?? []) as ProjectRecord[];
+  return (data ?? []).map((row) =>
+    withLatestDeploy(row as Record<string, unknown> & { deployments?: EmbeddedDeploymentRow[] | null }),
+  );
 }
 
 export async function createProject(input: {
@@ -48,12 +88,15 @@ export async function getProject(
 ): Promise<ProjectRecord | null> {
   const { data, error } = await db()
     .from("projects")
-    .select("*")
+    .select("*, deployments(state, created_at)")
     .eq("id", id)
     .eq("owner_id", ownerId)
     .maybeSingle();
   if (error) throw new Error(`getProject failed: ${error.message}`);
-  return (data ?? null) as ProjectRecord | null;
+  if (!data) return null;
+  return withLatestDeploy(
+    data as Record<string, unknown> & { deployments?: EmbeddedDeploymentRow[] | null },
+  );
 }
 
 export async function touchProject(id: string): Promise<void> {

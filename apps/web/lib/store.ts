@@ -143,6 +143,32 @@ export interface DeploymentLive {
   error_message: string | null;
 }
 
+/**
+ * A DOM element the user picked out of the live preview via the element
+ * picker. The shape mirrors the `uniqus:element` postMessage the proxy-injected
+ * script emits (see PreviewPanel) — selector + light metadata, no pixels.
+ *
+ * It's set from PreviewPanel and consumed in ChatPanel, which attaches it to
+ * the next turn as a `selected_element` block on the `user_message` so the
+ * agent knows exactly which on-screen element the user means. `rect` is in the
+ * iframe's own CSS pixels at pick time (used for the highlight overlay and to
+ * crop a screenshot to the element).
+ */
+export interface SelectedElement {
+  /** A CSS selector that uniquely targets the element inside the preview. */
+  selector: string;
+  /** Lowercased tag name, e.g. "button", "div". */
+  tag: string;
+  /** The element's class list (without the leading dot). */
+  classes: string[];
+  /** The element's id attribute, or null if it has none. */
+  id: string | null;
+  /** Bounding box in iframe CSS px at pick time. */
+  rect: { x: number; y: number; width: number; height: number };
+  /** Trimmed, truncated text content — a human hint of what was clicked. */
+  text: string;
+}
+
 export type ChatItem =
   | {
       kind: "user";
@@ -150,6 +176,8 @@ export type ChatItem =
       content: string;
       attachments?: UploadedFileSummary[];
       fileRefs?: string[];
+      /** Element picked from the preview and sent with this turn, if any. */
+      selectedElement?: SelectedElement;
     }
   | { kind: "assistant_text"; id: string; content: string }
   | {
@@ -225,6 +253,12 @@ export interface PanelVisibility {
 
 interface State {
   connected: boolean;
+  /**
+   * True once the WS client has exhausted its reconnect budget
+   * (MAX_RECONNECT_ATTEMPTS) and given up auto-reconnecting. The UI surfaces a
+   * "connection lost — Retry" affordance; a manual retry resets this to false.
+   */
+  connectionFailed: boolean;
   busy: boolean;
   mode: "plan-then-execute" | "execute-only";
   /**
@@ -302,8 +336,23 @@ interface State {
    * running "X in · Y out" counter; cleared when the turn completes.
    */
   liveUsage: { input: number; output: number } | null;
+  /**
+   * Element the user picked from the preview (element picker), waiting to be
+   * attached to the next turn. Set by PreviewPanel, rendered as a chip and sent
+   * as `selected_element` by ChatPanel, then cleared on a successful send.
+   */
+  pendingSelectedElement: SelectedElement | null;
+  /**
+   * Files queued from outside the composer — e.g. an annotated preview
+   * screenshot from the PreviewAnnotator. ChatPanel drains these into its own
+   * pending-attachments list so the existing upload→image path handles them;
+   * this is just the hand-off channel between the preview pane and the chat
+   * composer (sibling components).
+   */
+  queuedComposerFiles: File[];
 
   setConnected(c: boolean): void;
+  setConnectionFailed(failed: boolean): void;
   setBusy(b: boolean): void;
   /** Set mode programmatically (auto-defaults). Does NOT mark modeTouched. */
   setMode(m: "plan-then-execute" | "execute-only"): void;
@@ -321,6 +370,7 @@ interface State {
     content: string,
     attachments?: UploadedFileSummary[],
     fileRefs?: string[],
+    selectedElement?: SelectedElement,
   ): void;
   appendText(content: string): void;
   /** Append a reasoning/thinking delta to the current reasoning block. */
@@ -345,6 +395,12 @@ interface State {
     outputTokens?: number,
   ): void;
   setLiveUsage(usage: { input: number; output: number } | null): void;
+  /** Set (or clear) the element picked from the preview for the next turn. */
+  setPendingSelectedElement(el: SelectedElement | null): void;
+  /** Append files (e.g. an annotated screenshot) for the composer to pick up. */
+  enqueueComposerFiles(files: File[]): void;
+  /** Empty the queued-composer-files hand-off (ChatPanel calls after draining). */
+  clearQueuedComposerFiles(): void;
   setTree(entries: TreeEntry[]): void;
   setFile(path: string | null, content: string): void;
   appendTerminalLine(line: string): void;
@@ -364,6 +420,13 @@ interface State {
   toggleTurn(completeItemId: string): void;
   setDeployment(d: DeploymentLive | null): void;
   setRedeploySuggested(value: boolean): void;
+  /**
+   * Signal that project files changed (a `file_changed` WS event). Drives the
+   * redeploy nudge: if the live deploy is already READY, the deployed app is
+   * now stale, so suggest a redeploy. A no-op otherwise (nothing deployed yet,
+   * or a deploy is already in flight).
+   */
+  markProjectFilesChanged(): void;
   setTodos(items: TodoItem[]): void;
   resetChat(): void;
   reset(): void;
@@ -377,6 +440,7 @@ export const previewTabId = (serverId: string): string => `preview:${serverId}`;
 
 export const useStore = create<State>((set, get) => ({
   connected: false,
+  connectionFailed: false,
   busy: false,
   mode: "execute-only",
   modeTouched: false,
@@ -412,8 +476,11 @@ export const useStore = create<State>((set, get) => ({
   redeploySuggested: false,
   todos: [],
   liveUsage: null,
+  pendingSelectedElement: null,
+  queuedComposerFiles: [],
 
   setConnected: (c) => set({ connected: c }),
+  setConnectionFailed: (failed) => set({ connectionFailed: failed }),
   setBusy: (b) => set({ busy: b }),
   setMode: (m) => set({ mode: m }),
   setModeManual: (m) => set({ mode: m, modeTouched: true }),
@@ -436,7 +503,7 @@ export const useStore = create<State>((set, get) => ({
     set({ thinking: t });
   },
 
-  addUserMessage: (content, attachments, fileRefs) =>
+  addUserMessage: (content, attachments, fileRefs, selectedElement) =>
     set((s) => ({
       chat: [
         ...s.chat,
@@ -446,6 +513,7 @@ export const useStore = create<State>((set, get) => ({
           content,
           attachments: attachments && attachments.length > 0 ? attachments : undefined,
           fileRefs: fileRefs && fileRefs.length > 0 ? fileRefs : undefined,
+          selectedElement: selectedElement ?? undefined,
         },
       ],
     })),
@@ -454,18 +522,11 @@ export const useStore = create<State>((set, get) => ({
     set((s) => {
       const last = s.chat[s.chat.length - 1];
       if (last && last.kind === "assistant_text") {
-        const nextContent = last.content + content;
         return {
-          chat: [...s.chat.slice(0, -1), { ...last, content: nextContent }],
-          redeploySuggested:
-            s.redeploySuggested || /\bredeploy\b|\bdeploy again\b/i.test(nextContent),
+          chat: [...s.chat.slice(0, -1), { ...last, content: last.content + content }],
         };
       }
-      return {
-        chat: [...s.chat, { kind: "assistant_text", id: id(), content }],
-        redeploySuggested:
-          s.redeploySuggested || /\bredeploy\b|\bdeploy again\b/i.test(content),
-      };
+      return { chat: [...s.chat, { kind: "assistant_text", id: id(), content }] };
     }),
 
   appendThinking: (content) =>
@@ -588,6 +649,11 @@ export const useStore = create<State>((set, get) => ({
       ],
     })),
   setLiveUsage: (usage) => set({ liveUsage: usage }),
+  setPendingSelectedElement: (el) => set({ pendingSelectedElement: el }),
+  enqueueComposerFiles: (files) =>
+    set((s) => ({ queuedComposerFiles: [...s.queuedComposerFiles, ...files] })),
+  clearQueuedComposerFiles: () =>
+    set((s) => (s.queuedComposerFiles.length === 0 ? {} : { queuedComposerFiles: [] })),
 
   setTree: (entries) => set({ tree: entries }),
   setFile: (path, content) => set({ selectedFile: path, fileContent: content }),
@@ -662,8 +728,25 @@ export const useStore = create<State>((set, get) => ({
         [completeItemId]: !s.expandedTurns[completeItemId],
       },
     })),
-  setDeployment: (d) => set({ deployment: d }),
+  setDeployment: (d) =>
+    set(() => {
+      // A new deploy starting (QUEUED/BUILDING) or succeeding (READY) means the
+      // live deploy now reflects the current files — clear the stale-files
+      // nudge. A failed/canceled deploy leaves it as-is (files are still
+      // un-deployed, so keep nudging if we already were).
+      const clears =
+        d !== null &&
+        (d.state === "QUEUED" || d.state === "BUILDING" || d.state === "READY");
+      return clears ? { deployment: d, redeploySuggested: false } : { deployment: d };
+    }),
   setRedeploySuggested: (value) => set({ redeploySuggested: value }),
+  markProjectFilesChanged: () =>
+    set((s) =>
+      // Only nudge once there's a live, READY deploy to fall out of date — a
+      // file change before the first deploy (or while one is in flight) isn't
+      // a "redeploy" situation.
+      s.deployment?.state === "READY" ? { redeploySuggested: true } : {},
+    ),
   setTodos: (items) => set({ todos: items }),
   resetChat: () =>
     set({
@@ -673,6 +756,8 @@ export const useStore = create<State>((set, get) => ({
       expandedTurns: {},
       redeploySuggested: false,
       liveUsage: null,
+      pendingSelectedElement: null,
+      queuedComposerFiles: [],
     }),
   reset: () =>
     set({
@@ -699,6 +784,8 @@ export const useStore = create<State>((set, get) => ({
       redeploySuggested: false,
       todos: [],
       liveUsage: null,
+      pendingSelectedElement: null,
+      queuedComposerFiles: [],
     }),
 }));
 

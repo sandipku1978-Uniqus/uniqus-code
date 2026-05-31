@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import { createHash, randomUUID, randomBytes } from "node:crypto";
 import { FirecrackerClient, spawnFirecracker } from "./client.js";
 import { pingAgent, pushFile, finalizeRestore, pingAt } from "./agentRpc.js";
@@ -154,10 +155,37 @@ export async function ensureVm(opts: BootOpts): Promise<VmHandle> {
   return await bootNew(opts);
 }
 
+/**
+ * Per-phase boot stopwatch. `phase(label)` logs the elapsed time since the
+ * previous `phase`/`total` call (the duration of the phase just completed) and
+ * `total(label)` logs the cumulative time since the stopwatch was created.
+ * Uses the monotonic perf_hooks clock so the deltas aren't perturbed by wall-
+ * clock adjustments. Logs are additive — the existing `step X/8` lines stay.
+ */
+function bootStopwatch(id: string): {
+  phase: (label: string) => void;
+  total: (label: string) => void;
+} {
+  const start = performance.now();
+  let last = start;
+  const ms = (n: number): string => `${Math.round(n)}ms`;
+  return {
+    phase(label: string): void {
+      const now = performance.now();
+      console.log(`[fleet ${id}] timing: ${label} took ${ms(now - last)}`);
+      last = now;
+    },
+    total(label: string): void {
+      console.log(`[fleet ${id}] timing: ${label} total ${ms(performance.now() - start)}`);
+    },
+  };
+}
+
 async function bootNew(opts: BootOpts): Promise<VmHandle> {
   await fs.mkdir(STATE_DIR, { recursive: true });
 
   const id = `vm_${opts.projectId.slice(0, 8)}_${randomUUID().slice(0, 4)}`;
+  const sw = bootStopwatch(id);
   const apiSocket = path.join(STATE_DIR, `${id}.api.sock`);
   const vsockUds = path.join(STATE_DIR, `${id}.vsock`);
   // Rootfs path is stable per-project (not per-vm-id) so a snapshot taken
@@ -174,6 +202,7 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
   if (!(await pathExists(rootImagePath))) {
     await copyOnWrite(ROOTFS_BASE_PATH, rootImagePath);
   }
+  sw.phase("copy-on-write rootfs overlay");
 
   // Allocate per-VM networking. Hash projectId → /16 host octets so the
   // same project gets the same IP across orchestrator restarts. MAC is
@@ -184,11 +213,13 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
   console.log(`[fleet ${id}] step 3/8: bridge ${BRIDGE_NAME} verified`);
   await ensureTapDevice(tapName);
   console.log(`[fleet ${id}] step 4/8: tap ${tapName} attached to bridge`);
+  sw.phase("network/tap setup");
 
   // Spawn firecracker bound to a fresh API socket.
   console.log(`[fleet ${id}] step 5/8: spawning firecracker (socket=${apiSocket})`);
   const fc = await spawnFirecracker({ socketPath: apiSocket });
   console.log(`[fleet ${id}] step 6/8: firecracker spawned (pid=${fc.pid})`);
+  sw.phase("firecracker spawn");
   const client = new FirecrackerClient(apiSocket);
 
   const guestCid = ++cidSeq;
@@ -241,6 +272,9 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
     await teardownTap(tapName).catch(() => {});
     throw err;
   }
+  // Covers putMachineConfig/putBootSource/putDrive(s) + ensureSandboxImage +
+  // putNetworkInterface/putVsock + InstanceStart.
+  sw.phase("VM config + ensureSandboxImage + InstanceStart");
 
   const handle: VmHandle = {
     id,
@@ -306,6 +340,7 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
   console.log(
     `[fleet ${id}] in-VM agent healthy after ${pingAttempts} ping attempts (kind=${handle.agentKind ?? "unknown"})`,
   );
+  sw.phase(`health-wait (${pingAttempts} ping attempts)`);
   if (handle.agentKind === "node") {
     // The Rust agent is meant to be canonical. A silent fallback to Node
     // (e.g. build host without rustup) regresses cold-start time without
@@ -323,6 +358,8 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
   await hydrateInto(handle, opts.hostSandboxDir).catch((err) => {
     console.error(`[vm ${id}] initial hydration failed:`, err);
   });
+  sw.phase("hydration");
+  sw.total("cold boot");
 
   vms.set(opts.projectId, {
     handle,
@@ -469,9 +506,11 @@ async function buildBaseSnapshot(): Promise<void> {
  * mounts its disk. Sub-second versus ~15-20s.
  */
 async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
-  await ensureBaseSnapshot();
-  const p = baseSnapshotPaths();
   const id = `vm_${opts.projectId.slice(0, 8)}_${randomUUID().slice(0, 4)}`;
+  const sw = bootStopwatch(id);
+  await ensureBaseSnapshot();
+  sw.phase("ensureBaseSnapshot");
+  const p = baseSnapshotPaths();
   const runDir = path.join(RUN_DIR, id);
   await fs.mkdir(runDir, { recursive: true });
   const apiSocket = path.join(runDir, "api.sock");
@@ -483,10 +522,13 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
   const linkPath = path.join(runDir, "sandbox.ext4");
   await fs.rm(linkPath, { force: true }).catch(() => {});
   await fs.symlink(path.resolve(sandboxImage), linkPath);
+  sw.phase("ensureSandboxImage");
 
   await ensureBridge();
   await ensureTapDevice(tapName);
+  sw.phase("network/tap setup");
   const fc = await spawnFirecracker({ socketPath: apiSocket, cwd: runDir });
+  sw.phase("firecracker spawn");
   const client = new FirecrackerClient(apiSocket);
   const handle: VmHandle = {
     id,
@@ -514,6 +556,7 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
       network_overrides: [{ iface_id: "eth0", host_dev_name: tapName }],
       resume_vm: false,
     });
+    sw.phase("loadSnapshot (paused)");
 
     await withBootstrapLock(async () => {
       await client.resumeInstance();
@@ -562,6 +605,7 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
         throw new Error(`restored clone unreachable on project IP ${ip} after re-stamp`);
       }
     });
+    sw.phase("resume + finalizeRestore + health (bootstrap lock)");
 
     handle.agentKind = "rust";
     // Seed project files (cheap/empty for a brand-new project; the per-project
@@ -569,6 +613,8 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
     await hydrateInto(handle, opts.hostSandboxDir).catch((err) => {
       console.error(`[vm ${id}] hydration after restore failed:`, err);
     });
+    sw.phase("hydration");
+    sw.total("golden restore");
     vms.set(opts.projectId, {
       handle,
       client,
@@ -590,12 +636,24 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
 
 const HYDRATE_MAX_FILES = 5_000;
 const HYDRATE_MAX_BYTES = 200 * 1024 * 1024;
+// Push files to the in-VM agent in parallel batches rather than one
+// round-trip at a time. Mirrors HYDRATE_BATCH_SIZE in storage/sync.ts: the
+// per-file RPC (agentRpc.pushFile) is round-trip-bound, so serial pushes made
+// hydration scale linearly with file count. Batches of 8 cut that without
+// overwhelming the agent. The per-file RPC contract is unchanged.
+const HYDRATE_PUSH_BATCH_SIZE = 8;
 
 async function hydrateInto(vm: VmHandle, hostDir: string): Promise<void> {
   const root = path.resolve(hostDir);
+  // First walk the tree to collect the files to push (cheap, host-local stat
+  // reads), applying the same count/byte caps as before. Then push them in
+  // bounded-concurrency batches.
+  const files: { rel: string; full: string }[] = [];
   let count = 0;
   let bytes = 0;
+  let capped = false;
   async function walk(dir: string): Promise<void> {
+    if (capped) return;
     let entries;
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
@@ -603,6 +661,7 @@ async function hydrateInto(vm: VmHandle, hostDir: string): Promise<void> {
       return;
     }
     for (const e of entries) {
+      if (capped) return;
       if (e.name === "node_modules" || e.name === ".git") continue;
       const full = path.join(dir, e.name);
       if (e.isDirectory()) {
@@ -612,15 +671,28 @@ async function hydrateInto(vm: VmHandle, hostDir: string): Promise<void> {
       if (!e.isFile()) continue;
       const rel = path.relative(root, full).replaceAll(path.sep, "/");
       const stat = await fs.stat(full);
-      if (bytes + stat.size > HYDRATE_MAX_BYTES) return;
-      if (count >= HYDRATE_MAX_FILES) return;
-      const data = await fs.readFile(full);
-      await pushFile(vm, rel, data);
+      // Preserve original cap semantics: a file that would overflow the byte
+      // ceiling, or the file-count ceiling, halts collection entirely.
+      if (bytes + stat.size > HYDRATE_MAX_BYTES || count >= HYDRATE_MAX_FILES) {
+        capped = true;
+        return;
+      }
+      files.push({ rel, full });
       count++;
       bytes += stat.size;
     }
   }
   await walk(root);
+
+  for (let i = 0; i < files.length; i += HYDRATE_PUSH_BATCH_SIZE) {
+    const batch = files.slice(i, i + HYDRATE_PUSH_BATCH_SIZE);
+    await Promise.all(
+      batch.map(async ({ rel, full }) => {
+        const data = await fs.readFile(full);
+        await pushFile(vm, rel, data);
+      }),
+    );
+  }
 }
 
 export async function pause(projectId: string): Promise<void> {

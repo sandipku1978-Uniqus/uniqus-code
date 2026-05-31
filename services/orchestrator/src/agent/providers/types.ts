@@ -79,8 +79,22 @@ export interface StreamTurnParams {
 
 /** Token usage for one model call (cumulative for the call, not a delta). */
 export interface TokenUsage {
+  /**
+   * FRESH (uncached) input tokens — billed at the full input rate. Each
+   * provider reports caching differently, so the adapters normalize to this
+   * meaning: Anthropic's `input_tokens` is already the uncached remainder;
+   * OpenAI/Gemini report a total that INCLUDES cache, so those adapters
+   * subtract the cached portion to land here. Keeping one consistent meaning
+   * lets the loop sum across providers without re-deriving the split.
+   */
   inputTokens: number;
   outputTokens: number;
+  /** Prompt tokens served from cache (Anthropic cache_read / OpenAI
+   * cached_tokens / Gemini cachedContentTokenCount). Billed ~0.1×. */
+  cacheReadTokens?: number;
+  /** Tokens written to the cache this call (Anthropic cache_creation; ~1.25×).
+   * OpenAI/Gemini auto-cache with no separate write line, so 0 there. */
+  cacheCreationTokens?: number;
 }
 
 export interface StreamTurnResult {

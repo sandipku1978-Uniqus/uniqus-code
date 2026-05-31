@@ -5,7 +5,17 @@
       "Bash(npx --version)",
       "Bash(*)",
       "WebSearch",
-      "PowerShell(*)"
+      "PowerShell(*)",
+      "Skill(claude-api)",
+      "Skill(claude-api:*)",
+      "Read(//tmp/**)",
+      "Read(//c/tmp/**)",
+      "WebFetch(domain:platform.openai.com)",
+      "WebFetch(domain:cookbook.openai.com)",
+      "WebFetch(domain:docs.claude.com)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:community.openai.com)",
+      "WebFetch(domain:www.latforge.com)"
     ]
   }
 }

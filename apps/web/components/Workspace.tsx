@@ -33,6 +33,7 @@ export default function Workspace({
   signOutUrl: string;
 }) {
   const connected = useStore((s) => s.connected);
+  const connectionFailed = useStore((s) => s.connectionFailed);
   const panels = useStore((s) => s.panels);
   const togglePanel = useStore((s) => s.togglePanel);
   const project = useStore((s) => s.project);
@@ -295,7 +296,7 @@ export default function Workspace({
               <circle cx="6" cy="18" r="3" />
               <path d="M18 9a9 9 0 0 1-9 9" />
             </svg>
-            main
+            {project?.linked_branch ?? "main"}
           </span>
         </div>
 
@@ -575,17 +576,35 @@ export default function Workspace({
               width: 7,
               height: 7,
               borderRadius: "50%",
-              background: connected ? "var(--conf-high)" : "var(--text-dim)",
+              background: connected
+                ? "var(--conf-high)"
+                : connectionFailed
+                ? "var(--conf-low)"
+                : "var(--text-dim)",
             }}
           />
-          {connected ? "online" : "connecting…"}
+          {connected
+            ? "online"
+            : connectionFailed
+            ? "connection failed"
+            : "connecting…"}
+          {!connected && connectionFailed && (
+            <button
+              type="button"
+              onClick={() => connect(projectId, sessionParam)}
+              className="status-retry-btn"
+              title="Reconnect to the workspace"
+            >
+              Retry
+            </button>
+          )}
         </span>
         <span className="seg">{project?.name ?? "—"}</span>
         <span className="seg" title="Files synced to Supabase Storage">
           {lastSyncedAt ? `synced ${relativeAge(lastSyncedAt)}` : "not synced yet"}
         </span>
         <div className="right">
-          <span className="seg">main</span>
+          <span className="seg">{project?.linked_branch ?? "main"}</span>
           <span className="seg">utf-8</span>
         </div>
       </div>

@@ -1,20 +1,34 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { UploadedFileSummary } from "@uniqus/api-types";
+import type { ClientEvent, UploadedFileSummary } from "@uniqus/api-types";
 import {
   fetchSlashCommandsApi,
   uploadProjectFilesApi,
   type SlashCommandSummary,
 } from "@/lib/api";
-import { useStore, type ChatItem } from "@/lib/store";
-import { send } from "@/lib/ws-client";
+import { useStore, type ChatItem, type SelectedElement } from "@/lib/store";
+import { connect, send } from "@/lib/ws-client";
 import PlanReview from "./PlanReview";
 import ChatSessionDropdown from "./ChatSessionDropdown";
 import ModelPicker from "./ModelPicker";
+import Modal from "./Modal";
 import { ErrorBoundary } from "./ErrorBoundary";
+
+/**
+ * A few short, realistic starter prompts shown on the empty-chat onboarding so
+ * a first-time user isn't staring at a blank composer. Clicking one drops the
+ * text into the composer (it doesn't auto-send) so they can tweak before
+ * running. Kept local to this file — the picker has its own copy.
+ */
+const EXAMPLE_PROMPTS = [
+  "Build a landing page for a coffee subscription with a hero, pricing, and signup form.",
+  "Make a Markdown note-taking app with a sidebar list and live preview.",
+  "Create a REST API for a todo list with SQLite and a few example endpoints.",
+];
 
 export default function ChatPanel() {
   const chat = useStore((s) => s.chat);
@@ -28,10 +42,24 @@ export default function ChatPanel() {
   const setBusy = useStore((s) => s.setBusy);
   const project = useStore((s) => s.project);
   const connected = useStore((s) => s.connected);
+  const connectionFailed = useStore((s) => s.connectionFailed);
   const expandedTurns = useStore((s) => s.expandedTurns);
   const toggleTurn = useStore((s) => s.toggleTurn);
   const todos = useStore((s) => s.todos);
   const liveUsage = useStore((s) => s.liveUsage);
+  // Element the user picked from the preview (PreviewPanel sets this); attached
+  // to the next turn as `selected_element` and cleared on a successful send.
+  const pendingSelectedElement = useStore((s) => s.pendingSelectedElement);
+  const setPendingSelectedElement = useStore((s) => s.setPendingSelectedElement);
+  // Files handed over from the preview pane (e.g. an annotated screenshot) —
+  // drained into pendingFiles below so the normal upload path handles them.
+  const queuedComposerFiles = useStore((s) => s.queuedComposerFiles);
+  const clearQueuedComposerFiles = useStore((s) => s.clearQueuedComposerFiles);
+  // Mirror Workspace's session-param read so a manual Retry reconnects to the
+  // SAME chat session (a bare connect() would default the session to null and
+  // silently drop the user back to the project's default thread).
+  const searchParams = useSearchParams();
+  const sessionParam = searchParams?.get("session") ?? null;
   const [tasksExpanded, setTasksExpanded] = useState(false);
   const [input, setInput] = useState("");
   // Persist the composer draft per-project so a reload or a client-side crash
@@ -53,11 +81,35 @@ export default function ChatPanel() {
   // looks like a no-op — the button just keeps saying "Stop" until something
   // happens. Reset whenever `busy` flips (i.e. a turn ends or a new one starts).
   const [stopping, setStopping] = useState(false);
+  // Drives the Modal-based "Clear chat history?" confirmation (replaces the
+  // native window.confirm so it matches the app's other destructive dialogs).
+  const [confirmReset, setConfirmReset] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setStopping(false);
   }, [busy]);
+
+  // Drain files queued from the preview pane (annotated screenshots) into the
+  // composer's pending attachments, deduping the same way addFiles does, then
+  // empty the hand-off queue so they aren't re-added on the next render.
+  useEffect(() => {
+    if (queuedComposerFiles.length === 0) return;
+    setPendingFiles((current) => {
+      const next = [...current];
+      for (const file of queuedComposerFiles) {
+        const duplicate = next.some(
+          (existing) =>
+            existing.name === file.name &&
+            existing.size === file.size &&
+            existing.lastModified === file.lastModified,
+        );
+        if (!duplicate) next.push(file);
+      }
+      return next;
+    });
+    clearQueuedComposerFiles();
+  }, [queuedComposerFiles, clearQueuedComposerFiles]);
 
   // Lazy-load slash commands once per project. The list is small and stable
   // — built-ins never change at runtime, project commands change rarely.
@@ -224,8 +276,10 @@ export default function ChatPanel() {
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
     const trimmed = input.trim();
+    // Snapshot the picked element now — it's valid context even with no text.
+    const selectedElement = pendingSelectedElement;
     if (
-      (!trimmed && pendingFiles.length === 0) ||
+      (!trimmed && pendingFiles.length === 0 && !selectedElement) ||
       busy ||
       uploading ||
       !project ||
@@ -250,13 +304,15 @@ export default function ChatPanel() {
       return;
     }
 
-    const content = trimmed || "Use the attached file(s).";
+    const content =
+      trimmed ||
+      (pendingFiles.length > 0 ? "Use the attached file(s)." : "Use the selected element.");
     const fileRefs = extractFileRefs(content, validFilePaths);
-    // Send is synchronous, so check the result BEFORE echoing/clearing. On a
-    // closed socket we keep the composer text (and its saved draft) and don't
-    // echo a bubble — otherwise the user would lose the exact text the draft
-    // feature exists to protect, with a misleading "sent" bubble left behind.
-    const ok = send({
+    // The `selected_element` block rides on the user_message. The shared
+    // contract (C) puts it there; the orchestrator's ClientEvent type gains the
+    // field in the paired Backend track, so until that lands we widen the
+    // payload locally rather than editing the shared package from this track.
+    const payload: ClientEvent & { selected_element?: SelectedElement } = {
       type: "user_message",
       content,
       mode,
@@ -264,7 +320,13 @@ export default function ChatPanel() {
       thinking: thinking !== "medium" ? thinking : undefined,
       attachments,
       file_refs: fileRefs.length > 0 ? fileRefs : undefined,
-    });
+    };
+    if (selectedElement) payload.selected_element = selectedElement;
+    // Send is synchronous, so check the result BEFORE echoing/clearing. On a
+    // closed socket we keep the composer text (and its saved draft) and don't
+    // echo a bubble — otherwise the user would lose the exact text the draft
+    // feature exists to protect, with a misleading "sent" bubble left behind.
+    const ok = send(payload);
     if (!ok) {
       addSystem(
         "disconnected — message not sent. We'll reconnect automatically; try again in a moment.",
@@ -273,11 +335,12 @@ export default function ChatPanel() {
       return;
     }
     // Sent — echo the message, mark the turn busy, and clear the composer +
-    // its persisted draft.
-    addUserMessage(content, attachments, fileRefs);
+    // its persisted draft (and the one-shot selected element).
+    addUserMessage(content, attachments, fileRefs, selectedElement ?? undefined);
     setBusy(true);
     setInput("");
     setPendingFiles([]);
+    if (selectedElement) setPendingSelectedElement(null);
     setUploading(false);
   };
 
@@ -297,9 +360,12 @@ export default function ChatPanel() {
 
   const resetChat = () => {
     if (busy || chat.length === 0) return;
-    if (confirm("Clear chat history? Sandbox files are kept.")) {
-      send({ type: "reset_session" });
-    }
+    setConfirmReset(true);
+  };
+
+  const confirmResetChat = () => {
+    setConfirmReset(false);
+    send({ type: "reset_session" });
   };
 
   const addFiles = (files: FileList | null) => {
@@ -344,11 +410,58 @@ export default function ChatPanel() {
 
       <div ref={scrollRef} className="chat-scroll">
         {chat.length === 0 && (
-          <div style={{ color: "var(--text-dim)", fontSize: 12, fontStyle: "italic" }}>
-            Describe what you want to build.{" "}
-            {mode === "plan-then-execute"
-              ? "Uniqus will propose a plan first."
-              : "Uniqus will start working immediately."}
+          <div style={{ color: "var(--text-dim)", fontSize: 12 }}>
+            <div style={{ fontStyle: "italic" }}>
+              Describe what you want to build.{" "}
+              {mode === "plan-then-execute"
+                ? "Uniqus will propose a plan first."
+                : "Uniqus will start working immediately."}
+            </div>
+            <div style={{ marginTop: 6, fontStyle: "normal" }}>
+              New here?{" "}
+              <a
+                href="/guide"
+                target="_blank"
+                rel="noreferrer"
+                style={{ color: "var(--accent, #a78bfa)", textDecoration: "none" }}
+              >
+                Read the guide
+              </a>
+              .
+            </div>
+            <div
+              style={{
+                marginTop: 10,
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+                fontStyle: "normal",
+              }}
+            >
+              {EXAMPLE_PROMPTS.map((prompt) => (
+                <button
+                  key={prompt}
+                  type="button"
+                  onClick={() => {
+                    setInput(prompt);
+                    textareaRef.current?.focus();
+                  }}
+                  style={{
+                    textAlign: "left",
+                    padding: "6px 10px",
+                    fontSize: 12,
+                    color: "var(--text-primary)",
+                    background: "transparent",
+                    border: "1px dashed var(--border-default, #2a2a36)",
+                    borderRadius: 6,
+                    cursor: "pointer",
+                  }}
+                  title="Use this prompt"
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
           </div>
         )}
         {turns.map((turn, idx) => {
@@ -383,16 +496,31 @@ export default function ChatPanel() {
           // Show a thinking indicator when the agent is working but no tool
           // calls or text have streamed yet (e.g. planning, booting VM).
           const lastTurn = turns[turns.length - 1];
-          const hasVisibleActivity = lastTurn && !lastTurn.complete && lastTurn.body.length > 0;
+          const inFlight = lastTurn && !lastTurn.complete ? lastTurn : null;
+          // Real streamed output (assistant text, tool cards) renders its own
+          // rows, so the pill is redundant once any non-system item lands. A
+          // `system` progress note (rendered muted in-line) does NOT count as
+          // visible activity — it instead becomes the pill's label below.
+          const hasVisibleActivity =
+            !!inFlight && inFlight.body.some((i) => i.kind !== "system");
           if (hasVisibleActivity) return null;
+          // Surface server progress (e.g. "Starting sandbox…", "Installing
+          // dependencies…"): the most recent `system` item of the in-flight
+          // turn, if any, takes precedence over the generic "Thinking…".
+          const lastSystem = inFlight
+            ? [...inFlight.body].reverse().find((i) => i.kind === "system")
+            : undefined;
+          const progress =
+            lastSystem && lastSystem.kind === "system" ? lastSystem.content : null;
+          const label =
+            progress ??
+            (mode === "plan-then-execute" ? "Thinking about a plan…" : "Thinking…");
           return (
             <div className="msg">
               <div className="head">
                 <span className="av agent">U</span>
                 <span className="name">Uniqus</span>
-                <span className="frame thinking-indicator">
-                  {mode === "plan-then-execute" ? "Thinking about a plan…" : "Thinking…"}
-                </span>
+                <span className="frame thinking-indicator">{label}</span>
               </div>
             </div>
           );
@@ -415,7 +543,12 @@ export default function ChatPanel() {
                   <>
                     <span style={{ opacity: 0.6 }}>Tasks {done}/{todos.length}</span>
                     {inFlight && (
-                      <span className="tasks-inline-active">▶ {inFlight.activeForm}</span>
+                      <span className="tasks-inline-active">
+                        <span title="In progress" role="img" aria-label="In progress">
+                          ▶
+                        </span>{" "}
+                        {inFlight.activeForm}
+                      </span>
                     )}
                   </>
                 );
@@ -427,11 +560,24 @@ export default function ChatPanel() {
             <div className="tasks-inline-list">
               {todos.map((t, i) => {
                 const icon = t.status === "completed" ? "✓" : t.status === "in_progress" ? "▶" : "·";
+                const stateLabel =
+                  t.status === "completed"
+                    ? "Completed"
+                    : t.status === "in_progress"
+                    ? "In progress"
+                    : "Pending";
                 const color = t.status === "completed" ? "var(--text-dim)" : t.status === "in_progress" ? "var(--accent, #a78bfa)" : "var(--text-primary)";
                 const label = t.status === "in_progress" ? t.activeForm : t.content;
                 return (
                   <div key={i} className="tasks-inline-item" style={{ color }}>
-                    <span style={{ fontFamily: "var(--font-mono-stack)", fontSize: 11 }}>{icon}</span>
+                    <span
+                      title={stateLabel}
+                      role="img"
+                      aria-label={stateLabel}
+                      style={{ fontFamily: "var(--font-mono-stack)", fontSize: 11 }}
+                    >
+                      {icon}
+                    </span>
                     <span style={{ textDecoration: t.status === "completed" ? "line-through" : "none" }}>{label}</span>
                   </div>
                 );
@@ -451,6 +597,39 @@ export default function ChatPanel() {
         </div>
       )}
 
+      {connectionFailed && (
+        <div
+          className="ws-failed-banner"
+          role="alert"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            margin: "0 0 6px",
+            padding: "6px 10px",
+            fontSize: 12,
+            color: "var(--text-primary)",
+            background: "color-mix(in srgb, var(--conf-low, #c0392b) 14%, transparent)",
+            border: "1px solid var(--conf-low, #c0392b)",
+            borderRadius: 6,
+          }}
+        >
+          <span style={{ flex: 1 }}>Connection lost.</span>
+          <button
+            type="button"
+            onClick={() => {
+              if (project) connect(project.id, sessionParam);
+            }}
+            disabled={!project}
+            className="icon-btn-sm"
+            style={{ width: "auto", padding: "2px 10px", fontSize: 11 }}
+            title="Reconnect to the workspace"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       <div
         className={`composer${dragging ? " dragging" : ""}`}
         onDragOver={handleDragOver}
@@ -460,6 +639,8 @@ export default function ChatPanel() {
         <div className="field">
           {slashMatches.length > 0 && (
             <div
+              role="menu"
+              aria-label="Slash commands"
               style={{
                 marginBottom: 6,
                 border: "1px solid var(--border-default, #2a2a36)",
@@ -472,6 +653,8 @@ export default function ChatPanel() {
                 <button
                   key={c.name}
                   type="button"
+                  role="menuitem"
+                  aria-selected={i === slashIndex}
                   onClick={() => {
                     setInput(`/${c.name} `);
                   }}
@@ -500,6 +683,8 @@ export default function ChatPanel() {
           )}
           {atMatches.length > 0 && (
             <div
+              role="menu"
+              aria-label="File references"
               style={{
                 marginBottom: 6,
                 border: "1px solid var(--border-default, #2a2a36)",
@@ -514,6 +699,8 @@ export default function ChatPanel() {
                 <button
                   key={p}
                   type="button"
+                  role="menuitem"
+                  aria-selected={i === atIndex}
                   onClick={() => {
                     setInput((prev) => prev.replace(/@[\w./-]*$/, `@${p} `));
                   }}
@@ -608,6 +795,30 @@ export default function ChatPanel() {
             hidden
             onChange={(e) => addFiles(e.target.files)}
           />
+          {pendingSelectedElement && (
+            <div className="composer-attachments">
+              <span className="selected-el-chip" title={pendingSelectedElement.selector}>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                  <line x1="12" y1="2" x2="12" y2="6" />
+                  <line x1="12" y1="18" x2="12" y2="22" />
+                  <line x1="2" y1="12" x2="6" y2="12" />
+                  <line x1="18" y1="12" x2="22" y2="12" />
+                  <circle cx="12" cy="12" r="4" />
+                </svg>
+                <span className="selected-el-chip-label">
+                  {describeSelectedElement(pendingSelectedElement)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPendingSelectedElement(null)}
+                  title="Remove selected element"
+                  aria-label="Remove selected element"
+                >
+                  ×
+                </button>
+              </span>
+            </div>
+          )}
           {pendingFiles.length > 0 && (
             <div className="composer-attachments">
               {pendingFiles.map((file, index) => (
@@ -687,7 +898,7 @@ export default function ChatPanel() {
                 onClick={() => void handleSubmit()}
                 disabled={
                   uploading ||
-                  (!input.trim() && pendingFiles.length === 0) ||
+                  (!input.trim() && pendingFiles.length === 0 && !pendingSelectedElement) ||
                   !project ||
                   !connected
                 }
@@ -703,6 +914,40 @@ export default function ChatPanel() {
           </div>
         </div>
       </div>
+
+      {confirmReset && (
+        <Modal
+          title="Clear chat history?"
+          subtitle="This clears the conversation only — your sandbox files are kept."
+          width={420}
+          onClose={() => setConfirmReset(false)}
+          footer={
+            <>
+              <span />
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setConfirmReset(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn-danger"
+                  onClick={confirmResetChat}
+                >
+                  Clear history
+                </button>
+              </div>
+            </>
+          }
+        >
+          <p style={{ margin: 0, fontSize: 13, color: "var(--text-dim)" }}>
+            The agent will start fresh with no memory of this conversation.
+          </p>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -818,6 +1063,13 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** Compact label for a picked element: "button#submit.cta". */
+function describeSelectedElement(el: SelectedElement): string {
+  const id = el.id ? `#${el.id}` : "";
+  const cls = el.classes.length > 0 ? `.${el.classes.slice(0, 2).join(".")}` : "";
+  return `${el.tag || "element"}${id}${cls}` || el.selector;
+}
+
 /** Compact token count: 980 → "980", 10800 → "10.8k", 1_250_000 → "1.25M". */
 function formatTokens(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "0";
@@ -885,6 +1137,14 @@ function ChatItemView({ item }: { item: ChatItem }) {
               ))}
             </div>
           )}
+          {item.selectedElement && (
+            <div className="message-file-refs">
+              <span className="message-file-refs-label">element:</span>
+              <code className="message-file-ref" title={item.selectedElement.selector}>
+                {describeSelectedElement(item.selectedElement)}
+              </code>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -937,6 +1197,10 @@ function UserQuestionCard({
 }) {
   const resolveUserQuestion = useStore((s) => s.resolveUserQuestion);
   const [freeText, setFreeText] = useState("");
+  // Surfaced when send() fails (socket down). Without it the click was a silent
+  // no-op — the answer buttons stayed live but nothing happened. Cleared on a
+  // successful send (or a fresh attempt).
+  const [sendError, setSendError] = useState<string | null>(null);
   const answered = item.answer !== undefined;
 
   const submit = (answer: string) => {
@@ -947,7 +1211,14 @@ function UserQuestionCard({
       call_id: item.call_id,
       answer: trimmed,
     });
-    if (ok) resolveUserQuestion(item.call_id, trimmed);
+    if (ok) {
+      setSendError(null);
+      resolveUserQuestion(item.call_id, trimmed);
+    } else {
+      // Keep the answer controls enabled so the user can retry once the socket
+      // reconnects, rather than losing their selection to a dropped frame.
+      setSendError("Couldn't send — reconnecting. Try again.");
+    }
   };
 
   return (
@@ -1004,6 +1275,18 @@ function UserQuestionCard({
                     Answer
                   </button>
                 </form>
+              )}
+              {sendError && (
+                <div
+                  role="alert"
+                  style={{
+                    marginTop: 8,
+                    fontSize: 12,
+                    color: "var(--conf-low, #c0392b)",
+                  }}
+                >
+                  {sendError}
+                </div>
               )}
             </>
           )}

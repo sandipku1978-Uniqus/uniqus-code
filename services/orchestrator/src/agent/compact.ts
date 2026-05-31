@@ -32,13 +32,19 @@ import { ensureAnthropic } from "./router.js";
 
 const COMPACT_THRESHOLD_TOKENS = numEnv("COMPACT_THRESHOLD_TOKENS", 150_000);
 const COMPACT_KEEP_TOKENS = numEnv("COMPACT_KEEP_TOKENS", 80_000);
-// Char-to-token rough estimate. Anthropic averages ~3.5 chars/token across
-// English code+prose; we use 4 (slightly under-estimating tokens) so the
-// threshold trips a bit early — preferable to tripping late and 400ing.
-const CHARS_PER_TOKEN = 4;
-// Per-image token estimate (~1.5k tokens, a typical screenshot's vision cost),
-// expressed in chars so it folds into the char-based estimate.
-const IMAGE_CHARS = 1500 * CHARS_PER_TOKEN;
+// Char-to-token rough estimate. Long agent histories are dominated by code,
+// JSON tool args, and command output, which tokenize denser than prose — closer
+// to ~3 chars/token than English's ~3.5-4. Using 3.3 makes the estimate run
+// slightly HIGH (so the threshold trips early), which is the safe direction:
+// tripping late risks blowing past the model's context window mid-call (a hard
+// 400 that compaction can't recover from). The previous value of 4 under-counted
+// dense histories ~25%, letting real tokens drift toward the cap before the
+// threshold noticed.
+const CHARS_PER_TOKEN = 3.3;
+// Per-image token estimate (~1.5k tokens, a typical screenshot's vision cost).
+// Pinned as an absolute token count (not derived from CHARS_PER_TOKEN) so tuning
+// the char ratio doesn't silently change image accounting.
+const IMAGE_CHARS = 1500 * 4;
 const MAX_SUMMARY_TOKENS = 4096;
 
 function numEnv(key: string, fallback: number): number {

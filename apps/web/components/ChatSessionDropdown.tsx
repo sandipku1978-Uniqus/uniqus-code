@@ -9,6 +9,7 @@ import {
   renameChatSessionApi,
   type ChatSessionSummary,
 } from "@/lib/api";
+import Modal from "./Modal";
 
 /**
  * Topbar dropdown for switching between chat sessions in the same project.
@@ -25,6 +26,10 @@ export default function ChatSessionDropdown({ projectId }: { projectId: string }
   const [sessions, setSessions] = useState<ChatSessionSummary[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Session targeted by the rename / delete confirmation modals (null = closed).
+  const [renaming, setRenaming] = useState<ChatSessionSummary | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [deleting, setDeleting] = useState<ChatSessionSummary | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Server-side, no ?session= binds to ensureDefaultSession(), which chooses
@@ -88,11 +93,20 @@ export default function ChatSessionDropdown({ projectId }: { projectId: string }
     }
   };
 
-  const onRename = async (s: ChatSessionSummary): Promise<void> => {
-    const next = window.prompt("Rename chat", s.title ?? "");
-    if (next === null) return;
-    const trimmed = next.trim();
-    if (!trimmed || trimmed === s.title) return;
+  const onRename = (s: ChatSessionSummary): void => {
+    setRenameValue(s.title ?? "");
+    setRenaming(s);
+  };
+
+  const commitRename = async (): Promise<void> => {
+    const s = renaming;
+    if (!s) return;
+    const trimmed = renameValue.trim();
+    if (!trimmed || trimmed === s.title) {
+      setRenaming(null);
+      return;
+    }
+    setRenaming(null);
     try {
       await renameChatSessionApi(projectId, s.id, trimmed);
       await refresh();
@@ -101,8 +115,14 @@ export default function ChatSessionDropdown({ projectId }: { projectId: string }
     }
   };
 
-  const onDelete = async (s: ChatSessionSummary): Promise<void> => {
-    if (!window.confirm(`Delete "${s.title ?? "Chat"}" and all its messages?`)) return;
+  const onDelete = (s: ChatSessionSummary): void => {
+    setDeleting(s);
+  };
+
+  const commitDelete = async (): Promise<void> => {
+    const s = deleting;
+    if (!s) return;
+    setDeleting(null);
     try {
       await deleteChatSessionApi(projectId, s.id);
       const r = await fetchChatSessionsApi(projectId);
@@ -226,7 +246,7 @@ export default function ChatSessionDropdown({ projectId }: { projectId: string }
                   </button>
                   <button
                     type="button"
-                    onClick={() => void onRename(s)}
+                    onClick={() => onRename(s)}
                     title="Rename"
                     className="icon-btn-xs"
                   >
@@ -234,7 +254,7 @@ export default function ChatSessionDropdown({ projectId }: { projectId: string }
                   </button>
                   <button
                     type="button"
-                    onClick={() => void onDelete(s)}
+                    onClick={() => onDelete(s)}
                     title="Delete"
                     className="icon-btn-xs danger"
                   >
@@ -251,9 +271,81 @@ export default function ChatSessionDropdown({ projectId }: { projectId: string }
           )}
         </div>
       )}
+
+      {renaming && (
+        <Modal
+          title="Rename chat"
+          onClose={() => setRenaming(null)}
+          width={420}
+          footer={
+            <div className="modal-actions">
+              <button type="button" className="btn-ghost" onClick={() => setRenaming(null)}>
+                Cancel
+              </button>
+              <button type="button" className="btn-primary" onClick={() => void commitRename()}>
+                Save
+              </button>
+            </div>
+          }
+        >
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void commitRename();
+            }}
+          >
+            <input
+              type="text"
+              autoFocus
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              placeholder="Chat title"
+              style={renameInputStyle}
+            />
+          </form>
+        </Modal>
+      )}
+
+      {deleting && (
+        <Modal
+          title="Delete this chat?"
+          subtitle={deleting.title ?? "Chat"}
+          onClose={() => setDeleting(null)}
+          width={460}
+          footer={
+            <>
+              <span className="modal-status">This can’t be undone.</span>
+              <div className="modal-actions">
+                <button type="button" className="btn-ghost" onClick={() => setDeleting(null)}>
+                  Cancel
+                </button>
+                <button type="button" className="btn-primary" onClick={() => void commitDelete()}>
+                  Delete
+                </button>
+              </div>
+            </>
+          }
+        >
+          <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "var(--text-muted)" }}>
+            Deleting <strong>“{deleting.title ?? "Chat"}”</strong> permanently removes the
+            conversation and all of its messages. The project’s VM, files, skills, and secrets are
+            shared across chats and are not affected.
+          </p>
+        </Modal>
+      )}
     </div>
   );
 }
+
+const renameInputStyle: React.CSSProperties = {
+  width: "100%",
+  background: "var(--bg-base)",
+  color: "var(--text-primary)",
+  border: "1px solid var(--border-default)",
+  borderRadius: 6,
+  padding: "8px 10px",
+  fontSize: 13,
+};
 
 function oldestSession(sessions: ChatSessionSummary[]): ChatSessionSummary | null {
   return sessions.reduce<ChatSessionSummary | null>((oldest, s) => {

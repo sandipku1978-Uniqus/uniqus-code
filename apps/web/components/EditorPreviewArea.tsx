@@ -314,8 +314,8 @@ export default function EditorPreviewArea() {
           <div className="editor-empty">
             <h3>Your preview will show up here.</h3>
             <p>
-              Once Uniqus starts the project, a live preview opens here as a tab. You can also
-              open a file from the explorer to see its code.
+              Click Run in the top toolbar to start the dev server and see a live preview here. You
+              can also open a file from the explorer to view its code.
             </p>
           </div>
         )}

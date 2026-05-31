@@ -104,6 +104,11 @@ alter table projects add column if not exists github_repo_full_name text;
 -- the picker grid and topbar. Null = render the auto-derived hash tile.
 alter table projects add column if not exists icon text;
 
+-- Branch the project is linked to on its remote (GitHub). Surfaced in the All
+-- Projects view's card alongside the latest deploy state. Null = unknown; the
+-- UI falls back to 'main'. Populated by the import / repo-link flow.
+alter table projects add column if not exists linked_branch text;
+
 -- Deploys: one row per attempted deployment. Lets the UI show history and
 -- lets the orchestrator poll status without re-asking Vercel for everything.
 create table if not exists deployments (
@@ -306,11 +311,20 @@ create table if not exists usage_events (
   user_id uuid references users(id) on delete cascade,
   provider text not null,
   model text not null,
+  -- input_tokens is FRESH (uncached) input only. Cached prompt tokens are split
+  -- into the cache_* columns below so the dashboard prices them at the cheaper
+  -- cache rates instead of charging every replayed prefix token at full price.
   input_tokens integer not null default 0,
   output_tokens integer not null default 0,
+  cache_read_tokens integer not null default 0,
+  cache_creation_tokens integer not null default 0,
   elapsed_ms integer not null default 0,
   created_at timestamptz not null default now()
 );
+
+-- Idempotent migration for tables created before the cache split shipped.
+alter table usage_events add column if not exists cache_read_tokens integer not null default 0;
+alter table usage_events add column if not exists cache_creation_tokens integer not null default 0;
 
 create index if not exists usage_events_user_idx
   on usage_events (user_id, created_at desc);
@@ -323,36 +337,46 @@ alter table usage_events enable row level security;
 create or replace function account_usage_stats(uid uuid)
 returns jsonb language sql stable as $$
   with rows as (
-    select provider, model, input_tokens, output_tokens, elapsed_ms
+    select provider, model, input_tokens, output_tokens,
+           cache_read_tokens, cache_creation_tokens, elapsed_ms
     from usage_events where user_id = uid
   ),
   totals as (
     select
-      coalesce(sum(input_tokens), 0)::bigint  as total_input_tokens,
-      coalesce(sum(output_tokens), 0)::bigint as total_output_tokens,
-      coalesce(sum(elapsed_ms), 0)::bigint    as total_time_ms,
-      count(*)::bigint                         as turns
+      coalesce(sum(input_tokens), 0)::bigint           as total_input_tokens,
+      coalesce(sum(output_tokens), 0)::bigint          as total_output_tokens,
+      coalesce(sum(cache_read_tokens), 0)::bigint      as total_cache_read_tokens,
+      coalesce(sum(cache_creation_tokens), 0)::bigint  as total_cache_creation_tokens,
+      coalesce(sum(elapsed_ms), 0)::bigint             as total_time_ms,
+      count(*)::bigint                                  as turns
     from rows
   ),
   per_model as (
     select
       provider, model,
-      sum(input_tokens)::bigint  as input_tokens,
-      sum(output_tokens)::bigint as output_tokens,
-      count(*)::bigint           as turns
+      sum(input_tokens)::bigint           as input_tokens,
+      sum(output_tokens)::bigint          as output_tokens,
+      sum(cache_read_tokens)::bigint      as cache_read_tokens,
+      sum(cache_creation_tokens)::bigint  as cache_creation_tokens,
+      count(*)::bigint                    as turns
     from rows
     group by provider, model
-    order by (sum(input_tokens) + sum(output_tokens)) desc
+    order by (sum(input_tokens) + sum(output_tokens) + sum(cache_read_tokens)) desc
   )
   select jsonb_build_object(
-    'total_input_tokens',  (select total_input_tokens  from totals),
-    'total_output_tokens', (select total_output_tokens from totals),
-    'total_time_ms',       (select total_time_ms       from totals),
-    'turns',               (select turns               from totals),
+    'total_input_tokens',           (select total_input_tokens           from totals),
+    'total_output_tokens',          (select total_output_tokens          from totals),
+    'total_cache_read_tokens',      (select total_cache_read_tokens      from totals),
+    'total_cache_creation_tokens',  (select total_cache_creation_tokens  from totals),
+    'total_time_ms',                (select total_time_ms                from totals),
+    'turns',                        (select turns                        from totals),
     'per_model', coalesce(
       (select jsonb_agg(jsonb_build_object(
         'model', model, 'provider', provider,
-        'input_tokens', input_tokens, 'output_tokens', output_tokens, 'turns', turns
+        'input_tokens', input_tokens, 'output_tokens', output_tokens,
+        'cache_read_tokens', cache_read_tokens,
+        'cache_creation_tokens', cache_creation_tokens,
+        'turns', turns
       )) from per_model),
       '[]'::jsonb
     )

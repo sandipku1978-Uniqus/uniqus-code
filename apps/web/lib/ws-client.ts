@@ -33,6 +33,11 @@ const tasksAutoOpenedProjects = new Set<string>();
 // under thundering-herd. Cap at 30s, jitter to spread the herd.
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_CAP_MS = 30_000;
+// Give up auto-reconnecting after this many failed attempts (~minutes of
+// retries with the capped backoff). Past the cap we stop scheduling and flag
+// `connectionFailed` so the UI can offer a manual Retry instead of silently
+// hammering a server that isn't coming back.
+const MAX_RECONNECT_ATTEMPTS = 12;
 let reconnectAttempts = 0;
 
 function nextReconnectDelay(): number {
@@ -43,6 +48,20 @@ function nextReconnectDelay(): number {
 }
 
 export function connect(projectId: string, sessionId: string | null = null): void {
+  // A fresh connect — i.e. an explicit call rather than the reconnect timer —
+  // clears the backoff budget and the "connection lost" flag so a manual Retry
+  // (or switching project/session) returns the UI to a connecting state.
+  reconnectAttempts = 0;
+  useStore.getState().setConnectionFailed(false);
+  openSocket(projectId, sessionId);
+}
+
+/**
+ * Open (or re-open) the socket. Public `connect()` resets the reconnect budget
+ * first; the reconnect timer calls this directly so the exponential backoff
+ * keeps growing across consecutive failed attempts.
+ */
+function openSocket(projectId: string, sessionId: string | null): void {
   // If asked to connect to a different project OR a different session within
   // the same project, close the old socket first — server-side history is
   // bound at upgrade time, so we have to reconnect to switch sessions.
@@ -66,6 +85,7 @@ export function connect(projectId: string, sessionId: string | null = null): voi
 
   ws.onopen = () => {
     useStore.getState().setConnected(true);
+    useStore.getState().setConnectionFailed(false);
     reconnectAttempts = 0;
     send({ type: "request_tree" });
     // Replay any edits the user made while the socket was down. Without this
@@ -77,10 +97,16 @@ export function connect(projectId: string, sessionId: string | null = null): voi
     useStore.getState().setConnected(false);
     socket = null;
     if (reconnectTimer) clearTimeout(reconnectTimer);
-    const delay = nextReconnectDelay();
     reconnectAttempts += 1;
+    if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+      // Out of budget — stop hammering and let the UI offer a manual Retry,
+      // which calls connect() and resets the counter + this flag.
+      useStore.getState().setConnectionFailed(true);
+      return;
+    }
+    const delay = nextReconnectDelay();
     reconnectTimer = setTimeout(() => {
-      if (activeProjectId) connect(activeProjectId, activeSessionId);
+      if (activeProjectId) openSocket(activeProjectId, activeSessionId);
     }, delay);
   };
 
@@ -210,6 +236,9 @@ function handleEvent(event: ServerEvent): void {
       break;
     case "file_changed":
       send({ type: "request_tree" });
+      // Project files moved on from the live deploy — nudge a redeploy (no-op
+      // unless there's already a READY deploy that's now stale).
+      s.markProjectFilesChanged();
       // Don't clobber local edits the user has in flight — if the editor is
       // dirty/saving on this same path, leave the buffer alone. The user's
       // save will land shortly and become the new authoritative version.

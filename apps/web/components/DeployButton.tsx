@@ -13,6 +13,7 @@ import {
   type VercelStatus,
 } from "@/lib/api";
 import type { DeploymentState } from "@uniqus/api-types";
+import Modal from "./Modal";
 
 type EnvRow = { id: number; key: string; value: string };
 let envIdSeq = 1;
@@ -23,13 +24,36 @@ export default function DeployButton({ projectId }: { projectId: string }) {
   const setRedeploySuggested = useStore((s) => s.setRedeploySuggested);
   const [open, setOpen] = useState(false);
 
+  // Lift the Vercel-connected status to the resting button so the prerequisite
+  // is discoverable BEFORE the modal opens — the user shouldn't have to open
+  // the dialog and click "Deploy" only to be told "Connect Vercel first".
+  const [vercel, setVercel] = useState<VercelStatus | null>(null);
+
+  useEffect(() => {
+    let cancel = false;
+    fetchVercelStatus()
+      .then((s) => {
+        if (!cancel) setVercel(s);
+      })
+      .catch(() => {
+        if (!cancel)
+          setVercel({ connected: false, user_login: null, team_id: null, connected_at: null });
+      });
+    return () => {
+      cancel = true;
+    };
+  }, []);
+
+  const needsVercel = vercel !== null && !vercel.connected;
+
   const label = useMemo(() => {
+    if (needsVercel) return "Connect Vercel";
     if (!live) return "Deploy";
     if (live.state === "READY") return "Redeploy";
     if (live.state === "ERROR") return "Failed";
     if (live.state === "CANCELED") return "Canceled";
     return "Deploying…";
-  }, [live]);
+  }, [needsVercel, live]);
 
   return (
     <>
@@ -40,7 +64,11 @@ export default function DeployButton({ projectId }: { projectId: string }) {
           setOpen(true);
         }}
         className="toggle-btn"
-        title="Deploy this project to Vercel"
+        title={
+          needsVercel
+            ? "Connect Vercel to deploy this project"
+            : "Deploy this project to Vercel"
+        }
         data-on={live?.state === "READY"}
         data-suggested={redeploySuggested || undefined}
       >
@@ -56,16 +84,27 @@ export default function DeployButton({ projectId }: { projectId: string }) {
         </svg>
         <span>{label}</span>
       </button>
-      {open && <DeployModal projectId={projectId} onClose={() => setOpen(false)} />}
+      {open && (
+        <DeployModal
+          projectId={projectId}
+          initialVercel={vercel}
+          onVercelChange={setVercel}
+          onClose={() => setOpen(false)}
+        />
+      )}
     </>
   );
 }
 
 function DeployModal({
   projectId,
+  initialVercel,
+  onVercelChange,
   onClose,
 }: {
   projectId: string;
+  initialVercel: VercelStatus | null;
+  onVercelChange: (status: VercelStatus) => void;
   onClose: () => void;
 }) {
   const live = useStore((s) => s.deployment);
@@ -74,7 +113,9 @@ function DeployModal({
   const project = useStore((s) => s.project);
   const searchParams = useSearchParams();
 
-  const [vercel, setVercel] = useState<VercelStatus | null>(null);
+  // Seed from the status the button already fetched so the modal opens without
+  // a "checking…" flash; still re-fetch on the post-OAuth flag below.
+  const [vercel, setVercelState] = useState<VercelStatus | null>(initialVercel);
   const [history, setHistory] = useState<DeploymentSummary[] | null>(null);
   const [envRows, setEnvRows] = useState<EnvRow[]>([
     { id: envIdSeq++, key: "", value: "" },
@@ -82,6 +123,12 @@ function DeployModal({
   const [target, setTarget] = useState<"production" | "preview">("production");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Keep the resting button's status in sync with whatever the modal learns.
+  function setVercel(status: VercelStatus): void {
+    setVercelState(status);
+    onVercelChange(status);
+  }
 
   // The Vercel callback redirects back with `?vercel=connected|error&...`.
   // Refresh status whenever that flag changes so the modal reflects the
@@ -94,6 +141,7 @@ function DeployModal({
       .catch(() =>
         setVercel({ connected: false, user_login: null, team_id: null, connected_at: null }),
       );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vercelFlag]);
 
   useEffect(() => {
@@ -162,270 +210,17 @@ function DeployModal({
     }
   }
 
-  // Close on Escape so the modal feels like a dialog, not a stuck panel.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   return (
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.55)",
-        zIndex: 100,
-        display: "grid",
-        placeItems: "center",
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: "min(560px, 92vw)",
-          maxHeight: "85vh",
-          overflow: "auto",
-          background: "var(--bg-base, #0c0c10)",
-          border: "1px solid var(--border-default)",
-          borderRadius: 10,
-          padding: 18,
-          color: "var(--text-primary)",
-          boxShadow: "0 24px 48px rgba(0,0,0,0.6)",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: 12,
-          }}
-        >
-          <h2 style={{ fontSize: 16, margin: 0 }}>
-            Deploy <span style={{ color: "var(--text-muted)" }}>{project?.name}</span>
-          </h2>
-          <button onClick={onClose} className="btn-ghost" style={{ fontSize: 12 }}>
-            Close
-          </button>
-        </div>
-
-        {/* Vercel connection */}
-        {vercel === null ? (
-          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
-            checking Vercel connection…
-          </div>
-        ) : vercel.connected ? (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              padding: "8px 10px",
-              border: "1px solid var(--border-default)",
-              borderRadius: 6,
-              background: "var(--bg-elev)",
-              marginBottom: 12,
-            }}
-          >
-            <span style={{ fontSize: 12 }}>
-              Connected as{" "}
-              <strong>@{vercel.user_login || "vercel"}</strong>
-              {vercel.team_id ? (
-                <span style={{ color: "var(--text-muted)" }}> · team scope</span>
-              ) : (
-                <span style={{ color: "var(--text-muted)" }}> · personal scope</span>
-              )}
-            </span>
-            <button
-              type="button"
-              onClick={disconnect}
-              className="btn-ghost"
-              style={{ fontSize: 11 }}
-            >
-              Disconnect
-            </button>
-          </div>
-        ) : (
-          <div
-            style={{
-              padding: "10px 12px",
-              border: "1px dashed var(--border-default)",
-              borderRadius: 6,
-              marginBottom: 12,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-            }}
-          >
-            <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
-              Connect Vercel to deploy this project to your account.
-            </span>
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={startConnect}
-              style={{ fontSize: 12, padding: "6px 10px" }}
-            >
-              Connect Vercel
-            </button>
-          </div>
-        )}
-
-        {/* Live deploy banner — only when there's an in-progress / latest deploy. */}
-        {live && (
-          <div
-            style={{
-              padding: "8px 10px",
-              border: "1px solid var(--border-default)",
-              borderRadius: 6,
-              marginBottom: 12,
-              fontSize: 12,
-              background:
-                live.state === "READY"
-                  ? "rgba(80, 200, 120, 0.08)"
-                  : live.state === "ERROR"
-                  ? "rgba(220, 90, 90, 0.08)"
-                  : "var(--bg-elev)",
-            }}
-          >
-            <div>
-              <strong>{stateLabel(live.state)}</strong>
-              {live.vercel_url && (
-                <>
-                  {" · "}
-                  <a
-                    href={`https://${live.vercel_url}`}
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    style={{ color: "var(--text-primary)" }}
-                  >
-                    {live.vercel_url}
-                  </a>
-                </>
-              )}
-            </div>
-            {live.error_message && (
-              <div style={{ color: "var(--conf-low)", marginTop: 6 }}>
-                {live.error_message}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Env editor */}
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
-            Environment variables — applied to the deployed app
-          </div>
-          <div style={{ display: "grid", gap: 6 }}>
-            {envRows.map((r, idx) => (
-              <div key={r.id} style={{ display: "flex", gap: 6 }}>
-                <input
-                  value={r.key}
-                  onChange={(e) =>
-                    setEnvRows((rows) =>
-                      rows.map((x, i) =>
-                        i === idx ? { ...x, key: e.target.value } : x,
-                      ),
-                    )
-                  }
-                  placeholder="KEY"
-                  style={{
-                    ...modalFieldStyle,
-                    flex: "0 0 36%",
-                    fontFamily: "monospace",
-                    textTransform: "none",
-                  }}
-                  disabled={busy}
-                />
-                <input
-                  value={r.value}
-                  onChange={(e) =>
-                    setEnvRows((rows) =>
-                      rows.map((x, i) =>
-                        i === idx ? { ...x, value: e.target.value } : x,
-                      ),
-                    )
-                  }
-                  placeholder="value"
-                  style={{ ...modalFieldStyle, flex: 1 }}
-                  disabled={busy}
-                />
-                <button
-                  type="button"
-                  onClick={() =>
-                    setEnvRows((rows) =>
-                      rows.length === 1
-                        ? [{ id: envIdSeq++, key: "", value: "" }]
-                        : rows.filter((_, i) => i !== idx),
-                    )
-                  }
-                  className="btn-ghost"
-                  style={{ fontSize: 11, padding: "0 8px" }}
-                  disabled={busy}
-                  title="Remove row"
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
-          </div>
-          <button
-            type="button"
-            onClick={() =>
-              setEnvRows((rows) => [...rows, { id: envIdSeq++, key: "", value: "" }])
-            }
-            className="btn-ghost"
-            style={{ fontSize: 11, marginTop: 6 }}
-            disabled={busy}
-          >
-            + Add variable
-          </button>
-        </div>
-
-        {/* Target */}
-        <div style={{ display: "flex", gap: 12, marginBottom: 14 }}>
-          {(["production", "preview"] as const).map((t) => (
-            <label
-              key={t}
-              style={{
-                fontSize: 12,
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                cursor: "pointer",
-              }}
-            >
-              <input
-                type="radio"
-                name="deploy-target"
-                value={t}
-                checked={target === t}
-                onChange={() => setTarget(t)}
-                disabled={busy}
-              />
-              {t === "production" ? "Production" : "Preview (one-off URL)"}
-            </label>
-          ))}
-        </div>
-
-        {error && (
-          <div
-            style={{
-              color: "var(--conf-low)",
-              fontSize: 12,
-              marginBottom: 10,
-            }}
-          >
-            {error}
-          </div>
-        )}
-
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+    <Modal
+      title={
+        <>
+          Deploy <span style={{ color: "var(--text-muted)" }}>{project?.name}</span>
+        </>
+      }
+      onClose={onClose}
+      width={560}
+      footer={
+        <div className="modal-actions">
           <button
             type="button"
             onClick={deployNow}
@@ -435,59 +230,271 @@ function DeployModal({
             {busy ? "Deploying…" : "Deploy now"}
           </button>
         </div>
+      }
+    >
+      {/* Vercel connection */}
+      {vercel === null ? (
+        <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+          checking Vercel connection…
+        </div>
+      ) : vercel.connected ? (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "8px 10px",
+            border: "1px solid var(--border-default)",
+            borderRadius: 6,
+            background: "var(--bg-elev)",
+            marginBottom: 12,
+          }}
+        >
+          <span style={{ fontSize: 12 }}>
+            Connected as{" "}
+            <strong>@{vercel.user_login || "vercel"}</strong>
+            {vercel.team_id ? (
+              <span style={{ color: "var(--text-muted)" }}> · team scope</span>
+            ) : (
+              <span style={{ color: "var(--text-muted)" }}> · personal scope</span>
+            )}
+          </span>
+          <button
+            type="button"
+            onClick={disconnect}
+            className="btn-ghost"
+            style={{ fontSize: 11 }}
+          >
+            Disconnect
+          </button>
+        </div>
+      ) : (
+        <div
+          style={{
+            padding: "10px 12px",
+            border: "1px dashed var(--border-default)",
+            borderRadius: 6,
+            marginBottom: 12,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+            Connect Vercel to deploy this project to your account.
+          </span>
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={startConnect}
+            style={{ fontSize: 12, padding: "6px 10px" }}
+          >
+            Connect Vercel
+          </button>
+        </div>
+      )}
 
-        {/* History */}
-        {history && history.length > 0 && (
-          <div style={{ marginTop: 18 }}>
-            <div
-              style={{
-                fontSize: 12,
-                color: "var(--text-muted)",
-                marginBottom: 6,
-              }}
-            >
-              Recent deploys
-            </div>
-            <div style={{ display: "grid", gap: 4 }}>
-              {history.slice(0, 6).map((d) => (
-                <div
-                  key={d.id}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    fontSize: 11,
-                    padding: "6px 8px",
-                    border: "1px solid var(--border-default)",
-                    borderRadius: 4,
-                  }}
+      {/* Live deploy banner — only when there's an in-progress / latest deploy. */}
+      {live && (
+        <div
+          style={{
+            padding: "8px 10px",
+            border: "1px solid var(--border-default)",
+            borderRadius: 6,
+            marginBottom: 12,
+            fontSize: 12,
+            background:
+              live.state === "READY"
+                ? "rgba(80, 200, 120, 0.08)"
+                : live.state === "ERROR"
+                ? "rgba(220, 90, 90, 0.08)"
+                : "var(--bg-elev)",
+          }}
+        >
+          <div>
+            <strong>{stateLabel(live.state)}</strong>
+            {live.vercel_url && (
+              <>
+                {" · "}
+                <a
+                  href={`https://${live.vercel_url}`}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  style={{ color: "var(--text-primary)" }}
                 >
-                  <span>
-                    <strong>{stateLabel(d.state)}</strong>
-                    <span style={{ color: "var(--text-muted)" }}>
-                      {" "}
-                      · {d.target}
-                    </span>
-                  </span>
-                  {d.vercel_url ? (
-                    <a
-                      href={`https://${d.vercel_url}`}
-                      target="_blank"
-                      rel="noreferrer noopener"
-                      style={{ color: "var(--text-primary)" }}
-                    >
-                      {d.vercel_url}
-                    </a>
-                  ) : (
-                    <span style={{ color: "var(--text-muted)" }}>(no url yet)</span>
-                  )}
-                </div>
-              ))}
-            </div>
+                  {live.vercel_url}
+                </a>
+              </>
+            )}
           </div>
-        )}
+          {live.error_message && (
+            <div style={{ color: "var(--conf-low)", marginTop: 6 }}>
+              {live.error_message}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Env editor */}
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
+          Environment variables — applied to the deployed app
+        </div>
+        <div style={{ display: "grid", gap: 6 }}>
+          {envRows.map((r, idx) => (
+            <div key={r.id} style={{ display: "flex", gap: 6 }}>
+              <input
+                value={r.key}
+                onChange={(e) =>
+                  setEnvRows((rows) =>
+                    rows.map((x, i) =>
+                      i === idx ? { ...x, key: e.target.value } : x,
+                    ),
+                  )
+                }
+                placeholder="KEY"
+                style={{
+                  ...modalFieldStyle,
+                  flex: "0 0 36%",
+                  fontFamily: "monospace",
+                  textTransform: "none",
+                }}
+                disabled={busy}
+              />
+              <input
+                value={r.value}
+                onChange={(e) =>
+                  setEnvRows((rows) =>
+                    rows.map((x, i) =>
+                      i === idx ? { ...x, value: e.target.value } : x,
+                    ),
+                  )
+                }
+                placeholder="value"
+                style={{ ...modalFieldStyle, flex: 1 }}
+                disabled={busy}
+              />
+              <button
+                type="button"
+                onClick={() =>
+                  setEnvRows((rows) =>
+                    rows.length === 1
+                      ? [{ id: envIdSeq++, key: "", value: "" }]
+                      : rows.filter((_, i) => i !== idx),
+                  )
+                }
+                className="btn-ghost"
+                style={{ fontSize: 11, padding: "0 8px" }}
+                disabled={busy}
+                title="Remove row"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={() =>
+            setEnvRows((rows) => [...rows, { id: envIdSeq++, key: "", value: "" }])
+          }
+          className="btn-ghost"
+          style={{ fontSize: 11, marginTop: 6 }}
+          disabled={busy}
+        >
+          + Add variable
+        </button>
       </div>
-    </div>
+
+      {/* Target */}
+      <div style={{ display: "flex", gap: 12, marginBottom: 14 }}>
+        {(["production", "preview"] as const).map((t) => (
+          <label
+            key={t}
+            style={{
+              fontSize: 12,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              cursor: "pointer",
+            }}
+          >
+            <input
+              type="radio"
+              name="deploy-target"
+              value={t}
+              checked={target === t}
+              onChange={() => setTarget(t)}
+              disabled={busy}
+            />
+            {t === "production" ? "Production" : "Preview (one-off URL)"}
+          </label>
+        ))}
+      </div>
+
+      {error && (
+        <div
+          style={{
+            color: "var(--conf-low)",
+            fontSize: 12,
+            marginBottom: 10,
+          }}
+        >
+          {error}
+        </div>
+      )}
+
+      {/* History */}
+      {history && history.length > 0 && (
+        <div style={{ marginTop: 18 }}>
+          <div
+            style={{
+              fontSize: 12,
+              color: "var(--text-muted)",
+              marginBottom: 6,
+            }}
+          >
+            Recent deploys
+          </div>
+          <div style={{ display: "grid", gap: 4 }}>
+            {history.slice(0, 6).map((d) => (
+              <div
+                key={d.id}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  fontSize: 11,
+                  padding: "6px 8px",
+                  border: "1px solid var(--border-default)",
+                  borderRadius: 4,
+                }}
+              >
+                <span>
+                  <strong>{stateLabel(d.state)}</strong>
+                  <span style={{ color: "var(--text-muted)" }}>
+                    {" "}
+                    · {d.target}
+                  </span>
+                </span>
+                {d.vercel_url ? (
+                  <a
+                    href={`https://${d.vercel_url}`}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    style={{ color: "var(--text-primary)" }}
+                  >
+                    {d.vercel_url}
+                  </a>
+                ) : (
+                  <span style={{ color: "var(--text-muted)" }}>(no url yet)</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Modal>
   );
 }
 

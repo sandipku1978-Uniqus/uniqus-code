@@ -18,11 +18,15 @@ import {
 } from "./background.js";
 import { takeScreenshot } from "./screenshot.js";
 import { resolveModel } from "./router.js";
-import { getProvider, providerKeysFromEnv, type ProviderKeys } from "./providers/index.js";
+import { getProvider, providerKeysFromEnv, type ProviderKeys, type TokenUsage } from "./providers/index.js";
 import type { ModelChoice, ThinkingEffort } from "@uniqus/api-types";
 import { setTodos, type TodoItem } from "./todos.js";
 import { listProjectSecrets, plumbSecretToEnvFile } from "../secrets.js";
 import { callConnector, listProjectConnectors } from "../connectors/index.js";
+import {
+  formatSelectedElementBlock,
+  type SelectedElement,
+} from "./selectedElement.js";
 
 const MAX_ITERATIONS = 125;
 const MAX_TOKENS = 16384*2;
@@ -262,12 +266,30 @@ export interface LoopOptions extends LoopHooks {
    * next turn without a reconnect.
    */
   repo?: { fullName: string; url: string } | null;
+  /**
+   * The element the user clicked in the live preview (via the iframe picker),
+   * attached to THIS turn only. Rendered as a structured "selected element"
+   * block appended to the user message so the agent knows which UI node the
+   * request targets. Validated upstream (parseSelectedElement); null/undefined
+   * ⇒ nothing appended.
+   */
+  selectedElement?: SelectedElement | null;
 }
 
 export interface LoopResult {
   aborted: boolean;
-  /** Cumulative token usage for the turn (summed across every iteration). */
-  usage: { inputTokens: number; outputTokens: number };
+  /**
+   * Cumulative token usage for the turn (summed across every iteration).
+   * `inputTokens` is FRESH (uncached) input only; cached prompt tokens are
+   * reported separately so the dashboard can price them at the discounted rate
+   * instead of billing every replayed prefix token at the full input rate.
+   */
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  };
   /** The provider-native model id the turn actually ran on (for usage records). */
   model: string;
   /** The provider that served the turn. */
@@ -292,12 +314,33 @@ export async function runAgentLoop(
   // running counts) is forwarded by the onUsage hook passed to the adapter.
   let usageIn = 0;
   let usageOut = 0;
-  const finish = (aborted: boolean): LoopResult => ({
-    aborted,
-    usage: { inputTokens: usageIn, outputTokens: usageOut },
-    model: resolved.model,
-    provider: resolved.provider,
-  });
+  let usageCacheRead = 0;
+  let usageCacheCreate = 0;
+  // The active provider call's latest live usage, NOT yet committed to the
+  // running totals. Banked on the abort path so a user-initiated Stop mid-stream
+  // doesn't silently drop that call's billed tokens from the turn's record.
+  // Cleared to null the instant a call commits, so it's never double-counted.
+  let inflight: TokenUsage | null = null;
+  const finish = (aborted: boolean): LoopResult => {
+    if (aborted && inflight) {
+      usageIn += inflight.inputTokens;
+      usageOut += inflight.outputTokens;
+      usageCacheRead += inflight.cacheReadTokens ?? 0;
+      usageCacheCreate += inflight.cacheCreationTokens ?? 0;
+      inflight = null;
+    }
+    return {
+      aborted,
+      usage: {
+        inputTokens: usageIn,
+        outputTokens: usageOut,
+        cacheReadTokens: usageCacheRead,
+        cacheCreationTokens: usageCacheCreate,
+      },
+      model: resolved.model,
+      provider: resolved.provider,
+    };
+  };
   const skillsBody =
     opts.skills !== undefined ? opts.skills : await readSkills(opts.sandbox.rootDir);
   // Web search is wired on Anthropic, OpenAI (Responses built-in), and Gemini
@@ -313,7 +356,14 @@ export async function runAgentLoop(
     opts.repo ?? null,
   );
   const messages = opts.messages ?? [];
-  messages.push({ role: "user", content: userMessage });
+  // Append the selected-element context (if the user clicked one in the
+  // preview) as a structured block on this turn's user message, so the agent
+  // knows which UI node the request targets. It rides the persisted message
+  // and is stripped from the replayed user bubble (see REPLAY_TRAILER_MARKERS).
+  const turnContent = opts.selectedElement
+    ? `${userMessage}${formatSelectedElementBlock(opts.selectedElement)}`
+    : userMessage;
+  messages.push({ role: "user", content: turnContent });
   normalizeMessageHistoryInPlace(messages);
 
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
@@ -360,11 +410,23 @@ export async function runAgentLoop(
         onToolCall: opts.onToolCall,
         onToolResult: opts.onToolResult,
         // Live counter: forward committed totals + this call's running counts.
-        onUsage: (u) =>
+        // The composer's "X in" shows TOTAL processed input (fresh + cache), so
+        // a cached turn doesn't visually collapse to near-zero now that the
+        // buckets are split — the honest split still goes to the DB/dashboard.
+        // Also stash the call-local figure so an abort can bank it (see finish).
+        onUsage: (u) => {
+          inflight = u;
           opts.onUsage?.({
-            inputTokens: usageIn + u.inputTokens,
+            inputTokens:
+              usageIn +
+              usageCacheRead +
+              usageCacheCreate +
+              u.inputTokens +
+              (u.cacheReadTokens ?? 0) +
+              (u.cacheCreationTokens ?? 0),
             outputTokens: usageOut + u.outputTokens,
-          }),
+          });
+        },
       });
     } catch (err) {
       // Treat any error as "aborted" if the user has actually pressed Stop.
@@ -375,10 +437,18 @@ export async function runAgentLoop(
     }
 
     // Commit this iteration's usage into the running totals, then emit the
-    // settled cumulative figure.
+    // settled cumulative figure. Clear `inflight` so the now-committed call
+    // can't be banked again if a later iteration aborts.
     usageIn += turn.usage?.inputTokens ?? 0;
     usageOut += turn.usage?.outputTokens ?? 0;
-    opts.onUsage?.({ inputTokens: usageIn, outputTokens: usageOut });
+    usageCacheRead += turn.usage?.cacheReadTokens ?? 0;
+    usageCacheCreate += turn.usage?.cacheCreationTokens ?? 0;
+    inflight = null;
+    // Settled cumulative for the live counter — total processed input.
+    opts.onUsage?.({
+      inputTokens: usageIn + usageCacheRead + usageCacheCreate,
+      outputTokens: usageOut,
+    });
 
     const toolCalls = turn.toolCalls;
     messages.push({ role: "assistant", content: turn.content });
@@ -468,12 +538,17 @@ export async function runAgentLoop(
 }
 
 /**
- * Hard cap on a single tool result's text (head + tail kept). ~96 KB ≈ 24k
+ * Hard cap on a single tool result's text (head + tail kept). ~32 KB ≈ 8k
  * tokens — generous for real output but a firm ceiling so one oversized
  * read_file/grep/log can't overflow the context window or balloon the input
- * cost when replayed across the loop's iterations.
+ * cost when replayed across the loop's iterations. Lowered from 96 KB to match
+ * the connector cap and shrink the per-iteration replay cost: the full history
+ * (including every prior tool result) is re-sent on each of up to 125
+ * iterations, so an oversized result is paid for many times over. The head+tail
+ * split plus the "narrow your read/grep" hint steer the model toward bounded
+ * reads instead of relying on the ceiling.
  */
-const MAX_TOOL_RESULT_CHARS = 96 * 1024;
+const MAX_TOOL_RESULT_CHARS = 32 * 1024;
 export function truncateToolResultText(s: string): string {
   if (s.length <= MAX_TOOL_RESULT_CHARS) return s;
   const half = Math.floor(MAX_TOOL_RESULT_CHARS / 2);

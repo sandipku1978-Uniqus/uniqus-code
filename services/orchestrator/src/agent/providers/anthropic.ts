@@ -27,14 +27,18 @@ function applyEffort(
   params.output_config = { effort };
 }
 
+// Non-standard fields other adapters stamp onto tool_use blocks for their own
+// round-tripping: Gemini's `thought_signature` (3.x multi-turn function calling)
+// and OpenAI's `openai_reasoning` (encrypted reasoning replay). The Messages API
+// 400s on unknown block fields ("Extra inputs are not permitted"), so they must
+// be removed before a conversation that switched to Claude reaches the API.
+const FOREIGN_TOOL_USE_FIELDS = ["thought_signature", "openai_reasoning"] as const;
+
 /**
  * Strip provider-specific extras the canonical history may carry that the
- * Anthropic API rejects. The Gemini adapter stamps `thought_signature` onto
- * tool_use blocks (it needs them echoed back); when a conversation switches to
- * Claude, those blocks reach the Messages API, which 400s on the unknown field
- * ("tool_use.thought_signature: Extra inputs are not permitted"). We send a
- * shallow-cleaned copy and leave the stored history untouched (Gemini still
- * needs the signature). Only clones messages/blocks that actually carry it.
+ * Anthropic API rejects (see FOREIGN_TOOL_USE_FIELDS). We send a shallow-cleaned
+ * copy and leave the stored history untouched (the other providers still need
+ * their fields). Only clones messages/blocks that actually carry one.
  */
 function stripForeignFields(
   messages: Anthropic.MessageParam[],
@@ -43,20 +47,39 @@ function stripForeignFields(
     if (!Array.isArray(m.content)) return m;
     let touched = false;
     const content = m.content.map((block) => {
+      const rec = block as unknown as Record<string, unknown>;
       if (
         block &&
         typeof block === "object" &&
-        (block as { type?: string }).type === "tool_use" &&
-        "thought_signature" in block
+        rec.type === "tool_use" &&
+        FOREIGN_TOOL_USE_FIELDS.some((f) => f in rec)
       ) {
         touched = true;
-        const { thought_signature: _drop, ...rest } = block as Record<string, unknown>;
+        const rest = { ...rec };
+        for (const f of FOREIGN_TOOL_USE_FIELDS) delete rest[f];
         return rest as unknown as Anthropic.ContentBlockParam;
       }
       return block;
     });
     return touched ? ({ ...m, content } as Anthropic.MessageParam) : m;
   });
+}
+
+/**
+ * Mark the LAST tool as a cache breakpoint. Tools render first in the prompt
+ * prefix (before system + messages), and our tool schemas are large (~16 KB)
+ * and static, so caching them is a major saving across the loop's iterations.
+ * A breakpoint here caches the entire tools block; it also survives turns where
+ * only the system text changes (skills/repo/account-prompt are per-turn), which
+ * a system-only breakpoint would invalidate. cache_control on a tool is natively
+ * typed in the SDK (0.100.1), so no cast is needed. Returns a shallow copy.
+ */
+function withToolCache(tools: Anthropic.Tool[]): Anthropic.Tool[] {
+  if (tools.length === 0) return tools;
+  const i = tools.length - 1;
+  const copy = [...tools];
+  copy[i] = { ...copy[i], cache_control: { type: "ephemeral" } } as Anthropic.Tool;
+  return copy;
 }
 
 /**
@@ -109,7 +132,10 @@ export class AnthropicAdapter implements ModelProviderAdapter {
       model: p.model,
       max_tokens: p.maxTokens,
       system: [{ type: "text", text: p.system, cache_control: { type: "ephemeral" } }],
-      tools: [...p.tools, WEB_SEARCH_TOOL] as Anthropic.MessageCreateParams["tools"],
+      tools: withToolCache([
+        ...p.tools,
+        WEB_SEARCH_TOOL,
+      ] as Anthropic.Tool[]) as Anthropic.MessageCreateParams["tools"],
       messages: withPrefixCache(stripForeignFields(p.messages)),
     } as Anthropic.MessageCreateParamsStreaming;
     applyEffort(params as unknown as Record<string, unknown>, p.thinkingEffort);
@@ -120,24 +146,31 @@ export class AnthropicAdapter implements ModelProviderAdapter {
     );
 
     const announced = new Set<string>();
-    // Live token usage: message_start carries the input (+ cache) token count;
-    // each message_delta carries the running output_tokens. Surface both as
-    // they arrive so the composer's counter ticks up during the stream.
-    let inputTokens = 0;
+    // Live token usage. message_start carries the input breakdown; each
+    // message_delta carries the running output_tokens. We keep the three input
+    // buckets SEPARATE — `input_tokens` is the fresh/uncached remainder,
+    // `cache_read_input_tokens` bills ~0.1×, `cache_creation_input_tokens`
+    // ~1.25× — so the dashboard can price a cached turn honestly instead of
+    // charging every replayed prefix token at the full rate (the bug that made
+    // a small task look like millions of input tokens).
+    let inputTokens = 0; // fresh (uncached)
+    let cacheReadTokens = 0;
+    let cacheCreationTokens = 0;
     let outputTokens = 0;
+    const emitLive = (): void =>
+      p.onUsage?.({ inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens });
     stream.on("streamEvent", (event) => {
       if (event.type === "message_start") {
         const u = event.message.usage;
-        inputTokens =
-          (u.input_tokens ?? 0) +
-          (u.cache_read_input_tokens ?? 0) +
-          (u.cache_creation_input_tokens ?? 0);
+        inputTokens = u.input_tokens ?? 0;
+        cacheReadTokens = u.cache_read_input_tokens ?? 0;
+        cacheCreationTokens = u.cache_creation_input_tokens ?? 0;
         outputTokens = u.output_tokens ?? 0;
-        p.onUsage?.({ inputTokens, outputTokens });
+        emitLive();
       } else if (event.type === "message_delta") {
         if (event.usage?.output_tokens != null) {
           outputTokens = event.usage.output_tokens;
-          p.onUsage?.({ inputTokens, outputTokens });
+          emitLive();
         }
       } else if (event.type === "content_block_start") {
         const block = event.content_block;
@@ -156,11 +189,10 @@ export class AnthropicAdapter implements ModelProviderAdapter {
     const finalMessage = await stream.finalMessage();
     const fu = finalMessage.usage;
     const finalUsage = {
-      inputTokens:
-        (fu.input_tokens ?? 0) +
-        (fu.cache_read_input_tokens ?? 0) +
-        (fu.cache_creation_input_tokens ?? 0),
+      inputTokens: fu.input_tokens ?? 0, // fresh (uncached) only
       outputTokens: fu.output_tokens ?? 0,
+      cacheReadTokens: fu.cache_read_input_tokens ?? 0,
+      cacheCreationTokens: fu.cache_creation_input_tokens ?? 0,
     };
     p.onUsage?.(finalUsage);
 

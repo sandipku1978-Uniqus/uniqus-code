@@ -87,7 +87,7 @@ export async function importZip(
  * Returns the common single-root prefix (with trailing `/`) if every entry
  * shares the same first path segment, else null.
  */
-function detectSingleRoot(names: string[]): string | null {
+export function detectSingleRoot(names: string[]): string | null {
   if (names.length === 0) return null;
   let common: string | null = null;
   for (const n of names) {
@@ -165,7 +165,15 @@ export async function importGithub(
   return { files_imported: count, total_bytes: bytes, stripped_root: null };
 }
 
-function buildCloneUrl(repoUrl: string, pat?: string): string {
+/**
+ * Scrub an injected PAT (`x-access-token:<pat>@`) from any text before it can
+ * land in an error message or log. Pure so it can be unit-tested directly.
+ */
+export function scrubPat(text: string): string {
+  return text.replace(/x-access-token:[^@]+@/g, "x-access-token:***@");
+}
+
+export function buildCloneUrl(repoUrl: string, pat?: string): string {
   const trimmed = repoUrl.trim();
   if (!pat) return trimmed;
   // Only inject for https URLs; ssh URLs (git@github.com:...) ignore PAT.
@@ -209,7 +217,7 @@ function runGit(args: string[]): Promise<void> {
     child.on("close", (code) => {
       if (code === 0) return resolve();
       // Scrub PAT from any error surface, just in case.
-      const safe = stderr.replace(/x-access-token:[^@]+@/g, "x-access-token:***@");
+      const safe = scrubPat(stderr);
       reject(new Error(`git clone failed (exit ${code}): ${safe.slice(-2000)}`));
     });
   });

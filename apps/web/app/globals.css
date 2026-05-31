@@ -1009,6 +1009,24 @@ section.band .sub {
   color: var(--text-muted);
 }
 .proj .status .d { width: 6px; height: 6px; border-radius: 50%; background: var(--conf-high); }
+/* Deploy-state dot colors (always paired with a text label — never color-only). */
+.proj .status .d.live { background: var(--conf-high); }
+.proj .status .d.building { background: var(--conf-medium); }
+.proj .status .d.failed { background: var(--conf-low); }
+.proj .status .d.none { background: var(--text-dim); }
+
+/* Loading placeholder. Subtle raised block that pulses; sized inline by the
+   <Skeleton> component (width/height/radius props). */
+.skeleton {
+  display: block;
+  background: var(--bg-elev);
+  border-radius: 6px;
+  animation: uniqus-skeleton-pulse 1.4s ease-in-out infinite;
+}
+@keyframes uniqus-skeleton-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 0.9; }
+}
 
 .empty-state {
   border: 1px dashed var(--border-default);
@@ -2364,6 +2382,7 @@ section.band .sub {
 
 /* ── Preview iframe wrapper ───────────────────────────────────────────── */
 .preview-wrap {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -2396,17 +2415,24 @@ section.band .sub {
 .preview-iframe {
   flex: 1;
   width: 100%;
+  height: 100%;
   border: 0;
   background: #fff;
+  display: block;
 }
 
-/* ── Preview phone mode ───────────────────────────────────────────────────
-   The stage + device-frame are always in the DOM; `data-phone` flips them
-   between a transparent pass-through (iframe fills the pane, exactly as the
-   plain preview) and a centered phone-proportioned device on a dark backdrop.
-   Because the iframe element never moves in the tree, toggling does not reload
-   the running app. */
+/* ── Preview stage + device frame ──────────────────────────────────────────
+   The stage, device-frame, and viewport are always in the DOM; `data-framed`
+   flips them between a transparent pass-through (iframe fills the pane, exactly
+   like the plain preview) and a centered, fixed-width device on a dark backdrop
+   (the device-breakpoint picker). The iframe element never moves in the tree,
+   so switching device sizes never reloads the running app.
+
+   `.preview-viewport` is the iframe's own coordinate space: the element-picker
+   highlight lives inside it, so it inherits both the iframe's CSS pixels and
+   any scale-to-fit transform applied to a fixed device size (set inline). */
 .preview-stage {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -2417,51 +2443,393 @@ section.band .sub {
   min-height: 0;
   display: flex;
 }
+.preview-viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.preview-viewport[data-framed="true"] {
+  flex: 0 0 auto;
+}
 
-.preview-stage[data-phone="true"] {
+.preview-stage[data-framed="true"] {
   overflow: auto;
   padding: 20px;
   background: radial-gradient(90% 90% at 50% 0%, #15151c, #0a0a0e);
 }
-.device-frame[data-phone="true"] {
-  position: relative;
+/* In framed mode the device-frame is sized inline to the SCALED footprint
+   (deviceW×scale × deviceH×scale); the viewport inside is the true device size
+   scaled by a transform with a top-left origin, so overflow:hidden clips the
+   painted result to the rounded frame. */
+.preview-stage[data-framed="true"] > .device-frame {
   flex: 0 0 auto;
-  /* Drive the size from WIDTH (capped to the pane) and derive height from the
-     aspect ratio, so the frame can never overflow horizontally — even in a
-     narrow desktop preview pane. On panes shorter than the derived height the
-     stage scrolls vertically. `margin:auto` (rather than the parent's
-     align/justify center) keeps it centered while staying fully scrollable in
-     the overflow direction. */
   margin: auto;
-  width: min(390px, 100%);
-  height: auto;
-  aspect-ratio: 390 / 844;
-  padding: 12px;
+  display: block;
+  overflow: hidden;
   background: #0b0b0f;
   border: 1px solid #30303c;
-  border-radius: 44px;
+  border-radius: 16px;
   box-shadow:
     0 30px 70px rgba(0, 0, 0, 0.55),
     inset 0 0 0 1px rgba(255, 255, 255, 0.03);
 }
-/* Notch */
-.device-frame[data-phone="true"]::before {
-  content: "";
+.device-frame[data-framed="true"] > .preview-viewport {
+  border-radius: inherit;
+  overflow: hidden;
+}
+
+/* ── Element picker ─────────────────────────────────────────────────────────
+   Highlight box drawn over the picked element. It lives inside .preview-viewport
+   so its rect (the element's iframe-CSS-px box) lines up 1:1 — and rides any
+   device scale transform. Never intercepts pointer events. */
+.picker-highlight {
   position: absolute;
-  top: 13px;
+  pointer-events: none;
+  z-index: 2;
+  border: 2px solid var(--brand-magenta);
+  background: color-mix(in srgb, var(--brand-magenta) 14%, transparent);
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+.picker-highlight-label {
+  position: absolute;
+  top: -20px;
+  left: -2px;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 6px;
+  font-family: var(--font-mono-stack);
+  font-size: 10px;
+  line-height: 16px;
+  color: #fff;
+  background: var(--brand-magenta);
+  border-radius: 3px 3px 3px 0;
+}
+/* Floating hint while pick-mode is armed. */
+.picker-hint {
+  position: absolute;
+  top: 40px;
   left: 50%;
   transform: translateX(-50%);
-  width: 36%;
-  max-width: 150px;
-  height: 20px;
-  background: #0b0b0f;
-  border-radius: 0 0 14px 14px;
-  z-index: 2;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 24px);
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-elev, #1a1a22);
+  border: 1px solid var(--brand-magenta);
+  border-radius: 999px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
-.device-frame[data-phone="true"] > .preview-iframe {
-  border-radius: 30px;
-  /* The iframe's own scroll keeps content inside the rounded corners. */
+.picker-hint-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--brand-magenta);
+  animation: pulse-dim 1.5s ease-in-out infinite;
+}
+.picker-hint-esc {
+  padding: 1px 6px;
+  font-size: 10px;
+  color: var(--text-dim);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+}
+/* Confirm card after an element is reported. */
+.picker-confirm {
+  position: absolute;
+  top: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(360px, calc(100% - 24px));
+  padding: 10px 12px;
+  background: var(--bg-elev, #1a1a22);
+  border: 1px solid var(--brand-magenta);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+.picker-confirm-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.picker-confirm-sel {
+  font-family: var(--font-mono-stack);
+  font-size: 12px;
+  color: var(--brand-magenta);
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.picker-confirm-text {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.picker-confirm-actions {
+  display: flex;
+  gap: 6px;
+}
+.picker-btn {
+  flex: 1;
+  padding: 5px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.picker-btn:hover {
+  background: var(--bg-surface-hover);
+}
+.picker-btn.primary {
+  background: var(--brand-magenta);
+  border-color: var(--brand-magenta);
+  color: #fff;
+}
+.picker-btn.primary:hover {
+  filter: brightness(1.08);
+}
+.picker-btn.ghost {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+}
+.picker-toast {
+  position: absolute;
+  top: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-elev, #1a1a22);
+  border: 1px solid var(--conf-high, #2e7d52);
+  border-radius: 999px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  animation: scaleIn var(--dur-fast, 0.12s) ease backwards;
+}
+
+/* ── Device-breakpoint picker ───────────────────────────────────────────────*/
+.device-picker {
+  position: relative;
+}
+.device-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  min-width: 170px;
+  padding: 4px;
+  background: var(--bg-elev, #1a1a22);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+.device-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  color: var(--text-primary);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.device-menu-item:hover {
+  background: var(--bg-surface-hover);
+}
+.device-menu-item.active {
+  color: var(--brand-magenta);
+}
+.device-menu-dim {
+  font-family: var(--font-mono-stack);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* ── Selected-element chip (composer) ───────────────────────────────────────*/
+.selected-el-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 4px 4px 8px;
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--brand-magenta);
+  background: color-mix(in srgb, var(--brand-magenta) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--brand-magenta) 35%, transparent);
+  border-radius: var(--radius-sm);
+}
+.selected-el-chip-label {
+  min-width: 0;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono-stack);
+}
+.selected-el-chip button {
+  border: 0;
+  background: transparent;
+  color: var(--brand-magenta);
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+}
+.selected-el-chip button:hover {
+  background: color-mix(in srgb, var(--brand-magenta) 18%, transparent);
+}
+
+/* ── Screenshot annotator ───────────────────────────────────────────────────*/
+.annotator {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.annotator-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-default);
+  background: var(--bg-surface);
+}
+.annotator-tool-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.annotator-tool,
+.annotator-action {
+  padding: 4px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.annotator-tool:hover:not(:disabled),
+.annotator-action:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-surface-hover);
+}
+.annotator-tool.active {
+  color: #fff;
+  background: var(--brand-magenta);
+  border-color: var(--brand-magenta);
+}
+.annotator-tool:disabled,
+.annotator-action:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.annotator-swatch {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+.annotator-swatch.active {
+  border-color: var(--text-primary);
+}
+.annotator-swatch:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.annotator-width {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 24px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.annotator-width.active {
+  color: var(--brand-magenta);
+  border-color: var(--brand-magenta);
+}
+.annotator-width:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.annotator-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 320px;
+  max-height: 64vh;
+  overflow: auto;
+  padding: 16px;
+  background: repeating-conic-gradient(#1a1a22 0% 25%, #121218 0% 50%) 50% / 22px 22px;
+}
+.annotator-canvas {
+  max-width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+  border-radius: 4px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  touch-action: none;
+}
+.annotator-text-input {
+  font-family: var(--font-mono-stack);
+  font-size: 13px;
+  padding: 2px 6px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  outline: none;
+}
+.annotator-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.annotator-error {
+  padding: 8px 14px;
+  font-size: 12px;
+  color: var(--conf-low, #c0392b);
+  border-top: 1px solid var(--border-default);
+  background: color-mix(in srgb, var(--conf-low, #c0392b) 10%, transparent);
 }
 
 /* ── Error boundaries ──────────────────────────────────────────────────────

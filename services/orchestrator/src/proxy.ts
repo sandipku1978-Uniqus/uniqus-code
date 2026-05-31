@@ -129,11 +129,12 @@ export function resolveTarget(
 /**
  * Forward an HTTP request to the in-sandbox dev server and stream the response back.
  *
- * For HTML responses we buffer + inject a tiny navigation-reporter script so
- * the workspace's preview URL bar can reflect the iframe's actual current
- * path (including SPA pushState navigations). The script posts a message to
- * `window.parent` on every path change. Cross-origin is fine — postMessage
- * works across origins; we never need to read iframe.contentWindow.location.
+ * For HTML responses we buffer + inject two tiny bridge scripts: a
+ * navigation-reporter (so the workspace's preview URL bar reflects the iframe's
+ * actual path, including SPA pushState navigations) and an element-picker (so
+ * the user can click a node in the preview to point the agent at it). Both post
+ * messages to `window.parent`. Cross-origin is fine — postMessage works across
+ * origins; we never need to read iframe.contentWindow.location.
  */
 export function proxyHttp(
   req: IncomingMessage,
@@ -195,7 +196,7 @@ export function proxyHttp(
       upRes.on("data", (c: Buffer) => chunks.push(c));
       upRes.on("end", () => {
         const original = Buffer.concat(chunks).toString("utf-8");
-        const injected = injectNavReporter(original, target.serverId);
+        const injected = injectPreviewScripts(original, target.serverId);
         res.writeHead(upRes.statusCode ?? 502, outHeaders);
         res.end(injected);
       });
@@ -311,16 +312,39 @@ const HOP_BY_HOP = new Set([
 ]);
 
 /**
- * Tiny script we inject into the head of every HTML preview response. It
- * wraps history.pushState/replaceState and listens for popstate, then posts
- * the current path to window.parent. The workspace's PreviewPanel listens
- * for `uniqus:preview-nav` messages and updates the URL bar.
+ * Inject our preview bridge scripts into the head of every HTML preview
+ * response: the navigation reporter and the element picker. Both are
+ * self-contained IIFEs guarded by an install flag (idempotent if injected
+ * twice) and only ever postMessage OUTWARD to window.parent — cross-origin
+ * safe; we never read parent or iframe state.
  *
- * Cross-origin safe — we only postMessage outward; we never read parent state.
- * Idempotent if injected twice (the wrappers no-op on the second pass).
+ * Exported for unit testing — the injected payload is stringified JS that the
+ * compiler can't validate, so a test parses it to catch escape/quote breakage.
  */
-function injectNavReporter(html: string, serverId: string): string {
-  const script = `<script>(function(){
+export function injectPreviewScripts(html: string, serverId: string): string {
+  const script = navReporterScript(serverId) + elementPickerScript(serverId);
+  // Prefer to inject at the start of <head> so we run before app code; fall
+  // back to <body> or just prepending if neither tag exists (rare).
+  const headOpen = html.search(/<head[^>]*>/i);
+  if (headOpen >= 0) {
+    const insertAt = html.indexOf(">", headOpen) + 1;
+    return html.slice(0, insertAt) + script + html.slice(insertAt);
+  }
+  const bodyOpen = html.search(/<body[^>]*>/i);
+  if (bodyOpen >= 0) {
+    const insertAt = html.indexOf(">", bodyOpen) + 1;
+    return html.slice(0, insertAt) + script + html.slice(insertAt);
+  }
+  return script + html;
+}
+
+/**
+ * Wraps history.pushState/replaceState and listens for popstate, then posts the
+ * current path to window.parent. The workspace's PreviewPanel listens for
+ * `uniqus:preview-nav` messages and updates the URL bar.
+ */
+function navReporterScript(serverId: string): string {
+  return `<script>(function(){
   if (window.__uniqusNavReporterInstalled) return;
   window.__uniqusNavReporterInstalled = true;
   var serverId = ${JSON.stringify(serverId)};
@@ -348,19 +372,170 @@ function injectNavReporter(html: string, serverId: string): string {
   if (document.readyState !== "loading") post();
   else document.addEventListener("DOMContentLoaded", post);
 })();</script>`;
-  // Prefer to inject at the start of <head> so we run before app code; fall
-  // back to <body> or just prepending if neither tag exists (rare).
-  const headOpen = html.search(/<head[^>]*>/i);
-  if (headOpen >= 0) {
-    const insertAt = html.indexOf(">", headOpen) + 1;
-    return html.slice(0, insertAt) + script + html.slice(insertAt);
+}
+
+/**
+ * Element picker. When the parent turns pick-mode ON (by posting a
+ * `uniqus:pick-mode` message into the iframe), it highlights whatever element
+ * the cursor is over and, on the next click, posts the element descriptor to
+ * the parent as
+ *   { type:"uniqus:element", server_id, selector, tag, classes, id, rect, text }
+ * then turns itself off. The shared contract is that outbound message shape; the
+ * inbound control message is accepted liberally (any of a few `uniqus:` toggle
+ * names) so it interoperates regardless of which name the host UI sends.
+ *
+ * While picking it swallows mousedown/up/click in the capture phase so the
+ * preview app's own handlers don't fire on the selection click, and Escape
+ * cancels. All listeners are passive observers of the page — no DOM mutation
+ * beyond a single fixed-position highlight overlay (pointer-events:none).
+ */
+function elementPickerScript(serverId: string): string {
+  return `<script>(function(){
+  if (window.__uniqusElementPickerInstalled) return;
+  window.__uniqusElementPickerInstalled = true;
+  var serverId = ${JSON.stringify(serverId)};
+  var active = false, hovered = null, box = null, label = null;
+
+  function ensureOverlay() {
+    if (box) return;
+    box = document.createElement("div");
+    box.setAttribute("data-uniqus-picker", "1");
+    var s = box.style;
+    s.position = "fixed"; s.zIndex = "2147483646"; s.pointerEvents = "none";
+    s.border = "2px solid #d4439a"; s.background = "rgba(212,67,154,0.12)";
+    s.borderRadius = "2px"; s.boxSizing = "border-box"; s.display = "none";
+    s.transition = "left 40ms ease-out, top 40ms ease-out, width 40ms ease-out, height 40ms ease-out";
+    label = document.createElement("div");
+    label.setAttribute("data-uniqus-picker", "1");
+    var ls = label.style;
+    ls.position = "fixed"; ls.zIndex = "2147483647"; ls.pointerEvents = "none";
+    ls.background = "#d4439a"; ls.color = "#fff"; ls.display = "none";
+    ls.font = "11px/1.4 ui-monospace,Menlo,Consolas,monospace";
+    ls.padding = "2px 6px"; ls.borderRadius = "3px"; ls.whiteSpace = "nowrap";
+    ls.maxWidth = "90vw"; ls.overflow = "hidden"; ls.textOverflow = "ellipsis";
+    var root = document.body || document.documentElement;
+    root.appendChild(box); root.appendChild(label);
   }
-  const bodyOpen = html.search(/<body[^>]*>/i);
-  if (bodyOpen >= 0) {
-    const insertAt = html.indexOf(">", bodyOpen) + 1;
-    return html.slice(0, insertAt) + script + html.slice(insertAt);
+  function removeOverlay() {
+    if (box && box.parentNode) box.parentNode.removeChild(box);
+    if (label && label.parentNode) label.parentNode.removeChild(label);
+    box = null; label = null;
   }
-  return script + html;
+  function esc(v) {
+    if (window.CSS && CSS.escape) return CSS.escape(v);
+    return String(v).replace(/[^a-zA-Z0-9_-]/g, function(c){ return "\\\\" + c; });
+  }
+  function stableClass(c) {
+    if (!c || c.length > 30) return false;
+    if (/^(css|sc|jsx|emotion|chakra)-/i.test(c)) return false; // styled/emotion/css-modules
+    if (/[0-9a-f]{6,}/i.test(c) && /[0-9]/.test(c)) return false; // hashy
+    return true;
+  }
+  function firstStableClass(el) {
+    var list = el.classList ? Array.prototype.slice.call(el.classList) : [];
+    for (var i = 0; i < list.length; i++) if (stableClass(list[i])) return list[i];
+    return null;
+  }
+  function nthOfType(el) {
+    var p = el.parentNode; if (!p) return 0;
+    var same = [], kids = p.children, i;
+    for (i = 0; i < kids.length; i++) if (kids[i].tagName === el.tagName) same.push(kids[i]);
+    if (same.length < 2) return 0;
+    return same.indexOf(el) + 1;
+  }
+  function selectorFor(el) {
+    if (!el || el.nodeType !== 1) return "";
+    if (el.id && /^[A-Za-z][\\w-]*$/.test(el.id)) return "#" + esc(el.id);
+    var parts = [], node = el, guard = 0;
+    while (node && node.nodeType === 1 && node !== document.documentElement && guard < 8) {
+      guard++;
+      if (node.id && /^[A-Za-z][\\w-]*$/.test(node.id)) { parts.unshift("#" + esc(node.id)); break; }
+      var seg = node.tagName.toLowerCase();
+      var c = firstStableClass(node);
+      if (c) seg += "." + esc(c);
+      var n = nthOfType(node);
+      if (n) seg += ":nth-of-type(" + n + ")";
+      parts.unshift(seg);
+      node = node.parentNode;
+    }
+    return parts.join(" > ");
+  }
+  function describe(el) {
+    var r = el.getBoundingClientRect();
+    var classes = el.classList ? Array.prototype.slice.call(el.classList) : [];
+    var text = (el.innerText || el.textContent || "").replace(/\\s+/g, " ").trim();
+    if (text.length > 300) text = text.slice(0, 300);
+    return {
+      type: "uniqus:element", server_id: serverId,
+      selector: selectorFor(el), tag: el.tagName.toLowerCase(),
+      id: el.id || null, classes: classes,
+      rect: { x: Math.round(r.left), y: Math.round(r.top),
+        width: Math.round(r.width), height: Math.round(r.height),
+        top: Math.round(r.top), right: Math.round(r.right),
+        bottom: Math.round(r.bottom), left: Math.round(r.left) },
+      text: text
+    };
+  }
+  function paint(el) {
+    if (!el || el.nodeType !== 1) return;
+    ensureOverlay();
+    var r = el.getBoundingClientRect(), bs = box.style;
+    bs.display = "block"; bs.left = r.left + "px"; bs.top = r.top + "px";
+    bs.width = r.width + "px"; bs.height = r.height + "px";
+    var cls = el.classList && el.classList.length
+      ? "." + Array.prototype.slice.call(el.classList).slice(0, 2).join(".") : "";
+    label.textContent = el.tagName.toLowerCase() + cls;
+    label.style.display = "block";
+    var ly = r.top - 22; if (ly < 2) ly = r.top + 2;
+    label.style.left = Math.max(2, r.left) + "px"; label.style.top = ly + "px";
+  }
+  function onMove(e) {
+    if (!active) return;
+    var el = e.target;
+    if (!el || el === box || el === label) return;
+    hovered = el; paint(el);
+  }
+  function onClick(e) {
+    if (!active) return;
+    e.preventDefault(); e.stopPropagation();
+    var el = e.target || hovered;
+    if (el && el !== box && el !== label) {
+      try { window.parent.postMessage(describe(el), "*"); } catch (err) {}
+    }
+    setActive(false);
+  }
+  function swallow(e) { if (active) { e.preventDefault(); e.stopPropagation(); } }
+  function onKey(e) {
+    if (active && (e.key === "Escape" || e.keyCode === 27)) {
+      setActive(false);
+      try { window.parent.postMessage({ type: "uniqus:pick-cancel", server_id: serverId }, "*"); } catch (err) {}
+    }
+  }
+  function setActive(on) {
+    on = !!on;
+    if (on === active) return;
+    active = on;
+    if (on) { ensureOverlay(); document.documentElement.style.cursor = "crosshair"; }
+    else { removeOverlay(); hovered = null; document.documentElement.style.cursor = ""; }
+    try { window.parent.postMessage({ type: "uniqus:pick-state", server_id: serverId, active: active }, "*"); } catch (err) {}
+  }
+  window.addEventListener("message", function(e) {
+    var d = e.data;
+    if (!d || typeof d !== "object") return;
+    var t = d.type;
+    if (t === "uniqus:pick-mode" || t === "uniqus:select-mode" || t === "uniqus:picker") {
+      var want = (d.enabled != null ? d.enabled : (d.active != null ? d.active : d.value));
+      setActive(!!want);
+    } else if (t === "uniqus:pick-start") { setActive(true); }
+    else if (t === "uniqus:pick-stop") { setActive(false); }
+  });
+  document.addEventListener("mousemove", onMove, true);
+  document.addEventListener("click", onClick, true);
+  document.addEventListener("mousedown", swallow, true);
+  document.addEventListener("mouseup", swallow, true);
+  document.addEventListener("keydown", onKey, true);
+  window.addEventListener("scroll", function(){ if (active && hovered) paint(hovered); }, true);
+})();</script>`;
 }
 
 /**

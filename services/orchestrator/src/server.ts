@@ -29,6 +29,12 @@ import type {
 } from "@uniqus/api-types";
 import { MODEL_CATALOG, estimateCostUsd } from "@uniqus/api-types";
 import { runAgentLoop } from "./agent/loop.js";
+import {
+  parseSelectedElement,
+  formatSelectedElementBlock,
+  SELECTED_ELEMENT_MARKER,
+  type SelectedElement,
+} from "./agent/selectedElement.js";
 import { proposePlan, formatPlanForExecution } from "./agent/plan.js";
 import { getTodos, clearTodos } from "./agent/todos.js";
 import {
@@ -90,7 +96,12 @@ import {
   clearGithubRepo,
 } from "./db/projects.js";
 import { loadHistory, appendMessage, clearHistory } from "./db/messages.js";
-import { recordUsageEvent, getUsageAggregate } from "./db/usage.js";
+import {
+  recordUsageEvent,
+  getUsageAggregate,
+  getDailyUsageByModel,
+  getUsageByProjectByModel,
+} from "./db/usage.js";
 import {
   ensureDefaultSession,
   listSessions,
@@ -1320,6 +1331,19 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return json(res, 200, { ok: true });
   }
 
+  // Per-project usage rollup (same shape as /api/account/usage-stats, scoped
+  // to one project) for the workspace's usage widget. Ownership is verified via
+  // getProject before we expose any figures.
+  const projectUsageMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/usage$/,
+  );
+  if (projectUsageMatch && req.method === "GET") {
+    const projectId = projectUsageMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    return json(res, 200, { stats: await projectUsageStats(user.id, projectId) });
+  }
+
   // ── Deployments ─────────────────────────────────────────────────────────
   // List a project's recent deploys for the deploy modal's history panel.
   const deployListMatch = req.url?.match(
@@ -1509,6 +1533,14 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     // dev server on the orchestrator host even with Firecracker on.
     let runVm: VmHandle | undefined = undefined;
     if (isFirecrackerEnabled()) {
+      // Only announce a cold boot/restore — a VM that's already running
+      // resumes instantly, so we'd be lying to the user about a wait.
+      const alreadyRunning = listVms().some(
+        (vm) => vm.projectId === projectId && vm.state === "running",
+      );
+      if (!alreadyRunning) {
+        broadcastToProject(projectId, { type: "system", content: "Starting sandbox…" });
+      }
       try {
         runVm = await ensureVm({ projectId, hostSandboxDir: dest });
       } catch (err) {
@@ -1528,11 +1560,15 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     // Run click can't race the session-start auto-install or an agent-issued
     // `npm install` (concurrent installs corrupt node_modules).
     const dep = await ensureProjectDeps({ rootDir: dest, vm: runVm }, projectId, {
-      onStart: (mgr) =>
+      onStart: (mgr) => {
+        // Progress notice for the busy pill — fires only when an install is
+        // actually about to run (onStart is skipped when deps are present).
+        broadcastToProject(projectId, { type: "system", content: "Installing dependencies…" });
         broadcastToProject(projectId, {
           type: "text",
           content: `\n[run] installing dependencies (${mgr} install) — this can take a minute…\n`,
-        }),
+        });
+      },
     });
     if (dep.attempted && !dep.ok) {
       return json(res, 400, {
@@ -2160,6 +2196,8 @@ async function accountUsageStats(ownerId: string): Promise<AccountUsageStats> {
     return {
       total_input_tokens: 0,
       total_output_tokens: 0,
+      total_cache_read_tokens: 0,
+      total_cache_creation_tokens: 0,
       total_cost_usd: 0,
       total_time_ms: 0,
       turns: 0,
@@ -2168,7 +2206,15 @@ async function accountUsageStats(ownerId: string): Promise<AccountUsageStats> {
   }
   let totalCost = 0;
   const topModels = agg.per_model.map((m) => {
-    totalCost += estimateCostUsd(m.model, m.input_tokens, m.output_tokens);
+    // Price cached reads/writes at their discounted rates — not the full input
+    // rate — so a heavily-cached agent loop isn't billed ~10× over reality.
+    totalCost += estimateCostUsd(
+      m.model,
+      m.input_tokens,
+      m.output_tokens,
+      m.cache_read_tokens,
+      m.cache_creation_tokens,
+    );
     const catalog = MODEL_CATALOG.find((c) => c.model === m.model);
     return {
       model: m.model,
@@ -2176,15 +2222,194 @@ async function accountUsageStats(ownerId: string): Promise<AccountUsageStats> {
       label: catalog?.label ?? m.model,
       input_tokens: m.input_tokens,
       output_tokens: m.output_tokens,
+      cache_read_tokens: m.cache_read_tokens,
+      cache_creation_tokens: m.cache_creation_tokens,
       turns: m.turns,
     };
   });
+
+  // Per-day and per-project breakdowns for the dashboard trend chart + the
+  // "spend by project" widget. Both come back split per model so cost can be
+  // priced with the right per-model rates, then collapsed to one entry per
+  // date / per project here. Best-effort — a failed lookup just omits that
+  // slice rather than failing the whole rollup.
+  let daily: AccountUsageStats["daily"];
+  try {
+    const dailyRows = await getDailyUsageByModel(ownerId, 30);
+    const byDate = new Map<string, { cost_usd: number; tokens: number }>();
+    for (const r of dailyRows) {
+      const slot = byDate.get(r.date) ?? { cost_usd: 0, tokens: 0 };
+      slot.cost_usd += estimateCostUsd(
+        r.model,
+        r.input_tokens,
+        r.output_tokens,
+        r.cache_read_tokens,
+        r.cache_creation_tokens,
+      );
+      slot.tokens += r.input_tokens + r.output_tokens;
+      byDate.set(r.date, slot);
+    }
+    daily = [...byDate.entries()]
+      .map(([date, v]) => ({ date, cost_usd: v.cost_usd, tokens: v.tokens }))
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  } catch (err) {
+    console.error("accountUsageStats: getDailyUsageByModel failed:", err);
+  }
+
+  let byProject: AccountUsageStats["by_project"];
+  try {
+    const projectRows = await getUsageByProjectByModel(ownerId);
+    const byProjectId = new Map<
+      string,
+      { project_name: string; cost_usd: number; tokens: number }
+    >();
+    for (const r of projectRows) {
+      const slot =
+        byProjectId.get(r.project_id) ??
+        { project_name: r.project_name, cost_usd: 0, tokens: 0 };
+      slot.cost_usd += estimateCostUsd(
+        r.model,
+        r.input_tokens,
+        r.output_tokens,
+        r.cache_read_tokens,
+        r.cache_creation_tokens,
+      );
+      slot.tokens += r.input_tokens + r.output_tokens;
+      byProjectId.set(r.project_id, slot);
+    }
+    byProject = [...byProjectId.entries()]
+      .map(([project_id, v]) => ({
+        project_id,
+        project_name: v.project_name,
+        cost_usd: v.cost_usd,
+        tokens: v.tokens,
+      }))
+      .sort((a, b) => b.cost_usd - a.cost_usd)
+      .slice(0, 8);
+  } catch (err) {
+    console.error("accountUsageStats: getUsageByProjectByModel failed:", err);
+  }
+
   return {
     total_input_tokens: agg.total_input_tokens,
     total_output_tokens: agg.total_output_tokens,
+    total_cache_read_tokens: agg.total_cache_read_tokens,
+    total_cache_creation_tokens: agg.total_cache_creation_tokens,
     total_cost_usd: totalCost,
     total_time_ms: agg.total_time_ms,
     turns: agg.turns,
+    top_models: topModels,
+    daily,
+    by_project: byProject,
+  };
+}
+
+/**
+ * Per-project usage rollup — the same {@link AccountUsageStats} shape the
+ * dashboard consumes, but scoped to one project. Built from the per-(project,
+ * model) rows so cost is priced per model with {@link estimateCostUsd} (the
+ * single cost source) and cached tokens get their discounted rates. Never
+ * throws — a failed lookup yields a zeroed rollup so the project view still
+ * renders. `total_time_ms` isn't carried on the per-project rows, so it's 0
+ * here; the account-wide endpoint remains the source for wall-clock time.
+ */
+async function projectUsageStats(
+  ownerId: string,
+  projectId: string,
+): Promise<AccountUsageStats> {
+  const empty: AccountUsageStats = {
+    total_input_tokens: 0,
+    total_output_tokens: 0,
+    total_cache_read_tokens: 0,
+    total_cache_creation_tokens: 0,
+    total_cost_usd: 0,
+    total_time_ms: 0,
+    turns: 0,
+    top_models: [],
+  };
+  let rows;
+  try {
+    rows = await getUsageByProjectByModel(ownerId);
+  } catch (err) {
+    console.error("projectUsageStats: getUsageByProjectByModel failed:", err);
+    return empty;
+  }
+  const mine = rows.filter((r) => r.project_id === projectId);
+  if (mine.length === 0) return empty;
+
+  let totalInput = 0;
+  let totalOutput = 0;
+  let totalCacheRead = 0;
+  let totalCacheCreation = 0;
+  let totalCost = 0;
+  let turns = 0;
+  // Collapse the project's rows to one entry per model for the top-models list.
+  const byModel = new Map<
+    string,
+    {
+      provider: string;
+      input_tokens: number;
+      output_tokens: number;
+      cache_read_tokens: number;
+      cache_creation_tokens: number;
+      turns: number;
+    }
+  >();
+  for (const r of mine) {
+    totalInput += r.input_tokens;
+    totalOutput += r.output_tokens;
+    totalCacheRead += r.cache_read_tokens;
+    totalCacheCreation += r.cache_creation_tokens;
+    turns += r.turns;
+    totalCost += estimateCostUsd(
+      r.model,
+      r.input_tokens,
+      r.output_tokens,
+      r.cache_read_tokens,
+      r.cache_creation_tokens,
+    );
+    const slot =
+      byModel.get(r.model) ??
+      {
+        provider: r.provider,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+        turns: 0,
+      };
+    slot.input_tokens += r.input_tokens;
+    slot.output_tokens += r.output_tokens;
+    slot.cache_read_tokens += r.cache_read_tokens;
+    slot.cache_creation_tokens += r.cache_creation_tokens;
+    slot.turns += r.turns;
+    byModel.set(r.model, slot);
+  }
+
+  const topModels = [...byModel.entries()]
+    .map(([model, m]) => {
+      const catalog = MODEL_CATALOG.find((c) => c.model === model);
+      return {
+        model,
+        provider: (catalog?.provider ?? (m.provider as ModelProvider)) as ModelProvider,
+        label: catalog?.label ?? model,
+        input_tokens: m.input_tokens,
+        output_tokens: m.output_tokens,
+        cache_read_tokens: m.cache_read_tokens,
+        cache_creation_tokens: m.cache_creation_tokens,
+        turns: m.turns,
+      };
+    })
+    .sort((a, b) => b.input_tokens + b.output_tokens - (a.input_tokens + a.output_tokens));
+
+  return {
+    total_input_tokens: totalInput,
+    total_output_tokens: totalOutput,
+    total_cache_read_tokens: totalCacheRead,
+    total_cache_creation_tokens: totalCacheCreation,
+    total_cost_usd: totalCost,
+    total_time_ms: 0,
+    turns,
     top_models: topModels,
   };
 }
@@ -2199,6 +2424,9 @@ function toProjectSummary(p: {
   github_repo_url?: string | null;
   github_repo_full_name?: string | null;
   vercel_project_name?: string | null;
+  linked_branch?: string | null;
+  latest_deploy_state?: DeploymentState | null;
+  latest_deploy_at?: string | null;
 }): ProjectSummary {
   return {
     id: p.id,
@@ -2210,6 +2438,9 @@ function toProjectSummary(p: {
     github_repo_url: p.github_repo_url ?? null,
     github_repo_full_name: p.github_repo_full_name ?? null,
     vercel_project_name: p.vercel_project_name ?? null,
+    linked_branch: p.linked_branch ?? null,
+    latest_deploy_state: p.latest_deploy_state ?? null,
+    latest_deploy_at: p.latest_deploy_at ?? null,
   };
 }
 
@@ -2464,6 +2695,10 @@ async function handleConnection(
         // the same VM (and resumes if it was paused).
         if (isFirecrackerEnabled() && !vmHandle) {
           console.log(`[ws ${project.id}] booting Firecracker VM…`);
+          // Surface the cold boot/restore as a progress notice so the busy pill
+          // shows what's actually happening during the multi-second wait. Only
+          // fires when the VM isn't already running for this session.
+          send({ type: "system", content: "Starting sandbox…" });
           const t0 = Date.now();
           try {
             vmHandle = await ensureVm({
@@ -2492,6 +2727,13 @@ async function handleConnection(
           }
         }
         if (vmHandle) touchVm(project.id);
+        // The element the user clicked in the live preview (iframe picker), if
+        // any, rides on the user_message as `selected_element`. It's untrusted
+        // client input — validate/normalize before handing it to the agent. The
+        // field isn't on the shared ClientEvent type yet, so read it defensively.
+        const selectedElement = parseSelectedElement(
+          (event as { selected_element?: unknown }).selected_element,
+        );
         try {
           await runSession(
             event.content,
@@ -2500,6 +2742,7 @@ async function handleConnection(
             event.mode,
             event.model,
             event.thinking,
+            selectedElement,
             send,
             apiKey,
             history,
@@ -2668,6 +2911,8 @@ const REPLAY_TRAILER_MARKERS = [
   "\n\nUploaded files are already available in the project sandbox.",
   "\n\nThe user @-referenced these files; their current contents are inlined below.",
   "\n\nApproved plan:",
+  // The selected-element block the loop appends (see selectedElement.ts).
+  SELECTED_ELEMENT_MARKER,
 ];
 
 /**
@@ -2899,6 +3144,7 @@ async function runSession(
   mode: "plan-then-execute" | "execute-only",
   modelChoice: ModelChoice | undefined,
   thinkingEffort: ThinkingEffort | undefined,
+  selectedElement: SelectedElement | null,
   send: Sender,
   apiKey: string,
   history: Anthropic.MessageParam[],
@@ -2948,6 +3194,13 @@ async function runSession(
     )
     .catch(() => null);
   let finalMessage = messageWithRefs;
+  // The selected-element block, rendered once. The execute loop appends its own
+  // copy from `selectedElement` (LoopOptions); the planner — which runs before
+  // the loop touches history — needs it folded into its input message so a
+  // "make this bigger" plan knows which element "this" is.
+  const selectedBlock = selectedElement
+    ? formatSelectedElementBlock(selectedElement)
+    : "";
 
   // Stream the planner's read-only investigation to the client using the same
   // events the execute loop emits, so plan mode shows its work instead of
@@ -2970,7 +3223,7 @@ async function runSession(
   };
 
   if (mode === "plan-then-execute") {
-    const plan = await proposePlan(messageWithRefs, {
+    const plan = await proposePlan(`${messageWithRefs}${selectedBlock}`, {
       apiKey,
       sandbox: planSandbox,
       history,
@@ -3074,6 +3327,7 @@ async function runSession(
     thinkingEffort: effort,
     userId,
     repo,
+    selectedElement,
     onTodoWrite: (items) => broadcastToProject(projectId, { type: "todos_updated", todos: items }),
     onUsage: emitUsage,
     requestUserAnswer: registerUserAnswer,
@@ -3238,7 +3492,12 @@ async function runSession(
   // Record the turn's usage for the dashboard rollups. Best-effort — a failed
   // analytics write must never break the turn. Skipped when nothing was billed
   // (e.g. an instant abort before the first token).
-  if (result.usage.inputTokens > 0 || result.usage.outputTokens > 0) {
+  if (
+    result.usage.inputTokens > 0 ||
+    result.usage.outputTokens > 0 ||
+    result.usage.cacheReadTokens > 0 ||
+    result.usage.cacheCreationTokens > 0
+  ) {
     void recordUsageEvent({
       projectId,
       userId,
@@ -3246,6 +3505,8 @@ async function runSession(
       model: result.model,
       inputTokens: result.usage.inputTokens,
       outputTokens: result.usage.outputTokens,
+      cacheReadTokens: result.usage.cacheReadTokens,
+      cacheCreationTokens: result.usage.cacheCreationTokens,
       elapsedMs,
     }).catch((err) => console.error("recordUsageEvent failed:", err));
   }
@@ -3255,7 +3516,12 @@ async function runSession(
     tool_calls: toolCalls,
     elapsed_ms: elapsedMs,
     aborted: result.aborted || undefined,
-    input_tokens: result.usage.inputTokens,
+    // Total processed input (fresh + cache) to match the live counter; the
+    // honest fresh/cache split is persisted to usage_events above.
+    input_tokens:
+      result.usage.inputTokens +
+      result.usage.cacheReadTokens +
+      result.usage.cacheCreationTokens,
     output_tokens: result.usage.outputTokens,
   });
 }

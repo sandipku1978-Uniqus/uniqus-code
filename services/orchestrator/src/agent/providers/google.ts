@@ -161,10 +161,17 @@ export class GoogleAdapter implements ModelProviderAdapter {
 
       const um = chunk.usageMetadata;
       if (um) {
+        // promptTokenCount INCLUDES cached tokens (implicit caching is on by
+        // default for 2.5/3.x). Subtract the cached portion so inputTokens is
+        // the fresh, full-price remainder and the dashboard can price the
+        // cached reads at the discounted rate instead of billing them at 1×.
+        const cached = um.cachedContentTokenCount ?? 0;
         usage = {
-          inputTokens: um.promptTokenCount ?? 0,
+          inputTokens: Math.max(0, (um.promptTokenCount ?? 0) - cached),
           // Reasoning ("thoughts") tokens are billed as output — include them.
           outputTokens: (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0),
+          cacheReadTokens: cached,
+          cacheCreationTokens: 0,
         };
         p.onUsage?.(usage);
       }
@@ -223,7 +230,7 @@ export class GoogleAdapter implements ModelProviderAdapter {
   }
 }
 
-function mapStopReason(
+export function mapStopReason(
   reason: string | undefined,
   hadToolCalls: boolean,
 ): StreamTurnResult["stopReason"] {
@@ -234,7 +241,7 @@ function mapStopReason(
 
 // Gemini rejects a few JSON-schema keywords; strip the ones we know it
 // doesn't accept so our Anthropic-shaped tool schemas pass through.
-function sanitizeSchema(schema: unknown): unknown {
+export function sanitizeSchema(schema: unknown): unknown {
   if (Array.isArray(schema)) return schema.map(sanitizeSchema);
   if (schema && typeof schema === "object") {
     const out: Record<string, unknown> = {};
@@ -247,7 +254,7 @@ function sanitizeSchema(schema: unknown): unknown {
   return schema;
 }
 
-function toGeminiFunctionDeclarations(tools: Anthropic.Tool[]): Array<Record<string, unknown>> {
+export function toGeminiFunctionDeclarations(tools: Anthropic.Tool[]): Array<Record<string, unknown>> {
   return tools.map((t) => ({
     name: t.name,
     description: t.description,
@@ -255,7 +262,7 @@ function toGeminiFunctionDeclarations(tools: Anthropic.Tool[]): Array<Record<str
   }));
 }
 
-function toGeminiContents(messages: Anthropic.MessageParam[]): Array<Record<string, unknown>> {
+export function toGeminiContents(messages: Anthropic.MessageParam[]): Array<Record<string, unknown>> {
   // tool_use id → function name, so tool_results can be matched back to calls.
   const idToName = new Map<string, string>();
   for (const msg of messages) {

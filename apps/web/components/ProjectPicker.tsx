@@ -3,9 +3,11 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import type { ProjectSummary } from "@uniqus/api-types";
+import type { DeploymentState, ProjectSummary } from "@uniqus/api-types";
 import BrandLockup from "./BrandLockup";
 import GuestBanner from "./GuestBanner";
+import Modal from "./Modal";
+import { Skeleton } from "./Skeleton";
 import {
   fetchProjects,
   fetchUsageStatsApi,
@@ -123,6 +125,55 @@ function fallbackTileColor(projectId: string): string {
   }
   const hue = Math.abs(hash) % 360;
   return `hsl(${hue} 55% 28%)`;
+}
+
+/**
+ * Map a project's most-recent deploy state to the status dot's color class, a
+ * short text label, and an accurate tooltip. The dot is never color-only — the
+ * label always rides alongside it. `null`/`undefined` ⇒ the project has never
+ * deployed (gray "Not deployed"), which is the common case.
+ */
+function deployStatus(state: DeploymentState | null | undefined): {
+  dotClass: "live" | "building" | "failed" | "none";
+  label: string;
+  title: string;
+} {
+  switch (state) {
+    case "READY":
+      return {
+        dotClass: "live",
+        label: "Live",
+        title: "Latest deploy is live.",
+      };
+    case "BUILDING":
+    case "QUEUED":
+      return {
+        dotClass: "building",
+        label: "Building",
+        title:
+          state === "QUEUED"
+            ? "A deploy is queued and about to build."
+            : "A deploy is currently building.",
+      };
+    case "ERROR":
+      return {
+        dotClass: "failed",
+        label: "Failed",
+        title: "The latest deploy failed — open the project and redeploy.",
+      };
+    case "CANCELED":
+      return {
+        dotClass: "none",
+        label: "Canceled",
+        title: "The latest deploy was canceled.",
+      };
+    default:
+      return {
+        dotClass: "none",
+        label: "Not deployed",
+        title: "This project hasn't been deployed yet.",
+      };
+  }
 }
 
 type Mode = "describe" | "zip" | "github";
@@ -729,9 +780,7 @@ export default function ProjectPicker({
             {!isGuest && mode === "github" && (
               <div className="newproj-extra" style={{ display: "grid", gap: 10, marginTop: 10 }}>
                 {github === null ? (
-                  <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
-                    checking GitHub connection…
-                  </div>
+                  <Skeleton height={36} radius={6} />
                 ) : github.connected ? (
                   <div
                     style={{
@@ -829,9 +878,7 @@ export default function ProjectPicker({
                         couldn’t load repos: {reposError}
                       </div>
                     ) : repos === null ? (
-                      <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
-                        loading repos…
-                      </div>
+                      <Skeleton height={36} radius={6} />
                     ) : (
                       <select
                         value={selectedRepo}
@@ -962,9 +1009,7 @@ export default function ProjectPicker({
             )}
           </div>
 
-          {projects === null && (
-            <div style={{ color: "var(--text-muted)", fontSize: 13 }}>loading…</div>
-          )}
+          {projects === null && <ProjectGridSkeleton />}
 
           {projects !== null && projects.length === 0 && (
             <div className="empty-state" style={{ textAlign: "left", padding: "24px" }}>
@@ -1106,13 +1151,20 @@ function DashboardWidgets({
   stats: AccountUsageStats | null;
   projectCount: number;
 }) {
-  const totalTokens =
-    (stats?.total_input_tokens ?? 0) + (stats?.total_output_tokens ?? 0);
+  // input/cache_read/cache_creation are now separate buckets. "Total processed"
+  // sums them all (what the model actually read), while the sub-line breaks out
+  // the cached portion so a small task no longer reads as millions of fresh
+  // input tokens — cached reads bill ~0.1× and are reflected in Est. cost.
+  const freshIn = stats?.total_input_tokens ?? 0;
+  const cacheRead = stats?.total_cache_read_tokens ?? 0;
+  const cacheCreate = stats?.total_cache_creation_tokens ?? 0;
+  const out = stats?.total_output_tokens ?? 0;
+  const totalTokens = freshIn + cacheRead + cacheCreate + out;
+  const cachedIn = cacheRead + cacheCreate;
   const topModels = (stats?.top_models ?? []).slice(0, 4);
-  const maxModelTokens = topModels.reduce(
-    (max, m) => Math.max(max, m.input_tokens + m.output_tokens),
-    0,
-  );
+  const modelTotal = (m: AccountUsageStats["top_models"][number]): number =>
+    m.input_tokens + m.cache_read_tokens + m.cache_creation_tokens + m.output_tokens;
+  const maxModelTokens = topModels.reduce((max, m) => Math.max(max, modelTotal(m)), 0);
 
   return (
     <section className="usage-widgets">
@@ -1126,9 +1178,11 @@ function DashboardWidgets({
         <StatCard
           label="Tokens"
           value={formatTokens(totalTokens)}
-          sub={`${formatTokens(stats?.total_input_tokens ?? 0)} in · ${formatTokens(
-            stats?.total_output_tokens ?? 0,
-          )} out`}
+          sub={
+            cachedIn > 0
+              ? `${formatTokens(freshIn)} in · ${formatTokens(cachedIn)} cached · ${formatTokens(out)} out`
+              : `${formatTokens(freshIn)} in · ${formatTokens(out)} out`
+          }
         />
         <StatCard label="Est. cost" value={formatUsd(stats?.total_cost_usd ?? 0)} sub="approximate" />
         <StatCard
@@ -1148,7 +1202,7 @@ function DashboardWidgets({
           <span className="top-models-title">Top models</span>
           <div className="top-models-list">
             {topModels.map((m) => {
-              const total = m.input_tokens + m.output_tokens;
+              const total = modelTotal(m);
               const pct = maxModelTokens > 0 ? (total / maxModelTokens) * 100 : 0;
               return (
                 <div key={`${m.provider}:${m.model}`} className="top-model-row">
@@ -1168,6 +1222,106 @@ function DashboardWidgets({
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * The ⋯ project-actions dropdown (Rename / Change icon / Delete). Shared by the
+ * home ProjectTile and the All/Recent RichProjectCard. Exposes proper
+ * `role="menu"`/`role="menuitem"` semantics plus roving keyboard focus:
+ * ArrowUp/Down move between items, Home/End jump to the first/last item, and
+ * Escape closes the menu (returning focus to the trigger is the caller's job —
+ * here we just signal close). Mouse behaviour is unchanged.
+ */
+function ProjectActionsMenu({
+  onEdit,
+  onClose,
+  style,
+}: {
+  onEdit: (field: "rename" | "icon" | "delete") => void;
+  onClose: () => void;
+  style?: React.CSSProperties;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Focus the first item when the menu opens so keyboard users land inside it.
+  useEffect(() => {
+    const items = menuRef.current?.querySelectorAll<HTMLButtonElement>(
+      '[role="menuitem"]',
+    );
+    items?.[0]?.focus();
+  }, []);
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>): void => {
+    const items = Array.from(
+      menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ??
+        [],
+    );
+    if (items.length === 0) return;
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      const next = current < 0 ? 0 : (current + 1) % items.length;
+      items[next].focus();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      const prev = current <= 0 ? items.length - 1 : current - 1;
+      items[prev].focus();
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      items[0].focus();
+    } else if (e.key === "End") {
+      e.preventDefault();
+      items[items.length - 1].focus();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      onClose();
+    }
+  };
+
+  return (
+    <div
+      ref={menuRef}
+      className="proj-menu"
+      role="menu"
+      aria-label="Project actions"
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={onKeyDown}
+      style={style}
+    >
+      <button
+        type="button"
+        role="menuitem"
+        onClick={() => {
+          onClose();
+          onEdit("rename");
+        }}
+      >
+        Rename
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        onClick={() => {
+          onClose();
+          onEdit("icon");
+        }}
+      >
+        Change icon
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        className="danger"
+        onClick={() => {
+          onClose();
+          onEdit("delete");
+        }}
+      >
+        Delete
+      </button>
+    </div>
   );
 }
 
@@ -1192,6 +1346,8 @@ function ProjectTile({
           type="button"
           className="proj-menu-btn"
           aria-label="Project actions"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
           onClick={(e) => {
             e.stopPropagation();
             e.preventDefault();
@@ -1201,39 +1357,10 @@ function ProjectTile({
           ⋯
         </button>
         {menuOpen && (
-          <div
-            className="proj-menu"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              type="button"
-              onClick={() => {
-                onOpenMenu(false);
-                onEdit("rename");
-              }}
-            >
-              Rename
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                onOpenMenu(false);
-                onEdit("icon");
-              }}
-            >
-              Change icon
-            </button>
-            <button
-              type="button"
-              className="danger"
-              onClick={() => {
-                onOpenMenu(false);
-                onEdit("delete");
-              }}
-            >
-              Delete
-            </button>
-          </div>
+          <ProjectActionsMenu
+            onEdit={onEdit}
+            onClose={() => onOpenMenu(false)}
+          />
         )}
       </div>
       <Link href={`/projects/${project.id}`} className="proj-tile-link">
@@ -1241,12 +1368,14 @@ function ProjectTile({
         <p className="desc">{project.description ?? "No description"}</p>
         <div className="meta">
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <span
-              className="status"
-              title="Saved and ready to open — the sandbox is restored when you open it, so you can chat with the agent and Run a preview."
-            >
-              <span className="d" /> Ready
-            </span>
+            {(() => {
+              const ds = deployStatus(project.latest_deploy_state);
+              return (
+                <span className="status" title={ds.title}>
+                  <span className={`d ${ds.dotClass}`} /> {ds.label}
+                </span>
+              );
+            })()}
             <span className="tile-chips">
               {project.vercel_project_name && (
                 <span className="tile-chip live" title="Published to Vercel">
@@ -1283,6 +1412,71 @@ function ProjectAvatar({ project }: { project: ProjectSummary }) {
   );
 }
 
+/**
+ * Placeholder for the home "Recent projects" grid while the list loads. Mirrors
+ * the proj-grid card layout (avatar + title + description + meta) so the page
+ * doesn't reflow when the real tiles arrive.
+ */
+function ProjectGridSkeleton() {
+  return (
+    <div className="proj-grid" aria-hidden="true">
+      {[0, 1, 2].map((i) => (
+        <div key={i} className="proj proj-tile">
+          <div className="proj-tile-head">
+            <Skeleton width={32} height={32} radius={8} />
+            <Skeleton width={24} height={24} radius={4} />
+          </div>
+          <div className="proj-tile-link">
+            <Skeleton width="60%" height={14} />
+            <Skeleton width="90%" height={12} />
+            <Skeleton width="75%" height={12} />
+            <div className="meta">
+              <Skeleton width={56} height={10} />
+              <Skeleton width={48} height={10} />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Placeholder rows for the All-projects / Recent list view while it loads.
+ * Each row matches the RichProjectCard's three-column grid (avatar · body ·
+ * actions) so the list settles in place when the data resolves.
+ */
+function ProjectListSkeleton() {
+  return (
+    <div style={{ display: "grid", gap: 12 }} aria-hidden="true">
+      {[0, 1, 2, 3].map((i) => (
+        <div
+          key={i}
+          className="proj proj-tile"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "auto 1fr auto",
+            alignItems: "start",
+            gap: 16,
+            padding: 14,
+          }}
+        >
+          <Skeleton width={32} height={32} radius={8} />
+          <div style={{ display: "grid", gap: 8, minWidth: 0 }}>
+            <Skeleton width="40%" height={14} />
+            <Skeleton width="70%" height={12} />
+            <div style={{ display: "flex", gap: 6 }}>
+              <Skeleton width={120} height={18} radius={4} />
+              <Skeleton width={100} height={18} radius={4} />
+            </div>
+          </div>
+          <Skeleton width={64} height={28} radius={6} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function RenameDialog({
   project,
   onCancel,
@@ -1298,36 +1492,46 @@ function RenameDialog({
     inputRef.current?.focus();
     inputRef.current?.select();
   }, []);
+  const formId = "rename-project-form";
   return (
-    <div className="proj-dialog-overlay" onClick={onCancel}>
-      <div className="proj-dialog" onClick={(e) => e.stopPropagation()}>
-        <h3>Rename project</h3>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            const trimmed = value.trim();
-            if (trimmed && trimmed !== project.name) onSubmit(trimmed);
-            else onCancel();
-          }}
-        >
-          <input
-            ref={inputRef}
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            style={fieldStyle}
-            maxLength={80}
-          />
-          <div className="proj-dialog-actions">
-            <button type="button" onClick={onCancel} className="btn-ghost">
-              Cancel
-            </button>
-            <button type="submit" className="btn-primary" disabled={!value.trim()}>
-              Save
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+    <Modal
+      title="Rename project"
+      width={420}
+      onClose={onCancel}
+      footer={
+        <div className="proj-dialog-actions">
+          <button type="button" onClick={onCancel} className="btn-ghost">
+            Cancel
+          </button>
+          <button
+            type="submit"
+            form={formId}
+            className="btn-primary"
+            disabled={!value.trim()}
+          >
+            Save
+          </button>
+        </div>
+      }
+    >
+      <form
+        id={formId}
+        onSubmit={(e) => {
+          e.preventDefault();
+          const trimmed = value.trim();
+          if (trimmed && trimmed !== project.name) onSubmit(trimmed);
+          else onCancel();
+        }}
+      >
+        <input
+          ref={inputRef}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          style={{ ...fieldStyle, width: "100%" }}
+          maxLength={80}
+        />
+      </form>
+    </Modal>
   );
 }
 
@@ -1341,21 +1545,11 @@ function IconDialog({
   onPick: (icon: string | null) => void;
 }) {
   return (
-    <div className="proj-dialog-overlay" onClick={onCancel}>
-      <div className="proj-dialog" onClick={(e) => e.stopPropagation()}>
-        <h3>Pick an icon for "{project.name}"</h3>
-        <div className="proj-icon-grid">
-          {ICON_CHOICES.map((icon) => (
-            <button
-              key={icon}
-              type="button"
-              onClick={() => onPick(icon)}
-              className={`proj-icon-choice ${project.icon === icon ? "selected" : ""}`}
-            >
-              {icon}
-            </button>
-          ))}
-        </div>
+    <Modal
+      title={`Pick an icon for "${project.name}"`}
+      width={420}
+      onClose={onCancel}
+      footer={
         <div className="proj-dialog-actions">
           <button type="button" onClick={onCancel} className="btn-ghost">
             Cancel
@@ -1369,8 +1563,21 @@ function IconDialog({
             Clear
           </button>
         </div>
+      }
+    >
+      <div className="proj-icon-grid">
+        {ICON_CHOICES.map((icon) => (
+          <button
+            key={icon}
+            type="button"
+            onClick={() => onPick(icon)}
+            className={`proj-icon-choice ${project.icon === icon ? "selected" : ""}`}
+          >
+            {icon}
+          </button>
+        ))}
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -1386,20 +1593,11 @@ function DeleteDialog({
   const [confirmName, setConfirmName] = useState("");
   const matches = confirmName.trim() === project.name;
   return (
-    <div className="proj-dialog-overlay" onClick={onCancel}>
-      <div className="proj-dialog" onClick={(e) => e.stopPropagation()}>
-        <h3>Delete "{project.name}"?</h3>
-        <p className="proj-dialog-warn">
-          This permanently removes the project, its files, its chat history,
-          and any deployments tracked by Uniqus. The action cannot be undone.
-        </p>
-        <input
-          value={confirmName}
-          onChange={(e) => setConfirmName(e.target.value)}
-          placeholder={`Type "${project.name}" to confirm`}
-          style={fieldStyle}
-          autoFocus
-        />
+    <Modal
+      title={`Delete "${project.name}"?`}
+      width={420}
+      onClose={onCancel}
+      footer={
         <div className="proj-dialog-actions">
           <button type="button" onClick={onCancel} className="btn-ghost">
             Cancel
@@ -1413,8 +1611,20 @@ function DeleteDialog({
             Delete project
           </button>
         </div>
-      </div>
-    </div>
+      }
+    >
+      <p className="proj-dialog-warn">
+        This permanently removes the project, its files, its chat history,
+        and any deployments tracked by Uniqus. The action cannot be undone.
+      </p>
+      <input
+        value={confirmName}
+        onChange={(e) => setConfirmName(e.target.value)}
+        placeholder={`Type "${project.name}" to confirm`}
+        style={{ ...fieldStyle, width: "100%", marginTop: 12 }}
+        autoFocus
+      />
+    </Modal>
   );
 }
 
@@ -1434,25 +1644,11 @@ function LinkRepoDialog({
   onCancel: () => void;
 }) {
   return (
-    <div className="proj-dialog-overlay" onClick={onCancel}>
-      <div className="proj-dialog" onClick={(e) => e.stopPropagation()}>
-        <h3>Connect this project to GitHub?</h3>
-        <p className="proj-dialog-warn" style={{ color: "var(--text-muted)" }}>
-          {repoFullName ? (
-            <>
-              Link this project to <strong>{repoFullName}</strong> so the
-              workspace shows the repo and can push changes back to it (pushing
-              needs your GitHub connected). Choose <strong>No</strong> to start
-              unconnected — you can link a repo later from the workspace.
-            </>
-          ) : (
-            <>
-              Link this project to the repo you&apos;re cloning so the workspace
-              shows it and can push changes back. Choose <strong>No</strong> to
-              start unconnected — you can link a repo later from the workspace.
-            </>
-          )}
-        </p>
+    <Modal
+      title="Connect this project to GitHub?"
+      width={420}
+      onClose={onCancel}
+      footer={
         <div className="proj-dialog-actions">
           <button type="button" onClick={() => onChoice(false)} className="btn-ghost">
             No, don&apos;t connect
@@ -1471,8 +1667,25 @@ function LinkRepoDialog({
             Yes, connect repo
           </button>
         </div>
-      </div>
-    </div>
+      }
+    >
+      <p className="proj-dialog-warn" style={{ color: "var(--text-muted)" }}>
+        {repoFullName ? (
+          <>
+            Link this project to <strong>{repoFullName}</strong> so the
+            workspace shows the repo and can push changes back to it (pushing
+            needs your GitHub connected). Choose <strong>No</strong> to start
+            unconnected — you can link a repo later from the workspace.
+          </>
+        ) : (
+          <>
+            Link this project to the repo you&apos;re cloning so the workspace
+            shows it and can push changes back. Choose <strong>No</strong> to
+            start unconnected — you can link a repo later from the workspace.
+          </>
+        )}
+      </p>
+    </Modal>
   );
 }
 
@@ -1542,7 +1755,7 @@ function ProjectListView({
         </div>
       </div>
       {sorted === null ? (
-        <div style={{ color: "var(--text-muted)", fontSize: 13 }}>loading…</div>
+        <ProjectListSkeleton />
       ) : sorted.length === 0 ? (
         <div className="empty-state">
           No projects yet. Head back to <strong>Home</strong> and start one.
@@ -1626,13 +1839,18 @@ function RichProjectCard({
           >
             {project.name}
           </Link>
-          <span
-            className="status"
-            title="Saved and ready to open — sandbox restored on open. Dot is green when the project is in a good state."
-            style={{ fontSize: 11, color: "var(--text-muted)" }}
-          >
-            <span className="d" /> Ready · edited {updated}
-          </span>
+          {(() => {
+            const ds = deployStatus(project.latest_deploy_state);
+            return (
+              <span
+                className="status"
+                title={ds.title}
+                style={{ fontSize: 11, color: "var(--text-muted)" }}
+              >
+                <span className={`d ${ds.dotClass}`} /> {ds.label} · edited {updated}
+              </span>
+            );
+          })()}
         </div>
         <div
           className="desc"
@@ -1693,6 +1911,8 @@ function RichProjectCard({
           type="button"
           className="proj-menu-btn"
           aria-label="Project actions"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
           onClick={(e) => {
             e.stopPropagation();
             e.preventDefault();
@@ -1703,40 +1923,11 @@ function RichProjectCard({
           ⋯
         </button>
         {menuOpen && (
-          <div
-            className="proj-menu"
-            onClick={(e) => e.stopPropagation()}
+          <ProjectActionsMenu
+            onEdit={onEdit}
+            onClose={() => onOpenMenu(false)}
             style={{ top: "100%", right: 0 }}
-          >
-            <button
-              type="button"
-              onClick={() => {
-                onOpenMenu(false);
-                onEdit("rename");
-              }}
-            >
-              Rename
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                onOpenMenu(false);
-                onEdit("icon");
-              }}
-            >
-              Change icon
-            </button>
-            <button
-              type="button"
-              className="danger"
-              onClick={() => {
-                onOpenMenu(false);
-                onEdit("delete");
-              }}
-            >
-              Delete
-            </button>
-          </div>
+          />
         )}
       </div>
     </div>
