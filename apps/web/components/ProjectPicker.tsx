@@ -8,6 +8,7 @@ import BrandLockup from "./BrandLockup";
 import GuestBanner from "./GuestBanner";
 import Modal from "./Modal";
 import { Skeleton } from "./Skeleton";
+import { PENDING_BRIEF_KEY } from "./LandingPrompt";
 import {
   fetchProjects,
   fetchUsageStatsApi,
@@ -261,6 +262,28 @@ export default function ProjectPicker({
     fetchUsageStatsApi()
       .then((r) => setUsage(r.stats))
       .catch(() => {});
+  }, []);
+
+  // A logged-out visitor who typed an idea into the landing-page composer is
+  // bounced here through sign-in. Their idea was parked in sessionStorage so it
+  // survives the round-trip — pick it up, drop it into the Describe box, and
+  // make sure we're on the home view so they can start with one click.
+  useEffect(() => {
+    let pending: string | null = null;
+    try {
+      pending = sessionStorage.getItem(PENDING_BRIEF_KEY);
+    } catch {
+      /* storage unavailable — nothing to restore */
+    }
+    if (!pending || !pending.trim()) return;
+    try {
+      sessionStorage.removeItem(PENDING_BRIEF_KEY);
+    } catch {
+      /* ignore */
+    }
+    setView("home");
+    setMode("describe");
+    setDescribeText(pending);
   }, []);
 
   // Pull GitHub connection state on mount, and again whenever the query

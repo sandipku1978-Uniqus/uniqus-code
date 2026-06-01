@@ -351,6 +351,15 @@ interface State {
    */
   queuedComposerFiles: File[];
 
+  /**
+   * Files attached in the landing-page composer before a project existed. Set
+   * just before navigating into a freshly-created workspace; ChatPanel drains
+   * them into its pending attachments once the project loads. Deliberately NOT
+   * cleared by `reset()` (which runs on workspace mount) so the hand-off
+   * survives that reset and the project switch.
+   */
+  briefFiles: File[];
+
   setConnected(c: boolean): void;
   setConnectionFailed(failed: boolean): void;
   setBusy(b: boolean): void;
@@ -401,6 +410,10 @@ interface State {
   enqueueComposerFiles(files: File[]): void;
   /** Empty the queued-composer-files hand-off (ChatPanel calls after draining). */
   clearQueuedComposerFiles(): void;
+  /** Stage landing-page attachments for the workspace composer to adopt. */
+  setBriefFiles(files: File[]): void;
+  /** Empty the brief-files hand-off (ChatPanel calls after draining). */
+  clearBriefFiles(): void;
   setTree(entries: TreeEntry[]): void;
   setFile(path: string | null, content: string): void;
   appendTerminalLine(line: string): void;
@@ -478,6 +491,7 @@ export const useStore = create<State>((set, get) => ({
   liveUsage: null,
   pendingSelectedElement: null,
   queuedComposerFiles: [],
+  briefFiles: [],
 
   setConnected: (c) => set({ connected: c }),
   setConnectionFailed: (failed) => set({ connectionFailed: failed }),
@@ -654,6 +668,9 @@ export const useStore = create<State>((set, get) => ({
     set((s) => ({ queuedComposerFiles: [...s.queuedComposerFiles, ...files] })),
   clearQueuedComposerFiles: () =>
     set((s) => (s.queuedComposerFiles.length === 0 ? {} : { queuedComposerFiles: [] })),
+  setBriefFiles: (files) => set({ briefFiles: files }),
+  clearBriefFiles: () =>
+    set((s) => (s.briefFiles.length === 0 ? {} : { briefFiles: [] })),
 
   setTree: (entries) => set({ tree: entries }),
   setFile: (path, content) => set({ selectedFile: path, fileContent: content }),

@@ -15,6 +15,7 @@ import { connect, send } from "@/lib/ws-client";
 import PlanReview from "./PlanReview";
 import ChatSessionDropdown from "./ChatSessionDropdown";
 import ModelPicker from "./ModelPicker";
+import MicButton from "./MicButton";
 import Modal from "./Modal";
 import { ErrorBoundary } from "./ErrorBoundary";
 
@@ -55,6 +56,11 @@ export default function ChatPanel() {
   // drained into pendingFiles below so the normal upload path handles them.
   const queuedComposerFiles = useStore((s) => s.queuedComposerFiles);
   const clearQueuedComposerFiles = useStore((s) => s.clearQueuedComposerFiles);
+  // Attachments staged in the landing-page composer before this project
+  // existed. Unlike queuedComposerFiles, briefFiles survives the per-project
+  // reset() that runs on workspace mount, so it drains reliably below.
+  const briefFiles = useStore((s) => s.briefFiles);
+  const clearBriefFiles = useStore((s) => s.clearBriefFiles);
   // Mirror Workspace's session-param read so a manual Retry reconnects to the
   // SAME chat session (a bare connect() would default the session to null and
   // silently drop the user back to the project's default thread).
@@ -110,6 +116,27 @@ export default function ChatPanel() {
     });
     clearQueuedComposerFiles();
   }, [queuedComposerFiles, clearQueuedComposerFiles]);
+
+  // Adopt attachments staged by the landing-page composer, once the project is
+  // loaded. Same dedupe rule as addFiles; cleared after draining so they aren't
+  // re-added on a later render or carried into a different project.
+  useEffect(() => {
+    if (!project || briefFiles.length === 0) return;
+    setPendingFiles((current) => {
+      const next = [...current];
+      for (const file of briefFiles) {
+        const duplicate = next.some(
+          (existing) =>
+            existing.name === file.name &&
+            existing.size === file.size &&
+            existing.lastModified === file.lastModified,
+        );
+        if (!duplicate) next.push(file);
+      }
+      return next;
+    });
+    clearBriefFiles();
+  }, [project, briefFiles, clearBriefFiles]);
 
   // Lazy-load slash commands once per project. The list is small and stable
   // — built-ins never change at runtime, project commands change rarely.
@@ -869,26 +896,25 @@ export default function ChatPanel() {
               Plan
             </button>
             <ModelPicker variant="compact" />
+            <MicButton
+              className="mic-btn"
+              disabled={busy || uploading || !project || !connected}
+              onText={(t) => setInput((prev) => (prev ? `${prev} ${t}` : t))}
+            />
             {busy ? (
               <button
                 type="button"
                 onClick={handleStop}
                 disabled={stopping}
-                className="send-btn"
-                style={{
-                  background: "var(--conf-low, #c0392b)",
-                  borderColor: "var(--conf-low, #c0392b)",
-                  opacity: stopping ? 0.7 : 1,
-                  cursor: stopping ? "default" : "pointer",
-                }}
+                className="send-btn stop"
+                aria-label={stopping ? "Stopping" : "Stop the agent"}
                 title={
                   stopping
                     ? "Stopping… (waiting for the agent to finish its current step)"
                     : "Stop the agent (cancels current turn)"
                 }
               >
-                {stopping ? "Stopping…" : "Stop"}
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                   <rect x="6" y="6" width="12" height="12" rx="1" />
                 </svg>
               </button>
@@ -903,11 +929,11 @@ export default function ChatPanel() {
                   !connected
                 }
                 className="send-btn"
+                aria-label={uploading ? "Uploading attachments" : "Send message"}
+                title={uploading ? "Uploading attachments…" : "Send message"}
               >
-                {uploading ? "Uploading..." : "Send"}
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <line x1="5" y1="12" x2="19" y2="12" />
-                  <polyline points="12 5 19 12 12 19" />
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M12 19V5M5 12l7-7 7 7" />
                 </svg>
               </button>
             )}

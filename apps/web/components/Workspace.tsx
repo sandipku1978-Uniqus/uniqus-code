@@ -47,6 +47,11 @@ export default function Workspace({
   const mode = useStore((s) => s.mode);
   const modeTouched = useStore((s) => s.modeTouched);
   const setMode = useStore((s) => s.setMode);
+  // Model + thinking ride the auto-fired brief so a choice made in the
+  // landing-page composer (persisted in the same store) applies to the very
+  // first turn, not just to follow-ups typed in the workspace.
+  const model = useStore((s) => s.model);
+  const thinking = useStore((s) => s.thinking);
   const addUserMessage = useStore((s) => s.addUserMessage);
   const setBusy = useStore((s) => s.setBusy);
   // account_type arrives on the WS session_started event. Guests get full
@@ -56,6 +61,9 @@ export default function Workspace({
   const router = useRouter();
   const searchParams = useSearchParams();
   const briefParam = searchParams?.get("brief") ?? null;
+  // Plan-mode preference carried from the landing-page composer ("1"/"0"). Only
+  // honored for a brand-new project's first turn (see the first-turn effect).
+  const planParam = searchParams?.get("plan") ?? null;
   // Phase-2.x multi-session support: ?session=<uuid> binds the WS to a
   // specific chat thread. Default (no param) resolves server-side to the
   // project's default session.
@@ -168,10 +176,11 @@ export default function Workspace({
     if (firstTurnDecidedRef.current) return;
     firstTurnDecidedRef.current = true;
     if (!hasHistory && !modeTouched) {
-      setMode("plan-then-execute");
+      // Default is plan-first; the landing composer can opt out via ?plan=0.
+      setMode(planParam === "0" ? "execute-only" : "plan-then-execute");
     }
     setFirstTurnModeReady(true);
-  }, [connected, project, hasHistory, modeTouched, setMode]);
+  }, [connected, project, hasHistory, modeTouched, setMode, planParam]);
 
   // After the first real message exists, default subsequent turns back to
   // execute-only (unless the user explicitly chose a mode).
@@ -203,7 +212,13 @@ export default function Workspace({
     briefFiredRef.current = briefParam;
     addUserMessage(briefParam);
     setBusy(true);
-    const ok = send({ type: "user_message", content: briefParam, mode });
+    const ok = send({
+      type: "user_message",
+      content: briefParam,
+      mode,
+      model: model !== "auto" ? model : undefined,
+      thinking: thinking !== "medium" ? thinking : undefined,
+    });
     if (!ok) {
       setBusy(false);
       // Leave the param in place so a reconnect retries the fire.
@@ -218,6 +233,8 @@ export default function Workspace({
     hasHistory,
     firstTurnModeReady,
     mode,
+    model,
+    thinking,
     addUserMessage,
     setBusy,
     projectId,

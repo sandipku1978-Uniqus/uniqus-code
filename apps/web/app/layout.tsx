@@ -36,7 +36,11 @@ const APPEARANCE_BOOTSTRAP = `(function(){try{var d=document.documentElement;var
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${dmSans.variable} ${jetBrainsMono.variable}`}>
+    <html
+      lang="en"
+      className={`${dmSans.variable} ${jetBrainsMono.variable}`}
+      suppressHydrationWarning
+    >
       <head>
         <script dangerouslySetInnerHTML={{ __html: APPEARANCE_BOOTSTRAP }} />
       </head>
