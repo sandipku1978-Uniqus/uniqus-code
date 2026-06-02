@@ -5,6 +5,7 @@ import { performance } from "node:perf_hooks";
 import { createHash, randomUUID, randomBytes } from "node:crypto";
 import { FirecrackerClient, spawnFirecracker } from "./client.js";
 import { pingAgent, pushFile, finalizeRestore, pingAt } from "./agentRpc.js";
+import { removeServersForProject } from "../agent/sandbox.js";
 import type { VmHandle } from "./types.js";
 
 /**
@@ -114,6 +115,15 @@ interface ManagedVm {
 }
 
 const vms = new Map<string, ManagedVm>();
+/**
+ * Single-flight the first-boot path per project (B-5). Two concurrent first
+ * messages (two tabs, or an abort+reconnect) would both see `vms.get()===
+ * undefined` and both run rehydrate/golden-restore/cold-boot, colliding on the
+ * deterministic tap/IP/overlay and orphaning the first VM's process + tap. Like
+ * `baseSnapshotBuild` below, concurrent callers share one in-flight boot; the
+ * entry is deleted on settle (success AND failure) so a later open re-boots.
+ */
+const bootInFlight = new Map<string, Promise<VmHandle>>();
 let cidSeq = 100; // guest CIDs 0/1/2 are reserved by the kernel; pick a non-overlapping range
 
 export interface BootOpts {
@@ -133,9 +143,27 @@ export async function ensureVm(opts: BootOpts): Promise<VmHandle> {
     existing.handle.lastUsedAt = Date.now();
     return existing.handle;
   }
-  // No in-memory entry. Maybe a previous orchestrator process left a
-  // snapshot for this project on disk — rehydrate from it before paying
-  // a fresh ~15 s cold boot.
+  // No in-memory entry → the first-boot path (rehydrate / golden-restore /
+  // cold-boot). Single-flight it per project (B-5): if a boot is already in
+  // flight, await it instead of racing a second boot that would collide on the
+  // deterministic tap/IP/overlay and orphan the first VM. The promise is stored
+  // before any await and cleared on settle (success AND failure).
+  const inFlight = bootInFlight.get(opts.projectId);
+  if (inFlight) return await inFlight;
+  const boot = bootFirstTime(opts).finally(() => {
+    bootInFlight.delete(opts.projectId);
+  });
+  bootInFlight.set(opts.projectId, boot);
+  return await boot;
+}
+
+/**
+ * The first-boot path for a project with no in-memory VM, factored out of
+ * `ensureVm` so it can be run under the per-project single-flight lock.
+ */
+async function bootFirstTime(opts: BootOpts): Promise<VmHandle> {
+  // Maybe a previous orchestrator process left a snapshot for this project on
+  // disk — rehydrate from it before paying a fresh ~15 s cold boot.
   const rehydrated = await tryRehydrateSnapshot(opts);
   if (rehydrated) return rehydrated;
   // Brand-new (or GC'd) project: no per-project snapshot exists. If the golden
@@ -326,11 +354,14 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
           `Stop with: kill ${fc.pid}`,
       );
     } else {
-      setTimeout(() => fc.close(), 30_000);
-      console.error(
-        `[fleet ${id}] VM kept alive for 30s for manual probing (ip=${ip}). ` +
-          `Set FIRECRACKER_KEEP_FAILED_VMS=1 to keep failed VMs indefinitely.`,
-      );
+      // Mirror the config-failure cleanup: kill firecracker NOW and reclaim the
+      // tap + sockets. The old deferred `setTimeout(fc.close, 30s)` left the TAP
+      // device and api/vsock sockets behind forever, leaking one of each per
+      // distinct failing project (B-8).
+      fc.close();
+      await teardownTap(tapName).catch(() => {});
+      await fs.rm(apiSocket, { force: true }).catch(() => {});
+      await fs.rm(vsockUds, { force: true }).catch(() => {});
     }
     throw new Error(
       `[vm ${id}] agent did not answer /health within 60s at ${ip}:${agentPort} — ` +
@@ -768,13 +799,36 @@ async function restoreFromSnapshot(projectId: string): Promise<void> {
   await ensureBridge();
   await ensureTapDevice(vm.handle.tapDevice);
   // Fresh API socket — the old one was unlinked when we snapshotted.
+  // Wrap spawn + loadSnapshot so a corrupt/incompatible snapshot can't leak the
+  // firecracker process and wedge the VM in 'snapshotted' (re-spawning a fresh
+  // leaked process on every retry). Mirror tryRehydrateSnapshot's cleanup:
+  // discard the bad snapshot so the next ensureVm cold-boots instead of looping.
   const fc = await spawnFirecracker({ socketPath: vm.handle.apiSocket });
   const client = new FirecrackerClient(vm.handle.apiSocket);
-  await client.loadSnapshot({
-    snapshot_path: paths.snapshot,
-    mem_backend: { backend_type: "File", backend_path: paths.memory },
-    resume_vm: true,
-  });
+  try {
+    await client.loadSnapshot({
+      snapshot_path: paths.snapshot,
+      mem_backend: { backend_type: "File", backend_path: paths.memory },
+      resume_vm: true,
+    });
+  } catch (err) {
+    console.error(
+      `[fleet ${vm.handle.id}] snapshot restore failed (${err instanceof Error ? err.message : err}); ` +
+        `discarding snapshot and dropping the VM so the next open cold-boots`,
+    );
+    fc.close();
+    await fs.rm(vm.handle.apiSocket, { force: true }).catch(() => {});
+    await fs.rm(vm.handle.vsockUds, { force: true }).catch(() => {});
+    // Trash the corrupt snapshot so we don't loop on it.
+    await fs.rm(paths.snapshot, { force: true }).catch(() => {});
+    await fs.rm(paths.memory, { force: true }).catch(() => {});
+    await teardownTap(vm.handle.tapDevice).catch(() => {});
+    // Drop the in-memory record so the next ensureVm falls through to a fresh
+    // boot rather than re-entering this path against the (now-deleted) snapshot.
+    vm.handle.state = "stopped";
+    vms.delete(projectId);
+    throw err;
+  }
   vm.client = client;
   vm.fcPid = fc.pid;
   vm.fcClose = fc.close;
@@ -807,10 +861,16 @@ async function tryRehydrateSnapshot(opts: BootOpts): Promise<VmHandle | null> {
 
   console.log(`[fleet ${id}] rehydrating from on-disk snapshot for ${opts.projectId.slice(0, 8)}`);
   const t0 = Date.now();
+  // Declared outside the try so the catch can reclaim the firecracker process +
+  // sockets if loadSnapshot throws on a corrupt/incompatible snapshot — mirrors
+  // restoreFromSnapshot's cleanup. Without this, a failed rehydrate leaked one
+  // firecracker process + its api.sock/vsock on every orchestrator restart with
+  // a bad snapshot (B-8 on the rehydrate path).
+  let fc: Awaited<ReturnType<typeof spawnFirecracker>> | undefined;
   try {
     await ensureBridge();
     await ensureTapDevice(tapName);
-    const fc = await spawnFirecracker({ socketPath: apiSocket });
+    fc = await spawnFirecracker({ socketPath: apiSocket });
     const client = new FirecrackerClient(apiSocket);
     await client.loadSnapshot({
       snapshot_path: paths.snapshot,
@@ -846,6 +906,12 @@ async function tryRehydrateSnapshot(opts: BootOpts): Promise<VmHandle | null> {
       `[fleet ${id}] rehydrate failed (${err instanceof Error ? err.message : err}); ` +
         `discarding snapshot and falling back to cold boot`,
     );
+    // Kill the spawned firecracker process and reclaim its sockets — the `fc?.`
+    // guard also covers spawnFirecracker itself having thrown (process never
+    // created). Close before unlinking, matching the restore path.
+    fc?.close();
+    await fs.rm(apiSocket, { force: true }).catch(() => {});
+    await fs.rm(vsockUds, { force: true }).catch(() => {});
     // Trash the snapshot so we don't loop on a corrupt one.
     await fs.rm(paths.snapshot, { force: true }).catch(() => {});
     await fs.rm(paths.memory, { force: true }).catch(() => {});
@@ -888,6 +954,10 @@ export async function destroy(projectId: string): Promise<void> {
   await teardownTap(vm.handle.tapDevice).catch(() => {});
   vm.handle.state = "stopped";
   vms.delete(projectId);
+  // The in-VM server processes died with the firecracker process — drop their
+  // stale host-side ManagedServer entries (B-10: VM-backed servers had no
+  // exit hook, so they leaked into list_servers / the preview proxy).
+  removeServersForProject(projectId);
 }
 
 /**
@@ -924,6 +994,9 @@ export async function reclaimVm(projectId: string): Promise<void> {
   await teardownTap(vm.handle.tapDevice).catch(() => {});
   vm.handle.state = "stopped";
   vms.delete(projectId);
+  // Reclaim kills the firecracker process, so its in-VM servers are gone too —
+  // prune their stale host-side entries (B-10).
+  removeServersForProject(projectId);
 }
 
 /** Reclaim disk for an orphan project (no in-memory record) but KEEP its ext4. */

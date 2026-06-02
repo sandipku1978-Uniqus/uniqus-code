@@ -26,7 +26,6 @@ let socket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let activeProjectId: string | null = null;
 let activeSessionId: string | null = null;
-const tasksAutoOpenedProjects = new Set<string>();
 
 // Reconnect backoff. A fixed 1.5s delay made every connected browser hammer
 // the orchestrator after a deploy/OOM/network blip, which can stall recovery
@@ -53,6 +52,12 @@ export function connect(projectId: string, sessionId: string | null = null): voi
   // (or switching project/session) returns the UI to a connecting state.
   reconnectAttempts = 0;
   useStore.getState().setConnectionFailed(false);
+  // Cancel any reconnect the previous close scheduled — otherwise a stale timer
+  // fires after this fresh connect and opens a stray duplicate socket.
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   openSocket(projectId, sessionId);
 }
 
@@ -66,7 +71,15 @@ function openSocket(projectId: string, sessionId: string | null): void {
   // the same project, close the old socket first — server-side history is
   // bound at upgrade time, so we have to reconnect to switch sessions.
   if (socket && (activeProjectId !== projectId || activeSessionId !== sessionId)) {
+    // Detach the old socket's handlers before closing it. Otherwise its async
+    // `onclose` fires after we've assigned the freshly-opened socket below and
+    // clobbers it (nulls the shared `socket`, bumps the reconnect counter,
+    // schedules a reconnect) — orphaning the new socket and opening a duplicate.
     try {
+      socket.onclose = null;
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
       socket.close();
     } catch {}
     socket = null;
@@ -87,6 +100,12 @@ function openSocket(projectId: string, sessionId: string | null): void {
     useStore.getState().setConnected(true);
     useStore.getState().setConnectionFailed(false);
     reconnectAttempts = 0;
+    // A successful open cancels any reconnect the previous close scheduled, so a
+    // stale timer can't tear this live socket down with a duplicate reconnect.
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     send({ type: "request_tree" });
     // Replay any edits the user made while the socket was down. Without this
     // a flaky network leaves dirty buffers stranded only in client state.
@@ -94,6 +113,10 @@ function openSocket(projectId: string, sessionId: string | null): void {
   };
 
   ws.onclose = () => {
+    // Ignore the close of a socket we've already replaced (project/session
+    // switch). Without this, this stale handler nulls the freshly-opened
+    // `socket` and schedules a reconnect → orphaned socket + duplicate connection.
+    if (socket !== ws) return;
     useStore.getState().setConnected(false);
     socket = null;
     if (reconnectTimer) clearTimeout(reconnectTimer);
@@ -189,6 +212,18 @@ function handleEvent(event: ServerEvent): void {
       if (s.tree.length === 0) {
         send({ type: "request_tree" });
       }
+      // Re-fetch the open file for the NEW session. `resetChat` keeps
+      // `selectedFile`, so the editor's request_file effect (which skips when
+      // selectedFile already equals the open path) would otherwise leave the
+      // previous session's stale content on screen. Skip a dirty/saving buffer
+      // so we don't request content we'd discard anyway (the file_content
+      // handler guards on the same).
+      if (s.selectedFile) {
+        const status = s.saveStatus[s.selectedFile]?.kind;
+        if (status !== "dirty" && status !== "saving") {
+          send({ type: "request_file", path: s.selectedFile });
+        }
+      }
       break;
     case "iteration":
       break;
@@ -226,12 +261,19 @@ function handleEvent(event: ServerEvent): void {
       break;
     case "file_content":
       if (event.content !== null) {
-        s.setFile(event.path, event.content);
-        // Server is the source of truth post-load — clear any stale dirty
-        // marker so the status footer doesn't lie. Also drop any pending
-        // edit since it's been overwritten by the server's content.
-        s.setSaveStatus(event.path, { kind: "idle" });
-        s.clearPendingEdit(event.path);
+        // Don't clobber an in-flight local edit. Re-requesting an already-dirty
+        // file (re-click the open tab, or switch-away-and-back while the agent
+        // is busy) would otherwise discard recent keystrokes and reset to "idle".
+        // Mirror the file_changed guard and skip the whole apply in that case.
+        const status = s.saveStatus[event.path]?.kind;
+        if (status !== "dirty" && status !== "saving") {
+          s.setFile(event.path, event.content);
+          // Server is the source of truth post-load — clear any stale dirty
+          // marker so the status footer doesn't lie. Also drop any pending
+          // edit since it's been overwritten by the server's content.
+          s.setSaveStatus(event.path, { kind: "idle" });
+          s.clearPendingEdit(event.path);
+        }
       }
       break;
     case "file_changed":
@@ -307,17 +349,9 @@ function handleEvent(event: ServerEvent): void {
       // which fetches the full list. Suppress chat noise.
       break;
     case "todos_updated":
+      // Rendered as the inline collapsible Tasks bar in the chat composer
+      // (ChatPanel) — the single live tasks surface.
       s.setTodos(event.todos);
-      // Auto-pop once per project so closing the pane stays respected.
-      if (
-        event.todos.length > 0 &&
-        !s.panels.tasks &&
-        activeProjectId &&
-        !tasksAutoOpenedProjects.has(activeProjectId)
-      ) {
-        tasksAutoOpenedProjects.add(activeProjectId);
-        s.setPanel("tasks", true);
-      }
       break;
     case "history_compacted":
       s.addSystem(

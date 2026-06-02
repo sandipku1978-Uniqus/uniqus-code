@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { toast } from "@/lib/toast";
 
 /**
  * Minimal shape of the browser SpeechRecognition we use — typed locally so we
@@ -12,7 +13,7 @@ type SpeechRecognitionLike = {
   continuous: boolean;
   onresult: ((e: SpeechResultEvent) => void) | null;
   onend: (() => void) | null;
-  onerror: (() => void) | null;
+  onerror: ((e: SpeechErrorEvent) => void) | null;
   start(): void;
   stop(): void;
 };
@@ -20,7 +21,33 @@ type SpeechResultEvent = {
   resultIndex: number;
   results: ArrayLike<ArrayLike<{ transcript: string }>>;
 };
+/** Subset of SpeechRecognitionErrorEvent — `error` carries the failure code. */
+type SpeechErrorEvent = { error?: string };
 type SpeechRecognitionCtor = new () => SpeechRecognitionLike;
+
+/**
+ * Map a SpeechRecognition error code to user-facing copy. Returns "" for codes
+ * we want to swallow silently (an intentional stop). Without this, every
+ * failure — blocked mic, no network, no speech — was a silent no-op that made
+ * the button look broken.
+ */
+function friendlyMicError(code: string | undefined): string {
+  switch (code) {
+    case "not-allowed":
+    case "service-not-allowed":
+      return "Microphone access is blocked. Allow mic access in your browser, then try again.";
+    case "audio-capture":
+      return "No microphone found. Check that one is connected and enabled.";
+    case "network":
+      return "Voice input needs a network connection — check your connection and retry.";
+    case "no-speech":
+      return "Didn't catch any speech — click the mic and try again.";
+    case "aborted":
+      return ""; // user/programmatic stop — not an error worth announcing
+    default:
+      return "Voice input failed — try again.";
+  }
+}
 
 function getRecognitionCtor(): SpeechRecognitionCtor | null {
   if (typeof window === "undefined") return null;
@@ -64,7 +91,12 @@ export default function MicButton({
 
   function toggle(): void {
     if (listening) {
-      recRef.current?.stop();
+      try {
+        recRef.current?.stop();
+      } catch {
+        // stop() can throw if recognition never actually started — recover.
+        setListening(false);
+      }
       return;
     }
     const Ctor = getRecognitionCtor();
@@ -82,10 +114,25 @@ export default function MicButton({
       if (text.trim()) onText(text.trim());
     };
     rec.onend = () => setListening(false);
-    rec.onerror = () => setListening(false);
+    rec.onerror = (e) => {
+      setListening(false);
+      const msg = friendlyMicError(e?.error);
+      if (msg) toast.error(msg);
+    };
     recRef.current = rec;
     setListening(true);
-    rec.start();
+    try {
+      // start() throws synchronously in an insecure context, when blocked by a
+      // permissions policy, or on a double-start. Without this guard the button
+      // gets wedged in the "listening" state forever (onend/onerror never fire).
+      rec.start();
+    } catch {
+      setListening(false);
+      recRef.current = null;
+      toast.error(
+        "Couldn't start voice input. Make sure the page is on https and microphone access is allowed.",
+      );
+    }
   }
 
   return (

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useSearchParams } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -61,6 +61,9 @@ export default function ChatPanel() {
   // reset() that runs on workspace mount, so it drains reliably below.
   const briefFiles = useStore((s) => s.briefFiles);
   const clearBriefFiles = useStore((s) => s.clearBriefFiles);
+  // One-shot text injected from outside the composer (e.g. "Reject & revise").
+  const pendingComposerText = useStore((s) => s.pendingComposerText);
+  const setPendingComposerText = useStore((s) => s.setPendingComposerText);
   // Mirror Workspace's session-param read so a manual Retry reconnects to the
   // SAME chat session (a bare connect() would default the session to null and
   // silently drop the user back to the project's default thread).
@@ -90,10 +93,23 @@ export default function ChatPanel() {
   // Drives the Modal-based "Clear chat history?" confirmation (replaces the
   // native window.confirm so it matches the app's other destructive dialogs).
   const [confirmReset, setConfirmReset] = useState(false);
+  // Escalation for a Stop that the server is slow to honour: after a timeout we
+  // offer a local "Force stop" so the kill switch never dead-ends (§C).
+  const [forceStop, setForceStop] = useState(false);
+  const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Cursor position in the composer, tracked so @file autocomplete works at the
+  // caret (not only end-of-string) and Escape can dismiss the palettes (§C).
+  const [cursor, setCursor] = useState(0);
+  const [paletteDismissed, setPaletteDismissed] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setStopping(false);
+    setForceStop(false);
+    if (stopTimerRef.current) {
+      clearTimeout(stopTimerRef.current);
+      stopTimerRef.current = null;
+    }
   }, [busy]);
 
   // Drain files queued from the preview pane (annotated screenshots) into the
@@ -101,9 +117,13 @@ export default function ChatPanel() {
   // empty the hand-off queue so they aren't re-added on the next render.
   useEffect(() => {
     if (queuedComposerFiles.length === 0) return;
+    // Snapshot exactly the files we drain so the store clears only these by
+    // reference — anything enqueued between this read and the clear survives
+    // (a blanket clear would drop files queued during that gap).
+    const drained = queuedComposerFiles;
     setPendingFiles((current) => {
       const next = [...current];
-      for (const file of queuedComposerFiles) {
+      for (const file of drained) {
         const duplicate = next.some(
           (existing) =>
             existing.name === file.name &&
@@ -114,7 +134,7 @@ export default function ChatPanel() {
       }
       return next;
     });
-    clearQueuedComposerFiles();
+    clearQueuedComposerFiles(drained);
   }, [queuedComposerFiles, clearQueuedComposerFiles]);
 
   // Adopt attachments staged by the landing-page composer, once the project is
@@ -137,6 +157,23 @@ export default function ChatPanel() {
     });
     clearBriefFiles();
   }, [project, briefFiles, clearBriefFiles]);
+
+  // Adopt one-shot text staged from outside the composer (plan "Reject &
+  // revise" seeds a revision prompt). Replaces the draft and focuses so the
+  // user can finish the sentence and send.
+  useEffect(() => {
+    if (pendingComposerText == null) return;
+    setInput(pendingComposerText);
+    setPendingComposerText(null);
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (ta) {
+        ta.focus();
+        const end = ta.value.length;
+        ta.setSelectionRange(end, end);
+      }
+    });
+  }, [pendingComposerText, setPendingComposerText]);
 
   // Lazy-load slash commands once per project. The list is small and stable
   // — built-ins never change at runtime, project commands change rarely.
@@ -254,18 +291,30 @@ export default function ChatPanel() {
     return m ? m[1].toLowerCase() : null;
   }, [input]);
   const slashMatches = useMemo(() => {
-    if (slashFilter === null) return [];
+    if (slashFilter === null || paletteDismissed) return [];
     return slashCommands.filter((c) => c.name.startsWith(slashFilter)).slice(0, 6);
-  }, [slashFilter, slashCommands]);
+  }, [slashFilter, slashCommands, paletteDismissed]);
   useEffect(() => {
     setSlashIndex(0);
   }, [slashFilter]);
+  // A new filter token means the user kept typing — undo any prior Escape so the
+  // palette can re-appear.
+  useEffect(() => {
+    setPaletteDismissed(false);
+  }, [slashFilter]);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({
-      top: scrollRef.current.scrollHeight,
-      behavior: "smooth",
-    });
+    const el = scrollRef.current;
+    if (!el) return;
+    // Only follow new messages when the user is already parked near the bottom.
+    // Otherwise a smooth scroll on every update yanks them down while they're
+    // reading older history. Measured BEFORE the new content reflows height —
+    // by the time this effect runs `scrollHeight` includes the new rows, but
+    // `scrollTop` hasn't moved, so a user who was at the bottom still reads as
+    // near-bottom while one who scrolled up does not.
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+    if (!nearBottom) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [chat]);
 
   const turns = useMemo(() => buildTurns(chat), [chat]);
@@ -278,14 +327,19 @@ export default function ChatPanel() {
     return set;
   }, [tree]);
 
-  // @file autocomplete — detect "@<partial>" at current cursor position.
+  // @file autocomplete — detect "@<partial>" immediately left of the caret, so
+  // it fires mid-sentence ("see @com|ponents") and not only at end-of-string.
   const [atIndex, setAtIndex] = useState(0);
+  const beforeCursor = useMemo(
+    () => input.slice(0, Math.min(cursor, input.length)),
+    [input, cursor],
+  );
   const atFilter = useMemo(() => {
-    const m = input.match(/(?:^|\s)@([\w./-]*)$/);
+    const m = beforeCursor.match(/(?:^|\s)@([\w./-]*)$/);
     return m ? m[1].toLowerCase() : null;
-  }, [input]);
+  }, [beforeCursor]);
   const atMatches = useMemo(() => {
-    if (atFilter === null) return [];
+    if (atFilter === null || paletteDismissed) return [];
     const all = Array.from(validFilePaths);
     return all
       .filter((p) => p.toLowerCase().includes(atFilter))
@@ -295,10 +349,105 @@ export default function ChatPanel() {
         return aStarts - bStarts || a.localeCompare(b);
       })
       .slice(0, 8);
-  }, [atFilter, validFilePaths]);
+  }, [atFilter, validFilePaths, paletteDismissed]);
   useEffect(() => {
     setAtIndex(0);
   }, [atFilter]);
+  useEffect(() => {
+    setPaletteDismissed(false);
+  }, [atFilter]);
+
+  // Replace the @-token immediately left of the caret with the picked path,
+  // preserving any text after the caret (the old code only worked at EOS).
+  const applyAtPick = useCallback(
+    (path: string) => {
+      const left = input.slice(0, Math.min(cursor, input.length));
+      const right = input.slice(Math.min(cursor, input.length));
+      const newLeft = left.replace(/@[\w./-]*$/, `@${path} `);
+      const next = newLeft + right;
+      setInput(next);
+      const pos = newLeft.length;
+      requestAnimationFrame(() => {
+        const ta = textareaRef.current;
+        if (ta) {
+          ta.focus();
+          ta.setSelectionRange(pos, pos);
+          setCursor(pos);
+        }
+      });
+    },
+    [input, cursor],
+  );
+
+  // Keep `cursor` in sync with the textarea caret.
+  const syncCursor = useCallback(() => {
+    const ta = textareaRef.current;
+    if (ta) setCursor(ta.selectionStart ?? 0);
+  }, []);
+
+  /**
+   * Send a plain-text turn without going through the composer's upload path.
+   * Shared by message Resend, the CompleteRow Regenerate control, and the tool
+   * "Fix this" action so they all assemble the same payload and echo a bubble.
+   * Returns true if it actually went out.
+   */
+  const sendText = useCallback(
+    (content: string): boolean => {
+      const trimmed = content.trim();
+      if (!trimmed || busy || uploading || !project || !connected) return false;
+      const fileRefs = extractFileRefs(trimmed, validFilePaths);
+      const payload: ClientEvent = {
+        type: "user_message",
+        content: trimmed,
+        mode,
+        model: model !== "auto" ? model : undefined,
+        thinking: thinking !== "medium" ? thinking : undefined,
+        file_refs: fileRefs.length > 0 ? fileRefs : undefined,
+      };
+      const ok = send(payload);
+      if (!ok) {
+        addSystem(
+          "disconnected — message not sent. We'll reconnect automatically; try again in a moment.",
+        );
+        return false;
+      }
+      addUserMessage(trimmed, undefined, fileRefs, undefined, Date.now());
+      setBusy(true);
+      return true;
+    },
+    [busy, uploading, project, connected, mode, model, thinking, validFilePaths, addSystem, addUserMessage, setBusy],
+  );
+
+  // Load a previous user message back into the composer for editing.
+  const handleEditMessage = useCallback((text: string) => {
+    setInput(text);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, []);
+
+  // Re-send a previous user message verbatim (or regenerate a turn's answer).
+  const handleResend = useCallback((text: string) => void sendText(text), [sendText]);
+
+  // Hand a failed tool's error back to the agent with a "fix it" framing (§C
+  // error→fix loop; the frontend slice — no terminal needed).
+  const handleFixError = useCallback(
+    (name: string, result: string) => {
+      const snippet = (result || "").slice(0, 1500);
+      void sendText(
+        `The \`${name}\` step failed. Please diagnose the cause and fix it.\n\n\`\`\`\n${snippet}\n\`\`\``,
+      );
+    },
+    [sendText],
+  );
+
+  const chatHandlers = useMemo<ChatHandlers>(
+    () => ({
+      onEdit: handleEditMessage,
+      onResend: handleResend,
+      onFixError: handleFixError,
+      canAct: connected && !busy,
+    }),
+    [handleEditMessage, handleResend, handleFixError, connected, busy],
+  );
 
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
@@ -331,6 +480,18 @@ export default function ChatPanel() {
       return;
     }
 
+    // The upload await above could have spanned a disconnect or the start of
+    // another turn (e.g. an auto-retry). Re-check before send() so we don't
+    // echo a bubble and clear the composer against a closed socket / busy
+    // session — mirrors the pre-upload guard and the ok-check below.
+    if (!connected || busy) {
+      addSystem(
+        "disconnected — message not sent. We'll reconnect automatically; try again in a moment.",
+      );
+      setUploading(false);
+      return;
+    }
+
     const content =
       trimmed ||
       (pendingFiles.length > 0 ? "Use the attached file(s)." : "Use the selected element.");
@@ -353,26 +514,44 @@ export default function ChatPanel() {
     // closed socket we keep the composer text (and its saved draft) and don't
     // echo a bubble — otherwise the user would lose the exact text the draft
     // feature exists to protect, with a misleading "sent" bubble left behind.
-    const ok = send(payload);
-    if (!ok) {
-      addSystem(
-        "disconnected — message not sent. We'll reconnect automatically; try again in a moment.",
-      );
+    // The finally guarantees `uploading` is reset even if send()/echo throws,
+    // so a failed send can never wedge the composer disabled.
+    try {
+      const ok = send(payload);
+      if (!ok) {
+        addSystem(
+          "disconnected — message not sent. We'll reconnect automatically; try again in a moment.",
+        );
+        return;
+      }
+      // Sent — echo the message, mark the turn busy, and clear the composer +
+      // its persisted draft (and the one-shot selected element).
+      addUserMessage(content, attachments, fileRefs, selectedElement ?? undefined, Date.now());
+      setBusy(true);
+      setInput("");
+      setPendingFiles([]);
+      if (selectedElement) setPendingSelectedElement(null);
+    } finally {
       setUploading(false);
-      return;
     }
-    // Sent — echo the message, mark the turn busy, and clear the composer +
-    // its persisted draft (and the one-shot selected element).
-    addUserMessage(content, attachments, fileRefs, selectedElement ?? undefined);
-    setBusy(true);
-    setInput("");
-    setPendingFiles([]);
-    if (selectedElement) setPendingSelectedElement(null);
-    setUploading(false);
   };
 
   const handleStop = () => {
     if (!busy) return;
+    // Second click once the escalation kicked in: give up waiting on the server
+    // and unwedge the UI locally so the kill switch never dead-ends (§C).
+    if (forceStop) {
+      if (stopTimerRef.current) {
+        clearTimeout(stopTimerRef.current);
+        stopTimerRef.current = null;
+      }
+      send({ type: "abort" });
+      setBusy(false);
+      setStopping(false);
+      setForceStop(false);
+      addSystem("Stopped. The agent may still be finishing its current step.");
+      return;
+    }
     setStopping(true);
     const ok = send({ type: "abort" });
     if (!ok) {
@@ -382,7 +561,12 @@ export default function ChatPanel() {
       setBusy(false);
       setStopping(false);
       addSystem("disconnected — stop request not sent.");
+      return;
     }
+    // If the server is slow to honour the abort, surface a local Force stop
+    // after a grace period rather than sitting on "Stopping…" forever.
+    if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+    stopTimerRef.current = setTimeout(() => setForceStop(true), 9000);
   };
 
   const resetChat = () => {
@@ -456,6 +640,11 @@ export default function ChatPanel() {
               </a>
               .
             </div>
+            {!connected && (
+              <div style={{ marginTop: 10, color: "var(--text-muted)", fontSize: 12 }}>
+                Connecting to your workspace…
+              </div>
+            )}
             <div
               style={{
                 marginTop: 10,
@@ -469,6 +658,9 @@ export default function ChatPanel() {
                 <button
                   key={prompt}
                   type="button"
+                  // Gate on the socket — an example that drops into a disabled
+                  // composer (during a cold Firecracker boot) reads as broken (§C).
+                  disabled={!connected}
                   onClick={() => {
                     setInput(prompt);
                     textareaRef.current?.focus();
@@ -481,9 +673,10 @@ export default function ChatPanel() {
                     background: "transparent",
                     border: "1px dashed var(--border-default, #2a2a36)",
                     borderRadius: 6,
-                    cursor: "pointer",
+                    cursor: connected ? "pointer" : "not-allowed",
+                    opacity: connected ? 1 : 0.5,
                   }}
-                  title="Use this prompt"
+                  title={connected ? "Use this prompt" : "Connecting…"}
                 >
                   {prompt}
                 </button>
@@ -515,6 +708,8 @@ export default function ChatPanel() {
                 turn={turn}
                 expanded={expanded || isLast && !turn.complete}
                 onToggle={completeId ? () => toggleTurn(completeId) : undefined}
+                handlers={chatHandlers}
+                isLastTurn={isLast}
               />
             </ErrorBoundary>
           );
@@ -585,7 +780,7 @@ export default function ChatPanel() {
           </button>
           {tasksExpanded && (
             <div className="tasks-inline-list">
-              {todos.map((t, i) => {
+              {todos.map((t) => {
                 const icon = t.status === "completed" ? "✓" : t.status === "in_progress" ? "▶" : "·";
                 const stateLabel =
                   t.status === "completed"
@@ -596,7 +791,14 @@ export default function ChatPanel() {
                 const color = t.status === "completed" ? "var(--text-dim)" : t.status === "in_progress" ? "var(--accent, #a78bfa)" : "var(--text-primary)";
                 const label = t.status === "in_progress" ? t.activeForm : t.content;
                 return (
-                  <div key={i} className="tasks-inline-item" style={{ color }}>
+                  // Key on the todo's stable text (TodoItem has no id), not the
+                  // array index — index keys mismatch state/DOM when the list
+                  // reorders. content+activeForm disambiguates any duplicates.
+                  <div
+                    key={`${t.content} ${t.activeForm}`}
+                    className="tasks-inline-item"
+                    style={{ color }}
+                  >
                     <span
                       title={stateLabel}
                       role="img"
@@ -615,11 +817,28 @@ export default function ChatPanel() {
       )}
 
       {busy && liveUsage && (liveUsage.input > 0 || liveUsage.output > 0) && (
-        <div className="live-usage" title="Live token usage for this response">
+        <div
+          className="live-usage"
+          title={`Usage for this response — ${formatTokens(
+            liveUsage.input,
+          )} tokens read, ${formatTokens(
+            liveUsage.output,
+          )} tokens written. Tokens are the unit AI models bill in.`}
+        >
           <span className="live-usage-dot" />
           <span>
-            <strong>{formatTokens(liveUsage.input)}</strong> tokens in ·{" "}
-            <strong>{formatTokens(liveUsage.output)}</strong> tokens out
+            Usage so far · <strong>{formatTokens(liveUsage.input)}</strong> in ·{" "}
+            <strong>{formatTokens(liveUsage.output)}</strong> out
+          </span>
+        </div>
+      )}
+
+      {!connected && !connectionFailed && (
+        <div className="chat-offline-pill" role="status">
+          <span className="chat-offline-dot" aria-hidden="true" />
+          <span style={{ flex: 1 }}>Offline — reconnecting…</span>
+          <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
+            your message is kept until you&apos;re back
           </span>
         </div>
       )}
@@ -728,9 +947,7 @@ export default function ChatPanel() {
                   type="button"
                   role="menuitem"
                   aria-selected={i === atIndex}
-                  onClick={() => {
-                    setInput((prev) => prev.replace(/@[\w./-]*$/, `@${p} `));
-                  }}
+                  onClick={() => applyAtPick(p)}
                   style={{
                     display: "flex",
                     gap: 8,
@@ -752,7 +969,13 @@ export default function ChatPanel() {
           <textarea
             ref={textareaRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              setCursor(e.target.selectionStart ?? e.target.value.length);
+            }}
+            onClick={syncCursor}
+            onSelect={syncCursor}
+            onKeyUp={syncCursor}
             onPaste={handlePaste}
             onKeyDown={(e) => {
               // @file autocomplete navigation
@@ -770,12 +993,12 @@ export default function ChatPanel() {
                 if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
                   e.preventDefault();
                   const pick = atMatches[atIndex] ?? atMatches[0];
-                  if (pick) setInput((prev) => prev.replace(/@[\w./-]*$/, `@${pick} `));
+                  if (pick) applyAtPick(pick);
                   return;
                 }
                 if (e.key === "Escape") {
                   e.preventDefault();
-                  // clear the @-token to dismiss the palette
+                  setPaletteDismissed(true);
                   return;
                 }
               }
@@ -794,6 +1017,11 @@ export default function ChatPanel() {
                   e.preventDefault();
                   const pick = slashMatches[slashIndex] ?? slashMatches[0];
                   if (pick) setInput(`/${pick.name} `);
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setPaletteDismissed(true);
                   return;
                 }
               }
@@ -905,11 +1133,15 @@ export default function ChatPanel() {
               <button
                 type="button"
                 onClick={handleStop}
-                disabled={stopping}
+                disabled={stopping && !forceStop}
                 className="send-btn stop"
-                aria-label={stopping ? "Stopping" : "Stop the agent"}
+                aria-label={
+                  forceStop ? "Force stop the agent" : stopping ? "Stopping" : "Stop the agent"
+                }
                 title={
-                  stopping
+                  forceStop
+                    ? "Force stop — the server is slow to respond; click to stop locally"
+                    : stopping
                     ? "Stopping… (waiting for the agent to finish its current step)"
                     : "Stop the agent (cancels current turn)"
                 }
@@ -978,6 +1210,18 @@ export default function ChatPanel() {
   );
 }
 
+/** Per-message action callbacks, threaded from ChatPanel down to each row. */
+interface ChatHandlers {
+  /** Load a previous user message back into the composer. */
+  onEdit: (text: string) => void;
+  /** Re-send a user message / regenerate a turn's answer. */
+  onResend: (text: string) => void;
+  /** Hand a failed tool's error back to the agent with a "fix it" prompt. */
+  onFixError: (name: string, result: string) => void;
+  /** Whether send-style actions are currently possible (connected + idle). */
+  canAct: boolean;
+}
+
 interface Turn {
   key: string;
   /** Items that always render at the top of the turn (user message). */
@@ -1032,28 +1276,51 @@ function Turn({
   turn,
   expanded,
   onToggle,
+  handlers,
+  isLastTurn,
 }: {
   turn: Turn;
   expanded: boolean;
   onToggle?: () => void;
+  handlers: ChatHandlers;
+  isLastTurn: boolean;
 }) {
-  const renderItems = (items: ChatItem[]) =>
-    items.map((item) => <ChatItemView key={item.id} item={item} />);
+  const renderHead = (items: ChatItem[]) =>
+    items.map((item) => <ChatItemView key={item.id} item={item} handlers={handlers} />);
+  const renderBody = (items: ChatItem[]) =>
+    items.map((item, i) => {
+      // A reasoning block is "live" only while it's the last item of an
+      // in-flight (not-yet-complete) turn — once text/a tool lands after it, the
+      // step is done and the trace auto-collapses to a pill (§C).
+      const isLiveReasoning =
+        item.kind === "reasoning" && !turn.complete && i === items.length - 1;
+      return (
+        <ChatItemView
+          key={item.id}
+          item={item}
+          handlers={handlers}
+          isLiveReasoning={isLiveReasoning}
+        />
+      );
+    });
   const stepCount = turn.body.filter((i) => i.kind === "tool").length;
   const finalText = [...turn.body].reverse().find((i) => i.kind === "assistant_text") as
     | Extract<ChatItem, { kind: "assistant_text" }>
     | undefined;
+  const userContent = (
+    turn.head.find((i) => i.kind === "user") as Extract<ChatItem, { kind: "user" }> | undefined
+  )?.content;
 
   return (
     <>
-      {renderItems(turn.head)}
+      {renderHead(turn.head)}
       {expanded ? (
-        renderItems(turn.body)
+        renderBody(turn.body)
       ) : (
         // Collapsed view: show only the assistant's final text + a "N steps"
         // disclosure that expands the full body when clicked.
         <>
-          {finalText && <ChatItemView item={finalText} />}
+          {finalText && <ChatItemView item={finalText} handlers={handlers} />}
           {stepCount > 0 && (
             <button
               type="button"
@@ -1076,7 +1343,16 @@ function Turn({
         </>
       )}
       {turn.complete && (
-        <CompleteRow item={turn.complete} expanded={expanded} onToggle={onToggle} />
+        <CompleteRow
+          item={turn.complete}
+          expanded={expanded}
+          onToggle={onToggle}
+          onRegenerate={
+            isLastTurn && userContent && handlers.canAct
+              ? () => handlers.onResend(userContent)
+              : undefined
+          }
+        />
       )}
     </>
   );
@@ -1094,6 +1370,76 @@ function describeSelectedElement(el: SelectedElement): string {
   const id = el.id ? `#${el.id}` : "";
   const cls = el.classes.length > 0 ? `.${el.classes.slice(0, 2).join(".")}` : "";
   return `${el.tag || "element"}${id}${cls}` || el.selector;
+}
+
+/** Local clock time (HH:MM) for a message timestamp. */
+function formatClock(ms: number): string {
+  try {
+    return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return "";
+  }
+}
+
+/** Small copy-to-clipboard button with transient "Copied ✓" feedback. */
+function CopyButton({
+  text,
+  label = "Copy",
+  className,
+}: {
+  text: string;
+  label?: string;
+  className?: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className={className}
+      title="Copy to clipboard"
+      aria-label="Copy to clipboard"
+      onClick={() => {
+        navigator.clipboard
+          ?.writeText(text)
+          .then(() => {
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1500);
+          })
+          .catch(() => {});
+      }}
+    >
+      {copied ? "Copied ✓" : label}
+    </button>
+  );
+}
+
+/** Markdown `pre` renderer that wraps a code block with a hover Copy button. */
+function CodeBlock({ children }: { children?: ReactNode }) {
+  const ref = useRef<HTMLPreElement>(null);
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="code-block-wrap">
+      <button
+        type="button"
+        className="code-copy-btn"
+        title="Copy code"
+        aria-label="Copy code"
+        onClick={() => {
+          const text = ref.current?.textContent ?? "";
+          navigator.clipboard
+            ?.writeText(text)
+            .then(() => {
+              setCopied(true);
+              window.setTimeout(() => setCopied(false), 1500);
+            })
+            .catch(() => {});
+        }}
+      >
+        {copied ? "Copied ✓" : "Copy"}
+      </button>
+      <pre ref={ref}>{children}</pre>
+    </div>
+  );
 }
 
 /** Compact token count: 980 → "980", 10800 → "10.8k", 1_250_000 → "1.25M". */
@@ -1130,13 +1476,47 @@ function extractFileRefs(content: string, validPaths: Set<string>): string[] {
   return Array.from(found);
 }
 
-function ChatItemView({ item }: { item: ChatItem }) {
+function ChatItemView({
+  item,
+  handlers,
+  isLiveReasoning = false,
+}: {
+  item: ChatItem;
+  handlers: ChatHandlers;
+  isLiveReasoning?: boolean;
+}) {
   if (item.kind === "user") {
     return (
       <div className="msg">
         <div className="head">
           <span className="av">Y</span>
           <span className="name">You</span>
+          {item.at !== undefined && (
+            <span className="msg-time" title={new Date(item.at).toLocaleString()}>
+              {formatClock(item.at)}
+            </span>
+          )}
+          <span className="msg-actions">
+            <button
+              type="button"
+              className="msg-action-btn"
+              title="Edit in the composer"
+              aria-label="Edit this message"
+              onClick={() => handlers.onEdit(item.content)}
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              className="msg-action-btn"
+              title="Send this message again"
+              aria-label="Resend this message"
+              disabled={!handlers.canAct}
+              onClick={() => handlers.onResend(item.content)}
+            >
+              Resend
+            </button>
+          </span>
         </div>
         <div className="msg-body user">
           {item.content}
@@ -1182,6 +1562,9 @@ function ChatItemView({ item }: { item: ChatItem }) {
           <span className="av agent">U</span>
           <span className="name">Uniqus</span>
           <span className="frame">Engineering agent</span>
+          <span className="msg-actions">
+            <CopyButton text={item.content} label="Copy" className="msg-action-btn" />
+          </span>
         </div>
         <div className="msg-body" style={{ paddingLeft: 30 }}>
           <div className="md">
@@ -1189,6 +1572,7 @@ function ChatItemView({ item }: { item: ChatItem }) {
               remarkPlugins={[remarkGfm]}
               components={{
                 a: ({ ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+                pre: CodeBlock,
               }}
             >
               {item.content}
@@ -1199,10 +1583,10 @@ function ChatItemView({ item }: { item: ChatItem }) {
     );
   }
   if (item.kind === "reasoning") {
-    return <ReasoningCard item={item} />;
+    return <ReasoningCard item={item} isLive={isLiveReasoning} />;
   }
   if (item.kind === "tool") {
-    return <ToolCard item={item} />;
+    return <ToolCard item={item} onFixError={handlers.onFixError} canAct={handlers.canAct} />;
   }
   if (item.kind === "user_question") {
     return <UserQuestionCard item={item} />;
@@ -1326,10 +1710,12 @@ function CompleteRow({
   item,
   expanded,
   onToggle,
+  onRegenerate,
 }: {
   item: Extract<ChatItem, { kind: "complete" }>;
   expanded: boolean;
   onToggle?: () => void;
+  onRegenerate?: () => void;
 }) {
   const parts = [
     item.aborted ? "aborted" : "done",
@@ -1345,35 +1731,72 @@ function CompleteRow({
   }
   const summary = parts.join(" · ");
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      className="msg-system"
-      style={{
-        cursor: onToggle ? "pointer" : "default",
-        width: "100%",
-        textAlign: "left",
-        background: "transparent",
-        border: "none",
-        padding: "4px 0",
-        opacity: 0.75,
-      }}
-      title={onToggle ? (expanded ? "Collapse this turn" : "Expand this turn") : undefined}
-    >
-      {onToggle ? (expanded ? "▾ " : "▸ ") : ""}
-      {summary}
-    </button>
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <button
+        type="button"
+        onClick={onToggle}
+        className="msg-system"
+        style={{
+          cursor: onToggle ? "pointer" : "default",
+          flex: 1,
+          textAlign: "left",
+          background: "transparent",
+          border: "none",
+          padding: "4px 0",
+          opacity: 0.75,
+        }}
+        title={onToggle ? (expanded ? "Collapse this turn" : "Expand this turn") : undefined}
+      >
+        {onToggle ? (expanded ? "▾ " : "▸ ") : ""}
+        {summary}
+      </button>
+      {onRegenerate && (
+        <button
+          type="button"
+          className="msg-action-btn"
+          onClick={onRegenerate}
+          title="Run this turn again from the same prompt"
+          aria-label="Regenerate this response"
+          style={{ flex: "0 0 auto" }}
+        >
+          ↻ Regenerate
+        </button>
+      )}
+    </div>
   );
 }
 
 function ReasoningCard({
   item,
+  isLive,
 }: {
   item: Extract<ChatItem, { kind: "reasoning" }>;
+  isLive: boolean;
 }) {
-  // Default open so the live trace is visible as it streams; collapsible since
-  // past steps' reasoning is mostly noise once the answer has landed.
-  const [expanded, setExpanded] = useState(true);
+  // Open while the step is live so the trace streams in view; auto-collapses to
+  // a "Thought for Ns" pill once the step finishes so past reasoning doesn't
+  // bury the answer (§C). Still manually re-openable.
+  const [expanded, setExpanded] = useState(isLive);
+  const startRef = useRef<number | null>(null);
+  const [durationMs, setDurationMs] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (isLive && startRef.current === null) startRef.current = Date.now();
+    if (!isLive && startRef.current !== null && durationMs === null) {
+      setDurationMs(Date.now() - startRef.current);
+    }
+  }, [isLive, durationMs]);
+
+  useEffect(() => {
+    if (!isLive) setExpanded(false);
+  }, [isLive]);
+
+  const label = isLive
+    ? "Thinking…"
+    : durationMs !== null && durationMs >= 1000
+    ? `Thought for ${Math.round(durationMs / 1000)}s`
+    : "Thought";
+
   return (
     <div className="reasoning-card">
       <button
@@ -1382,7 +1805,7 @@ function ReasoningCard({
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded ? "true" : "false"}
       >
-        <span>💭 Thinking</span>
+        <span>💭 {label}</span>
         <span className="reasoning-chevron">{expanded ? "▾" : "▸"}</span>
       </button>
       {expanded && <div className="reasoning-body">{item.content}</div>}
@@ -1392,35 +1815,56 @@ function ReasoningCard({
 
 function ToolCard({
   item,
+  onFixError,
+  canAct,
 }: {
   item: Extract<ChatItem, { kind: "tool" }>;
+  onFixError: (name: string, result: string) => void;
+  canAct: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const isError = item.is_error === true;
+  // Auto-expand errors so the reason is visible without a click (§C).
+  const [expanded, setExpanded] = useState(isError);
   const summary = summarizeInput(item.name, item.input);
   const hasResult = item.result !== undefined;
-  const isError = item.is_error === true;
+  // First non-empty line of the error, shown inline in the collapsed card so a
+  // failure isn't just a bare red badge.
+  const errorPreview =
+    isError && item.result
+      ? (item.result.split("\n").find((l) => l.trim()) ?? item.result).slice(0, 140)
+      : null;
 
   return (
-    <button
-      type="button"
-      onClick={() => setExpanded((v) => !v)}
-      className="tool-card"
-    >
-      <div className="row">
-        <span className={`name ${isError ? "error" : ""}`}>{item.name}</span>
-        <span className="summary">{summary}</span>
-        <span
-          className={`status ${
-            !hasResult ? "run" : isError ? "err" : "ok"
-          }`}
+    <>
+      <button type="button" onClick={() => setExpanded((v) => !v)} className="tool-card">
+        <div className="row">
+          <span className={`name ${isError ? "error" : ""}`}>{item.name}</span>
+          <span className="summary">{summary}</span>
+          <span className={`status ${!hasResult ? "run" : isError ? "err" : "ok"}`}>
+            {!hasResult ? "running…" : isError ? "error" : "✓"}
+          </span>
+        </div>
+        {isError && errorPreview && !expanded && (
+          <div className="tool-error-preview">{errorPreview}</div>
+        )}
+        {expanded && hasResult && <pre className={isError ? "err" : ""}>{item.result}</pre>}
+      </button>
+      {isError && hasResult && (
+        <button
+          type="button"
+          className="tool-fix-btn"
+          disabled={!canAct}
+          title={
+            canAct
+              ? "Send this error back to the agent to diagnose and fix"
+              : "Available once the agent is idle and connected"
+          }
+          onClick={() => onFixError(item.name, item.result ?? "")}
         >
-          {!hasResult ? "running…" : isError ? "error" : "✓"}
-        </span>
-      </div>
-      {expanded && hasResult && (
-        <pre className={isError ? "err" : ""}>{item.result}</pre>
+          Fix this →
+        </button>
       )}
-    </button>
+    </>
   );
 }
 
@@ -1450,7 +1894,23 @@ function summarizeInput(name: string, input: unknown): string {
       return String(a.server_id ?? "");
     case "web_search":
       return String(a.query ?? "");
-    default:
-      return "";
+    case "todo_write":
+      return Array.isArray(a.todos) ? `${a.todos.length} tasks` : "";
+    case "ask_user":
+      return String(a.question ?? "");
+    default: {
+      // Generic fallback so unknown/new tools don't render a bare name with no
+      // context (§C). Pick the first meaningful scalar, else a short JSON peek.
+      const first =
+        a.path ?? a.url ?? a.query ?? a.command ?? a.name ?? a.pattern ?? a.id ?? a.server_id;
+      if (typeof first === "string" || typeof first === "number") return String(first);
+      try {
+        const s = JSON.stringify(a);
+        if (!s || s === "{}" || s === "null") return "";
+        return s.length > 60 ? `${s.slice(0, 57)}…` : s;
+      } catch {
+        return "";
+      }
+    }
   }
 }

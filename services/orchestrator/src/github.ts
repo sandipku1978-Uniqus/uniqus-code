@@ -381,6 +381,7 @@ export async function createUserRepo(
   user: UserRecord,
   name: string,
   description: string | null,
+  isPrivate = true,
 ): Promise<CreatedRepo> {
   const token = await getGithubToken(user.id);
   if (!token) {
@@ -397,7 +398,7 @@ export async function createUserRepo(
     body: JSON.stringify({
       name,
       description: description ?? "",
-      private: true,
+      private: isPrivate,
       auto_init: false,
     }),
   });

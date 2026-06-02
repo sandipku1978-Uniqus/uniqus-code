@@ -208,6 +208,23 @@ export interface LoopOptions extends LoopHooks {
    */
   messages?: Anthropic.MessageParam[];
   /**
+   * Sink for the messages this turn appended (user prompt, each assistant
+   * reply, each tool_result batch), captured BY REFERENCE at push time. The
+   * caller persists exactly these — robust against the in-place head mutations
+   * (compaction's splice, normalize) that shift indices and made an index-based
+   * persist slice lose or duplicate the turn (B-1). Populated incrementally, so
+   * the caller can also flush it from a `finally` even when the loop throws
+   * (B-12). The loop never reads it back.
+   */
+  collectMessages?: Anthropic.MessageParam[];
+  /**
+   * The chat session this turn belongs to. Used to scope the agent's in-memory
+   * todo list per (project, session) so switching chat sessions in the same
+   * project doesn't show the other session's tasks (B-11). Optional: CLI/test
+   * runs without a session fall back to a project-only key.
+   */
+  sessionId?: string | null;
+  /**
    * Aborts the current Anthropic stream and any in-flight tool execution.
    * The loop returns normally (no throw) when aborted, so the caller can
    * decide how to record the partial turn.
@@ -356,6 +373,16 @@ export async function runAgentLoop(
     opts.repo ?? null,
   );
   const messages = opts.messages ?? [];
+  // Append every message this turn produces to both the live history AND the
+  // caller's persist sink (by reference). Persisting these references — rather
+  // than slicing `messages` by a pre-turn length — is immune to the in-place
+  // head mutations below (maybeCompact's splice, normalize's full-array splice)
+  // that shift/shrink indices (B-1), and lets the caller persist on a thrown
+  // error too (B-12).
+  const record = (m: Anthropic.MessageParam): void => {
+    messages.push(m);
+    opts.collectMessages?.push(m);
+  };
   // Append the selected-element context (if the user clicked one in the
   // preview) as a structured block on this turn's user message, so the agent
   // knows which UI node the request targets. It rides the persisted message
@@ -363,7 +390,7 @@ export async function runAgentLoop(
   const turnContent = opts.selectedElement
     ? `${userMessage}${formatSelectedElementBlock(opts.selectedElement)}`
     : userMessage;
-  messages.push({ role: "user", content: turnContent });
+  record({ role: "user", content: turnContent });
   normalizeMessageHistoryInPlace(messages);
 
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
@@ -451,7 +478,7 @@ export async function runAgentLoop(
     });
 
     const toolCalls = turn.toolCalls;
-    messages.push({ role: "assistant", content: turn.content });
+    record({ role: "assistant", content: turn.content });
 
     if (turn.stopReason === "end_turn" || toolCalls.length === 0) {
       return finish(false);
@@ -486,6 +513,7 @@ export async function runAgentLoop(
           call.input,
           call.id,
           opts.projectId ?? null,
+          opts.sessionId ?? null,
           opts.previewBaseUrl,
           opts.signal,
           opts.requestUserAnswer,
@@ -529,7 +557,7 @@ export async function runAgentLoop(
       }
     }
 
-    messages.push({ role: "user", content: toolResults });
+    record({ role: "user", content: toolResults });
   }
 
   throw new Error(
@@ -569,6 +597,7 @@ export async function executeTool(
   input: unknown,
   callId: string,
   projectId: string | null,
+  sessionId: string | null,
   previewBaseUrl: string | undefined,
   signal: AbortSignal | undefined,
   requestUserAnswer: LoopHooks["requestUserAnswer"],
@@ -682,13 +711,16 @@ export async function executeTool(
       return list.length === 0 ? "(no servers running)" : JSON.stringify(list, null, 2);
     }
     case "read_server_log":
-      return sb.readServerLog(args.server_id, args.max_bytes);
+      // Async variant RPCs into the VM. The sync readServerLog reads a host-side
+      // buffer that is always empty for Firecracker VM-backed servers (the prod
+      // path), so the agent got "" and retried blind when diagnosing crashes (B-7).
+      return await sb.readServerLogAsync(args.server_id, args.max_bytes);
     case "todo_write": {
       if (!Array.isArray(args.todos)) {
         throw new Error("todo_write requires 'todos' as an array");
       }
       const items = args.todos as TodoItem[];
-      const stored = projectId ? setTodos(projectId, items) : items;
+      const stored = projectId ? setTodos(projectId, sessionId, items) : items;
       onTodoWrite?.(stored);
       const summary = stored
         .map((it) => `${{ pending: "·", in_progress: "▶", completed: "✓" }[it.status]} ${it.content}`)

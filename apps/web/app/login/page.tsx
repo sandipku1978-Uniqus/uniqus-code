@@ -31,6 +31,14 @@ export default async function LoginPage() {
           Continue securely
         </a>
         <GuestLoginActions isExistingGuest={isExistingGuest} />
+        <div style={{ textAlign: "center", marginTop: 14 }}>
+          <a
+            href="/guide"
+            style={{ fontSize: 12, color: "var(--text-muted)", textDecoration: "none" }}
+          >
+            New here? Read the guide →
+          </a>
+        </div>
         <div className="footer">
           By signing in you agree to the terms and privacy policy.
         </div>

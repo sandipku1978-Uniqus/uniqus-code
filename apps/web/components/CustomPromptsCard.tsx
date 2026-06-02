@@ -144,7 +144,7 @@ export default function CustomPromptsCard() {
 
           <label style={{ display: "grid", gap: 6 }}>
             <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
-              Default skills
+              Default skills for new projects
             </span>
             <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
               Markdown seeded into every new project’s Skills file

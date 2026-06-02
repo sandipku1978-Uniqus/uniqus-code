@@ -12,6 +12,7 @@ import { connect, disconnect, send } from "@/lib/ws-client";
 import { useStore, previewTabId, fileTabId } from "@/lib/store";
 import { useIsMobile } from "@/lib/use-is-mobile";
 import { runProjectApi } from "@/lib/api";
+import { toast } from "@/lib/toast";
 import ChatPanel from "./ChatPanel";
 import FileExplorer from "./FileExplorer";
 import EditorPreviewArea from "./EditorPreviewArea";
@@ -36,6 +37,7 @@ export default function Workspace({
   const connectionFailed = useStore((s) => s.connectionFailed);
   const panels = useStore((s) => s.panels);
   const togglePanel = useStore((s) => s.togglePanel);
+  const resetPanels = useStore((s) => s.resetPanels);
   const project = useStore((s) => s.project);
   const reset = useStore((s) => s.reset);
   const lastSyncedAt = useStore((s) => s.lastSyncedAt);
@@ -71,6 +73,24 @@ export default function Workspace({
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [secretsOpen, setSecretsOpen] = useState(false);
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
+  // Bumped to force a clean PanelGroup remount after "Reset layout" clears the
+  // saved drag sizes (UI/UX audit §B).
+  const [layoutKey, setLayoutKey] = useState(0);
+
+  const resetLayout = () => {
+    try {
+      for (const k of Object.keys(window.localStorage)) {
+        if (k.includes("uniqus-h-") || k.includes("uniqus-v-")) {
+          window.localStorage.removeItem(k);
+        }
+      }
+    } catch {
+      /* private mode — non-fatal */
+    }
+    resetPanels();
+    setLayoutKey((n) => n + 1);
+    toast.success("Layout reset");
+  };
 
   // ── Mobile (≤760px) layout ──────────────────────────────────────────────
   // On a phone the horizontal Chat | Files | Editor split is unusable, so we
@@ -139,6 +159,11 @@ export default function Workspace({
   const goPreview = () => {
     setMobileView("editor");
     if (previews[0]) setEditorTab(previewTabId(previews[0].id));
+    else {
+      // No server yet — instead of a dead, inert tab (whose tooltip a phone
+      // can't show), surface the editor and explain how to start one (§E).
+      toast.info("Tap Run to start a live preview.");
+    }
   };
 
   // Tick so the "synced 12s ago" label increments without waiting for the
@@ -210,8 +235,10 @@ export default function Workspace({
     }
     if (briefFiredRef.current === briefParam) return;
     briefFiredRef.current = briefParam;
-    addUserMessage(briefParam);
-    setBusy(true);
+    // Send first, echo only on success (mirrors ChatPanel.handleSubmit). A
+    // failed send used to leave the echoed user bubble behind, which flipped
+    // hasHistory true and made the retry path strip ?brief= — so the new
+    // project's opening prompt was shown but never delivered.
     const ok = send({
       type: "user_message",
       content: briefParam,
@@ -220,11 +247,12 @@ export default function Workspace({
       thinking: thinking !== "medium" ? thinking : undefined,
     });
     if (!ok) {
-      setBusy(false);
       // Leave the param in place so a reconnect retries the fire.
       briefFiredRef.current = null;
       return;
     }
+    addUserMessage(briefParam);
+    setBusy(true);
     router.replace(`/projects/${projectId}`);
   }, [
     briefParam,
@@ -368,6 +396,20 @@ export default function Workspace({
                       covers the menu instead. */}
                   <div ref={overflowMenuRef} className="topbar-overflow">
                     {secondaryActions}
+                    <button
+                      type="button"
+                      className="toggle-btn"
+                      onClick={() => {
+                        resetLayout();
+                        closeOverflow();
+                      }}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <polyline points="23 4 23 10 17 10" />
+                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                      </svg>
+                      <span>Reset layout</span>
+                    </button>
                     <span className="topbar-overflow-sep" />
                     <a
                       href={signOutUrl}
@@ -409,11 +451,24 @@ export default function Workspace({
                   </svg>
                 }
               />
+              <button
+                type="button"
+                onClick={resetLayout}
+                className="icon-btn"
+                title="Reset layout (panel sizes + visibility)"
+                aria-label="Reset layout"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="23 4 23 10 17 10" />
+                  <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                </svg>
+              </button>
               <span style={{ width: 1, height: 18, background: "var(--border-default)" }} />
               <a
                 href={signOutUrl}
                 className="icon-btn"
                 title="Sign out"
+                aria-label="Sign out"
                 style={{ textDecoration: "none" }}
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -429,8 +484,29 @@ export default function Workspace({
 
       {isGuest && <GuestBanner variant="compact" />}
 
+      {isMobile && !connected && (
+        <div className="mobile-conn-bar" role="status">
+          <span className="chat-offline-dot" aria-hidden="true" />
+          <span style={{ flex: 1 }}>
+            {connectionFailed ? "Connection failed" : "Connecting…"}
+          </span>
+          {connectionFailed && (
+            <button
+              type="button"
+              className="status-retry-btn"
+              onClick={() => connect(projectId, sessionParam)}
+            >
+              Retry
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Main grid */}
-      <div className="ide-grid">
+      <div className="ide-grid" style={{ position: "relative" }}>
+        {/* Connect skeleton (desktop) — placeholder panes while the WS comes up
+            so the workspace doesn't look broken/blank on first open (§B). */}
+        {!isMobile && !connected && !connectionFailed && <WorkspaceSkeleton />}
         {isMobile ? (
           /* Phone: every pane is mounted at once and shown/hidden via CSS
              `display` (not conditional render) so each keeps its state across
@@ -463,7 +539,11 @@ export default function Workspace({
             </div>
           </div>
         ) : (
-          <PanelGroup direction="horizontal" autoSaveId={`uniqus-h-${panels.files ? "f" : "nf"}`}>
+          <PanelGroup
+            key={layoutKey}
+            direction="horizontal"
+            autoSaveId={`uniqus-h-${panels.files ? "f" : "nf"}`}
+          >
             <Panel id="chat" defaultSize={panels.files ? 35 : 45} minSize={25} order={1}>
               <ErrorBoundary label="chat">
                 <ChatPanel />
@@ -472,7 +552,11 @@ export default function Workspace({
 
             {panels.files && (
               <>
-                <PanelResizeHandle className="resize-handle-h" />
+                <PanelResizeHandle
+                  className="resize-handle-h"
+                  aria-label="Resize the files panel"
+                  title="Drag to resize · arrow keys when focused"
+                />
                 <Panel id="files" defaultSize={20} minSize={12} maxSize={35} order={2}>
                   <ErrorBoundary label="files">
                     <FileExplorer onClose={() => togglePanel("files")} />
@@ -481,7 +565,11 @@ export default function Workspace({
               </>
             )}
 
-            <PanelResizeHandle className="resize-handle-h" />
+            <PanelResizeHandle
+              className="resize-handle-h"
+              aria-label="Resize the editor panel"
+              title="Drag to resize · arrow keys when focused"
+            />
 
             <Panel id="main" defaultSize={panels.files ? 45 : 55} minSize={30} order={3}>
               <PanelGroup
@@ -495,7 +583,11 @@ export default function Workspace({
                 </Panel>
                 {panels.terminal && (
                   <>
-                    <PanelResizeHandle className="resize-handle-v" />
+                    <PanelResizeHandle
+                      className="resize-handle-v"
+                      aria-label="Resize the logs panel"
+                      title="Drag to resize · arrow keys when focused"
+                    />
                     <Panel id="terminal" defaultSize={30} minSize={15} order={3}>
                       <ErrorBoundary label="logs">
                         <TerminalPanel onClose={() => togglePanel("terminal")} />
@@ -538,9 +630,12 @@ export default function Workspace({
             onClick={goPreview}
             label="Preview"
             badge={hasPreview}
-            disabled={!hasPreview}
-            disabledTitle="Run the project to get a live preview"
-            accessibleLabel={hasPreview ? "Preview (running)" : undefined}
+            // Not disabled: a tap when nothing is running shows a hint (toast)
+            // rather than a dead tab a phone can't explain (§E).
+            dimmed={!hasPreview}
+            accessibleLabel={
+              hasPreview ? "Preview (running)" : "Preview — run the project first"
+            }
             icon={
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <circle cx="12" cy="12" r="10" />
@@ -611,6 +706,7 @@ export default function Workspace({
               onClick={() => connect(projectId, sessionParam)}
               className="status-retry-btn"
               title="Reconnect to the workspace"
+              aria-label="Reconnect to the workspace"
             >
               Retry
             </button>
@@ -630,6 +726,20 @@ export default function Workspace({
   );
 }
 
+/** Placeholder panes shown over the IDE grid while the WebSocket connects. */
+function WorkspaceSkeleton() {
+  return (
+    <div className="ide-skeleton" aria-hidden="true">
+      <div className="ide-skeleton-bar" style={{ width: "40%" }} />
+      <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+        {[90, 70, 80, 60, 75, 55, 85, 65].map((w, i) => (
+          <div key={i} className="ide-skeleton-row" style={{ width: `${w}%` }} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function relativeAge(epochMs: number): string {
   const sec = Math.max(0, Math.floor((Date.now() - epochMs) / 1000));
   if (sec < 5) return "just now";
@@ -640,73 +750,44 @@ function relativeAge(epochMs: number): string {
 
 function RunButton({ projectId }: { projectId: string }) {
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const addSystem = useStore((s) => s.addSystem);
-
-  // Auto-clear the error toast after a few seconds so a stale message
-  // doesn't sit above the topbar forever.
-  useEffect(() => {
-    if (!error) return;
-    const t = setTimeout(() => setError(null), 6000);
-    return () => clearTimeout(t);
-  }, [error]);
 
   const onClick = async () => {
     if (busy) return;
     setBusy(true);
-    setError(null);
     try {
       const r = await runProjectApi(projectId);
       addSystem(`server up · ${r.command} :${r.port} (config: ${r.config_source})`);
+      toast.success(`Server running on port ${r.port}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // Surface via the global toast system (aria-live) instead of a stray
+      // absolute-positioned popover above the topbar (§E).
+      toast.error(`Couldn't start the server: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div style={{ position: "relative" }}>
-      <button
-        type="button"
-        onClick={onClick}
-        disabled={busy}
-        className="toggle-btn"
-        title="Stop any running server, then start (or restart) the project's dev server"
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy}
+      className="toggle-btn"
+      title="Stop any running server, then start (or restart) the project's dev server"
+    >
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
       >
-        <svg
-          width="14"
-          height="14"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <polygon points="5 3 19 12 5 21 5 3" />
-        </svg>
-        <span>{busy ? "Starting…" : "Run"}</span>
-      </button>
-      {error && (
-        <div
-          style={{
-            position: "absolute",
-            top: "calc(100% + 6px)",
-            right: 0,
-            zIndex: 50,
-            background: "var(--bg-elev, #16161e)",
-            border: "1px solid var(--conf-low, #c0392b)",
-            borderRadius: 6,
-            padding: "8px 10px",
-            fontSize: 11,
-            color: "var(--text-primary)",
-            maxWidth: 360,
-            boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-          }}
-        >
-          {error}
-        </div>
-      )}
-    </div>
+        <polygon points="5 3 19 12 5 21 5 3" />
+      </svg>
+      <span>{busy ? "Starting…" : "Run"}</span>
+    </button>
   );
 }
 
@@ -740,8 +821,7 @@ function MobileTab({
   label,
   icon,
   badge,
-  disabled,
-  disabledTitle,
+  dimmed,
   accessibleLabel,
 }: {
   active: boolean;
@@ -750,10 +830,8 @@ function MobileTab({
   icon: React.ReactNode;
   /** Small dot indicating activity (e.g. a running preview server). */
   badge?: boolean;
-  /** Dim + block the tab (e.g. Preview before any server is running). */
-  disabled?: boolean;
-  /** Tooltip explaining why the tab is disabled. */
-  disabledTitle?: string;
+  /** Visually de-emphasize without blocking the tap (the tap shows a hint). */
+  dimmed?: boolean;
   /** Overrides the announced name (e.g. "Preview (running)") so state that's
    *  only shown as a colored dot is still perceivable to screen readers. */
   accessibleLabel?: string;
@@ -761,12 +839,10 @@ function MobileTab({
   return (
     <button
       type="button"
-      onClick={disabled ? undefined : onClick}
+      onClick={onClick}
       className="mobile-tab"
       data-active={active}
-      disabled={disabled}
-      aria-disabled={disabled || undefined}
-      title={disabled ? disabledTitle : undefined}
+      style={dimmed ? { opacity: 0.5 } : undefined}
       aria-label={accessibleLabel}
       aria-current={active ? "page" : undefined}
     >

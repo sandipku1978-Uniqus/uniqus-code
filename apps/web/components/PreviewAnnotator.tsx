@@ -72,6 +72,9 @@ export default function PreviewAnnotator({
   const [draft, setDraft] = useState<Shape | null>(null);
   const [capturing, setCapturing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Non-blocking hint (capture cancelled, or fell back to a whole-tab grab) —
+  // distinct from the louder `error` path (UI/UX audit §C).
+  const [notice, setNotice] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   // Inline text entry: where the user clicked (canvas coords + on-screen coords).
   const [textEntry, setTextEntry] = useState<{ cx: number; cy: number; dx: number; dy: number; value: string } | null>(null);
@@ -82,16 +85,31 @@ export default function PreviewAnnotator({
   const textInputRef = useRef<HTMLInputElement>(null);
   const canCapture = supportsCapture();
 
+  // The capture/load flows setState after async awaits (image decode, screen
+  // capture, frame grab) — guard every post-await setState so a close mid-flight
+  // doesn't trigger a "setState after unmount" warning / wasted work.
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   // ── Load a base image from a data URL ──────────────────────────────────────
   const loadImage = useCallback((src: string) => {
     const img = new Image();
     img.onload = () => {
+      if (!isMountedRef.current) return;
       setImage(img);
       setShapes([]);
       setDraft(null);
       setError(null);
     };
-    img.onerror = () => setError("Could not load that image.");
+    img.onerror = () => {
+      if (!isMountedRef.current) return;
+      setError("Could not load that image.");
+    };
     img.src = src;
   }, []);
 
@@ -100,8 +118,14 @@ export default function PreviewAnnotator({
   // user captured the current tab); otherwise returns the full frame. Declared
   // before its consumers so the deps arrays below reference live bindings.
   const computePreviewCrop = useCallback(
-    (vw: number, vh: number): { x: number; y: number; w: number; h: number } => {
-      const full = { x: 0, y: 0, w: vw, h: vh };
+    (
+      vw: number,
+      vh: number,
+    ): { x: number; y: number; w: number; h: number; cropped: boolean } => {
+      // `cropped: false` ⇒ we couldn't isolate the preview and fell back to the
+      // whole frame; the caller surfaces a hint so the user isn't surprised by a
+      // screenshot of their entire tab.
+      const full = { x: 0, y: 0, w: vw, h: vh, cropped: false };
       const iframe = document.querySelector<HTMLIFrameElement>(
         `iframe[title="preview ${server.port}"]`,
       );
@@ -117,7 +141,7 @@ export default function PreviewAnnotator({
       const w = Math.min(vw - x, Math.round(r.width * sx));
       const h = Math.min(vh - y, Math.round(r.height * sy));
       if (w < 8 || h < 8) return full;
-      return { x, y, w, h };
+      return { x, y, w, h, cropped: true };
     },
     [server.port],
   );
@@ -125,7 +149,7 @@ export default function PreviewAnnotator({
   // Grab a single frame from the capture stream, cropped (best-effort) to the
   // preview iframe's on-screen box, and return a PNG data URL.
   const frameToDataUrl = useCallback(
-    (stream: MediaStream): Promise<string> =>
+    (stream: MediaStream): Promise<{ dataUrl: string; cropped: boolean }> =>
       new Promise((resolve, reject) => {
         const video = document.createElement("video");
         video.muted = true;
@@ -159,7 +183,7 @@ export default function PreviewAnnotator({
                 }
                 ctx.drawImage(video, crop.x, crop.y, crop.w, crop.h, 0, 0, crop.w, crop.h);
                 cleanup();
-                resolve(out.toDataURL("image/png"));
+                resolve({ dataUrl: out.toDataURL("image/png"), cropped: crop.cropped });
               });
             })
             .catch((e) => {
@@ -179,6 +203,7 @@ export default function PreviewAnnotator({
   const capture = useCallback(async () => {
     if (!canCapture) return;
     setError(null);
+    setNotice(null);
     setCapturing(true);
     let stream: MediaStream | null = null;
     try {
@@ -189,15 +214,29 @@ export default function PreviewAnnotator({
         audio: false,
         ...({ preferCurrentTab: true } as Record<string, unknown>),
       });
-      const dataUrl = await frameToDataUrl(stream);
+      const { dataUrl, cropped } = await frameToDataUrl(stream);
+      if (!isMountedRef.current) return;
       loadImage(dataUrl);
+      // Warn when we couldn't isolate the preview and grabbed the whole tab.
+      if (!cropped) {
+        setNotice(
+          "Couldn't isolate the preview — captured the whole tab. Crop it with the Box tool, recapture, or paste an image instead.",
+        );
+      }
     } catch (err) {
+      if (!isMountedRef.current) return;
       const msg = err instanceof Error ? err.message : String(err);
-      // A user cancelling the picker is not an error worth shouting about.
-      setError(/denied|dismiss|abort|cancel/i.test(msg) ? null : `Capture failed: ${msg}. You can paste a screenshot instead.`);
+      if (/denied|dismiss|abort|cancel/i.test(msg)) {
+        // User cancelled the OS picker — give a soft hint, not a loud error, so
+        // the empty state doesn't just sit there with no feedback (§C).
+        setNotice("Capture cancelled — click Capture again, or paste/drop a screenshot.");
+      } else {
+        setError(`Capture failed: ${msg}. You can paste a screenshot instead.`);
+      }
     } finally {
+      // Always release the tracks even if we unmounted; only the setState is guarded.
       stream?.getTracks().forEach((t) => t.stop());
-      setCapturing(false);
+      if (isMountedRef.current) setCapturing(false);
     }
   }, [canCapture, loadImage, frameToDataUrl]);
 
@@ -497,6 +536,19 @@ export default function PreviewAnnotator({
         {error && (
           <div className="annotator-error" role="alert">
             {error}
+          </div>
+        )}
+        {!error && notice && (
+          <div
+            className="annotator-error"
+            role="status"
+            style={{
+              background: "rgba(240, 180, 41, 0.12)",
+              borderColor: "rgba(240, 180, 41, 0.4)",
+              color: "var(--text-primary)",
+            }}
+          >
+            {notice}
           </div>
         )}
       </div>

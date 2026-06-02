@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Modal from "./Modal";
+import { toast } from "@/lib/toast";
 import {
   applySkillPackApi,
   fetchSkillPacksApi,
@@ -29,6 +30,15 @@ export default function SkillsModal({
   const [error, setError] = useState<string | null>(null);
   const [packs, setPacks] = useState<SkillPackSummary[]>([]);
   const [packBusy, setPackBusy] = useState<string | null>(null);
+  // The content as loaded/last-saved, to detect unsaved edits (§D).
+  const pristineRef = useRef<string>("");
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  // Pack pending confirmation before it overwrites the editor.
+  const [confirmPack, setConfirmPack] = useState<string | null>(null);
+  // Buffer of the editor content before a pack replaced it, for one-step undo.
+  const [undoBuffer, setUndoBuffer] = useState<string | null>(null);
+
+  const dirty = content !== pristineRef.current;
 
   useEffect(() => {
     let abort = false;
@@ -40,6 +50,7 @@ export default function SkillsModal({
         ]);
         if (abort) return;
         setContent(s.content);
+        pristineRef.current = s.content;
         setPacks(p.packs);
       } catch (err) {
         if (abort) return;
@@ -58,30 +69,58 @@ export default function SkillsModal({
     setError(null);
     try {
       await writeSkillsApi(projectId, content);
+      pristineRef.current = content;
+      toast.success("Skills saved");
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      toast.error(`Couldn't save Skills: ${msg}`);
     } finally {
       setSaving(false);
     }
+  };
+
+  // Guard every close path (Cancel, Escape, backdrop) against losing edits.
+  const requestClose = () => {
+    if (dirty) setConfirmDiscard(true);
+    else onClose();
   };
 
   // One design pack active at a time — the API supports append, but stacking
   // packs ("retro pixel" + "liquid glass") produces contradictory guidance
   // and was confusing in the UI. The skills file is still freeform; you can
   // hand-edit it to mix concepts.
-  const applyPack = async (id: string) => {
+  const applyPack = (id: string) => {
     if (packBusy) return;
+    // Confirm before clobbering a non-empty editor buffer (§D).
+    if (content.trim().length > 0) {
+      setConfirmPack(id);
+      return;
+    }
+    void applyPackNow(id);
+  };
+
+  const applyPackNow = async (id: string) => {
+    setConfirmPack(null);
     setPackBusy(id);
     setError(null);
     try {
+      const previous = content;
       const r = await applySkillPackApi(projectId, id, "replace");
+      setUndoBuffer(previous);
       setContent(r.content);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setPackBusy(null);
     }
+  };
+
+  const undoPack = () => {
+    if (undoBuffer === null) return;
+    setContent(undoBuffer);
+    setUndoBuffer(null);
   };
 
   // A pack is "active" when its body header (`# Design: <Name>`) is present in
@@ -96,6 +135,7 @@ export default function SkillsModal({
   })();
 
   return (
+    <>
     <Modal
       title="Project Skills"
       subtitle={
@@ -103,16 +143,43 @@ export default function SkillsModal({
           Stored at <code>.uniqus/skills.md</code> · prepended to the agent system prompt every turn
         </>
       }
-      onClose={onClose}
+      onClose={requestClose}
       width={960}
       bodyStyle={{ padding: 0, display: "grid", gridTemplateColumns: "1fr 280px" }}
       footer={
         <>
-          <div className={`modal-status${error ? " error" : ""}`}>
-            {error ?? `${content.length.toLocaleString()} chars · max 64 KB`}
+          <div
+            className={`modal-status${error ? " error" : ""}`}
+            role="status"
+            aria-live="polite"
+          >
+            {error ? (
+              error
+            ) : undoBuffer !== null ? (
+              <>
+                Pack applied ·{" "}
+                <button
+                  type="button"
+                  onClick={undoPack}
+                  style={{
+                    background: "none",
+                    border: 0,
+                    padding: 0,
+                    color: "var(--accent)",
+                    cursor: "pointer",
+                    font: "inherit",
+                    textDecoration: "underline",
+                  }}
+                >
+                  Undo
+                </button>
+              </>
+            ) : (
+              `${content.length.toLocaleString()} chars · max 64 KB${dirty ? " · unsaved" : ""}`
+            )}
           </div>
           <div className="modal-actions">
-            <button onClick={onClose} className="btn-secondary">
+            <button onClick={requestClose} className="btn-secondary">
               Cancel
             </button>
             <button onClick={onSave} disabled={saving || loading} className="btn-primary">
@@ -129,6 +196,7 @@ export default function SkillsModal({
           <textarea
             value={content}
             onChange={(e) => setContent(e.target.value)}
+            aria-label="Project guidance for the agent"
             placeholder={`# Project guidance for the agent\n\n- Always use Python 3.11.\n- Brand voice is dry and concise.\n- Avoid jQuery; prefer fetch + DOM APIs.\n- Bind dev servers to 0.0.0.0.`}
             style={{
               width: "100%",
@@ -228,5 +296,78 @@ export default function SkillsModal({
         </div>
       </div>
     </Modal>
+
+    {confirmDiscard && (
+      <Modal
+        title="Discard unsaved changes?"
+        width={420}
+        onClose={() => setConfirmDiscard(false)}
+        footer={
+          <>
+            <span />
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setConfirmDiscard(false)}
+              >
+                Keep editing
+              </button>
+              <button
+                type="button"
+                className="btn-danger"
+                onClick={() => {
+                  setConfirmDiscard(false);
+                  onClose();
+                }}
+              >
+                Discard
+              </button>
+            </div>
+          </>
+        }
+      >
+        <p style={{ margin: 0, fontSize: 13, color: "var(--text-dim)" }}>
+          You have unsaved edits to your Skills. Closing now will lose them.
+        </p>
+      </Modal>
+    )}
+
+    {confirmPack && (
+      <Modal
+        title="Replace your Skills?"
+        width={460}
+        onClose={() => setConfirmPack(null)}
+        footer={
+          <>
+            <span />
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setConfirmPack(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => applyPackNow(confirmPack)}
+              >
+                Replace
+              </button>
+            </div>
+          </>
+        }
+      >
+        <p style={{ margin: 0, fontSize: 13, color: "var(--text-dim)" }}>
+          Applying the{" "}
+          <strong>{packs.find((p) => p.id === confirmPack)?.name ?? "selected"}</strong> pack
+          overwrites everything currently in the editor. You can undo it right after, and
+          nothing is saved until you click Save.
+        </p>
+      </Modal>
+    )}
+    </>
   );
 }

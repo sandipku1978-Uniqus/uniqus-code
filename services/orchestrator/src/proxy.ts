@@ -54,9 +54,11 @@ function buildPreviewCookie(serverId: string): string {
   // SameSite=None; Secure is required because the preview iframe is
   // typically embedded in a different origin (the web app). Path=/ so the
   // cookie covers `/about`, `/_next/...`, `/_next/webpack-hmr`, etc.
-  // Max-Age is short — preview ids are ephemeral, we don't want stale ones
-  // outliving their dev servers.
-  return `${PREVIEW_COOKIE}=${encodeURIComponent(serverId)}; Path=/; Max-Age=86400; SameSite=None; Secure; HttpOnly`;
+  // Max-Age is deliberately short (1h): the serverId is an unguessable 128-bit
+  // capability (M-6) and a stale/injected cookie pins the victim's bare-path
+  // preview to that server for its whole lifetime, so don't let it outlive an
+  // ephemeral dev server by a day (M-7).
+  return `${PREVIEW_COOKIE}=${encodeURIComponent(serverId)}; Path=/; Max-Age=3600; SameSite=None; Secure; HttpOnly`;
 }
 
 /**
@@ -250,14 +252,36 @@ export function proxyWebSocket(
     headers,
   });
 
+  // Track the upstream socket so a client disconnect can tear it down too.
+  let upstreamSocket: Duplex | undefined;
+
+  // If the client drops (or stalls and the socket ends), abort the upstream
+  // request and destroy its socket — otherwise we leak an upstream
+  // request/socket per dropped preview WS.
+  const onClientGone = (): void => {
+    try {
+      upstream.destroy();
+    } catch {}
+    try {
+      upstreamSocket?.destroy();
+    } catch {}
+  };
+  clientSocket.on("close", onClientGone);
+  clientSocket.on("end", onClientGone);
+
   upstream.on("upgrade", (upRes, upSocket, upHead) => {
-    // Replay handshake to the client.
-    const lines = [`HTTP/1.1 ${upRes.statusCode ?? 101} ${upRes.statusMessage ?? "Switching Protocols"}`];
+    upstreamSocket = upSocket;
+    // Replay handshake to the client. Strip CR/LF from upstream-controlled
+    // status + header values so a malicious upstream can't inject extra
+    // headers / split the response into the client socket (L-7).
+    const lines = [
+      `HTTP/1.1 ${upRes.statusCode ?? 101} ${stripCrlf(upRes.statusMessage ?? "Switching Protocols")}`,
+    ];
     for (const [k, v] of Object.entries(upRes.headers)) {
       if (Array.isArray(v)) {
-        for (const item of v) lines.push(`${k}: ${item}`);
+        for (const item of v) lines.push(`${stripCrlf(k)}: ${stripCrlf(item)}`);
       } else if (v !== undefined) {
-        lines.push(`${k}: ${v}`);
+        lines.push(`${stripCrlf(k)}: ${stripCrlf(String(v))}`);
       }
     }
     lines.push("\r\n");
@@ -274,13 +298,14 @@ export function proxyWebSocket(
   });
 
   upstream.on("response", (upRes) => {
-    // Upstream answered with a normal response instead of upgrading. Forward and close.
-    const lines = [`HTTP/1.1 ${upRes.statusCode ?? 502} ${upRes.statusMessage ?? "Bad Gateway"}`];
+    // Upstream answered with a normal response instead of upgrading. Forward and
+    // close. Strip CR/LF from upstream-controlled values (L-7, response-split).
+    const lines = [`HTTP/1.1 ${upRes.statusCode ?? 502} ${stripCrlf(upRes.statusMessage ?? "Bad Gateway")}`];
     for (const [k, v] of Object.entries(upRes.headers)) {
       if (Array.isArray(v)) {
-        for (const item of v) lines.push(`${k}: ${item}`);
+        for (const item of v) lines.push(`${stripCrlf(k)}: ${stripCrlf(item)}`);
       } else if (v !== undefined) {
-        lines.push(`${k}: ${v}`);
+        lines.push(`${stripCrlf(k)}: ${stripCrlf(String(v))}`);
       }
     }
     lines.push("\r\n");
@@ -538,14 +563,29 @@ function elementPickerScript(serverId: string): string {
 })();</script>`;
 }
 
+/** Drop CR/LF/NUL so an upstream header value can't split the hand-built handshake (L-7). */
+function stripCrlf(s: string): string {
+  return String(s).replace(/[\r\n\0]/g, "");
+}
+
+/** Escape text interpolated into the preview error HTML (L-6, latent XSS sink). */
+function escapeHtml(s: string): string {
+  return String(s).replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] ?? c,
+  );
+}
+
 /**
  * Styled HTML error page for preview iframe failures. Shows a friendly
  * message instead of a blank page or raw error text.
  */
 export function previewErrorPage(status: number, title: string, detail: string): string {
+  const safeTitle = escapeHtml(title);
+  const safeDetail = escapeHtml(detail);
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${title}</title>
+<title>${safeTitle}</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,"Segoe UI",Roboto,sans-serif;background:#0e0e14;color:#e4e2dc;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
@@ -559,8 +599,8 @@ a:hover{text-decoration:underline}
 </style></head><body>
 <div class="card">
 <div class="code">${status}</div>
-<h1>${title}</h1>
-<p>${detail}</p>
+<h1>${safeTitle}</h1>
+<p>${safeDetail}</p>
 <a href="/">← Back to dashboard</a>
 </div></body></html>`;
 }

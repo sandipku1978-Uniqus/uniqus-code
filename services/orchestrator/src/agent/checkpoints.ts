@@ -246,21 +246,32 @@ export async function restoreCheckpoint(
   const ctx = await ensureShadow(sandboxDir, projectId);
   if (!ctx) return { ok: false, error: "checkpoints unavailable (git not installed?)" };
   // Stash a "pre-restore" checkpoint so the user can rewind the rewind.
+  // (This already goes through the per-project commit queue.)
   await commitCheckpoint(sandboxDir, projectId, `pre-restore: rolling back to ${sha.slice(0, 8)}`);
-  const checkout = await exec(
-    "git",
-    [
-      "--git-dir",
-      ctx.gitDir,
-      "--work-tree",
+  // Run the checkout through the SAME per-project queue commitCheckpoint uses
+  // so it can't race an in-flight checkpoint commit on the shadow repo and hit
+  // index.lock contention / a failed restore (B-14).
+  const prev = commitQueues.get(projectId) ?? Promise.resolve();
+  const checkoutP = prev.then(() =>
+    exec(
+      "git",
+      [
+        "--git-dir",
+        ctx.gitDir,
+        "--work-tree",
+        sandboxDir,
+        "checkout",
+        sha,
+        "--",
+        ".",
+      ],
       sandboxDir,
-      "checkout",
-      sha,
-      "--",
-      ".",
-    ],
-    sandboxDir,
+    ),
   );
+  // Keep the queue tail intact even if this checkout rejects, so a failure
+  // here doesn't poison later checkpoint commits.
+  commitQueues.set(projectId, checkoutP.catch(() => null));
+  const checkout = await checkoutP;
   if (!checkout.ok) {
     return { ok: false, error: checkout.stderr || "checkout failed" };
   }

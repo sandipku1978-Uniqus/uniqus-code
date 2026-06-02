@@ -1,5 +1,6 @@
 import { Client } from "pg";
 import type { ConnectorDefinition } from "./index.js";
+import { assertPublicHost } from "./ssrfGuard.js";
 
 /**
  * Postgres connector. Read/write SQL against a connection string stored in
@@ -37,6 +38,18 @@ export const postgresConnector: ConnectorDefinition = {
           ? args.url_secret
           : "DATABASE_URL";
         const connStr = await ctx.secret(urlSecret);
+        // Reject a connection host that resolves to a private / loopback /
+        // metadata / fleet-bridge address — otherwise the connection
+        // success/timeout is a blind internal port-scan oracle from the
+        // orchestrator's network position (M-5).
+        try {
+          const dbHost = new URL(connStr).hostname;
+          if (dbHost) await assertPublicHost(dbHost);
+        } catch (err) {
+          throw new Error(
+            `refusing to connect: ${err instanceof Error ? err.message : "invalid connection string"}`,
+          );
+        }
         const sql = String(args.sql ?? "");
         if (!sql.trim()) throw new Error("sql is required");
         const params = Array.isArray(args.params) ? args.params : [];

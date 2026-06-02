@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Modal from "./Modal";
+import { toast } from "@/lib/toast";
 import {
   deleteSecretApi,
   fetchSecretsApi,
@@ -35,6 +36,12 @@ export default function SecretsModal({
   // see this knob unless they want to.
   const [env, setEnv] = useState("default");
   const [saving, setSaving] = useState(false);
+  // Modal-based delete confirm (replaces window.confirm — UI/UX audit §D).
+  const [pendingDelete, setPendingDelete] = useState<SecretSummary | null>(null);
+  // True when the live name normalization actually rewrote the keystroke, so we
+  // can explain the surprising uppercase/underscore transform (§D).
+  const [nameAutoFormatted, setNameAutoFormatted] = useState(false);
+  const valueInputRef = useRef<HTMLInputElement>(null);
 
   const load = async () => {
     setError(null);
@@ -85,17 +92,33 @@ export default function SecretsModal({
     }
   };
 
-  const onDelete = async (s: SecretSummary) => {
-    if (!confirm(`Delete secret ${s.name} (env=${s.env})?`)) return;
+  const doDelete = async (s: SecretSummary) => {
+    setPendingDelete(null);
     try {
       await deleteSecretApi(projectId, s.name, s.env);
+      toast.success(`Deleted secret ${s.name}`);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      toast.error(`Couldn't delete ${s.name}: ${msg}`);
     }
   };
 
+  // One-click rotate: prefill the form with this secret's name + env and focus
+  // the value field, so replacing a value is one click instead of retyping the
+  // exact name/env (§D). Values are write-only by design, so we never show one.
+  const rotate = (s: SecretSummary) => {
+    setName(s.name);
+    setEnv(s.env);
+    setDescription(s.description ?? "");
+    setValue("");
+    setNameAutoFormatted(false);
+    requestAnimationFrame(() => valueInputRef.current?.focus());
+  };
+
   return (
+    <>
     <Modal
       title="Project Secrets"
       subtitle={
@@ -108,7 +131,11 @@ export default function SecretsModal({
       bodyStyle={{ display: "grid", gap: 16 }}
       footer={
         <>
-          <div className={`modal-status${error ? " error" : ""}`}>
+          <div
+            className={`modal-status${error ? " error" : ""}`}
+            role="status"
+            aria-live="polite"
+          >
             {error ?? "Audit-logged · AES-256-GCM encrypted"}
           </div>
           <div className="modal-actions">
@@ -125,15 +152,20 @@ export default function SecretsModal({
               <input
                 type="text"
                 value={name}
-                onChange={(e) =>
-                  setName(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "_"))
-                }
+                aria-label="Secret name"
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  const norm = raw.toUpperCase().replace(/[^A-Z0-9_]/g, "_");
+                  setNameAutoFormatted(raw.length > 0 && norm !== raw);
+                  setName(norm);
+                }}
                 placeholder="STRIPE_API_KEY"
                 style={inputStyle}
               />
               <input
                 type="text"
                 value={env}
+                aria-label="Environment slot"
                 onChange={(e) =>
                   setEnv(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))
                 }
@@ -149,9 +181,16 @@ export default function SecretsModal({
                 <option value="production" />
               </datalist>
             </div>
+            <div className={`field-hint${nameAutoFormatted ? " changed" : ""}`}>
+              {nameAutoFormatted
+                ? `Auto-formatted to ${name}`
+                : "Names are uppercase, A–Z 0–9 _ only — we format it for you."}
+            </div>
             <input
+              ref={valueInputRef}
               type="password"
               value={value}
+              aria-label="Secret value"
               onChange={(e) => setValue(e.target.value)}
               placeholder="value (write-only — won't be shown again)"
               style={inputStyle}
@@ -159,14 +198,18 @@ export default function SecretsModal({
             <input
               type="text"
               value={description}
+              aria-label="Secret description"
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Optional description (visible to the agent in list_secrets)"
               style={inputStyle}
             />
-            <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <button type="submit" disabled={saving} className="send-btn" style={{ padding: "4px 12px" }}>
                 {saving ? "Saving…" : "Save secret"}
               </button>
+              <span className="field-hint">
+                Saving an existing name + env replaces its value.
+              </span>
             </div>
           </form>
 
@@ -218,21 +261,70 @@ export default function SecretsModal({
                           {s.description}
                         </div>
                       )}
+                      <div style={{ color: "var(--text-dim)", fontSize: 11 }}>
+                        Updated {new Date(s.updated_at).toLocaleString()}
+                      </div>
                     </div>
-                    <button
-                      onClick={() => onDelete(s)}
-                      className="icon-btn-sm"
-                      style={{ width: "auto", padding: "2px 8px", fontSize: 11 }}
-                      title={`Delete ${s.name} (env=${s.env})`}
-                    >
-                      delete
-                    </button>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button
+                        onClick={() => rotate(s)}
+                        className="icon-btn-sm"
+                        style={{ width: "auto", padding: "2px 8px", fontSize: 11 }}
+                        title={`Replace the value of ${s.name} (env=${s.env})`}
+                        aria-label={`Rotate ${s.name}`}
+                      >
+                        rotate
+                      </button>
+                      <button
+                        onClick={() => setPendingDelete(s)}
+                        className="icon-btn-sm"
+                        style={{ width: "auto", padding: "2px 8px", fontSize: 11 }}
+                        title={`Delete ${s.name} (env=${s.env})`}
+                        aria-label={`Delete ${s.name}`}
+                      >
+                        delete
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
             )}
           </div>
     </Modal>
+    {pendingDelete && (
+      <Modal
+        title="Delete secret?"
+        width={420}
+        onClose={() => setPendingDelete(null)}
+        footer={
+          <>
+            <span />
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setPendingDelete(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-danger"
+                onClick={() => doDelete(pendingDelete)}
+              >
+                Delete
+              </button>
+            </div>
+          </>
+        }
+      >
+        <p style={{ margin: 0, fontSize: 13, color: "var(--text-dim)" }}>
+          Delete <code>{pendingDelete.name}</code> (env={pendingDelete.env})? Code that
+          reads this secret at runtime will stop receiving it. This can&apos;t be undone.
+        </p>
+      </Modal>
+    )}
+    </>
   );
 }
 

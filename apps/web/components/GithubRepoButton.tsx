@@ -29,6 +29,9 @@ export default function GithubRepoButton({ projectId }: { projectId: string }) {
   // Guard against accidental repo creation — confirm before the (irreversible,
   // outward-facing) create + push.
   const [confirming, setConfirming] = useState(false);
+  // Repo visibility chosen in the confirm dialog (UI/UX audit §D — was
+  // hardcoded private with no choice).
+  const [visibility, setVisibility] = useState<"private" | "public">("private");
   // "Disconnect repo" confirm — clears the stale link so the user can relink.
   const [unlinking, setUnlinking] = useState(false);
 
@@ -156,11 +159,12 @@ export default function GithubRepoButton({ projectId }: { projectId: string }) {
 
   async function doCreate(): Promise<void> {
     if (busy || !project) return;
-    setConfirming(false);
+    // Keep the dialog OPEN through the request so a failure is shown in the
+    // dialog (not just a fleeting system line) — only close on success (§D).
     setBusy(true);
     setError(null);
     try {
-      const r = await createGithubRepoApi(projectId);
+      const r = await createGithubRepoApi(projectId, { private: visibility === "private" });
       // Optimistically update the project in the store so the next render
       // shows the linked-repo state without refetching.
       setProject({
@@ -176,6 +180,7 @@ export default function GithubRepoButton({ projectId }: { projectId: string }) {
             `Push from the agent with: git remote add origin ${r.repo_url}.git ; git push -u origin ${r.default_branch}`,
         );
       }
+      setConfirming(false);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
@@ -192,7 +197,7 @@ export default function GithubRepoButton({ projectId }: { projectId: string }) {
         onClick={() => !busy && project && setConfirming(true)}
         disabled={busy || connected === null}
         className="toggle-btn"
-        title="Create a fresh private GitHub repo for this project + push the initial commit"
+        title="Create a fresh GitHub repo for this project + push the initial commit"
       >
         <GithubIcon />
         <span>{busy ? "Creating…" : "Create GitHub repo"}</span>
@@ -202,27 +207,61 @@ export default function GithubRepoButton({ projectId }: { projectId: string }) {
         <Modal
           title="Create a GitHub repo?"
           subtitle={project ? `For project “${project.name}”` : undefined}
-          onClose={() => setConfirming(false)}
+          onClose={() => !busy && setConfirming(false)}
           width={460}
           footer={
             <>
-              <span className="modal-status">This can’t be undone from here.</span>
+              <span className={`modal-status${error ? " error" : ""}`} role="status" aria-live="polite">
+                {error ?? "This can’t be undone from here."}
+              </span>
               <div className="modal-actions">
-                <button type="button" className="btn-ghost" onClick={() => setConfirming(false)}>
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  onClick={() => setConfirming(false)}
+                  disabled={busy}
+                >
                   Cancel
                 </button>
-                <button type="button" className="btn-primary" onClick={doCreate}>
-                  Create repo
+                <button type="button" className="btn-primary" onClick={doCreate} disabled={busy}>
+                  {busy ? "Creating…" : "Create repo"}
                 </button>
               </div>
             </>
           }
         >
-          <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "var(--text-muted)" }}>
-            This creates a new <strong>private</strong> GitHub repository on your connected account
-            and pushes the current project as the initial commit. Use this once per project — if you
-            already have a repo, push to it from the agent instead.
+          <p style={{ margin: "0 0 12px", fontSize: 13, lineHeight: 1.6, color: "var(--text-muted)" }}>
+            This creates a new GitHub repository on your connected account and pushes the current
+            project as the initial commit. Use this once per project — if you already have a repo,
+            push to it from the agent instead.
           </p>
+          <fieldset style={{ border: 0, margin: 0, padding: 0, display: "grid", gap: 8 }}>
+            <legend className="sr-only">Repository visibility</legend>
+            {(["private", "public"] as const).map((v) => (
+              <label
+                key={v}
+                style={{ display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer", fontSize: 13 }}
+              >
+                <input
+                  type="radio"
+                  name="repo-visibility"
+                  value={v}
+                  checked={visibility === v}
+                  onChange={() => setVisibility(v)}
+                  disabled={busy}
+                  style={{ marginTop: 2 }}
+                />
+                <span>
+                  <strong>{v === "private" ? "Private" : "Public"}</strong>
+                  <span style={{ color: "var(--text-dim)", marginLeft: 6 }}>
+                    {v === "private"
+                      ? "Only you and collaborators can see it."
+                      : "Anyone on the internet can see this repository."}
+                  </span>
+                </span>
+              </label>
+            ))}
+          </fieldset>
         </Modal>
       )}
     </>

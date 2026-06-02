@@ -6,6 +6,8 @@ import BrandLockup from "./BrandLockup";
 import ModelPicker from "./ModelPicker";
 import AppearanceCard from "./AppearanceCard";
 import CustomPromptsCard from "./CustomPromptsCard";
+import Modal from "./Modal";
+import { toast } from "@/lib/toast";
 import {
   fetchGithubStatus,
   disconnectGithubApi,
@@ -26,6 +28,8 @@ export default function SettingsView({
 }) {
   const isGuest = accountType === "guest";
   const [github, setGithub] = useState<GithubStatus | null>(null);
+  const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
 
   useEffect(() => {
     if (isGuest) return;
@@ -35,11 +39,19 @@ export default function SettingsView({
   }, [isGuest]);
 
   async function handleDisconnectGithub(): Promise<void> {
+    setDisconnecting(true);
     try {
       await disconnectGithubApi();
       setGithub({ connected: false, login: null, connected_at: null });
-    } catch {
-      /* surfaced via the status row staying connected; no-op */
+      setConfirmingDisconnect(false);
+      toast.success("GitHub disconnected");
+    } catch (err) {
+      // Was previously swallowed — surface it so the user knows it failed (§D).
+      toast.error(
+        `Couldn't disconnect GitHub: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      setDisconnecting(false);
     }
   }
 
@@ -109,7 +121,7 @@ export default function SettingsView({
                 </span>
                 <button
                   type="button"
-                  onClick={handleDisconnectGithub}
+                  onClick={() => setConfirmingDisconnect(true)}
                   className="btn-ghost"
                   style={{ fontSize: 12 }}
                 >
@@ -139,20 +151,20 @@ export default function SettingsView({
         <div className="settings-card">
           <h2>Per-project configuration</h2>
           <p className="settings-card-sub">
-            These are configured inside each project’s workspace, since they
-            differ per project.
+            These live inside each project because they differ per project. Per-project
+            Skills extend the account-wide default skills set below.
           </p>
           <div className="settings-row">
             <span className="k">Skills (agent instructions)</span>
-            <span className="v">Workspace → Skills</span>
+            <span className="v">Open a project, then the Skills button in its top bar</span>
           </div>
           <div className="settings-row">
             <span className="k">Secrets / API keys</span>
-            <span className="v">Workspace → Secrets</span>
+            <span className="v">Open a project, then the Secrets button in its top bar</span>
           </div>
           <div className="settings-row">
             <span className="k">Connectors</span>
-            <span className="v">Workspace → agent tools</span>
+            <span className="v">Configured per project from the agent tools</span>
           </div>
         </div>
 
@@ -177,6 +189,42 @@ export default function SettingsView({
         {/* Custom prompts & default skills — functional (account-wide, persisted) */}
         <CustomPromptsCard />
       </div>
+
+      {confirmingDisconnect && (
+        <Modal
+          title="Disconnect GitHub?"
+          width={460}
+          onClose={() => !disconnecting && setConfirmingDisconnect(false)}
+          footer={
+            <>
+              <span />
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setConfirmingDisconnect(false)}
+                  disabled={disconnecting}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn-danger"
+                  onClick={handleDisconnectGithub}
+                  disabled={disconnecting}
+                >
+                  {disconnecting ? "Disconnecting…" : "Disconnect"}
+                </button>
+              </div>
+            </>
+          }
+        >
+          <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "var(--text-muted)" }}>
+            You’ll need to reconnect to import private repos or create repos. Repositories
+            already on github.com are left untouched.
+          </p>
+        </Modal>
+      )}
     </>
   );
 }

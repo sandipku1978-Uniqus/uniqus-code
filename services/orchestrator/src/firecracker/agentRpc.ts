@@ -320,6 +320,9 @@ function rpc<T = void>(
     req.once("response", (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (c: Buffer) => chunks.push(c));
+      // Without this, a mid-body stream error never settles the promise and
+      // the abort listener leaks (the data/end path never runs).
+      res.on("error", (err) => fail(err));
       res.on("end", () => {
         if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
         const text = Buffer.concat(chunks).toString("utf-8");

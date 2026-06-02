@@ -141,9 +141,25 @@ interface ModelTokenTotals {
 
 /** One (date, model) bucket from {@link getDailyUsageByModel}. */
 export interface DailyUsageByModelRow extends ModelTokenTotals {
-  /** Calendar day in the DB's timezone, YYYY-MM-DD (from created_at). */
+  /** Calendar day in the orchestrator's LOCAL timezone, YYYY-MM-DD. */
   date: string;
   model: string;
+}
+
+/**
+ * Bucket an event's `created_at` (a UTC ISO string) into a YYYY-MM-DD calendar
+ * day in the orchestrator's LOCAL timezone. Slicing the raw UTC string would
+ * misattribute usage by one day on non-UTC deployments (B-15); the dashboard's
+ * other day-boundary logic is local-time, so match it. Built from local
+ * getFullYear/Month/Date rather than toISOString (which is always UTC).
+ */
+function localDayKey(createdAt: string): string {
+  const d = new Date(createdAt);
+  if (Number.isNaN(d.getTime())) return String(createdAt).slice(0, 10);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
 /** One (project, model) bucket from {@link getUsageByProjectByModel}. */
@@ -227,7 +243,8 @@ async function sweepUsageEvents(
  * ordered by date (oldest-first). The server prices each model row with its
  * existing estimateCostUsd to build AccountUsageStats.daily — so this returns
  * token/model splits, not cost. `date` is created_at truncated to the calendar
- * day (DB timezone), matching how the trend chart buckets time.
+ * day in the orchestrator's LOCAL timezone, matching how the trend chart buckets
+ * time (see localDayKey / B-15).
  */
 export async function getDailyUsageByModel(
   userId: string,
@@ -243,7 +260,7 @@ export async function getDailyUsageByModel(
   // the sweep is ordered ascending, so the date order is already oldest-first.
   const buckets = new Map<string, DailyUsageByModelRow>();
   for (const row of rows) {
-    const date = String(row.created_at).slice(0, 10); // YYYY-MM-DD
+    const date = localDayKey(String(row.created_at)); // local-time YYYY-MM-DD (B-15)
     const model = String(row.model);
     const key = `${date} ${model}`;
     let bucket = buckets.get(key);

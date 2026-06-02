@@ -261,6 +261,7 @@ export default function FileExplorer({
   onFileOpened?: () => void;
 }) {
   const tree = useStore((s) => s.tree);
+  const treeLoaded = useStore((s) => s.treeLoaded);
   const selected = useStore((s) => s.selectedFile);
   const openFile = useStore((s) => s.openFile);
   const project = useStore((s) => s.project);
@@ -275,6 +276,33 @@ export default function FileExplorer({
   } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [actionsBusy, setActionsBusy] = useState(false);
+  // Right-click / ⋯ context menu (UI/UX audit gap #6).
+  const [menu, setMenu] = useState<{ node: TreeNode; x: number; y: number } | null>(null);
+  const treeListRef = useRef<HTMLDivElement>(null);
+
+  // Arrow-key navigation across the visible (flattened) rows — the rows are
+  // rendered in visible order in the DOM, so we can move focus by querying the
+  // .tree-row buttons rather than threading a roving-tabindex through the
+  // recursive tree (UI/UX audit §B).
+  const onTreeKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+    const rows = Array.from(
+      treeListRef.current?.querySelectorAll<HTMLButtonElement>(".tree-row") ?? [],
+    );
+    if (rows.length === 0) return;
+    const idx = rows.indexOf(document.activeElement as HTMLButtonElement);
+    if (idx === -1) return;
+    e.preventDefault();
+    const next =
+      e.key === "ArrowDown"
+        ? Math.min(rows.length - 1, idx + 1)
+        : e.key === "ArrowUp"
+        ? Math.max(0, idx - 1)
+        : e.key === "Home"
+        ? 0
+        : rows.length - 1;
+    rows[next]?.focus();
+  };
 
   const toggle = (path: string): void =>
     setExpanded((prev) => {
@@ -351,15 +379,47 @@ export default function FileExplorer({
     const trimmed = newName.trim();
     setRenaming(null);
     if (!trimmed) return;
-    if (trimmed.includes("/") || trimmed.includes("\\")) {
-      addSystem("rename failed: new name cannot contain '/'");
+    // Backslashes are never valid path separators here.
+    if (trimmed.includes("\\")) {
+      addSystem("rename failed: name cannot contain '\\'");
       return;
     }
     const parent = oldPath.includes("/") ? oldPath.slice(0, oldPath.lastIndexOf("/")) : "";
-    const target = parent ? `${parent}/${trimmed}` : trimmed;
+    // A "/" in the new name means a path-move: absolute (leading "/") is relative
+    // to the project root; otherwise it's relative to the file's current parent.
+    // The rename op already accepts a full destination path (§B — was rejected).
+    let target: string;
+    if (trimmed.includes("/")) {
+      const raw = trimmed.startsWith("/")
+        ? trimmed.slice(1)
+        : parent
+        ? `${parent}/${trimmed}`
+        : trimmed;
+      target = normalizePath(raw);
+      if (!target) {
+        addSystem("rename failed: invalid destination path");
+        return;
+      }
+    } else {
+      target = parent ? `${parent}/${trimmed}` : trimmed;
+    }
     if (target === oldPath) return;
     await wrapAction(() =>
       fileOpApi(project.id, { op: "rename", from: oldPath, to: target }).then(() => {}),
+    );
+  };
+
+  // Move a node into a target folder ("" = project root) by reusing the rename
+  // op — drives drag-and-drop and the context menu's move affordances.
+  const moveInto = async (fromPath: string, destDir: string): Promise<void> => {
+    if (!project) return;
+    const base = fromPath.includes("/") ? fromPath.slice(fromPath.lastIndexOf("/") + 1) : fromPath;
+    const to = destDir ? `${destDir}/${base}` : base;
+    if (to === fromPath) return;
+    // Guard against dropping a folder into itself or a descendant.
+    if (destDir === fromPath || destDir.startsWith(`${fromPath}/`)) return;
+    await wrapAction(() =>
+      fileOpApi(project.id, { op: "rename", from: fromPath, to }).then(() => {}),
     );
   };
 
@@ -381,6 +441,7 @@ export default function FileExplorer({
             onClick={() => onCreate("", "file")}
             className="icon-btn-sm"
             title="New file at root"
+            aria-label="New file at root"
             disabled={!project}
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -395,6 +456,7 @@ export default function FileExplorer({
             onClick={() => onCreate("", "dir")}
             className="icon-btn-sm"
             title="New folder at root"
+            aria-label="New folder at root"
             disabled={!project}
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -408,6 +470,7 @@ export default function FileExplorer({
             onClick={() => send({ type: "request_tree" })}
             className="icon-btn-sm"
             title="Refresh"
+            aria-label="Refresh file tree"
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <polyline points="23 4 23 10 17 10" />
@@ -419,6 +482,7 @@ export default function FileExplorer({
             onClick={onClose}
             className="icon-btn-sm"
             title="Hide files"
+            aria-label="Hide files panel"
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <line x1="18" y1="6" x2="6" y2="18" />
@@ -435,7 +499,24 @@ export default function FileExplorer({
           placeholder="Filter files…"
         />
       </div>
-      <div className="tree-list">
+      <div
+        className="tree-list"
+        ref={treeListRef}
+        role="tree"
+        aria-label="Files"
+        onKeyDown={onTreeKeyDown}
+        // Drop onto empty space = move to project root.
+        onDragOver={(e) => {
+          if (e.dataTransfer.types.includes("text/uniqus-path")) e.preventDefault();
+        }}
+        onDrop={(e) => {
+          const from = e.dataTransfer.getData("text/uniqus-path");
+          if (from) {
+            e.preventDefault();
+            void moveInto(from, "");
+          }
+        }}
+      >
         {filtered ? (
           filtered.length === 0 ? (
             <div className="tree-empty">No matches.</div>
@@ -455,10 +536,32 @@ export default function FileExplorer({
               </button>
             ))
           )
+        ) : !treeLoaded ? (
+          // Loading skeleton — distinguishes "tree not arrived yet" from a
+          // genuinely empty project (§B).
+          <div style={{ display: "grid", gap: 6, padding: "4px 8px" }} aria-busy="true">
+            {[0, 1, 2, 3, 4].map((i) => (
+              <div
+                key={i}
+                className="ide-skeleton-row"
+                style={{ width: `${80 - i * 8}%`, height: 14 }}
+              />
+            ))}
+          </div>
         ) : (
           <>
             {nodes.length === 0 && !creating && (
-              <div className="tree-empty">No files yet.</div>
+              <div className="tree-empty">
+                No files yet.
+                <div className="tree-empty-actions">
+                  <button type="button" onClick={() => onCreate("", "file")} disabled={!project}>
+                    New file
+                  </button>
+                  <button type="button" onClick={() => onCreate("", "dir")} disabled={!project}>
+                    New folder
+                  </button>
+                </div>
+              </div>
             )}
             {/* Inline creator at root */}
             {creating && creating.parent === "" && (
@@ -488,11 +591,41 @@ export default function FileExplorer({
                 onCreateChild={(parent, type) => onCreate(parent, type)}
                 onSubmitCreate={(value) => void submitCreate(value)}
                 onCancelCreate={() => setCreating(null)}
+                onContextMenu={(n, x, y) => setMenu({ node: n, x, y })}
+                onMoveNode={(from, destDir) => void moveInto(from, destDir)}
               />
             ))}
           </>
         )}
       </div>
+      {menu && (
+        <RowContextMenu
+          node={menu.node}
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+          onRename={() => {
+            setRenaming(menu.node.path);
+            setMenu(null);
+          }}
+          onDelete={() => {
+            setConfirmDelete(menu.node.path);
+            setMenu(null);
+          }}
+          onNewFile={() => {
+            onCreate(menu.node.path, "file");
+            setMenu(null);
+          }}
+          onNewFolder={() => {
+            onCreate(menu.node.path, "dir");
+            setMenu(null);
+          }}
+          onCopyPath={() => {
+            navigator.clipboard?.writeText(menu.node.path).catch(() => {});
+            setMenu(null);
+          }}
+        />
+      )}
       {confirmDelete && (
         <DeleteConfirm
           path={confirmDelete}
@@ -503,6 +636,20 @@ export default function FileExplorer({
       <QuickOpen tree={tree} onOpen={reqOpen} />
     </div>
   );
+}
+
+/** Collapse `.`/`..` segments and strip empties so a typed path-move is sane. */
+function normalizePath(raw: string): string {
+  const out: string[] = [];
+  for (const seg of raw.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      out.pop();
+      continue;
+    }
+    out.push(seg);
+  }
+  return out.join("/");
 }
 
 function highlightMatch(path: string, query: string): React.ReactNode {
@@ -782,6 +929,8 @@ function Row({
   onCreateChild,
   onSubmitCreate,
   onCancelCreate,
+  onContextMenu,
+  onMoveNode,
 }: {
   node: TreeNode;
   depth: number;
@@ -798,10 +947,13 @@ function Row({
   onCreateChild: (parent: string, type: "file" | "dir") => void;
   onSubmitCreate: (value: string) => void;
   onCancelCreate: () => void;
+  onContextMenu: (node: TreeNode, x: number, y: number) => void;
+  onMoveNode: (from: string, destDir: string) => void;
 }) {
   const isOpen = expanded.has(node.path);
   const isSelected = !node.isDir && selected === node.path;
   const isRenaming = renaming === node.path;
+  const [dropTarget, setDropTarget] = useState(false);
 
   if (isRenaming) {
     return (
@@ -819,12 +971,66 @@ function Row({
   return (
     <>
       <div
-        className={`tree-row-wrap ${isSelected ? "active" : ""}`}
+        className={`tree-row-wrap ${isSelected ? "active" : ""}${dropTarget ? " drop-target" : ""}`}
         style={{ paddingLeft: `${4 + depth * 12}px` }}
+        role="treeitem"
+        aria-level={depth + 1}
+        aria-selected={isSelected}
+        aria-expanded={node.isDir ? isOpen : undefined}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          onContextMenu(node, e.clientX, e.clientY);
+        }}
+        // Drop target: dragging a node onto a folder moves it inside (§B).
+        onDragOver={
+          node.isDir
+            ? (e) => {
+                if (e.dataTransfer.types.includes("text/uniqus-path")) {
+                  e.preventDefault();
+                  setDropTarget(true);
+                }
+              }
+            : undefined
+        }
+        onDragLeave={node.isDir ? () => setDropTarget(false) : undefined}
+        // Attached to BOTH file and dir rows: always consume a drop that carries
+        // a dragged path so it can't bubble to the .tree-list root handler (which
+        // moves the node to the project root). That bubbling turned a natural
+        // "drop on itself / on a file to cancel" gesture into a destructive
+        // move-to-root. Only a directory row that isn't the source performs the
+        // move; everything else just swallows the event.
+        onDrop={(e) => {
+          if (node.isDir) setDropTarget(false);
+          const from = e.dataTransfer.getData("text/uniqus-path");
+          if (!from) return;
+          e.preventDefault();
+          e.stopPropagation();
+          if (node.isDir && from !== node.path) onMoveNode(from, node.path);
+        }}
       >
         <button
           type="button"
+          draggable
+          onDragStart={(e) => {
+            e.dataTransfer.setData("text/uniqus-path", node.path);
+            e.dataTransfer.effectAllowed = "move";
+          }}
           onClick={() => (node.isDir ? onToggle(node.path) : onOpenFile(node.path))}
+          onKeyDown={(e) => {
+            if (e.key === "F2") {
+              e.preventDefault();
+              onStartRename(node.path);
+            } else if (e.key === "Delete") {
+              e.preventDefault();
+              onAskDelete(node.path);
+            } else if (node.isDir && e.key === "ArrowRight" && !isOpen) {
+              e.preventDefault();
+              onToggle(node.path);
+            } else if (node.isDir && e.key === "ArrowLeft" && isOpen) {
+              e.preventDefault();
+              onToggle(node.path);
+            }
+          }}
           className="tree-row"
         >
           {node.isDir ? (
@@ -844,39 +1050,44 @@ function Row({
           onDelete={() => onAskDelete(node.path)}
           onNewFile={() => onCreateChild(node.path, "file")}
           onNewFolder={() => onCreateChild(node.path, "dir")}
+          onMore={(x, y) => onContextMenu(node, x, y)}
         />
       </div>
-      {node.isDir && isOpen && creating && creating.parent === node.path && (
-        <InlineRow
-          depth={depth + 1}
-          isDir={creating.type === "dir"}
-          placeholder={creating.type === "dir" ? "new-folder" : "new-file.ts"}
-          onSubmit={onSubmitCreate}
-          onCancel={onCancelCreate}
-        />
+      {node.isDir && isOpen && (
+        <div role="group">
+          {creating && creating.parent === node.path && (
+            <InlineRow
+              depth={depth + 1}
+              isDir={creating.type === "dir"}
+              placeholder={creating.type === "dir" ? "new-folder" : "new-file.ts"}
+              onSubmit={onSubmitCreate}
+              onCancel={onCancelCreate}
+            />
+          )}
+          {node.children.map((child) => (
+            <Row
+              key={child.path}
+              node={child}
+              depth={depth + 1}
+              expanded={expanded}
+              onToggle={onToggle}
+              onOpenFile={onOpenFile}
+              selected={selected}
+              renaming={renaming}
+              creating={creating}
+              onStartRename={onStartRename}
+              onSubmitRename={onSubmitRename}
+              onCancelRename={onCancelRename}
+              onAskDelete={onAskDelete}
+              onCreateChild={onCreateChild}
+              onSubmitCreate={onSubmitCreate}
+              onCancelCreate={onCancelCreate}
+              onContextMenu={onContextMenu}
+              onMoveNode={onMoveNode}
+            />
+          ))}
+        </div>
       )}
-      {node.isDir &&
-        isOpen &&
-        node.children.map((child) => (
-          <Row
-            key={child.path}
-            node={child}
-            depth={depth + 1}
-            expanded={expanded}
-            onToggle={onToggle}
-            onOpenFile={onOpenFile}
-            selected={selected}
-            renaming={renaming}
-            creating={creating}
-            onStartRename={onStartRename}
-            onSubmitRename={onSubmitRename}
-            onCancelRename={onCancelRename}
-            onAskDelete={onAskDelete}
-            onCreateChild={onCreateChild}
-            onSubmitCreate={onSubmitCreate}
-            onCancelCreate={onCancelCreate}
-          />
-        ))}
     </>
   );
 }
@@ -887,12 +1098,15 @@ function RowActions({
   onDelete,
   onNewFile,
   onNewFolder,
+  onMore,
 }: {
   isDir: boolean;
   onRename: () => void;
   onDelete: () => void;
   onNewFile: () => void;
   onNewFolder: () => void;
+  /** Open the full action menu at the given viewport coords (touch + overflow). */
+  onMore: (x: number, y: number) => void;
 }) {
   return (
     <div className="tree-row-actions">
@@ -905,6 +1119,7 @@ function RowActions({
               onNewFile();
             }}
             title="New file in this folder"
+            aria-label="New file in this folder"
             className="icon-btn-xs"
           >
             +F
@@ -916,6 +1131,7 @@ function RowActions({
               onNewFolder();
             }}
             title="New folder in this folder"
+            aria-label="New folder in this folder"
             className="icon-btn-xs"
           >
             +D
@@ -929,6 +1145,7 @@ function RowActions({
           onRename();
         }}
         title="Rename"
+        aria-label="Rename"
         className="icon-btn-xs"
       >
         ✎
@@ -940,9 +1157,93 @@ function RowActions({
           onDelete();
         }}
         title="Delete"
+        aria-label="Delete"
         className="icon-btn-xs danger"
       >
         ×
+      </button>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+          onMore(r.right, r.bottom);
+        }}
+        title="More actions"
+        aria-label="More actions"
+        aria-haspopup="menu"
+        className="icon-btn-xs"
+      >
+        ⋯
+      </button>
+    </div>
+  );
+}
+
+/** Right-click / ⋯ menu for a tree row. Closes on outside click or Escape. */
+function RowContextMenu({
+  node,
+  x,
+  y,
+  onClose,
+  onRename,
+  onDelete,
+  onNewFile,
+  onNewFolder,
+  onCopyPath,
+}: {
+  node: TreeNode;
+  x: number;
+  y: number;
+  onClose: () => void;
+  onRename: () => void;
+  onDelete: () => void;
+  onNewFile: () => void;
+  onNewFolder: () => void;
+  onCopyPath: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  }, [onClose]);
+
+  // Keep the menu on-screen (rough clamp to the viewport).
+  const left = Math.min(x, (typeof window !== "undefined" ? window.innerWidth : 9999) - 180);
+  const top = Math.min(y, (typeof window !== "undefined" ? window.innerHeight : 9999) - 200);
+
+  return (
+    <div ref={ref} className="ctx-menu" role="menu" style={{ left, top }}>
+      <button type="button" role="menuitem" onClick={onRename}>
+        Rename
+      </button>
+      <button type="button" role="menuitem" className="danger" onClick={onDelete}>
+        Delete
+      </button>
+      {node.isDir && (
+        <>
+          <div className="ctx-menu-sep" />
+          <button type="button" role="menuitem" onClick={onNewFile}>
+            New file
+          </button>
+          <button type="button" role="menuitem" onClick={onNewFolder}>
+            New folder
+          </button>
+        </>
+      )}
+      <div className="ctx-menu-sep" />
+      <button type="button" role="menuitem" onClick={onCopyPath}>
+        Copy path
       </button>
     </div>
   );
@@ -965,6 +1266,9 @@ function InlineRow({
 }) {
   const [value, setValue] = useState(initialValue ?? "");
   const inputRef = useRef<HTMLInputElement>(null);
+  // Commit only on Enter; blur cancels. Prevents accidental creates/renames
+  // when focus is lost, and the Enter→blur double-fire (§C).
+  const committedRef = useRef(false);
   useEffect(() => {
     inputRef.current?.focus();
     inputRef.current?.select();
@@ -978,13 +1282,16 @@ function InlineRow({
         value={value}
         onChange={(e) => setValue(e.target.value)}
         placeholder={placeholder}
+        aria-label={isDir ? "Folder name" : "File name"}
         onBlur={() => {
-          if (value.trim()) onSubmit(value);
-          else onCancel();
+          // If the user already committed with Enter, don't re-fire; otherwise a
+          // blur is a cancel (no silent create on click-away).
+          if (!committedRef.current) onCancel();
         }}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             e.preventDefault();
+            committedRef.current = true;
             onSubmit(value);
           } else if (e.key === "Escape") {
             e.preventDefault();

@@ -422,6 +422,12 @@ interface ManagedServer extends ServerInfo {
   project_id: string | null;
   /** Set when the server runs inside a Firecracker VM. */
   vm?: VmHandle;
+  /**
+   * For VM-backed servers: the id the in-VM agent knows this server by. The
+   * host map is keyed by an unguessable 128-bit `id` (the preview capability,
+   * M-6), so VM RPCs must address the agent by THIS id instead.
+   */
+  vmServerId?: string;
 }
 
 const servers = new Map<string, ManagedServer>();
@@ -446,7 +452,10 @@ export async function startServer(
     // proxy.ts; until that's wired the preview won't render but the
     // server starts cleanly.
     const r = await fcAgent.startServer(sandbox.vm, command, port, readyTimeoutMs, signal);
-    const id = r.id;
+    // Expose an unguessable 128-bit host id (the preview capability — M-6),
+    // independent of the in-VM agent's shorter id, which we keep as vmServerId
+    // for addressing the agent on stop/log RPCs.
+    const id = `srv_${randomUUID().replace(/-/g, "")}`;
     // Track in the host-side servers map so list_servers / stop_server work.
     const server: ManagedServer = {
       id,
@@ -458,6 +467,7 @@ export async function startServer(
       log: { value: "" },
       project_id: projectId,
       vm: sandbox.vm,
+      vmServerId: r.id,
     };
     servers.set(id, server);
     return { id, command, port: r.port, pid: r.pid, started_at: server.started_at };
@@ -477,7 +487,12 @@ export async function startServer(
     }
   }
 
-  const id = `srv_${randomUUID().slice(0, 8)}`;
+  // Full 128-bit token, not a 32-bit slice. The preview proxy authorizes purely
+  // by this id (it can't see the cross-origin app session), so the id IS the
+  // capability — a guessable 32-bit value made the preview an online-enumerable
+  // IDOR into other tenants' dev servers (M-6 / H-1). Keep the `srv_` prefix the
+  // proxy's PREVIEW_PREFIX regex matches.
+  const id = `srv_${randomUUID().replace(/-/g, "")}`;
   const choice = pickShell();
   const proc = spawn(choice.shell, [...choice.prefix, command], {
     cwd: sandbox.rootDir,
@@ -560,11 +575,30 @@ export function stopServer(id: string): void {
   if (!server) throw new Error(`No server with id ${id}`);
   if (server.vm) {
     // Fire-and-forget — the in-VM agent kills the process tree inside the VM.
-    void fcAgent.stopServer(server.vm, id).catch(() => {});
+    // Address the agent by the id IT knows (vmServerId), not the host id.
+    void fcAgent.stopServer(server.vm, server.vmServerId ?? id).catch(() => {});
   } else {
     treeKill(server.pid, "SIGKILL");
   }
   servers.delete(id);
+}
+
+/**
+ * Drop every VM-backed server belonging to a project. Called by the fleet
+ * manager when a project's VM is destroyed/reclaimed — at that point the
+ * firecracker process is killed and the in-VM server processes are gone for
+ * good, but (unlike process-backed servers, which self-prune via proc.on(
+ * 'exit')) nothing else removes their entries. Without this they linger in the
+ * map → wrong list_servers, leaked ids, and the preview proxy dialing a dead
+ * VM IP. Emits 'server_exit' so the UI clears the stopped server too.
+ */
+export function removeServersForProject(projectId: string): void {
+  for (const [id, s] of servers) {
+    if (s.vm && s.project_id === projectId) {
+      servers.delete(id);
+      sandboxEvents.emit("server_exit", id, s.project_id);
+    }
+  }
 }
 
 export function listServers(projectId?: string | null): ServerInfo[] {
@@ -613,7 +647,7 @@ export async function readServerLogAsync(id: string, maxBytes = 8000): Promise<s
   const server = servers.get(id);
   if (!server) throw new Error(`No server with id ${id}`);
   if (server.vm) {
-    return await fcAgent.readServerLog(server.vm, id, maxBytes);
+    return await fcAgent.readServerLog(server.vm, server.vmServerId ?? id, maxBytes);
   }
   return server.log.value.slice(-maxBytes);
 }

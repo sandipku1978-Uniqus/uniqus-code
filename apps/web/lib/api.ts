@@ -20,7 +20,12 @@ function defaultApiBase(): string {
   if (typeof window !== "undefined") {
     const isHttps = window.location.protocol === "https:";
     const proto = isHttps ? "https" : "http";
-    const port = isHttps ? "" : ":8787";
+    // Plain http (the documented local-dev setup: web on :4242) ALWAYS targets
+    // the orchestrator on :8787 — never the page's own port, which would point
+    // REST at the Next.js dev server and 404 every call. This mirrors
+    // ws-client.ts and PreviewPanel.tsx. For https (self-host behind a proxy)
+    // assume same-origin and honor the page's explicit port (e.g. :3001).
+    const port = isHttps ? (window.location.port ? `:${window.location.port}` : "") : ":8787";
     return `${proto}://${window.location.hostname}${port}`;
   }
   return "http://localhost:8787";
@@ -102,14 +107,14 @@ export interface CreateGithubRepoResult {
 }
 
 /**
- * Create a fresh GitHub repo (always private) for a project, using the
- * user's existing GitHub OAuth token. Best-effort initial push from the
- * host-side sandbox dir; pushed=false means the user needs to push from
- * the agent themselves.
+ * Create a fresh GitHub repo for a project, using the user's existing GitHub
+ * OAuth token. Defaults to private; pass `private: false` for a public repo.
+ * Best-effort initial push from the host-side sandbox dir; pushed=false means
+ * the user needs to push from the agent themselves.
  */
 export const createGithubRepoApi = (
   projectId: string,
-  body: { name?: string } = {},
+  body: { name?: string; private?: boolean } = {},
 ): Promise<CreateGithubRepoResult> =>
   api(`/api/projects/${projectId}/create-github-repo`, {
     method: "POST",
@@ -231,8 +236,11 @@ export interface GithubRepoSummary {
   updated_at: string;
 }
 
-export const fetchGithubStatus = (): Promise<GithubStatus> =>
-  api("/api/github/status");
+// Accepts an optional AbortSignal so callers can cancel an in-flight status
+// fetch when rapid re-fires would otherwise let a stale response stomp newer
+// state (see ProjectPicker's github-status effect).
+export const fetchGithubStatus = (signal?: AbortSignal): Promise<GithubStatus> =>
+  api("/api/github/status", { signal });
 
 export const fetchGithubRepos = (): Promise<{ repos: GithubRepoSummary[] }> =>
   api("/api/github/repos");
@@ -532,19 +540,36 @@ export const createGuestApi = async (): Promise<GuestCreateResult> => {
   return (await res.json()) as GuestCreateResult;
 };
 
+/** Error thrown by guest restore, carrying the HTTP status so the UI can
+ *  distinguish an unrecognised code (401/404) from a transient failure. */
+export class RestoreError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "RestoreError";
+    this.status = status;
+  }
+}
+
 /** Re-attach to an existing guest account via its recovery code. */
 export const restoreGuestApi = async (
   recoveryCode: string,
 ): Promise<{ display_name: string | null }> => {
-  const res = await fetch("/api/guest/restore", {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ recovery_code: recoveryCode }),
-  });
+  let res: Response;
+  try {
+    res = await fetch("/api/guest/restore", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ recovery_code: recoveryCode }),
+    });
+  } catch {
+    // Network failure (offline, DNS, CORS) — status 0 signals "transient".
+    throw new RestoreError(0, "network error");
+  }
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`restore failed: ${body || res.statusText}`);
+    throw new RestoreError(res.status, `restore failed: ${body || res.statusText}`);
   }
   return (await res.json()) as { display_name: string | null };
 };

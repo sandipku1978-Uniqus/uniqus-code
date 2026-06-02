@@ -37,6 +37,7 @@ import {
 } from "./agent/selectedElement.js";
 import { proposePlan, formatPlanForExecution } from "./agent/plan.js";
 import { getTodos, clearTodos } from "./agent/todos.js";
+import { assertPublicHost } from "./connectors/ssrfGuard.js";
 import {
   readSkills,
   writeSkills,
@@ -187,11 +188,28 @@ interface SessionCtx {
   send: Sender;
   user: UserRecord;
   projectId: string;
+  /** Which chat session this socket is bound to (history is per-session). */
+  sessionId: string;
 }
 const sessions = new Set<SessionCtx>();
 
 function broadcastToProject(projectId: string, event: ServerEvent): void {
   for (const s of sessions) if (s.projectId === projectId) s.send(event);
+}
+
+/**
+ * Like broadcastToProject but scoped to a single chat session — used for
+ * per-session state (e.g. the agent's todo list) that must NOT leak into a
+ * sibling session's UI when both have the project open (B-11).
+ */
+function broadcastToSession(
+  projectId: string,
+  sessionId: string,
+  event: ServerEvent,
+): void {
+  for (const s of sessions) {
+    if (s.projectId === projectId && s.sessionId === sessionId) s.send(event);
+  }
 }
 
 sandboxEvents.on("server_exit", (id: string, projectId: string | null) => {
@@ -360,6 +378,14 @@ function setCors(res: ServerResponse, req: IncomingMessage): void {
   }
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  // Baseline security headers on every API response (L-1). The preview proxy
+  // path serves user content and short-circuits BEFORE setCors, so framing the
+  // preview iframe is unaffected by X-Frame-Options here. No CSP: these are JSON
+  // API responses, and a wrong policy is riskier than the marginal gain.
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
 }
 
 /**
@@ -380,11 +406,61 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+// Generous ceiling for JSON routes — the largest legit JSON field is a ~64 KB
+// skills doc; binary/file uploads use the Busboy multipart path, not this
+// reader. Buffering without a cap let a near-anonymous guest stream a multi-GB
+// body and OOM the single shared Node process (H-3).
+const MAX_JSON_BODY_BYTES = 10 * 1024 * 1024;
+
 async function readJsonBody<T>(req: IncomingMessage): Promise<T> {
+  const declared = Number(req.headers["content-length"]);
+  if (Number.isFinite(declared) && declared > MAX_JSON_BODY_BYTES) {
+    throw new Error("request body too large");
+  }
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let total = 0;
+  for await (const chunk of req) {
+    total += (chunk as Buffer).length;
+    if (total > MAX_JSON_BODY_BYTES) {
+      // Stop accumulating — don't buffer past the cap regardless of a lying
+      // (or absent) Content-Length header.
+      throw new Error("request body too large");
+    }
+    chunks.push(chunk as Buffer);
+  }
   if (chunks.length === 0) return {} as T;
   return JSON.parse(Buffer.concat(chunks).toString("utf-8")) as T;
+}
+
+/**
+ * Abuse/rate-limit key: the real TCP peer address. We deliberately do NOT honor
+ * X-Forwarded-For — the orchestrator listens directly on 0.0.0.0 with no trusted
+ * reverse proxy in front (see deploy notes), so XFF is fully client-controlled.
+ * Keying on it would let a single host defeat the limiter by rotating the header
+ * per request (the M-8 flood it's meant to blunt). If a trusted proxy is ever
+ * placed in front, parse XFF only when the immediate peer is that proxy.
+ */
+function clientIp(req: IncomingMessage): string {
+  return req.socket.remoteAddress ?? "unknown";
+}
+
+/**
+ * Tiny in-memory fixed-window rate limiter (M-8). No dependency, resets on
+ * restart, and is per-process (fine for the single-box orchestrator). Returns
+ * true if the call is allowed, false once `limit` is exceeded within `windowMs`.
+ */
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+function rateLimitOk(key: string, limit: number, windowMs: number): boolean {
+  const now = Date.now();
+  const b = rateBuckets.get(key);
+  if (!b || now >= b.resetAt) {
+    if (rateBuckets.size > 50_000) rateBuckets.clear(); // crude bound on memory
+    rateBuckets.set(key, { count: 1, resetAt: now + windowMs });
+    return true;
+  }
+  if (b.count >= limit) return false;
+  b.count += 1;
+  return true;
 }
 
 /**
@@ -536,6 +612,12 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // value we return into a first-party cookie. No session needed, so these run
   // above the auth gate.
   if (req.url === "/api/guest" && req.method === "POST") {
+    // Blunt anonymous floods of throwaway guest rows (M-8). Generous on purpose:
+    // legit signups normally arrive relayed through the web app (one egress IP),
+    // so this only trips a hammering single source. A real fix is CAPTCHA/PoW.
+    if (!rateLimitOk(`guest-create:${clientIp(req)}`, 30, 5 * 60 * 1000)) {
+      return json(res, 429, { error: "too many requests — please wait a moment and try again" });
+    }
     return await handleGuestCreate(res);
   }
   if (req.url === "/api/guest/restore" && req.method === "POST") {
@@ -692,7 +774,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     // Reject obviously unsafe URLs before creating the project. Without this,
     // the clone tool happily accepts file:// and arbitrary http(s) hosts,
     // which is an SSRF / local-file-read footgun on a multi-tenant host.
-    const urlError = validateCloneUrl(repoUrl);
+    const urlError = await validateCloneUrl(repoUrl);
     if (urlError) return json(res, 400, { error: urlError });
 
     // Auth resolution order: explicit `use_oauth` pulls the stored OAuth
@@ -1270,16 +1352,21 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         repo_full_name: project.github_repo_full_name,
       });
     }
-    const body = await readJsonBody<{ name?: string }>(req).catch<{ name?: string }>(() => ({}));
+    const body = await readJsonBody<{ name?: string; private?: boolean }>(req).catch<{
+      name?: string;
+      private?: boolean;
+    }>(() => ({}));
     // GitHub repo names: alphanumeric, -, _, . — keep it close to the project name.
     const requestedName =
       (body.name ?? project.name).toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
     if (!requestedName || requestedName.length > 100) {
       return json(res, 400, { error: "invalid repo name" });
     }
+    // Default private; honor an explicit `private: false` for a public repo.
+    const isPrivate = body.private !== false;
     let repo;
     try {
-      repo = await githubCreateRepo(user, requestedName, project.description);
+      repo = await githubCreateRepo(user, requestedName, project.description, isPrivate);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg === "github_not_connected") {
@@ -2112,7 +2199,7 @@ async function rollbackImport(
  * also means PAT-injection (which only runs for https URLs) covers every
  * code path that reaches `git clone`.
  */
-function validateCloneUrl(repoUrl: string): string | null {
+async function validateCloneUrl(repoUrl: string): Promise<string | null> {
   let parsed: URL;
   try {
     parsed = new URL(repoUrl);
@@ -2124,6 +2211,15 @@ function validateCloneUrl(repoUrl: string): string | null {
   }
   if (!parsed.hostname) {
     return "repo_url is missing a hostname";
+  }
+  // Reject hosts that resolve to a private / loopback / link-local / metadata /
+  // fleet-bridge address — otherwise an authenticated user makes the
+  // orchestrator host `git clone` to an internal target, turning clone
+  // success/failure into a semi-blind internal port/service oracle (M-3).
+  try {
+    await assertPublicHost(parsed.hostname);
+  } catch {
+    return "repo_url must point at a publicly routable host";
   }
   return null;
 }
@@ -2537,7 +2633,7 @@ async function handleConnection(
   const send: Sender = (event) => {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(event));
   };
-  const ctx: SessionCtx = { send, user, projectId: project.id };
+  const ctx: SessionCtx = { send, user, projectId: project.id, sessionId };
   sessions.add(ctx);
 
   // Mutable history; populated after async hydrate below. Mutating in place
@@ -2567,6 +2663,13 @@ async function handleConnection(
   // Otherwise messages that arrive during hydration (especially the
   // client's initial request_tree on WS open) get silently dropped.
   ws.on("close", () => {
+    // If the socket drops mid-turn, abort the in-flight agent loop. Otherwise
+    // the turn runs to completion against a dead socket — burning LLM tokens,
+    // keeping the VM busy, and spawning child procs nobody is listening to
+    // (B-9). The turn's `finally` still persists whatever it produced.
+    if (busy && currentAbort && !currentAbort.signal.aborted) {
+      currentAbort.abort();
+    }
     sessions.delete(ctx);
   });
 
@@ -2578,6 +2681,13 @@ async function handleConnection(
       send({ type: "error", message: "invalid JSON" });
       return;
     }
+
+    // True only for the invocation that actually started a turn (set busy).
+    // ws.on("message") fires concurrently per inbound frame, so a bystander
+    // handler (request_file, abort, …) that throws while a turn is in flight
+    // must NOT clear busy in the shared catch below — otherwise a second
+    // user_message would start a parallel turn on the same VM/history (B-13).
+    let startedTurn = false;
 
     try {
       if (event.type === "plan_approved") {
@@ -2615,8 +2725,8 @@ async function handleConnection(
         // same project (and the sandbox files / VM / secrets) are untouched.
         await clearHistory(project.id, sessionId);
         history.length = 0;
-        clearTodos(project.id);
-        broadcastToProject(project.id, { type: "todos_updated", todos: [] });
+        clearTodos(project.id, sessionId);
+        broadcastToSession(project.id, sessionId, { type: "todos_updated", todos: [] });
         send({ type: "session_reset" });
         return;
       }
@@ -2690,6 +2800,7 @@ async function handleConnection(
           return;
         }
         busy = true;
+        startedTurn = true;
         currentAbort = new AbortController();
         // Lazy VM boot. ensureVm is idempotent — same project id returns
         // the same VM (and resumes if it was paused).
@@ -2780,8 +2891,13 @@ async function handleConnection(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       send({ type: "error", message });
-      busy = false;
-      currentAbort = null;
+      // Only the turn-owning invocation may clear these (its own finally already
+      // did on the normal error path); a bystander handler that threw must leave
+      // an in-flight turn's flags untouched (B-13).
+      if (startedTurn) {
+        busy = false;
+        currentAbort = null;
+      }
     }
   });
 
@@ -2833,7 +2949,7 @@ async function handleConnection(
   }
 
   // Replay any existing todos so the Tasks pane survives reconnects.
-  const existingTodos = getTodos(project.id);
+  const existingTodos = getTodos(project.id, sessionId);
   if (existingTodos.length > 0) {
     send({ type: "todos_updated", todos: existingTodos });
   }
@@ -3280,7 +3396,12 @@ async function runSession(
           return formatPlanForExecution(approved);
         };
 
-  const turnStartLength = history.length;
+  // Collect this turn's appended messages BY REFERENCE (the loop pushes to this
+  // sink as it goes). We persist exactly these — not a slice of `history` taken
+  // by a pre-turn length — because the loop mutates the head of `history` in
+  // place (compaction splice, normalize), which shifts/shrinks indices and made
+  // the old index-based persist silently lose or duplicate the whole turn (B-1).
+  const turnMessages: Anthropic.MessageParam[] = [];
 
   // Coalesce storage_synced broadcasts so we don't flood the UI on
   // back-to-back writes — emit at most once per ~500ms window.
@@ -3314,12 +3435,16 @@ async function runSession(
     }, 300);
   };
 
-  const result = await runAgentLoop(finalMessage, {
+  let result: Awaited<ReturnType<typeof runAgentLoop>>;
+  try {
+    result = await runAgentLoop(finalMessage, {
     sandbox: { rootDir: sandboxDir, vm: vmHandle ?? undefined },
     apiKey,
     modelChoice,
     projectId,
+    sessionId,
     messages: history,
+    collectMessages: turnMessages,
     signal,
     previewBaseUrl: PREVIEW_BASE_URL,
     skills: skillsBody,
@@ -3328,7 +3453,10 @@ async function runSession(
     userId,
     repo,
     selectedElement,
-    onTodoWrite: (items) => broadcastToProject(projectId, { type: "todos_updated", todos: items }),
+    // Per-session so a sibling chat session in the same project doesn't see this
+    // turn's todos pop into its Tasks pane (B-11).
+    onTodoWrite: (items) =>
+      broadcastToSession(projectId, sessionId, { type: "todos_updated", todos: items }),
     onUsage: emitUsage,
     requestUserAnswer: registerUserAnswer,
     requestPlan,
@@ -3450,14 +3578,17 @@ async function runSession(
       }
     },
   });
-
-  // Persist any new messages added during this turn — even if aborted, the
-  // partial assistant message + synthesized tool_results need to survive so
-  // the next turn's history is a valid sequence.
-  for (let i = turnStartLength; i < history.length; i++) {
-    await appendMessage(projectId, sessionId, history[i]).catch((err) =>
-      console.error("appendMessage failed:", err),
-    );
+  } finally {
+    // Persist exactly the messages this turn appended (collected by reference) —
+    // even if aborted OR if the loop threw (B-12), so the DB never diverges from
+    // the in-memory history. Iterating the collected refs is immune to the
+    // mid-turn head mutations (compaction/normalize) that made the old
+    // index-based slice silently lose or duplicate the whole turn (B-1).
+    for (const m of turnMessages) {
+      await appendMessage(projectId, sessionId, m).catch((err) =>
+        console.error("appendMessage failed:", err),
+      );
+    }
   }
   // Bump the session's updated_at so the dropdown can sort by recency.
   // Fire-and-forget — the user shouldn't wait for a metadata write to see

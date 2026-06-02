@@ -216,11 +216,53 @@ export default function CodeEditor() {
           borderTop: "1px solid var(--border-default)",
           background: "#0c0c11",
           display: "flex",
+          alignItems: "center",
           justifyContent: "space-between",
+          gap: 10,
         }}
       >
-        <span>{path}</span>
-        <span>{describeSave(saveStatus, busy)}</span>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {path}
+        </span>
+        <span style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+          {saveStatus.kind === "dirty" && (
+            <span
+              aria-hidden="true"
+              title={busy ? "Saves when the agent finishes" : "Unsaved changes"}
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: "50%",
+                background: busy ? "#f0b429" : "var(--accent)",
+              }}
+            />
+          )}
+          <span role="status" aria-live="polite">
+            {describeSave(saveStatus, busy)}
+          </span>
+          {(saveStatus.kind === "dirty" || saveStatus.kind === "error") && (
+            <button
+              type="button"
+              onClick={() => {
+                if (saveTimer.current) {
+                  clearTimeout(saveTimer.current);
+                  saveTimer.current = null;
+                }
+                flushSave(path).catch(() => {});
+              }}
+              disabled={busy && saveStatus.kind === "dirty"}
+              className="btn-secondary"
+              style={{ fontSize: 11, padding: "2px 10px" }}
+              title={
+                busy
+                  ? "Saves automatically when the agent finishes"
+                  : "Save now (⌘S)"
+              }
+            >
+              {busy && saveStatus.kind === "dirty" ? "Queued" : "Save"}
+            </button>
+          )}
+        </span>
       </div>
     </div>
   );
@@ -231,7 +273,7 @@ function describeSave(status: SaveStatus, agentBusy: boolean): string {
     case "saving":
       return "saving…";
     case "dirty":
-      return agentBusy ? "edits queued (agent running)" : "unsaved · ⌘S to save";
+      return agentBusy ? "saves when agent finishes" : "unsaved";
     case "saved":
       return "saved";
     case "error":

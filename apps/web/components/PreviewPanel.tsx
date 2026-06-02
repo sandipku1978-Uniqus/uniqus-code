@@ -171,8 +171,28 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
   // In-app path the iframe is currently showing — updated via postMessage from
   // the navigation reporter the proxy injects into every HTML response.
   const [iframePath, setIframePath] = useState<string>("/");
+  // Editable address-bar draft, synced from iframePath (UI/UX audit §B — the
+  // URL bar used to be a read-only span).
+  const [urlDraft, setUrlDraft] = useState<string>("/");
+  // Parent-side nav history of reported paths. The preview is cross-origin, so
+  // we can't touch its History API directly; instead we track the paths it
+  // reports and re-point the iframe's src to navigate Back/Forward.
+  const navHistoryRef = useRef<string[]>(["/"]);
+  const navIdxRef = useRef(0);
+  // True while we navigate programmatically (Back/Forward) so the resulting
+  // path report isn't pushed as a new history entry.
+  const programmaticNavRef = useRef(false);
+  // True while the user is editing the address bar — guards against an incoming
+  // iframe nav report (e.g. an async client-side redirect in the previewed app)
+  // overwriting the path the user is mid-typing.
+  const urlFocusedRef = useRef(false);
+  const [navState, setNavState] = useState({ canBack: false, canForward: false });
   // Load state for the proxied iframe (inferred from load events + a timeout).
-  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  // "slow" = the iframe hasn't loaded yet but nothing has actually failed (a
+  // first `npm install` + compile routinely runs tens of seconds); "error" is
+  // reserved for a real iframe load failure. The old code flipped to a hard
+  // "Preview unavailable" after a fixed 8 s, false-failing healthy boots.
+  const [status, setStatus] = useState<"loading" | "ready" | "slow" | "error">("loading");
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -182,6 +202,45 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
   // production (Vercel + Hetzner) where the dev server isn't on a public port.
   const baseUrl = `${ORCHESTRATOR_URL}/preview/${server.id}/`;
   const displayedUrl = `${baseUrl.replace(/\/$/, "")}${iframePath.startsWith("/") ? iframePath : `/${iframePath}`}`;
+
+  // Re-point the iframe to an in-app path. Setting the src of a frame you own is
+  // allowed even cross-origin (unlike touching its History API).
+  const navigateTo = useCallback(
+    (path: string) => {
+      const p = (path || "/").trim();
+      const norm = p.startsWith("/") ? p : `/${p}`;
+      if (iframeRef.current) {
+        iframeRef.current.src = `${baseUrl.replace(/\/$/, "")}${norm}`;
+      }
+    },
+    [baseUrl],
+  );
+
+  const goBack = useCallback(() => {
+    if (navIdxRef.current <= 0) return;
+    navIdxRef.current -= 1;
+    programmaticNavRef.current = true;
+    const path = navHistoryRef.current[navIdxRef.current];
+    setUrlDraft(path);
+    setNavState({
+      canBack: navIdxRef.current > 0,
+      canForward: navIdxRef.current < navHistoryRef.current.length - 1,
+    });
+    navigateTo(path);
+  }, [navigateTo]);
+
+  const goForward = useCallback(() => {
+    if (navIdxRef.current >= navHistoryRef.current.length - 1) return;
+    navIdxRef.current += 1;
+    programmaticNavRef.current = true;
+    const path = navHistoryRef.current[navIdxRef.current];
+    setUrlDraft(path);
+    setNavState({
+      canBack: navIdxRef.current > 0,
+      canForward: navIdxRef.current < navHistoryRef.current.length - 1,
+    });
+    navigateTo(path);
+  }, [navigateTo]);
   // Origin we accept picker messages from / post control messages to. Scoping
   // these keeps a stray frame from spoofing element selections. "*" only in the
   // (dev) case where we couldn't resolve an absolute orchestrator URL.
@@ -246,20 +305,49 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
       : 1;
 
   useEffect(() => {
-    // Reset path when the underlying server changes — and when the user hits
-    // Reload, since the inner app starts at "/" again.
+    // Reset path + nav history when the underlying server changes — and when the
+    // user hits Reload, since the inner app starts at "/" again.
     setIframePath("/");
+    setUrlDraft("/");
+    navHistoryRef.current = ["/"];
+    navIdxRef.current = 0;
+    programmaticNavRef.current = false;
+    setNavState({ canBack: false, canForward: false });
   }, [server.id, reloadKey]);
 
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
+      // Only trust nav messages from the preview's own (orchestrator) origin —
+      // mirror the element-picker listener's guard below. Without this a
+      // malicious preview app (or any cross-origin frame) can spoof the URL bar
+      // (L-10).
+      if (previewOrigin !== "*" && e.origin !== previewOrigin) return;
       if (!isPreviewNavMessage(e.data)) return;
       if (e.data.server_id !== server.id) return;
-      setIframePath(e.data.path || "/");
+      const path = e.data.path || "/";
+      setIframePath(path);
+      // Keep iframePath (used for the displayed URL + open-in-new-tab) in sync,
+      // but don't clobber the address bar while the user is typing in it.
+      if (!urlFocusedRef.current) setUrlDraft(path);
+      // Record into the parent-side history unless this report came from a
+      // Back/Forward we triggered (which shouldn't create a new entry).
+      if (programmaticNavRef.current) {
+        programmaticNavRef.current = false;
+      } else if (navHistoryRef.current[navIdxRef.current] !== path) {
+        navHistoryRef.current = [
+          ...navHistoryRef.current.slice(0, navIdxRef.current + 1),
+          path,
+        ];
+        navIdxRef.current = navHistoryRef.current.length - 1;
+      }
+      setNavState({
+        canBack: navIdxRef.current > 0,
+        canForward: navIdxRef.current < navHistoryRef.current.length - 1,
+      });
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [server.id]);
+  }, [server.id, previewOrigin]);
 
   // Element-picker message listener. Only while picking, and only from the
   // preview's own origin. A valid message becomes the candidate and pauses
@@ -299,13 +387,16 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
 
   useEffect(() => {
     // Re-arm the load state whenever the iframe re-points (server change or
-    // Reload). If `onLoad` never fires within a few seconds the dev server is
-    // almost certainly down/starting — treat that as an error.
+    // Reload). The iframe stays mounted the whole time, so a late `onLoad`
+    // still resolves to "ready". After a generous grace we only down-shift to a
+    // reassuring "still starting" state (NOT a scary error) — the dev server's
+    // port was already confirmed open before this server appeared, so a slow
+    // first paint is almost always install/compile, not a failure.
     setStatus("loading");
-    const timeout = window.setTimeout(() => {
-      setStatus((s) => (s === "loading" ? "error" : s));
-    }, 8000);
-    return () => window.clearTimeout(timeout);
+    const slowAt = window.setTimeout(() => {
+      setStatus((s) => (s === "loading" ? "slow" : s));
+    }, 45000);
+    return () => window.clearTimeout(slowAt);
   }, [baseUrl, server.id, reloadKey]);
 
   // Close the device menu on an outside click.
@@ -333,18 +424,81 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
       <div className="preview-toolbar">
         <button
           type="button"
+          onClick={goBack}
+          disabled={!navState.canBack}
+          className="icon-btn-sm"
+          title="Back"
+          aria-label="Back"
+          style={{ opacity: navState.canBack ? 1 : 0.4 }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <polyline points="15 18 9 12 15 6" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          onClick={goForward}
+          disabled={!navState.canForward}
+          className="icon-btn-sm"
+          title="Forward"
+          aria-label="Forward"
+          style={{ opacity: navState.canForward ? 1 : 0.4 }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          onClick={() => navigateTo("/")}
+          className="icon-btn-sm"
+          title="Home (/)"
+          aria-label="Go to home"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            <polyline points="9 22 9 12 15 12 15 22" />
+          </svg>
+        </button>
+        <button
+          type="button"
           onClick={() => setReloadKey((k) => k + 1)}
           className="icon-btn-sm"
           title="Reload"
+          aria-label="Reload"
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="23 4 23 10 17 10" />
             <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
           </svg>
         </button>
-        <span className="url" title={displayedUrl}>
-          {displayedUrl}
-        </span>
+        <form
+          className="preview-url-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            navigateTo(urlDraft);
+          }}
+        >
+          <input
+            className="url"
+            value={urlDraft}
+            onChange={(e) => setUrlDraft(e.target.value)}
+            onFocus={() => {
+              urlFocusedRef.current = true;
+            }}
+            onBlur={() => {
+              // Re-sync to the actual current path so a typed-but-not-submitted
+              // draft doesn't linger (mirrors a browser address bar reverting on
+              // blur).
+              urlFocusedRef.current = false;
+              setUrlDraft(iframePath);
+            }}
+            spellCheck={false}
+            aria-label="Preview address"
+            title={displayedUrl}
+            placeholder="/"
+          />
+        </form>
 
         {/* Element picker toggle */}
         <button
@@ -540,6 +694,17 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
             <div style={overlayStyle} aria-live="polite">
               <span style={dotStyle} aria-hidden />
               <p style={{ margin: 0, fontSize: 12.5, color: "var(--text-muted)" }}>Loading preview…</p>
+            </div>
+          )}
+          {status === "slow" && (
+            <div style={overlayStyle} aria-live="polite">
+              <span style={dotStyle} aria-hidden />
+              <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6, maxWidth: "34ch", color: "var(--text-muted)" }}>
+                Still starting — the first build can take a little while. It'll appear as soon as it's ready.
+              </p>
+              <button type="button" onClick={() => setReloadKey((k) => k + 1)} style={reloadBtnStyle}>
+                Reload
+              </button>
             </div>
           )}
           {status === "error" && (

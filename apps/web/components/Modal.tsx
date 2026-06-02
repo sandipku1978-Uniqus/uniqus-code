@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, type ReactNode, type CSSProperties } from "react";
+import { useEffect, useId, useRef, type ReactNode, type CSSProperties } from "react";
 
 /**
  * Shared modal primitive. Every overlay in the app used to hand-roll its own
@@ -15,9 +15,13 @@ import { useEffect, useRef, type ReactNode, type CSSProperties } from "react";
 const FOCUSABLE =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-// Module-level counter so nested/stacked modals don't prematurely release the
-// body scroll-lock when the inner one closes.
-let openModalCount = 0;
+// Module-level stack of mounted-modal ids. Only the topmost id reacts to Escape
+// and Tab, so a stacked confirm dialog owns the keyboard without its parent's
+// listener also firing (which double-closed the parent on Escape and fought the
+// focus-trap on Tab). The body scroll-lock is released only once the last modal
+// unmounts.
+let modalStack: number[] = [];
+let nextModalId = 1;
 
 export default function Modal({
   title,
@@ -28,7 +32,7 @@ export default function Modal({
   width = 640,
   maxHeight = "85vh",
   bodyStyle,
-  labelId = "modal-title",
+  labelId,
 }: {
   title: ReactNode;
   subtitle?: ReactNode;
@@ -40,12 +44,28 @@ export default function Modal({
   bodyStyle?: CSSProperties;
   labelId?: string;
 }) {
+  // Per-instance default so stacked dialogs don't all share id="modal-title"
+  // (which made aria-labelledby on a confirm dialog resolve to the PARENT's
+  // title — the confirm was announced with the wrong name to screen readers).
+  const autoId = useId();
+  const resolvedLabelId = labelId ?? autoId;
   const cardRef = useRef<HTMLDivElement>(null);
+  // Latest onClose, read by the keydown handler. Lets the mount effect run with
+  // an empty dep array so this modal's position in the stack is stable — pushed
+  // once on mount, not re-pushed (to the top) whenever onClose identity changes.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  // Track where the mouse went DOWN so a drag that starts inside the card (e.g.
+  // selecting text in an input) and releases over the dim backdrop doesn't close
+  // the dialog and discard the in-progress edit. We only close when BOTH the
+  // press and the release happen on the overlay itself.
+  const pressedOnOverlay = useRef(false);
 
   useEffect(() => {
     const prevActive = document.activeElement as HTMLElement | null;
 
-    openModalCount += 1;
+    const id = nextModalId++;
+    modalStack.push(id);
     document.body.style.overflow = "hidden";
 
     const card = cardRef.current;
@@ -54,19 +74,36 @@ export default function Modal({
     (initial ?? card)?.focus();
 
     const onKeyDown = (e: KeyboardEvent) => {
+      // Only the topmost modal in the stack handles keys — otherwise every
+      // mounted modal's document-level listener would fire on one keypress
+      // (double-close on Escape, duelling focus-traps on Tab).
+      if (modalStack[modalStack.length - 1] !== id) return;
       if (e.key === "Escape") {
         e.stopPropagation();
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (e.key !== "Tab" || !card) return;
       const nodes = Array.from(card.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
         (el) => el.offsetParent !== null,
       );
-      if (nodes.length === 0) return;
+      if (nodes.length === 0) {
+        // Nothing focusable inside — keep focus on the card so Tab can't escape.
+        e.preventDefault();
+        card.focus();
+        return;
+      }
       const first = nodes[0];
       const last = nodes[nodes.length - 1];
-      const active = document.activeElement;
+      const active = document.activeElement as HTMLElement | null;
+      // If focus has somehow left the dialog (on the body, the card itself, or a
+      // node filtered out as hidden), pull it back in rather than letting Tab
+      // walk out into the browser chrome.
+      if (!active || !card.contains(active) || !nodes.includes(active)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+        return;
+      }
       if (e.shiftKey && active === first) {
         e.preventDefault();
         last.focus();
@@ -79,22 +116,34 @@ export default function Modal({
 
     return () => {
       document.removeEventListener("keydown", onKeyDown, true);
-      openModalCount = Math.max(0, openModalCount - 1);
-      if (openModalCount === 0) document.body.style.overflow = "";
+      const i = modalStack.indexOf(id);
+      if (i !== -1) modalStack.splice(i, 1);
+      if (modalStack.length === 0) document.body.style.overflow = "";
       prevActive?.focus?.();
     };
-  }, [onClose]);
+    // Mount/unmount only — onClose is read through onCloseRef so changing it
+    // doesn't reshuffle the modal stack.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div
+      className="modal-overlay"
+      onMouseDown={(e) => {
+        pressedOnOverlay.current = e.target === e.currentTarget;
+      }}
+      onMouseUp={(e) => {
+        if (e.target === e.currentTarget && pressedOnOverlay.current) onClose();
+        pressedOnOverlay.current = false;
+      }}
+    >
       <div
         ref={cardRef}
         className="modal-card"
         role="dialog"
         aria-modal="true"
-        aria-labelledby={labelId}
+        aria-labelledby={resolvedLabelId}
         tabIndex={-1}
-        onClick={(e) => e.stopPropagation()}
         style={
           {
             "--modal-w": `${width}px`,
@@ -104,7 +153,7 @@ export default function Modal({
       >
         <div className="modal-head">
           <div>
-            <div className="modal-title" id={labelId}>
+            <div className="modal-title" id={resolvedLabelId}>
               {title}
             </div>
             {subtitle && <div className="modal-sub">{subtitle}</div>}

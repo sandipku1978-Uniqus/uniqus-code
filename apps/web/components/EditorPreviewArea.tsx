@@ -3,9 +3,16 @@
 import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { useStore, fileTabId, previewTabId, flushSave } from "@/lib/store";
+import {
+  useStore,
+  fileTabId,
+  previewTabId,
+  flushSave,
+  flushAllPendingEdits,
+} from "@/lib/store";
 import { send } from "@/lib/ws-client";
 import { stopServerApi, getApiBase } from "@/lib/api";
+import Modal from "./Modal";
 import CodeEditor from "./CodeEditor";
 import PreviewPanel from "./PreviewPanel";
 
@@ -20,10 +27,14 @@ function ImageViewer({ path, projectId }: { path: string; projectId: string | nu
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [zoom, setZoom] = useState(100);
+  // Bumped by the Retry button so a transient fetch failure isn't a dead end (§C).
+  const [reloadKey, setReloadKey] = useState(0);
+  const [dims, setDims] = useState<{ w: number; h: number } | null>(null);
 
   useEffect(() => {
     if (!projectId) return;
     let cancelled = false;
+    setError(null);
     fetch(`${getApiBase()}/api/projects/${projectId}/raw/${encodeURIComponent(path)}`, { credentials: "include" })
       .then((res) => {
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -41,11 +52,12 @@ function ImageViewer({ path, projectId }: { path: string; projectId: string | nu
     return () => {
       cancelled = true;
     };
-  }, [path, projectId]);
+  }, [path, projectId, reloadKey]);
 
   // Reset zoom when switching files
   useEffect(() => {
     setZoom(100);
+    setDims(null);
   }, [path]);
 
   // Cleanup object URL on unmount
@@ -57,8 +69,15 @@ function ImageViewer({ path, projectId }: { path: string; projectId: string | nu
 
   if (error) {
     return (
-      <div className="editor-empty" style={{ gap: 8 }}>
+      <div className="editor-empty" style={{ gap: 10 }}>
         <p style={{ color: "var(--text-dim)" }}>Could not load image: {error}</p>
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={() => setReloadKey((k) => k + 1)}
+        >
+          Retry
+        </button>
       </div>
     );
   }
@@ -85,10 +104,23 @@ function ImageViewer({ path, projectId }: { path: string; projectId: string | nu
           flexShrink: 0,
         }}
       >
-        <button type="button" onClick={() => setZoom((z) => Math.max(10, z - 25))} style={{ background: "none", border: "none", color: "var(--text-primary)", cursor: "pointer", fontSize: 14, padding: "2px 6px" }}>−</button>
+        <button type="button" onClick={() => setZoom((z) => Math.max(10, z - 25))} aria-label="Zoom out" style={{ background: "none", border: "none", color: "var(--text-primary)", cursor: "pointer", fontSize: 14, padding: "2px 6px" }}>−</button>
         <span style={{ minWidth: 40, textAlign: "center" }}>{zoom}%</span>
-        <button type="button" onClick={() => setZoom((z) => Math.min(500, z + 25))} style={{ background: "none", border: "none", color: "var(--text-primary)", cursor: "pointer", fontSize: 14, padding: "2px 6px" }}>+</button>
-        <button type="button" onClick={() => setZoom(100)} style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 10, padding: "2px 6px" }}>Reset</button>
+        <button type="button" onClick={() => setZoom((z) => Math.min(500, z + 25))} aria-label="Zoom in" style={{ background: "none", border: "none", color: "var(--text-primary)", cursor: "pointer", fontSize: 14, padding: "2px 6px" }}>+</button>
+        <button type="button" onClick={() => setZoom(100)} style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 10, padding: "2px 6px" }}>Fit</button>
+        {dims && (
+          <span style={{ marginLeft: 8 }}>
+            {dims.w}×{dims.h}
+          </span>
+        )}
+        <a
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          style={{ marginLeft: "auto", color: "var(--accent)", fontSize: 10 }}
+        >
+          Open in new tab ↗
+        </a>
       </div>
       {/* Image area */}
       <div
@@ -106,6 +138,12 @@ function ImageViewer({ path, projectId }: { path: string; projectId: string | nu
         <img
           src={url}
           alt={path.split("/").pop() ?? "image"}
+          onLoad={(e) =>
+            setDims({
+              w: e.currentTarget.naturalWidth,
+              h: e.currentTarget.naturalHeight,
+            })
+          }
           style={{
             width: `${zoom}%`,
             maxWidth: zoom <= 100 ? "100%" : "none",
@@ -125,27 +163,57 @@ function isMarkdownFile(filePath: string): boolean {
 }
 
 function MarkdownPreview({ content }: { content: string }) {
+  const [copied, setCopied] = useState(false);
   return (
     <div
       style={{
         height: "100%",
         overflow: "auto",
-        padding: "24px 32px",
         background: "var(--bg-canvas, #0e0e14)",
         color: "var(--text-primary, #e4e2dc)",
         fontSize: 14,
         lineHeight: 1.7,
       }}
     >
-      <div className="md" style={{ maxWidth: 760 }}>
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          components={{
-            a: ({ ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+      <div
+        style={{
+          position: "sticky",
+          top: 0,
+          display: "flex",
+          justifyContent: "flex-end",
+          padding: "6px 12px",
+          background: "var(--bg-canvas, #0e0e14)",
+          borderBottom: "1px solid var(--border-default)",
+        }}
+      >
+        <button
+          type="button"
+          className="btn-secondary"
+          style={{ fontSize: 11, padding: "2px 10px" }}
+          onClick={() => {
+            navigator.clipboard
+              ?.writeText(content)
+              .then(() => {
+                setCopied(true);
+                window.setTimeout(() => setCopied(false), 1500);
+              })
+              .catch(() => {});
           }}
         >
-          {content}
-        </ReactMarkdown>
+          {copied ? "Copied ✓" : "Copy source"}
+        </button>
+      </div>
+      <div style={{ padding: "24px 32px" }}>
+        <div className="md" style={{ maxWidth: 760 }}>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              a: ({ ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+            }}
+          >
+            {content}
+          </ReactMarkdown>
+        </div>
       </div>
     </div>
   );
@@ -163,8 +231,14 @@ export default function EditorPreviewArea() {
   const fileContent = useStore((s) => s.fileContent);
   const projectId = useStore((s) => s.project?.id ?? null);
   const [mdPreview, setMdPreview] = useState(false);
+  // Preview-tab close confirm — closing stops the dev server, so warn first (§C).
+  const [confirmStop, setConfirmStop] = useState<{ id: string; port: number } | null>(null);
 
   const hasAnyTabs = openFiles.length > 0 || previews.length > 0;
+  // How many open files have unsaved edits, for the Save-all affordance.
+  const dirtyCount = openFiles.filter(
+    (p) => saveStatus[p]?.kind === "dirty" || saveStatus[p]?.kind === "saving",
+  ).length;
 
   // Pick what to render based on editorTab; fall back to first available tab.
   let activeTab = editorTab;
@@ -265,17 +339,9 @@ export default function EditorPreviewArea() {
                   className="x"
                   onClick={(e) => {
                     e.stopPropagation();
-                    // Closing the tab also stops the dev server. Otherwise
-                    // dev servers leak across runs and tie up ports until the
-                    // orchestrator restarts. The DELETE call is best-effort —
-                    // we remove the tab locally regardless so the UI stays
-                    // responsive even if the API is briefly down. The
-                    // `server_stopped` broadcast that follows the kill is a
-                    // no-op for this client (preview already removed).
-                    removePreview(p.id);
-                    if (projectId) {
-                      stopServerApi(projectId, p.id).catch(() => {});
-                    }
+                    // Closing stops the dev server — confirm first so a stray
+                    // click doesn't tear down a running preview (§C).
+                    setConfirmStop({ id: p.id, port: p.port });
                   }}
                   title="Close tab and stop the dev server"
                 >
@@ -284,20 +350,35 @@ export default function EditorPreviewArea() {
               </button>
             );
           })}
-          {activeFilePath && isMarkdownFile(activeFilePath) && (
-            <button
-              type="button"
-              onClick={() => setMdPreview((v) => !v)}
-              className={`tab ${mdPreview ? "active" : ""}`}
-              style={{ marginLeft: "auto", fontSize: 10, gap: 4, opacity: 0.85 }}
-              title={mdPreview ? "Show source" : "Preview markdown"}
-            >
-              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M2 3h12v10H2V3zm1 1v8h10V4H3zm1 1h3v2H6v2H5V5h-.5L4 5zm4.5 0H10l1.5 3-1.5 3H8.5l1.5-3-1.5-3z"/>
-              </svg>
-              {mdPreview ? "Source" : "Preview"}
-            </button>
-          )}
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4 }}>
+            {dirtyCount > 1 && (
+              <button
+                type="button"
+                onClick={() => {
+                  flushAllPendingEdits().catch(() => {});
+                }}
+                className="tab"
+                style={{ fontSize: 10, gap: 4, opacity: 0.85 }}
+                title="Save all unsaved files"
+              >
+                Save all ({dirtyCount})
+              </button>
+            )}
+            {activeFilePath && isMarkdownFile(activeFilePath) && (
+              <button
+                type="button"
+                onClick={() => setMdPreview((v) => !v)}
+                className={`tab ${mdPreview ? "active" : ""}`}
+                style={{ fontSize: 10, gap: 4, opacity: 0.85 }}
+                title={mdPreview ? "Show source" : "Preview markdown"}
+              >
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M2 3h12v10H2V3zm1 1v8h10V4H3zm1 1h3v2H6v2H5V5h-.5L4 5zm4.5 0H10l1.5 3-1.5 3H8.5l1.5-3-1.5-3z"/>
+                </svg>
+                {mdPreview ? "Source" : "Preview"}
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -320,6 +401,45 @@ export default function EditorPreviewArea() {
           </div>
         )}
       </div>
+
+      {confirmStop && (
+        <Modal
+          title="Stop the dev server?"
+          width={440}
+          onClose={() => setConfirmStop(null)}
+          footer={
+            <>
+              <span />
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setConfirmStop(null)}
+                >
+                  Keep running
+                </button>
+                <button
+                  type="button"
+                  className="btn-danger"
+                  onClick={() => {
+                    const { id } = confirmStop;
+                    setConfirmStop(null);
+                    removePreview(id);
+                    if (projectId) stopServerApi(projectId, id).catch(() => {});
+                  }}
+                >
+                  Close &amp; stop
+                </button>
+              </div>
+            </>
+          }
+        >
+          <p style={{ margin: 0, fontSize: 13, color: "var(--text-dim)", lineHeight: 1.6 }}>
+            Closing the preview on port {confirmStop.port} stops its dev server. You can start it
+            again from the Run button.
+          </p>
+        </Modal>
+      )}
     </div>
   );
 }

@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createGuestApi, restoreGuestApi } from "@/lib/api";
+import Modal from "./Modal";
+import { createGuestApi, restoreGuestApi, RestoreError } from "@/lib/api";
 
 /**
  * Guest entry points on the login page: start a free guest account (no Google,
@@ -23,8 +24,42 @@ export default function GuestLoginActions({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [newCode, setNewCode] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const [restoreOpen, setRestoreOpen] = useState(false);
   const [restoreCode, setRestoreCode] = useState("");
+
+  async function copyCode(): Promise<void> {
+    if (!newCode) return;
+    try {
+      await navigator.clipboard.writeText(newCode);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard can be blocked (insecure context / permissions) — fall back
+      // to selecting the text so the user can copy manually. The code box has
+      // userSelect:"all", so this is a no-op safety net.
+    }
+  }
+
+  function downloadCode(): void {
+    if (!newCode) return;
+    const blob = new Blob(
+      [
+        `Uniqus Code — guest recovery code\n\n${newCode}\n\n` +
+          `Keep this safe: it is the only way back into your guest account on ` +
+          `another device or after clearing browser data. We cannot recover it for you.\n`,
+      ],
+      { type: "text/plain" },
+    );
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "uniqus-recovery-code.txt";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
 
   async function startGuest(): Promise<void> {
     if (busy) return;
@@ -50,8 +85,17 @@ export default function GuestLoginActions({
     try {
       await restoreGuestApi(code);
       router.push("/projects");
-    } catch {
-      setError("That recovery code wasn't recognised.");
+    } catch (err) {
+      // Distinguish a genuinely unknown code from a transient failure so a
+      // network blip doesn't read as "your valid code is wrong" (§A).
+      const status = err instanceof RestoreError ? err.status : -1;
+      if (status === 401 || status === 404) {
+        setError(
+          "That recovery code isn't recognised. Check for typos — it looks like UNIQUS-GUEST-XXXX-…",
+        );
+      } else {
+        setError("We couldn't reach the server. Check your connection and try again.");
+      }
       setBusy(false);
     }
   }
@@ -127,8 +171,7 @@ export default function GuestLoginActions({
             }}
           >
             No Google account or email needed — best for students whose school
-            locks down sign-in. GitHub and deploys stay disabled until you sign
-            in.
+            locks down sign-in. GitHub and publishing unlock when you sign in.
           </p>
 
           <div style={{ marginTop: 12, textAlign: "center" }}>
@@ -167,6 +210,22 @@ export default function GuestLoginActions({
             </form>
           )}
 
+          {restoreOpen && (
+            <p
+              style={{
+                fontSize: 11,
+                color: "var(--text-muted)",
+                margin: "8px 0 0",
+                textAlign: "center",
+                lineHeight: 1.5,
+              }}
+            >
+              Lost your code? A guest account can only be reopened with its recovery
+              code — we can&apos;t recover it for you. You can still start a fresh guest
+              account above.
+            </p>
+          )}
+
           {error && (
             <div
               style={{
@@ -183,75 +242,67 @@ export default function GuestLoginActions({
       )}
 
       {newCode && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.6)",
-            zIndex: 200,
-            display: "grid",
-            placeItems: "center",
-          }}
+        <Modal
+          title="Save your recovery code"
+          // The account already exists — every dismissal path (Escape, backdrop,
+          // both buttons) continues into the dashboard rather than orphaning the
+          // user. The code stays viewable later from the guest banner (§A).
+          onClose={() => router.push("/projects")}
+          width={460}
+          footer={
+            <>
+              <span className="modal-status">
+                You can view this again anytime from the guest banner.
+              </span>
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  onClick={() => router.push("/projects")}
+                  className="btn-secondary"
+                >
+                  Skip for now
+                </button>
+                <button
+                  type="button"
+                  onClick={() => router.push("/projects")}
+                  className="btn-primary"
+                >
+                  I&apos;ve saved it — continue
+                </button>
+              </div>
+            </>
+          }
         >
+          <p style={{ fontSize: 13, color: "var(--text-muted)", margin: "0 0 14px", lineHeight: 1.6 }}>
+            This is the only way back into your guest account on another device or if
+            your browser data is cleared. Write it down or have your teacher record it —
+            we can&apos;t recover it for you.
+          </p>
           <div
             style={{
-              width: "min(460px, 92vw)",
-              background: "var(--bg-base, #0c0c10)",
-              border: "1px solid var(--border-default)",
-              borderRadius: 10,
-              padding: 22,
-              color: "var(--text-primary)",
-              boxShadow: "0 24px 48px rgba(0,0,0,0.6)",
+              fontFamily: "var(--font-mono, monospace)",
+              fontSize: 16,
+              letterSpacing: 1,
+              padding: "14px 16px",
+              background: "var(--bg-elev)",
+              border: "1px solid rgba(240, 180, 41, 0.4)",
+              borderRadius: 6,
+              userSelect: "all",
+              wordBreak: "break-all",
+              textAlign: "center",
             }}
           >
-            <h2 style={{ fontSize: 16, margin: "0 0 6px" }}>
-              Save your recovery code
-            </h2>
-            <p
-              style={{
-                fontSize: 12,
-                color: "var(--text-muted)",
-                margin: "0 0 14px",
-              }}
-            >
-              This is the only way back into your guest account on another
-              device or if your browser data is cleared. Write it down or have
-              your teacher record it — we can&apos;t recover it for you.
-            </p>
-            <div
-              style={{
-                fontFamily: "var(--font-mono, monospace)",
-                fontSize: 16,
-                letterSpacing: 1,
-                padding: "14px 16px",
-                background: "var(--bg-elev)",
-                border: "1px solid rgba(240, 180, 41, 0.4)",
-                borderRadius: 6,
-                userSelect: "all",
-                wordBreak: "break-all",
-                textAlign: "center",
-              }}
-            >
-              {newCode}
-            </div>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "flex-end",
-                marginTop: 18,
-              }}
-            >
-              <button
-                type="button"
-                onClick={() => router.push("/projects")}
-                className="btn-primary"
-                style={{ fontSize: 13 }}
-              >
-                I&apos;ve saved it — continue
-              </button>
-            </div>
+            {newCode}
           </div>
-        </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+            <button type="button" onClick={copyCode} className="btn-secondary" style={{ fontSize: 12, flex: 1 }}>
+              {copied ? "Copied ✓" : "Copy code"}
+            </button>
+            <button type="button" onClick={downloadCode} className="btn-secondary" style={{ fontSize: 12, flex: 1 }}>
+              Download
+            </button>
+          </div>
+        </Modal>
       )}
     </>
   );

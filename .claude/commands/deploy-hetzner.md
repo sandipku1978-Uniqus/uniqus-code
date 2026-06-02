@@ -11,7 +11,8 @@ Deploy the latest committed code to the Hetzner production box.
 Run **one** SSH command that does the full deploy in a single connection. Use this exact command (it `set -e`s, so any failed step aborts the rest):
 
 ```bash
-ssh root@65.109.89.35 'set -e
+ssh root@65.109.89.35 
+set -e
 cd /opt/uniqus-code
 # A prior npm install on the box can rewrite package-lock.json, which blocks a
 # fast-forward pull ("local changes would be overwritten"). Discard that
@@ -46,7 +47,7 @@ systemctl restart uniqus-orchestrator
 sleep 2
 systemctl status uniqus-orchestrator --no-pager | head -20
 echo "=== last 20 log lines ==="
-journalctl -u uniqus-orchestrator -n 20 --no-pager'
+journalctl -u uniqus-orchestrator -n 20 --no-pager
 ```
 
 (Alternate after ssh-ing into the hetzner box.)

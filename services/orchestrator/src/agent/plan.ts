@@ -168,6 +168,7 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
           call.input,
           call.id,
           opts.projectId ?? null,
+          null,
           undefined,
           opts.signal,
           undefined,

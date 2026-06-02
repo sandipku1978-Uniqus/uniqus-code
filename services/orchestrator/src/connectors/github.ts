@@ -1,4 +1,13 @@
 import type { ConnectorDefinition } from "./index.js";
+import { validatePathComponent } from "./ssrfGuard.js";
+
+/** Validate + URL-encode an owner/repo segment so it can't traverse to other endpoints (L-8). */
+function repoPath(args: Record<string, unknown>): { owner: string; repo: string } {
+  return {
+    owner: encodeURIComponent(validatePathComponent(String(args.owner ?? ""), "owner")),
+    repo: encodeURIComponent(validatePathComponent(String(args.repo ?? ""), "repo")),
+  };
+}
 
 /**
  * GitHub connector. Uses a token from project secrets (default GITHUB_TOKEN).
@@ -29,7 +38,8 @@ export const githubConnector: ConnectorDefinition = {
       },
       invoke: async (ctx, args) => {
         return await ghRequest(ctx, args, (token) => {
-          const url = new URL(`https://api.github.com/repos/${args.owner}/${args.repo}/issues`);
+          const { owner, repo } = repoPath(args);
+          const url = new URL(`https://api.github.com/repos/${owner}/${repo}/issues`);
           if (typeof args.state === "string") url.searchParams.set("state", args.state);
           url.searchParams.set("per_page", String(Math.min(Number(args.per_page) || 30, 100)));
           return { url: url.toString(), token };
@@ -50,10 +60,13 @@ export const githubConnector: ConnectorDefinition = {
         required: ["owner", "repo", "number"],
       },
       invoke: async (ctx, args) => {
-        return await ghRequest(ctx, args, (token) => ({
-          url: `https://api.github.com/repos/${args.owner}/${args.repo}/issues/${Number(args.number)}`,
-          token,
-        }));
+        return await ghRequest(ctx, args, (token) => {
+          const { owner, repo } = repoPath(args);
+          return {
+            url: `https://api.github.com/repos/${owner}/${repo}/issues/${Number(args.number)}`,
+            token,
+          };
+        });
       },
     },
     {
@@ -72,7 +85,8 @@ export const githubConnector: ConnectorDefinition = {
       },
       invoke: async (ctx, args) => {
         return await ghRequest(ctx, args, (token) => {
-          const url = new URL(`https://api.github.com/repos/${args.owner}/${args.repo}/pulls`);
+          const { owner, repo } = repoPath(args);
+          const url = new URL(`https://api.github.com/repos/${owner}/${repo}/pulls`);
           if (typeof args.state === "string") url.searchParams.set("state", args.state);
           url.searchParams.set("per_page", String(Math.min(Number(args.per_page) || 30, 100)));
           return { url: url.toString(), token };

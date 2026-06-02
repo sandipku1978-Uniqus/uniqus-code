@@ -25,10 +25,11 @@ export default async function MarketingPage() {
           <BrandLockup />
         </Link>
         <div className="links">
-          <a href="#how">Workflow</a>
-          <a href="#models">Models</a>
-          <a href="#kvms">KVMs</a>
+          <a href="#how">How it works</a>
+          <a href="#models">AI models</a>
+          <a href="#workspaces">Workspaces</a>
           <a href="#trust">Trust</a>
+          <a href="/guide">Guide</a>
         </div>
         <div className="right">
           {!user && (
@@ -55,12 +56,12 @@ export default async function MarketingPage() {
               <span className="dot" /> Private beta for serious builders
             </span>
             <h1>
-              Build with <span className="grad">the model you trust</span>.
+              Build with <span className="grad">the AI you trust</span>.
             </h1>
             <p className="lede">
-              An AI app-building workspace with per-turn model choice — Claude, GPT,
-              or Gemini — a real terminal, live preview, and an isolated Firecracker
-              microVM for every project.
+              An AI workspace for building real apps. Pick the AI you trust for each
+              step — Claude, GPT, or Gemini — watch your app come to life with a live
+              preview, and run every project in its own private, secure space.
             </p>
 
             <LandingPrompt
@@ -97,17 +98,17 @@ export default async function MarketingPage() {
 
         <section className="band split-band" id="models">
           <div className="section-head">
-            <span className="label-eyebrow">Multi-provider model selection</span>
-            <h2>Pick the brain for the job, turn by turn.</h2>
+            <span className="label-eyebrow">Your choice of AI</span>
+            <h2>Pick the right AI for the job, step by step.</h2>
             <p className="sub">
-              Auto mode keeps the best default ready. Advanced mode lets builders route a
-              hard refactor, fast UI pass, long-context search, or careful plan to the
-              model that fits.
+              Auto mode picks the best AI for you. Prefer to choose yourself? Send a
+              tricky rebuild, a quick design tweak, a big research task, or a careful
+              plan to whichever AI fits best.
             </p>
           </div>
           <div className="model-console" aria-label="Model picker preview">
             <div className="console-head">
-              <span>advanced picker</span>
+              <span>AI picker</span>
               <strong>thinking: high</strong>
             </div>
             <div className="model-card-grid">
@@ -122,31 +123,32 @@ export default async function MarketingPage() {
           </div>
         </section>
 
-        <section className="band kvm-band" id="kvms">
+        <section className="band kvm-band" id="workspaces">
           <div className="kvm-visual" aria-hidden="true">
             <div className="rack-frame">
               <div className="rack-row">
-                <span>project vm</span>
-                <strong>KVM 01</strong>
+                <span>your project</span>
+                <strong>Workspace 01</strong>
               </div>
               <div className="rack-row active">
-                <span>preview server</span>
-                <strong>KVM 02</strong>
+                <span>live preview</span>
+                <strong>Workspace 02</strong>
               </div>
               <div className="rack-row">
-                <span>restored snapshot</span>
-                <strong>KVM 03</strong>
+                <span>saved &amp; reopened</span>
+                <strong>Workspace 03</strong>
               </div>
-              <div className="rack-footer">files sync to storage between runs</div>
+              <div className="rack-footer">your work is saved safely between sessions</div>
             </div>
           </div>
           <div className="section-head">
-            <span className="label-eyebrow">KVM-backed sandboxes</span>
+            <span className="label-eyebrow">A private machine per project</span>
             <h2>Real machines for real builds.</h2>
             <p className="sub">
-              Each project runs in its own Firecracker microVM instead of a shared tab
-              runtime. Install packages, run databases, start dev servers, and keep risky
-              experiments contained.
+              Each project runs on its own private virtual machine — a secure,
+              dedicated computer in the cloud, not a shared browser tab. Add the tools
+              you need, run real databases, preview your app live, and try bold
+              experiments without putting anything else at risk.
             </p>
             <div className="kvm-points">
               {KVM_POINTS.map((point) => (
@@ -162,9 +164,10 @@ export default async function MarketingPage() {
         <section className="band" id="features">
           <div className="section-head wide">
             <span className="label-eyebrow">What is inside</span>
-            <h2>Everything wired into one workspace.</h2>
+            <h2>Everything you need in one workspace.</h2>
             <p className="sub">
-              Code, runtime, review trail, and escape hatch in one builder surface.
+              Your code, a live preview, a clear history of every change, and a way out
+              if you need one — all in one place.
             </p>
           </div>
           <div className="feature-grid">
@@ -186,8 +189,8 @@ export default async function MarketingPage() {
 
         <section className="band workflow-band" id="how">
           <div className="section-head wide">
-            <span className="label-eyebrow">The loop</span>
-            <h2>From prompt to preview to production without leaving the page.</h2>
+            <span className="label-eyebrow">How it works</span>
+            <h2>From idea to a live app without ever leaving the page.</h2>
           </div>
           <div className="steps">
             {STEPS.map((step) => (
@@ -205,8 +208,9 @@ export default async function MarketingPage() {
             <span className="label-eyebrow">Trust and control</span>
             <h2>Fast does not have to mean reckless.</h2>
             <p className="sub">
-              Uniqus Code keeps the agent observable: plans before edits, citations in
-              review, encrypted secrets, checkpoints, and deploys you approve.
+              Uniqus Code keeps the AI out in the open: it shows its plan before making
+              changes, backs up its facts, keeps your private keys encrypted, saves
+              restore points, and only publishes when you say so.
             </p>
           </div>
           <div className="trust-grid">
@@ -262,20 +266,20 @@ export default async function MarketingPage() {
 }
 
 const HERO_PROOF = [
-  { k: "3 providers", v: "Anthropic, OpenAI, Google" },
-  { k: "KVM per project", v: "Firecracker isolation" },
-  { k: "Ship-ready", v: "tests, preview, deploys" },
+  { k: "3 AI providers", v: "Anthropic, OpenAI, Google" },
+  { k: "A machine per project", v: "Private and secure" },
+  { k: "Launch-ready", v: "tested, previewed, live" },
 ];
 
 const MARQUEE_ITEMS = [
-  "Prompt to app",
+  "Idea to app",
   "Plan mode",
   "Live preview",
-  "GitHub import",
-  "Vercel deploy",
-  "Fly.io deploy",
-  "Encrypted secrets",
-  "Checkpoints",
+  "Import your code",
+  "Built-in web search",
+  "Publish to the web",
+  "Encrypted and private",
+  "Rewind anytime",
   "Design packs",
 ];
 
@@ -289,77 +293,77 @@ const HERO_SUGGESTIONS = [
 const MODELS = [
   {
     provider: "Auto",
-    name: "Best model per task",
-    body: "Let Uniqus route planning and coding to the strongest sensible default.",
+    name: "Best AI for each task",
+    body: "Let Uniqus automatically pick the best AI for planning and building.",
     active: true,
   },
   {
     provider: "Anthropic",
     name: "Claude Opus / Sonnet",
-    body: "Deep planning, careful refactors, and long agentic coding sessions.",
+    body: "Deep planning, careful changes, and long, focused building sessions.",
   },
   {
     provider: "OpenAI",
     name: "GPT-5.x / Codex",
-    body: "Complex reasoning, code generation, and durable tool-use loops.",
+    body: "Complex problem-solving, writing code, and sticking with multi-step tasks.",
   },
   {
     provider: "Google",
     name: "Gemini",
-    body: "Large-context analysis, search-heavy tasks, and fast iteration.",
+    body: "Working through lots of information, research-heavy tasks, and fast turnarounds.",
   },
 ];
 
 const KVM_POINTS = [
   {
-    title: "Per-project isolation",
-    body: "Code, installs, tests, and local services run away from every other workspace.",
+    title: "A space of its own",
+    body: "Your code, tools, and data stay walled off from every other project — nothing spills over.",
   },
   {
-    title: "Snapshot restore",
-    body: "Reopen projects quickly while preserving the machine state that matters.",
+    title: "Pick up where you left off",
+    body: "Reopen a project in seconds, with everything exactly the way you left it.",
   },
   {
-    title: "Real terminal",
-    body: "Use npm, pytest, psql, dev servers, and logs the way you would locally.",
+    title: "A real computer, not a toy",
+    body: "Install software, run databases, and start your app — just like you would on your own machine.",
   },
 ];
 
 const FEATURES = [
   {
     kicker: "Plan",
-    title: "Plan mode before edits",
-    body: "The agent investigates with read-only tools, proposes steps, and waits for approval before touching files.",
+    title: "It plans before it changes anything",
+    body: "The AI looks things over without changing anything, lays out the steps it will take, and waits for your approval before touching a single file.",
     visual: "visual-plan",
   },
   {
     kicker: "Build",
-    title: "Chat, files, editor, terminal",
-    body: "A single workspace joins natural-language requests with real repo context and command output.",
+    title: "Chat, files, and an editor in one place",
+    body: "A single workspace turns plain-English requests into real changes to your project's files — and shows you exactly what happened.",
     visual: "visual-build",
   },
   {
     kicker: "Preview",
-    title: "Live app inspection",
-    body: "Run the dev server, view the app beside the code, and let the agent capture screenshots to close the loop.",
+    title: "See your app come to life",
+    body: "Launch your app and view it right next to your code, while the AI takes screenshots to check its own work.",
     visual: "visual-preview",
   },
   {
     kicker: "Search",
-    title: "Provider-native web search",
-    body: "Use web search across supported providers when the answer depends on current docs or APIs.",
+    title: "Built-in web search",
+    body: "The AI can search the web whenever the answer depends on the latest, up-to-date information.",
     visual: "visual-search",
   },
   {
     kicker: "Customize",
     title: "Skills and design packs",
-    body: "Steer the agent with project skills, account prompts, and curated design guidance.",
+    body: "Guide the AI with reusable instructions, your own preferences, and hand-picked design styles.",
     visual: "visual-customize",
   },
   {
     kicker: "Ship",
-    title: "GitHub, deploys, checkpoints",
-    body: "Create repos, deploy to Vercel or Fly.io, and rewind with checkpoints when an experiment goes sideways.",
+    title: "Publish, save, and rewind",
+    body: "Save your code to GitHub, publish your app to the web, and rewind to an earlier version whenever an experiment goes sideways.",
     visual: "visual-ship",
   },
 ];
@@ -367,38 +371,38 @@ const FEATURES = [
 const STEPS = [
   {
     num: "01",
-    title: "Describe the product",
-    body: "Start from a sentence, screenshot, zip, or GitHub repo. The agent turns the goal into a workable plan.",
+    title: "Describe what you want",
+    body: "Start from a sentence, a screenshot, a zip file, or code you already have. The AI turns your goal into a clear plan.",
   },
   {
     num: "02",
-    title: "Choose the model",
-    body: "Stay on Auto or pick Claude, GPT, or Gemini for that exact turn with low, medium, or high thinking.",
+    title: "Choose your AI",
+    body: "Stay on Auto, or pick Claude, GPT, or Gemini for that step — and dial how hard it thinks from low to high.",
   },
   {
     num: "03",
-    title: "Run it in a KVM",
-    body: "The sandbox installs dependencies, edits files, starts previews, and runs tests inside its own microVM.",
+    title: "Run it in a private workspace",
+    body: "Your workspace installs everything it needs, edits files, starts a live preview, and tests the result — all on its own secure machine.",
   },
   {
     num: "04",
-    title: "Review and ship",
-    body: "Inspect the diff, citations, logs, and preview. Then deploy, checkpoint, or keep iterating.",
+    title: "Review and go live",
+    body: "Review what changed, where the facts came from, and the live preview. Then publish, save a restore point, or keep going.",
   },
 ];
 
 const TRUST = [
   {
-    title: "Encrypted secrets",
-    body: "API keys and OAuth tokens are stored as sealed credentials and never returned to the model.",
+    title: "Your private keys stay secret",
+    body: "Passwords and access keys are locked away with encryption and never shown back to the AI.",
   },
   {
-    title: "Destructive-change guardrails",
-    body: "Risky migrations and irreversible work are surfaced for review instead of quietly pushed through.",
+    title: "Guardrails on risky moves",
+    body: "Anything risky or hard to undo is flagged for your approval instead of being pushed through quietly.",
   },
   {
-    title: "Auditable work trail",
-    body: "Plans, tool calls, command output, checkpoints, and deploy state stay visible in the project.",
+    title: "A clear record of everything",
+    body: "Every plan, action, and result stays visible in your project, so you always know exactly what happened.",
   },
 ];
 
@@ -415,9 +419,9 @@ const FOOTER_COLUMNS = [
   {
     title: "Product",
     links: [
-      { label: "Models", href: "#models" },
-      { label: "KVMs", href: "#kvms" },
-      { label: "Workflow", href: "#how" },
+      { label: "AI models", href: "#models" },
+      { label: "Workspaces", href: "#workspaces" },
+      { label: "How it works", href: "#how" },
       { label: "Pricing", href: "#pricing" },
     ],
   },

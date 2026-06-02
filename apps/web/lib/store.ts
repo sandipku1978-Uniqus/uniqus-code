@@ -141,6 +141,8 @@ export interface DeploymentLive {
   state: DeploymentState;
   vercel_url: string | null;
   error_message: string | null;
+  /** Vercel inspector/build-logs URL, when known (set on a fresh deploy start). */
+  inspector_url?: string | null;
 }
 
 /**
@@ -178,6 +180,8 @@ export type ChatItem =
       fileRefs?: string[];
       /** Element picked from the preview and sent with this turn, if any. */
       selectedElement?: SelectedElement;
+      /** Epoch ms the message was sent (live turns only; absent on replay). */
+      at?: number;
     }
   | { kind: "assistant_text"; id: string; content: string }
   | {
@@ -214,7 +218,12 @@ export type ChatItem =
       allow_free_text: boolean;
       answer?: string;
     }
-  | { kind: "plan_proposal"; id: string; plan: Plan; status: "pending" | "approved" }
+  | {
+      kind: "plan_proposal";
+      id: string;
+      plan: Plan;
+      status: "pending" | "approved" | "rejected";
+    }
   | { kind: "system"; id: string; content: string }
   /**
    * Marks the end of a "turn" — everything between two `complete` markers (or
@@ -232,6 +241,16 @@ export type ChatItem =
       output_tokens?: number;
     };
 
+/**
+ * One line in the Logs pane. `stream` distinguishes the `$ command` prompt
+ * (cmd), normal stdout (out), and stderr / a failed command (err) so the panel
+ * can colour them differently (UI/UX audit §C).
+ */
+export interface TerminalLine {
+  text: string;
+  stream: "cmd" | "out" | "err";
+}
+
 /** Per-file save status for the user-edit auto-save flow. */
 export type SaveStatus =
   | { kind: "idle" }
@@ -247,8 +266,39 @@ export type SaveStatus =
 export interface PanelVisibility {
   files: boolean;
   terminal: boolean;
-  /** Tasks pane (Plan §5 — Artifact panes UI). Renders the agent's todo_write list. */
-  tasks: boolean;
+}
+
+/**
+ * Panel visibility is an account-wide layout preference (UI/UX audit §B): a
+ * user who closes Files/Logs expects them to stay closed across reloads and
+ * project switches. Persisted to localStorage like the model/thinking prefs.
+ */
+const PANELS_STORAGE_KEY = "uniqus.panels";
+const DEFAULT_PANELS: PanelVisibility = { files: true, terminal: false };
+
+function readStoredPanels(): PanelVisibility {
+  if (typeof window === "undefined") return { ...DEFAULT_PANELS };
+  try {
+    const raw = window.localStorage.getItem(PANELS_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_PANELS };
+    const parsed = JSON.parse(raw) as Partial<PanelVisibility>;
+    return {
+      files: typeof parsed.files === "boolean" ? parsed.files : DEFAULT_PANELS.files,
+      terminal:
+        typeof parsed.terminal === "boolean" ? parsed.terminal : DEFAULT_PANELS.terminal,
+    };
+  } catch {
+    return { ...DEFAULT_PANELS };
+  }
+}
+
+function persistPanels(panels: PanelVisibility): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(PANELS_STORAGE_KEY, JSON.stringify(panels));
+  } catch {
+    /* private mode / quota — non-fatal */
+  }
 }
 
 interface State {
@@ -290,9 +340,17 @@ interface State {
   thinking: ThinkingEffort;
   chat: ChatItem[];
   tree: TreeEntry[];
+  /**
+   * False until the first `tree_listing` lands after connect, so the file
+   * explorer can show a loading skeleton instead of a misleading "No files
+   * yet." during the connect window (UI/UX audit §B).
+   */
+  treeLoaded: boolean;
   selectedFile: string | null;
   fileContent: string;
-  terminalLines: string[];
+  terminalLines: TerminalLine[];
+  /** Count of log lines dropped past the ring-buffer cap, for a "trimmed" note. */
+  terminalDropped: number;
   pendingPlanItemId: string | null;
   previews: PreviewServer[];
   /**
@@ -360,6 +418,13 @@ interface State {
    */
   briefFiles: File[];
 
+  /**
+   * One-shot text to drop into the chat composer from outside it — e.g. the
+   * "Reject & revise" plan action seeds a revision prompt (UI/UX audit §C).
+   * ChatPanel adopts it into its local input and clears it.
+   */
+  pendingComposerText: string | null;
+
   setConnected(c: boolean): void;
   setConnectionFailed(failed: boolean): void;
   setBusy(b: boolean): void;
@@ -380,7 +445,14 @@ interface State {
     attachments?: UploadedFileSummary[],
     fileRefs?: string[],
     selectedElement?: SelectedElement,
+    at?: number,
   ): void;
+  /**
+   * Remove the most recent user-role chat bubble (the echoed user message).
+   * No-ops if the list is empty or the last item isn't a user message — used
+   * to roll back the echo when the send fails (B-2).
+   */
+  removeLastUserMessage(): void;
   appendText(content: string): void;
   /** Append a reasoning/thinking delta to the current reasoning block. */
   appendThinking(content: string): void;
@@ -395,6 +467,8 @@ interface State {
   resolveUserQuestion(callId: string, answer: string): void;
   addPlanProposal(plan: Plan): void;
   approvePendingPlan(plan: Plan): void;
+  /** Mark the pending plan rejected (user chose "Reject & revise"). */
+  rejectPendingPlan(): void;
   addSystem(content: string): void;
   addCompleteMarker(
     toolCalls: number,
@@ -408,15 +482,23 @@ interface State {
   setPendingSelectedElement(el: SelectedElement | null): void;
   /** Append files (e.g. an annotated screenshot) for the composer to pick up. */
   enqueueComposerFiles(files: File[]): void;
-  /** Empty the queued-composer-files hand-off (ChatPanel calls after draining). */
-  clearQueuedComposerFiles(): void;
+  /**
+   * Remove exactly the files ChatPanel drained (by reference identity), leaving
+   * any enqueued between the drain-read and this call — so a file queued in
+   * that window isn't lost (B-29).
+   */
+  clearQueuedComposerFiles(drained: File[]): void;
+  /** Stage text for the composer to adopt (one-shot). */
+  setPendingComposerText(text: string | null): void;
   /** Stage landing-page attachments for the workspace composer to adopt. */
   setBriefFiles(files: File[]): void;
   /** Empty the brief-files hand-off (ChatPanel calls after draining). */
   clearBriefFiles(): void;
   setTree(entries: TreeEntry[]): void;
   setFile(path: string | null, content: string): void;
-  appendTerminalLine(line: string): void;
+  appendTerminalLine(text: string, stream?: TerminalLine["stream"]): void;
+  /** Empty the Logs pane (user-invoked Clear). */
+  clearTerminal(): void;
   addPreview(p: PreviewServer): void;
   removePreview(id: string): void;
   openFile(path: string): void;
@@ -424,6 +506,8 @@ interface State {
   setEditorTab(tab: string): void;
   togglePanel(name: keyof PanelVisibility): void;
   setPanel(name: keyof PanelVisibility, value: boolean): void;
+  /** Restore default panel visibility (used by "Reset layout"). */
+  resetPanels(): void;
   setUser(u: CurrentUser | null): void;
   setProject(p: ProjectSummary | null): void;
   setLastSyncedAt(at: number): void;
@@ -447,6 +531,13 @@ interface State {
 
 let nextId = 1;
 const id = () => `i${nextId++}`;
+// Rewind the block-id counter so a fresh session (resetChat/reset) starts ids
+// clean. Without this, replayed blocks on session_started reuse ids from a
+// prior/live stream and appendText/appendThinking merge deltas into the wrong
+// block (B-27).
+const resetIds = () => {
+  nextId = 1;
+};
 
 export const fileTabId = (path: string): string => `file:${path}`;
 export const previewTabId = (serverId: string): string => `preview:${serverId}`;
@@ -467,9 +558,11 @@ export const useStore = create<State>((set, get) => ({
   thinking: readStoredThinking(),
   chat: [],
   tree: [],
+  treeLoaded: false,
   selectedFile: null,
   fileContent: "",
   terminalLines: [],
+  terminalDropped: 0,
   pendingPlanItemId: null,
   previews: [],
   openFiles: [],
@@ -477,8 +570,8 @@ export const useStore = create<State>((set, get) => ({
   // Files panel defaults ON: a builder shell with no visible file tree on
   // first paint feels empty even when the project has hundreds of files.
   // Terminal stays opt-in (it's currently a log viewer, not a real shell).
-  // Tasks pane auto-pops the first time the agent calls todo_write.
-  panels: { files: true, terminal: false, tasks: false },
+  // Persisted account-wide so a user's open/closed choice survives reloads.
+  panels: readStoredPanels(),
   user: null,
   project: null,
   lastSyncedAt: null,
@@ -492,6 +585,7 @@ export const useStore = create<State>((set, get) => ({
   pendingSelectedElement: null,
   queuedComposerFiles: [],
   briefFiles: [],
+  pendingComposerText: null,
 
   setConnected: (c) => set({ connected: c }),
   setConnectionFailed: (failed) => set({ connectionFailed: failed }),
@@ -517,7 +611,7 @@ export const useStore = create<State>((set, get) => ({
     set({ thinking: t });
   },
 
-  addUserMessage: (content, attachments, fileRefs, selectedElement) =>
+  addUserMessage: (content, attachments, fileRefs, selectedElement, at) =>
     set((s) => ({
       chat: [
         ...s.chat,
@@ -528,9 +622,19 @@ export const useStore = create<State>((set, get) => ({
           attachments: attachments && attachments.length > 0 ? attachments : undefined,
           fileRefs: fileRefs && fileRefs.length > 0 ? fileRefs : undefined,
           selectedElement: selectedElement ?? undefined,
+          at,
         },
       ],
     })),
+
+  removeLastUserMessage: () =>
+    set((s) => {
+      const last = s.chat[s.chat.length - 1];
+      // Only strip the echoed bubble if it's actually a user message — guards
+      // against clobbering a real assistant/tool item (B-2).
+      if (!last || last.kind !== "user") return {};
+      return { chat: s.chat.slice(0, -1) };
+    }),
 
   appendText: (content) =>
     set((s) => {
@@ -585,9 +689,22 @@ export const useStore = create<State>((set, get) => ({
       ),
     }));
     const item = get().chat.find((i) => i.kind === "tool" && i.call_id === callId);
-    if (item && item.kind === "tool" && item.name === "run_command") {
-      get().appendTerminalLine(`$ ${(item.input as { command?: string })?.command ?? ""}`);
-      get().appendTerminalLine(result);
+    // Only mirror to the terminal for an actual run_command whose input has the
+    // expected `{ command }` shape — guards the cast so a different tool landing
+    // on the same callId can't be read through the wrong shape (B-30).
+    if (
+      item &&
+      item.kind === "tool" &&
+      item.name === "run_command" &&
+      typeof item.input === "object" &&
+      item.input &&
+      "command" in item.input
+    ) {
+      get().appendTerminalLine(
+        `$ ${(item.input as { command?: string }).command ?? ""}`,
+        "cmd",
+      );
+      get().appendTerminalLine(result, isError ? "err" : "out");
       get().appendTerminalLine("");
     }
   },
@@ -641,6 +758,16 @@ export const useStore = create<State>((set, get) => ({
       pendingPlanItemId: null,
     })),
 
+  rejectPendingPlan: () =>
+    set((s) => ({
+      chat: s.chat.map((item) =>
+        item.kind === "plan_proposal" && item.id === s.pendingPlanItemId
+          ? { ...item, status: "rejected" }
+          : item,
+      ),
+      pendingPlanItemId: null,
+    })),
+
   addSystem: (content) =>
     set((s) => ({ chat: [...s.chat, { kind: "system", id: id(), content }] })),
 
@@ -666,16 +793,31 @@ export const useStore = create<State>((set, get) => ({
   setPendingSelectedElement: (el) => set({ pendingSelectedElement: el }),
   enqueueComposerFiles: (files) =>
     set((s) => ({ queuedComposerFiles: [...s.queuedComposerFiles, ...files] })),
-  clearQueuedComposerFiles: () =>
-    set((s) => (s.queuedComposerFiles.length === 0 ? {} : { queuedComposerFiles: [] })),
+  clearQueuedComposerFiles: (drained) =>
+    set((s) => {
+      if (drained.length === 0 || s.queuedComposerFiles.length === 0) return {};
+      // Drop only the drained files by reference identity, preserving anything
+      // enqueued after the drain-read so it isn't lost (B-29).
+      const remaining = s.queuedComposerFiles.filter((f) => !drained.includes(f));
+      if (remaining.length === s.queuedComposerFiles.length) return {};
+      return { queuedComposerFiles: remaining };
+    }),
+  setPendingComposerText: (text) => set({ pendingComposerText: text }),
   setBriefFiles: (files) => set({ briefFiles: files }),
   clearBriefFiles: () =>
     set((s) => (s.briefFiles.length === 0 ? {} : { briefFiles: [] })),
 
-  setTree: (entries) => set({ tree: entries }),
+  setTree: (entries) => set({ tree: entries, treeLoaded: true }),
   setFile: (path, content) => set({ selectedFile: path, fileContent: content }),
-  appendTerminalLine: (line) =>
-    set((s) => ({ terminalLines: [...s.terminalLines.slice(-499), line] })),
+  appendTerminalLine: (text, stream = "out") =>
+    set((s) => {
+      const overflow = s.terminalLines.length >= 500;
+      return {
+        terminalLines: [...s.terminalLines.slice(-499), { text, stream }],
+        terminalDropped: overflow ? s.terminalDropped + 1 : s.terminalDropped,
+      };
+    }),
+  clearTerminal: () => set({ terminalLines: [], terminalDropped: 0 }),
 
   addPreview: (p) =>
     set((s) => {
@@ -720,9 +862,22 @@ export const useStore = create<State>((set, get) => ({
   setEditorTab: (tab) => set({ editorTab: tab }),
 
   togglePanel: (name) =>
-    set((s) => ({ panels: { ...s.panels, [name]: !s.panels[name] } })),
+    set((s) => {
+      const panels = { ...s.panels, [name]: !s.panels[name] };
+      persistPanels(panels);
+      return { panels };
+    }),
   setPanel: (name, value) =>
-    set((s) => ({ panels: { ...s.panels, [name]: value } })),
+    set((s) => {
+      const panels = { ...s.panels, [name]: value };
+      persistPanels(panels);
+      return { panels };
+    }),
+  resetPanels: () => {
+    const panels = { ...DEFAULT_PANELS };
+    persistPanels(panels);
+    set({ panels });
+  },
 
   setUser: (u) => set({ user: u }),
   setProject: (p) => set({ project: p }),
@@ -765,32 +920,46 @@ export const useStore = create<State>((set, get) => ({
       s.deployment?.state === "READY" ? { redeploySuggested: true } : {},
     ),
   setTodos: (items) => set({ todos: items }),
-  resetChat: () =>
+  resetChat: () => {
+    // Rewind block ids before clearing so replayed blocks can't collide with a
+    // prior/live stream's ids (B-27).
+    resetIds();
     set({
       chat: [],
       pendingPlanItemId: null,
       terminalLines: [],
+      terminalDropped: 0,
       expandedTurns: {},
       redeploySuggested: false,
       liveUsage: null,
       pendingSelectedElement: null,
       queuedComposerFiles: [],
-    }),
-  reset: () =>
+    });
+  },
+  reset: () => {
+    // Rewind block ids on a per-project fresh start, same reason as resetChat
+    // (B-27).
+    resetIds();
     set({
       // Per-project fresh start so the first-turn plan default re-evaluates.
       mode: "execute-only",
       modeTouched: false,
       chat: [],
       tree: [],
+      // treeLoaded resets to false so the explorer shows its loading skeleton
+      // until the new project's tree arrives, not a stale "No files yet."
+      treeLoaded: false,
       selectedFile: null,
       fileContent: "",
       terminalLines: [],
+      terminalDropped: 0,
       pendingPlanItemId: null,
       previews: [],
       openFiles: [],
       editorTab: "",
-      panels: { files: true, terminal: false, tasks: false },
+      // panels intentionally omitted — it's an account-wide layout pref persisted
+      // to localStorage; a project switch must not reset the user's open/closed
+      // choice (UI/UX audit §B).
       user: null,
       project: null,
       lastSyncedAt: null,
@@ -803,7 +972,8 @@ export const useStore = create<State>((set, get) => ({
       liveUsage: null,
       pendingSelectedElement: null,
       queuedComposerFiles: [],
-    }),
+    });
+  },
 }));
 
 /**

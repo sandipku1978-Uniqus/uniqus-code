@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { DM_Sans, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
+import Toaster from "@/components/Toaster";
 
 const dmSans = DM_Sans({
   subsets: ["latin"],
@@ -17,8 +18,9 @@ const jetBrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Uniqus Code — Engineering, on demand.",
-  description: "AI engineering workbench from Uniqus.",
+  title: "Uniqus Code — Build real apps with AI.",
+  description:
+    "Describe what you want to build, pick the AI you trust, and watch your app come to life — from Uniqus.",
   icons: {
     icon: "/brand/uniqus-small-logo-color.png",
   },
@@ -44,7 +46,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <head>
         <script dangerouslySetInnerHTML={{ __html: APPEARANCE_BOOTSTRAP }} />
       </head>
-      <body>{children}</body>
+      <body>
+        {children}
+        <Toaster />
+      </body>
     </html>
   );
 }

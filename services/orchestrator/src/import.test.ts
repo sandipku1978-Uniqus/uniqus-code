@@ -230,6 +230,16 @@ describe("importZip", () => {
     }
   });
 
+  it("rejects an archive whose only content is a skip-dir (no silent empty import)", async () => {
+    const dir = await freshDir();
+    const zip = makeZip({
+      ".git/config": "[core]",
+      ".git/HEAD": "ref: refs/heads/main",
+    });
+
+    await expect(importZip(zip, dir)).rejects.toThrow(/no importable files/);
+  });
+
   it("rejects a single entry exceeding the per-file cap (zip-bomb guard)", async () => {
     const dir = await freshDir();
     // 51 MB > MAX_FILE_SIZE (50 MB). AdmZip stores the uncompressed size in the

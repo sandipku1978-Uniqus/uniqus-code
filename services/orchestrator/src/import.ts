@@ -59,6 +59,11 @@ export async function importZip(
   const stripPrefix = detectSingleRoot(entries.map((e) => e.entryName));
   const root = path.resolve(destDir);
   let count = 0;
+  // Running total of bytes actually written. The header-based pre-check above
+  // can be defeated by an archive with lying uncompressed sizes, so we also
+  // enforce MAX_TOTAL_SIZE against real decompressed bytes here (prevents the
+  // zip-bomb cap from being bypassed).
+  let writtenBytes = 0;
 
   for (const e of entries) {
     if (e.isDirectory) continue;
@@ -75,12 +80,31 @@ export async function importZip(
       // path traversal attempt; skip.
       continue;
     }
+    // Decompress once and reuse for both the size check and the write so we
+    // don't double-decompress (and so the cap reflects real bytes).
+    const data = e.getData();
+    writtenBytes += data.length;
+    if (writtenBytes > MAX_TOTAL_SIZE) {
+      throw new Error(
+        `zip too large: exceeded ${MAX_TOTAL_SIZE} bytes during extraction (header sizes lied)`,
+      );
+    }
     await fs.mkdir(path.dirname(full), { recursive: true });
-    await fs.writeFile(full, e.getData());
+    await fs.writeFile(full, data);
     count++;
   }
 
-  return { files_imported: count, total_bytes: total, stripped_root: stripPrefix };
+  // Every entry was skipped (e.g. an archive rooted entirely under .git/ or
+  // node_modules/). Surface an actionable error instead of silently returning a
+  // 201 "success" with an empty project — the route's catch rolls the project
+  // back to a 400.
+  if (count === 0) {
+    throw new Error(
+      "archive contained no importable files (only .git/node_modules/build artifacts, or all entries were skipped)",
+    );
+  }
+
+  return { files_imported: count, total_bytes: writtenBytes, stripped_root: stripPrefix };
 }
 
 /**
@@ -98,6 +122,9 @@ export function detectSingleRoot(names: string[]): string | null {
     if (common === null) common = head;
     else if (common !== head) return null;
   }
+  // Never strip a root that's itself a skip-dir (e.g. `.git/`): stripping it
+  // would then skip every entry, yielding a zero-file "import" with no error.
+  if (common !== null && SKIP_TOP_DIRS.has(common.slice(0, -1))) return null;
   return common;
 }
 

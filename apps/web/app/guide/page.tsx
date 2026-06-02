@@ -394,8 +394,8 @@ export default function GuidePage() {
               </article>
             </div>
             <div className="doc-callout neutral">
-              Guest accounts can build, edit, run, preview, and save work. Sign in with
-              Google when you want GitHub and deploy features.
+              Guest work is saved on this device. Sign in with Google to keep it
+              permanently across devices and to unlock GitHub and publishing.
             </div>
           </section>
 

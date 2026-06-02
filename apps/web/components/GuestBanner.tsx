@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Modal from "./Modal";
 import { fetchGuestRecoveryCodeApi } from "@/lib/api";
 
 /**
@@ -18,6 +19,18 @@ export default function GuestBanner({
   const [showCode, setShowCode] = useState(false);
   const [loadingCode, setLoadingCode] = useState(false);
   const [codeError, setCodeError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  async function copyCode(): Promise<void> {
+    if (!code) return;
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard blocked (insecure context) — the code box is userSelect:"all".
+    }
+  }
 
   async function revealCode(): Promise<void> {
     setShowCode(true);
@@ -70,8 +83,8 @@ export default function GuestBanner({
           </svg>
           <span>
             {compact
-              ? "Guest account — work is saved, but GitHub + deploys need a Google sign-in."
-              : "You're on a free guest account. Your work is saved, but sign in with Google to keep it permanently and to use GitHub or deploys."}
+              ? "Guest account — saved on this device. Sign in to keep it across devices and unlock GitHub + publishing."
+              : "You're on a free guest account. Your work is saved on this device — sign in with Google to keep it permanently across devices and to unlock GitHub and publishing."}
           </span>
         </span>
         <span style={{ display: "inline-flex", gap: 8, marginLeft: "auto" }}>
@@ -103,67 +116,59 @@ export default function GuestBanner({
       </div>
 
       {showCode && (
-        <div
-          onClick={() => setShowCode(false)}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.55)",
-            zIndex: 200,
-            display: "grid",
-            placeItems: "center",
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: "min(440px, 92vw)",
-              background: "var(--bg-base, #0c0c10)",
-              border: "1px solid var(--border-default)",
-              borderRadius: 10,
-              padding: 20,
-              color: "var(--text-primary)",
-              boxShadow: "0 24px 48px rgba(0,0,0,0.6)",
-            }}
-          >
-            <h2 style={{ fontSize: 15, margin: "0 0 6px" }}>Your recovery code</h2>
-            <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 14px" }}>
-              Save this somewhere safe — it&apos;s the only way back into this
-              guest account on another device or after browser data is cleared.
-            </p>
-            {loadingCode ? (
-              <div style={{ fontSize: 13, color: "var(--text-muted)" }}>loading…</div>
-            ) : codeError ? (
-              <div style={{ fontSize: 13, color: "var(--conf-low)" }}>{codeError}</div>
-            ) : (
-              <div
-                style={{
-                  fontFamily: "var(--font-mono, monospace)",
-                  fontSize: 15,
-                  letterSpacing: 1,
-                  padding: "12px 14px",
-                  background: "var(--bg-elev)",
-                  border: "1px solid var(--border-default)",
-                  borderRadius: 6,
-                  userSelect: "all",
-                  wordBreak: "break-all",
-                }}
-              >
-                {code}
+        <Modal
+          title="Your recovery code"
+          onClose={() => setShowCode(false)}
+          width={440}
+          footer={
+            <>
+              <span />
+              <div className="modal-actions">
+                {code && !loadingCode && (
+                  <button type="button" onClick={copyCode} className="btn-secondary" style={{ fontSize: 12 }}>
+                    {copied ? "Copied ✓" : "Copy"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setShowCode(false)}
+                  className="btn-primary"
+                  style={{ fontSize: 12 }}
+                >
+                  Done
+                </button>
               </div>
-            )}
-            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
-              <button
-                type="button"
-                onClick={() => setShowCode(false)}
-                className="btn-primary"
-                style={{ fontSize: 12 }}
-              >
-                Done
-              </button>
+            </>
+          }
+        >
+          <p style={{ fontSize: 13, color: "var(--text-muted)", margin: "0 0 14px", lineHeight: 1.6 }}>
+            Save this somewhere safe — it&apos;s the only way back into this guest account
+            on another device or after browser data is cleared.
+          </p>
+          {loadingCode ? (
+            <div style={{ fontSize: 13, color: "var(--text-muted)" }}>loading…</div>
+          ) : codeError ? (
+            <div style={{ fontSize: 13, color: "var(--conf-low)" }} role="alert">
+              {codeError}
             </div>
-          </div>
-        </div>
+          ) : (
+            <div
+              style={{
+                fontFamily: "var(--font-mono, monospace)",
+                fontSize: 15,
+                letterSpacing: 1,
+                padding: "12px 14px",
+                background: "var(--bg-elev)",
+                border: "1px solid var(--border-default)",
+                borderRadius: 6,
+                userSelect: "all",
+                wordBreak: "break-all",
+              }}
+            >
+              {code}
+            </div>
+          )}
+        </Modal>
       )}
     </>
   );

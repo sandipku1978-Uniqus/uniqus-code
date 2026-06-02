@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { DeploymentState, ProjectSummary } from "@uniqus/api-types";
@@ -206,6 +206,9 @@ export default function ProjectPicker({
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [usage, setUsage] = useState<AccountUsageStats | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Distinct from the in-form `error` so a project-load failure can render a
+  // real error+retry block instead of dead-ending on the skeleton (§E).
+  const [projectsError, setProjectsError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [mode, setMode] = useState<Mode>("describe");
   const [name, setName] = useState("");
@@ -253,16 +256,22 @@ export default function ProjectPicker({
   const [reposError, setReposError] = useState<string | null>(null);
   const [selectedRepo, setSelectedRepo] = useState<string>(""); // full_name
 
-  useEffect(() => {
+  const loadProjects = useCallback(() => {
+    setProjectsError(null);
+    setProjects(null);
     fetchProjects()
       .then((r) => setProjects(r.projects))
-      .catch((e) => setError(e.message));
+      .catch((e) => setProjectsError(e instanceof Error ? e.message : String(e)));
+  }, []);
+
+  useEffect(() => {
+    loadProjects();
     // Usage rollup for the dashboard widgets. Best-effort — a failure (e.g.
     // the usage table not yet migrated) just leaves the widgets at zero.
     fetchUsageStatsApi()
       .then((r) => setUsage(r.stats))
       .catch(() => {});
-  }, []);
+  }, [loadProjects]);
 
   // A logged-out visitor who typed an idea into the landing-page composer is
   // bounced here through sign-in. Their idea was parked in sessionStorage so it
@@ -292,9 +301,16 @@ export default function ProjectPicker({
   const githubFlag = searchParams?.get("github") ?? null;
   useEffect(() => {
     if (isGuest) return; // guests have no GitHub access
-    fetchGithubStatus()
+    // Abort the previous fetch on re-fire so a slow earlier response can't
+    // stomp the newer `connected` state when githubFlag flips rapidly.
+    const ctrl = new AbortController();
+    fetchGithubStatus(ctrl.signal)
       .then((s) => setGithub(s))
-      .catch(() => setGithub({ connected: false, login: null, connected_at: null }));
+      .catch((err) => {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setGithub({ connected: false, login: null, connected_at: null });
+      });
+    return () => ctrl.abort();
   }, [githubFlag, isGuest]);
 
   // When the user is connected, default to OAuth mode and fetch their
@@ -359,6 +375,12 @@ export default function ProjectPicker({
     if (mode === "describe") {
       const trimmed = describeText.trim();
       if (!trimmed) return;
+      // Soft minimum so a one-word brief ("app") doesn't sail through into a
+      // vague project — nudge for a sentence instead (§A).
+      if (trimmed.length < 12) {
+        setError("Tell us a little more — even one sentence about what it should do helps.");
+        return;
+      }
       setRefining(true);
       setError(null);
       try {
@@ -368,7 +390,12 @@ export default function ProjectPicker({
         );
         return;
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        // Keep the raw message for debugging, but show a friendly one (§A).
+        // eslint-disable-next-line no-console
+        console.error("createProjectFromBrief failed", err);
+        setError(
+          "Something went wrong turning your idea into a project. Try rephrasing, or simplify the description.",
+        );
         setRefining(false);
         return;
       }
@@ -526,13 +553,24 @@ export default function ProjectPicker({
             color: "var(--text-primary)",
           }}
         >
-          <span>We couldn&apos;t move your guest projects onto this account.</span>
+          <span>
+            We couldn&apos;t move your guest projects to your signed-in account yet — but
+            nothing was lost. Your guest projects are still safe; retry, or sign out and
+            back in.
+          </span>
           <a
             href="/api/guest/convert"
             className="btn-ghost"
             style={{ fontSize: 12, padding: "3px 9px", marginLeft: "auto" }}
           >
             Retry
+          </a>
+          <a
+            href="/guide"
+            className="btn-ghost"
+            style={{ fontSize: 12, padding: "3px 9px" }}
+          >
+            Get help
           </a>
         </div>
       )}
@@ -602,43 +640,6 @@ export default function ProjectPicker({
             </button>
           </div>
 
-          <div className="group">
-            <div className="label-micro">Workspace</div>
-            <div className="nav-item soon" aria-disabled="true" title="Coming soon">
-              <span className="ic">
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                >
-                  <rect x="2" y="3" width="20" height="14" rx="2" />
-                  <path d="M8 21h8M12 17v4" />
-                </svg>
-              </span>
-              Deployments
-              <span className="count">soon</span>
-            </div>
-            <div className="nav-item soon" aria-disabled="true" title="Coming soon">
-              <span className="ic">
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                >
-                  <ellipse cx="12" cy="5" rx="9" ry="3" />
-                  <path d="M3 5v14a9 3 0 0 0 18 0V5" />
-                </svg>
-              </span>
-              Datasets
-              <span className="count">soon</span>
-            </div>
-          </div>
 
           <div className="group">
             <div className="label-micro">Help &amp; account</div>
@@ -687,7 +688,7 @@ export default function ProjectPicker({
               <span className="v">{projects?.length ?? 0}</span>
             </div>
             <div className="upgrade" title="Higher limits and team features are on the way.">
-              {isGuest ? "Sign in to save your work" : "More on Pro — coming soon"}
+              {isGuest ? "Sign in to keep your work across devices" : "More on Pro — coming soon"}
             </div>
           </div>
         </aside>
@@ -757,14 +758,15 @@ export default function ProjectPicker({
                   />
                   <div className="newproj-blank-row">
                     <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                      Polished by Haiku 4.5 · ~200ms · adds nothing the brief doesn&apos;t imply
+                      We&apos;ll name the project and turn this into your first prompt.{" "}
+                      <span style={{ color: "var(--text-dim)" }}>Ctrl/⌘ + Enter to start.</span>
                     </span>
                     <button
                       type="submit"
                       className="btn-primary"
                       disabled={refining || !describeText.trim()}
                     >
-                      {refining ? "Refining brief…" : "Brief & start →"}
+                      {refining ? "Starting…" : "Start building →"}
                     </button>
                   </div>
                 </div>
@@ -991,26 +993,35 @@ export default function ProjectPicker({
             )}
 
             {error && (
-              <div style={{ color: "var(--conf-low)", fontSize: 12, marginTop: 10 }}>
+              <div
+                style={{ color: "var(--conf-low)", fontSize: 12, marginTop: 10 }}
+                role="alert"
+              >
                 {error}
               </div>
             )}
 
-              {mode === "describe" && (
-                <div className="dash-chips">
-                  {EXAMPLE_PROMPTS.map((p) => (
-                    <button
-                      key={p}
-                      type="button"
-                      className="dash-chip"
-                      title={`Use: ${p}`}
-                      onClick={() => startFromExample(p)}
-                    >
-                      {p}
-                    </button>
-                  ))}
-                </div>
-              )}
+              {/* Example chips show on every tab — clicking one bounces back to
+                  Describe mode with the prompt seeded (startFromExample sets the
+                  mode), so they're a useful nudge even on the import tabs (§A). */}
+              <div className="dash-chips">
+                {mode !== "describe" && (
+                  <span style={{ fontSize: 11, color: "var(--text-dim)", alignSelf: "center", marginRight: 4 }}>
+                    Or start from an idea:
+                  </span>
+                )}
+                {EXAMPLE_PROMPTS.map((p) => (
+                  <button
+                    key={p}
+                    type="button"
+                    className="dash-chip"
+                    title={`Use: ${p}`}
+                    onClick={() => startFromExample(p)}
+                  >
+                    {p}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
@@ -1032,7 +1043,21 @@ export default function ProjectPicker({
             )}
           </div>
 
-          {projects === null && <ProjectGridSkeleton />}
+          {projects === null && !projectsError && <ProjectGridSkeleton />}
+
+          {projectsError && (
+            <div className="empty-state" style={{ textAlign: "left", padding: "24px" }}>
+              <p style={{ margin: "0 0 6px", color: "var(--text-primary)", fontSize: 14, fontWeight: 600 }}>
+                Couldn’t load your projects
+              </p>
+              <p style={{ margin: "0 0 14px", color: "var(--text-muted)", fontSize: 12 }}>
+                {projectsError}
+              </p>
+              <button type="button" className="btn-secondary" onClick={loadProjects}>
+                Retry
+              </button>
+            </div>
+          )}
 
           {projects !== null && projects.length === 0 && (
             <div className="empty-state" style={{ textAlign: "left", padding: "24px" }}>
@@ -1047,7 +1072,7 @@ export default function ProjectPicker({
                     className="starter-card"
                     onClick={() => startFromExample(s.prompt)}
                   >
-                    <span className="ic">{s.icon}</span>
+                    <span className="ic" aria-hidden="true">{s.icon}</span>
                     <span className="t">{s.title}</span>
                     <span className="d">{s.blurb}</span>
                   </button>
@@ -1402,12 +1427,12 @@ function ProjectTile({
             <span className="tile-chips">
               {project.vercel_project_name && (
                 <span className="tile-chip live" title="Published to Vercel">
-                  ▲ live
+                  <span aria-hidden="true">▲</span> live
                 </span>
               )}
               {project.github_repo_url && (
                 <span className="tile-chip" title="Linked to a GitHub repo">
-                  ◉ repo
+                  <span aria-hidden="true">◉</span> repo
                 </span>
               )}
             </span>
@@ -1594,6 +1619,8 @@ function IconDialog({
             key={icon}
             type="button"
             onClick={() => onPick(icon)}
+            aria-label={`Use the ${icon} icon`}
+            aria-pressed={project.icon === icon}
             className={`proj-icon-choice ${project.icon === icon ? "selected" : ""}`}
           >
             {icon}
@@ -1834,11 +1861,23 @@ function RichProjectCard({
     <div
       ref={cardRef}
       className="proj proj-tile"
-      // Whole card is clickable. Inner links/buttons stopPropagation so they
-      // keep their own behavior (open repo/deploy URL, open the menu) instead
-      // of also firing this navigation. The title Link below keeps keyboard
-      // users a real, focusable link.
-      onClick={() => router.push(`/projects/${project.id}`)}
+      // Whole card is clickable AND keyboard-activatable (role=link + Enter/
+      // Space). Inner interactive controls are guarded via closest() so they
+      // keep their own behavior without each call site remembering
+      // stopPropagation; the title Link stays a real focusable link (§E).
+      role="link"
+      tabIndex={0}
+      aria-label={`Open ${project.name}`}
+      onClick={(e) => {
+        if ((e.target as HTMLElement).closest('a,button,input,select,[role="menu"]')) return;
+        router.push(`/projects/${project.id}`);
+      }}
+      onKeyDown={(e) => {
+        if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
+          e.preventDefault();
+          router.push(`/projects/${project.id}`);
+        }
+      }}
       style={{
         display: "grid",
         gridTemplateColumns: "auto 1fr auto",

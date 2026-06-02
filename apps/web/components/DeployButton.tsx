@@ -6,6 +6,7 @@ import { useStore } from "@/lib/store";
 import {
   deployProjectApi,
   disconnectVercelApi,
+  fetchSecretsApi,
   fetchVercelStatus,
   listDeploymentsApi,
   vercelOauthStartUrl,
@@ -14,6 +15,7 @@ import {
 } from "@/lib/api";
 import type { DeploymentState } from "@uniqus/api-types";
 import Modal from "./Modal";
+import { toast } from "@/lib/toast";
 
 type EnvRow = { id: number; key: string; value: string };
 let envIdSeq = 1;
@@ -123,6 +125,12 @@ function DeployModal({
   const [target, setTarget] = useState<"production" | "preview">("production");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Confirmations (UI/UX audit §D): unlinking Vercel and shipping to production
+  // both deserve a deliberate step.
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const [confirmProd, setConfirmProd] = useState(false);
+  // Names of the project's existing secrets, for the "Add from Secrets" picker.
+  const [secretNames, setSecretNames] = useState<string[]>([]);
 
   // Keep the resting button's status in sync with whatever the modal learns.
   function setVercel(status: VercelStatus): void {
@@ -150,6 +158,15 @@ function DeployModal({
       .catch(() => setHistory([]));
   }, [projectId, live?.state]);
 
+  // Pull the project's secret NAMES (never values — those stay server-side) so
+  // the user can wire a deploy env var to an existing secret in one click,
+  // instead of re-typing the same credentials in two places (§D).
+  useEffect(() => {
+    fetchSecretsApi(projectId)
+      .then((r) => setSecretNames(Array.from(new Set(r.secrets.map((s) => s.name)))))
+      .catch(() => setSecretNames([]));
+  }, [projectId]);
+
   // If the user just completed an OAuth dance, surface error reason if any.
   useEffect(() => {
     if (vercelFlag === "error") {
@@ -166,15 +183,30 @@ function DeployModal({
   }
 
   async function disconnect(): Promise<void> {
+    setConfirmDisconnect(false);
     try {
       await disconnectVercelApi();
       setVercel({ connected: false, user_login: null, team_id: null, connected_at: null });
+      toast.success("Vercel disconnected");
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      toast.error(`Couldn't disconnect Vercel: ${msg}`);
     }
   }
 
+  // Entry point for the Deploy/Retry buttons: production deploys go through a
+  // confirm first; preview deploys ship immediately.
+  function requestDeploy(): void {
+    if (target === "production") {
+      setConfirmProd(true);
+      return;
+    }
+    void deployNow();
+  }
+
   async function deployNow(): Promise<void> {
+    setConfirmProd(false);
     setError(null);
     if (!vercel?.connected) {
       setError("Connect Vercel first.");
@@ -202,15 +234,29 @@ function DeployModal({
         state: r.state,
         vercel_url: r.vercel_url ?? null,
         error_message: null,
+        inspector_url: r.inspector_url ?? null,
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      toast.error(`Deploy failed: ${msg}`);
     } finally {
       setBusy(false);
     }
   }
 
+  // Append a deploy env row keyed to an existing project secret. The value is
+  // left for the user (secret values are never returned to the client).
+  function addEnvFromSecret(name: string): void {
+    if (!name) return;
+    setEnvRows((rows) => {
+      const filtered = rows.filter((r) => r.key.trim() || r.value.trim());
+      return [...filtered, { id: envIdSeq++, key: name, value: "" }];
+    });
+  }
+
   return (
+    <>
     <Modal
       title={
         <>
@@ -223,11 +269,15 @@ function DeployModal({
         <div className="modal-actions">
           <button
             type="button"
-            onClick={deployNow}
+            onClick={requestDeploy}
             className="btn-primary"
             disabled={busy || !vercel?.connected}
           >
-            {busy ? "Deploying…" : "Deploy now"}
+            {busy
+              ? "Deploying…"
+              : target === "production"
+              ? "Deploy to production"
+              : "Deploy preview"}
           </button>
         </div>
       }
@@ -261,7 +311,7 @@ function DeployModal({
           </span>
           <button
             type="button"
-            onClick={disconnect}
+            onClick={() => setConfirmDisconnect(true)}
             className="btn-ghost"
             style={{ fontSize: 11 }}
           >
@@ -332,6 +382,29 @@ function DeployModal({
               {live.error_message}
             </div>
           )}
+          {live.state === "ERROR" && (
+            <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 8 }}>
+              <button
+                type="button"
+                onClick={() => void deployNow()}
+                className="btn-secondary"
+                style={{ fontSize: 11, padding: "4px 10px" }}
+                disabled={busy || !vercel?.connected}
+              >
+                Retry deploy
+              </button>
+              {live.inspector_url && (
+                <a
+                  href={live.inspector_url}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  style={{ fontSize: 11, color: "var(--accent)" }}
+                >
+                  Open build logs ↗
+                </a>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -345,6 +418,7 @@ function DeployModal({
             <div key={r.id} style={{ display: "flex", gap: 6 }}>
               <input
                 value={r.key}
+                aria-label="Environment variable name"
                 onChange={(e) =>
                   setEnvRows((rows) =>
                     rows.map((x, i) =>
@@ -363,6 +437,8 @@ function DeployModal({
               />
               <input
                 value={r.value}
+                type="password"
+                aria-label="Environment variable value"
                 onChange={(e) =>
                   setEnvRows((rows) =>
                     rows.map((x, i) =>
@@ -387,23 +463,54 @@ function DeployModal({
                 style={{ fontSize: 11, padding: "0 8px" }}
                 disabled={busy}
                 title="Remove row"
+                aria-label="Remove environment variable"
               >
                 ✕
               </button>
             </div>
           ))}
         </div>
-        <button
-          type="button"
-          onClick={() =>
-            setEnvRows((rows) => [...rows, { id: envIdSeq++, key: "", value: "" }])
-          }
-          className="btn-ghost"
-          style={{ fontSize: 11, marginTop: 6 }}
-          disabled={busy}
-        >
-          + Add variable
-        </button>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 6, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            onClick={() =>
+              setEnvRows((rows) => [...rows, { id: envIdSeq++, key: "", value: "" }])
+            }
+            className="btn-ghost"
+            style={{ fontSize: 11 }}
+            disabled={busy}
+          >
+            + Add variable
+          </button>
+          {secretNames.length > 0 && (
+            <label style={{ fontSize: 11, color: "var(--text-muted)", display: "flex", gap: 6, alignItems: "center" }}>
+              Add from Secrets:
+              <select
+                value=""
+                onChange={(e) => {
+                  addEnvFromSecret(e.target.value);
+                  e.target.value = "";
+                }}
+                disabled={busy}
+                aria-label="Add an environment variable from Project Secrets"
+                style={{ ...modalFieldStyle, padding: "4px 6px" }}
+              >
+                <option value="">choose…</option>
+                {secretNames.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+        {secretNames.length > 0 && (
+          <div className="field-hint" style={{ marginTop: 4 }}>
+            Picking a secret fills the key; enter its value here (secret values are never
+            shown).
+          </div>
+        )}
       </div>
 
       {/* Target */}
@@ -495,6 +602,64 @@ function DeployModal({
         </div>
       )}
     </Modal>
+
+    {confirmDisconnect && (
+      <Modal
+        title="Disconnect Vercel?"
+        width={460}
+        onClose={() => setConfirmDisconnect(false)}
+        footer={
+          <>
+            <span />
+            <div className="modal-actions">
+              <button type="button" className="btn-secondary" onClick={() => setConfirmDisconnect(false)}>
+                Cancel
+              </button>
+              <button type="button" className="btn-danger" onClick={disconnect}>
+                Disconnect Vercel
+              </button>
+            </div>
+          </>
+        }
+      >
+        <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "var(--text-muted)" }}>
+          This unlinks Vercel from your account. You’ll need to reconnect (and re-enter env
+          vars) before the next deploy. Already-deployed sites stay live.
+        </p>
+      </Modal>
+    )}
+
+    {confirmProd && (
+      <Modal
+        title="Deploy to production?"
+        width={460}
+        onClose={() => setConfirmProd(false)}
+        footer={
+          <>
+            <span />
+            <div className="modal-actions">
+              <button type="button" className="btn-secondary" onClick={() => setConfirmProd(false)}>
+                Cancel
+              </button>
+              <button type="button" className="btn-primary" onClick={() => void deployNow()}>
+                Deploy to production
+              </button>
+            </div>
+          </>
+        }
+      >
+        <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "var(--text-muted)" }}>
+          This publishes <strong>{project?.name}</strong> to your live production URL
+          {live?.vercel_url ? (
+            <>
+              {" "}(<code>{live.vercel_url}</code>)
+            </>
+          ) : null}
+          . Choose “Preview” instead for a throwaway URL.
+        </p>
+      </Modal>
+    )}
+    </>
   );
 }
 
