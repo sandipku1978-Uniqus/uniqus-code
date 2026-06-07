@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   fetchSupabaseStatus,
   fetchSupabaseProjects,
@@ -44,27 +44,27 @@ export default function DatabasesView({ isGuest }: { isGuest: boolean }) {
     typeof window !== "undefined" ? window.location.origin + "/projects" : "/projects";
 
   return (
-    <div style={{ maxWidth: 880 }}>
-      <h1 style={{ margin: "0 0 6px" }}>Databases</h1>
-      <p className="lede" style={{ marginTop: 0 }}>
+    <div className="dash-page" style={{ maxWidth: 880 }}>
+      <h1>Databases</h1>
+      <p className="lede">
         Postgres databases provisioned through your connected Supabase account.
         Inside a project, ask the agent to “create a database” and it’ll appear here.
       </p>
 
       {isGuest ? (
-        <div style={cardStyle}>
+        <div className="dash-card">
           <p style={{ margin: 0, fontSize: 13, color: "var(--text-muted)" }}>
             Sign in with an account to connect Supabase and create databases.
           </p>
         </div>
       ) : status === null ? (
-        <div style={cardStyle}>
+        <div className="dash-card">
           <p style={{ margin: 0, fontSize: 13, color: "var(--text-muted)" }}>Checking connection…</p>
         </div>
       ) : !status.connected ? (
-        <div style={cardStyle}>
-          <h2 style={{ margin: "0 0 6px", fontSize: 15 }}>Connect Supabase</h2>
-          <p style={{ margin: "0 0 14px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.6 }}>
+        <div className="dash-card">
+          <h2>Connect Supabase</h2>
+          <p className="card-sub">
             Connect your Supabase account so the agent can create a Postgres
             database for a project and wire its keys automatically.
           </p>
@@ -77,7 +77,7 @@ export default function DatabasesView({ isGuest }: { isGuest: boolean }) {
           </a>
         </div>
       ) : (
-        <div style={cardStyle}>
+        <div className="dash-card">
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
             <span style={{ fontSize: 13, color: "var(--text-muted)" }}>
               Connected{status.org_name ? <> · <strong style={{ color: "var(--text-primary)" }}>{status.org_name}</strong></> : null}
@@ -105,19 +105,7 @@ export default function DatabasesView({ isGuest }: { isGuest: boolean }) {
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {projects.map((p) => (
-                <div
-                  key={p.ref ?? p.id ?? p.name}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: 12,
-                    padding: "10px 12px",
-                    background: "var(--bg-dark)",
-                    border: "1px solid var(--border-default)",
-                    borderRadius: "var(--radius-sm)",
-                  }}
-                >
+                <div key={p.ref ?? p.id ?? p.name} className="dash-row">
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
                       {p.name ?? p.ref ?? "(unnamed)"}
@@ -160,10 +148,3 @@ function StatusBadge({ status }: { status?: string }) {
     </span>
   );
 }
-
-const cardStyle: CSSProperties = {
-  background: "var(--bg-surface)",
-  border: "1px solid var(--border-default)",
-  borderRadius: "var(--radius-md)",
-  padding: 18,
-};

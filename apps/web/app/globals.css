@@ -4065,6 +4065,59 @@ section.band .sub {
 }
 
 /* ==========================================================================
+   Dashboard sub-pages (Databases · Design Systems). These live inside
+   .dash-main but are document pages, not the hero — without these rules their
+   bare <h1>/.lede fall back to unstyled browser defaults (the "plain HTML"
+   look). This gives them the same header rhythm + card chrome as Settings.
+   ========================================================================== */
+.dash-page { animation: fadeIn var(--dur-base) var(--ease-out) backwards; }
+.dash-page > h1 { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 6px; }
+.dash-page > .lede {
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 0 0 24px;
+  max-width: 65ch;
+}
+
+.dash-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: 20px 22px;
+  animation: fadeInUp var(--dur-base) var(--ease-out) backwards;
+}
+.dash-card h2 { font-size: 15px; font-weight: 600; margin: 0 0 6px; }
+.dash-card .card-sub { color: var(--text-muted); font-size: 12.5px; line-height: 1.6; margin: 0 0 16px; }
+:root[data-density="compact"] .dash-card { padding: 14px 16px; }
+
+/* Read-only resource row (e.g. a provisioned database). */
+.dash-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg-dark);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+}
+
+/* Selectable list row (e.g. the design-system list). Inline backgrounds used
+   to win over :hover; driving selection with .active keeps hover working. */
+.dash-listrow {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--dur-base) ease, border-color var(--dur-base) ease;
+}
+.dash-listrow:hover { background: var(--bg-surface-hover); }
+.dash-listrow.active { background: var(--bg-dark); border-color: var(--brand-magenta); }
+
+/* ==========================================================================
    Motion overhaul — consistent entrances, micro-interactions, reduced-motion.
    Everything here animates only opacity/transform (compositor-cheap) and uses
    the shared --dur-* / --ease-* tokens so motion feels of-a-piece. Entrances

@@ -191,10 +191,10 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
 
   if (isGuest) {
     return (
-      <div style={{ maxWidth: 880 }}>
-        <h1 style={{ margin: "0 0 6px" }}>Design Systems</h1>
-        <div style={cardStyle}>
-          <p style={{ margin: 0, fontSize: 13, color: "var(--text-muted)" }}>
+      <div className="dash-page" style={{ maxWidth: 880 }}>
+        <h1>Design Systems</h1>
+        <div className="dash-card">
+          <p className="card-sub" style={{ marginBottom: 0 }}>
             Sign in with an account to create reusable design systems.
           </p>
         </div>
@@ -203,9 +203,9 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
   }
 
   return (
-    <div style={{ maxWidth: 980 }}>
-      <h1 style={{ margin: "0 0 6px" }}>Design Systems</h1>
-      <p className="lede" style={{ marginTop: 0 }}>
+    <div className="dash-page" style={{ maxWidth: 980 }}>
+      <h1>Design Systems</h1>
+      <p className="lede">
         Reusable token sets (color, type, spacing) the agent generates against.
         Create one here, then attach it to a project from the new-project picker —
         every screen stays on-system.
@@ -213,7 +213,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
 
       <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", gap: 16, alignItems: "start" }}>
         {/* List + create */}
-        <div style={cardStyle}>
+        <div className="dash-card">
           <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
             <input
               value={newName}
@@ -285,11 +285,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
                   key={s.id}
                   type="button"
                   onClick={() => select(s.id)}
-                  style={{
-                    ...listRow,
-                    background: draft?.id === s.id ? "var(--bg-dark)" : "transparent",
-                    borderColor: draft?.id === s.id ? "var(--brand-magenta)" : "var(--border-default)",
-                  }}
+                  className={`dash-listrow${draft?.id === s.id ? " active" : ""}`}
                 >
                   <span style={{ display: "flex", gap: 3 }}>
                     {Object.values(s.tokens?.colors ?? {}).slice(0, 4).map((c, i) => (
@@ -307,7 +303,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
 
         {/* Editor */}
         {draft ? (
-          <div style={cardStyle}>
+          <div className="dash-card">
             <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 14 }}>
               <input
                 value={draft.name}
@@ -374,7 +370,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
             </Field>
           </div>
         ) : (
-          <div style={cardStyle}>
+          <div className="dash-card">
             <p style={mutedSmall}>Select a design system to edit, or create one.</p>
           </div>
         )}
@@ -416,12 +412,6 @@ function normalizeHex(v: string): string {
   return "#000000";
 }
 
-const cardStyle: CSSProperties = {
-  background: "var(--bg-surface)",
-  border: "1px solid var(--border-default)",
-  borderRadius: "var(--radius-md)",
-  padding: 16,
-};
 const inputStyle: CSSProperties = {
   width: "100%",
   background: "var(--bg-dark)",
@@ -434,14 +424,4 @@ const inputStyle: CSSProperties = {
 };
 const smallBtn: CSSProperties = { fontSize: 12, padding: "6px 12px", whiteSpace: "nowrap" };
 const iconBtn: CSSProperties = { fontSize: 16, lineHeight: 1, padding: "0 8px", color: "var(--text-muted)" };
-const listRow: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  padding: "7px 8px",
-  border: "1px solid var(--border-default)",
-  borderRadius: "var(--radius-sm)",
-  cursor: "pointer",
-  textAlign: "left",
-};
 const mutedSmall: CSSProperties = { margin: 0, fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.6 };
