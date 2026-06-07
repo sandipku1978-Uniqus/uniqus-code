@@ -299,6 +299,55 @@ export interface ProjectSummary {
 // single source of truth for the token shape, shared by the UI editor and the
 // orchestrator's prompt formatter.
 
+/**
+ * One button variant (primary, secondary, outline, ghost, destructive, …).
+ * Color fields are a PALETTE TOKEN NAME (e.g. "primary") when possible so the
+ * variant tracks the palette; a raw CSS color or "transparent" is also allowed.
+ */
+export interface ButtonVariantSpec {
+  name: string;
+  /** Fill — palette token name, raw CSS color, or "transparent". */
+  background?: string;
+  /** Label color — palette token name or raw CSS color. */
+  foreground?: string;
+  /** Border color — palette token name or raw CSS color; omit for none. */
+  border?: string;
+}
+
+/**
+ * Structured component specs so a design system constrains not just color/type
+ * but the SHAPE of common UI: buttons, inputs, cards, badges. The coding agent
+ * generates components against these; the web preview renders them. Color-ish
+ * fields accept a palette token name or a raw CSS color (see ButtonVariantSpec).
+ */
+export interface DesignComponentTokens {
+  button?: {
+    radius?: string;
+    paddingX?: string;
+    paddingY?: string;
+    fontWeight?: number;
+    variants?: ButtonVariantSpec[];
+  };
+  input?: {
+    radius?: string;
+    background?: string;
+    border?: string;
+  };
+  card?: {
+    radius?: string;
+    background?: string;
+    border?: string;
+    /** CSS box-shadow value, or "none". */
+    shadow?: string;
+    padding?: string;
+  };
+  badge?: {
+    radius?: string;
+    /** "soft" = tinted bg, "solid" = filled, "outline" = bordered. */
+    variant?: "soft" | "solid" | "outline";
+  };
+}
+
 export interface DesignTokens {
   /** The mode the palette primarily targets. */
   mode: "light" | "dark" | "system";
@@ -312,6 +361,8 @@ export interface DesignTokens {
   radius: string;
   /** Base spacing unit, e.g. "4px". */
   spacing?: string;
+  /** Component-level specs so generated UIs stay on-system (buttons, inputs, …). */
+  components?: DesignComponentTokens;
   /** Freeform guidance the agent should follow (voice, density, motion, etc.). */
   notes?: string;
 }
@@ -322,6 +373,33 @@ export interface DesignSystem {
   tokens: DesignTokens;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * What the agent detected while analyzing a source (brief, codebase, live site,
+ * Figma, …), grouped for the approve/deny review step. Each entry is a short
+ * human-readable line. Unchecking a category in the UI reverts that slice of the
+ * tokens to defaults before saving.
+ */
+export interface DesignFindings {
+  /** Human label for where this came from, e.g. "live site: stripe.com". */
+  source: string;
+  colors: string[];
+  typography: string[];
+  components: string[];
+  spacing: string[];
+  notes: string[];
+}
+
+/**
+ * An UNSAVED proposal returned by the analyze step. The user reviews the
+ * findings + live preview, approves/denies, optionally refines, then saves
+ * (which persists the tokens as a DesignSystem).
+ */
+export interface DesignSystemDraft {
+  name: string;
+  tokens: DesignTokens;
+  findings: DesignFindings;
 }
 
 /** Sensible starting point for "start blank". Semantic names map to AI consistency. */
@@ -344,6 +422,23 @@ export const DEFAULT_DESIGN_TOKENS: DesignTokens = {
   typeScale: "1.25 — major third",
   radius: "8px",
   spacing: "4px",
+  components: {
+    button: {
+      radius: "8px",
+      paddingX: "14px",
+      paddingY: "8px",
+      fontWeight: 600,
+      variants: [
+        { name: "primary", background: "primary", foreground: "#ffffff" },
+        { name: "secondary", background: "surface", foreground: "text", border: "border" },
+        { name: "outline", background: "transparent", foreground: "primary", border: "primary" },
+        { name: "ghost", background: "transparent", foreground: "muted" },
+      ],
+    },
+    input: { radius: "8px", background: "background", border: "border" },
+    card: { radius: "12px", background: "surface", border: "border", shadow: "0 1px 2px rgba(0,0,0,0.06)", padding: "16px" },
+    badge: { radius: "999px", variant: "soft" },
+  },
   notes: "",
 };
 

@@ -27,7 +27,8 @@ export type ModelRole =
   | "agent" // long tool-use loop
   | "plan" // plan-mode
   | "compact" // history summarizer (internal, Claude-only)
-  | "classify"; // routing / brief-refine / lightweight (internal, Claude-only)
+  | "classify" // routing / brief-refine / lightweight (internal, Claude-only)
+  | "design"; // design-system generation + inference (internal, Claude-only)
 
 export type Provider = ModelProvider;
 
@@ -40,15 +41,18 @@ export interface ResolvedModel {
 
 /**
  * "auto" defaults. The user-facing roles default to Claude's flagship — the
- * strongest coding model and the product's native provider. Internal roles
- * use Haiku: they summarize / classify, never write code, so the
- * "no low tiers for the agent" rule doesn't apply to them.
+ * strongest coding model and the product's native provider. The lightweight
+ * internal roles (compact/classify) use Haiku: they summarize / classify, never
+ * write code, so the "no low tiers for the agent" rule doesn't apply. `design`
+ * is internal but quality-sensitive (it designs a whole system from a brief), so
+ * it runs on Sonnet — a clear step up from Haiku without the flagship's cost.
  */
 const AUTO: Record<ModelRole, ResolvedModel> = {
   agent: { provider: "anthropic", model: "claude-opus-4-8", overridden: false },
   plan: { provider: "anthropic", model: "claude-opus-4-8", overridden: false },
   compact: { provider: "anthropic", model: "claude-haiku-4-5-20251001", overridden: false },
   classify: { provider: "anthropic", model: "claude-haiku-4-5-20251001", overridden: false },
+  design: { provider: "anthropic", model: "claude-sonnet-4-6", overridden: false },
 };
 
 const PROVIDERS: ReadonlySet<string> = new Set<ModelProvider>([

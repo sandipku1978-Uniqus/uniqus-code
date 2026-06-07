@@ -15,8 +15,12 @@ import {
   fetchSupabaseStatus,
   disconnectSupabaseApi,
   supabaseOauthStartUrl,
+  fetchFigmaStatus,
+  disconnectFigmaApi,
+  figmaOauthStartUrl,
   type GithubStatus,
   type SupabaseStatus,
+  type FigmaStatus,
 } from "@/lib/api";
 
 export default function SettingsView({
@@ -37,6 +41,9 @@ export default function SettingsView({
   const [supabase, setSupabase] = useState<SupabaseStatus | null>(null);
   const [confirmingSupabaseDisconnect, setConfirmingSupabaseDisconnect] = useState(false);
   const [disconnectingSupabase, setDisconnectingSupabase] = useState(false);
+  const [figma, setFigma] = useState<FigmaStatus | null>(null);
+  const [confirmingFigmaDisconnect, setConfirmingFigmaDisconnect] = useState(false);
+  const [disconnectingFigma, setDisconnectingFigma] = useState(false);
 
   useEffect(() => {
     if (isGuest) return;
@@ -48,6 +55,9 @@ export default function SettingsView({
       .catch(() =>
         setSupabase({ connected: false, org_id: null, org_name: null, connected_at: null }),
       );
+    fetchFigmaStatus()
+      .then(setFigma)
+      .catch(() => setFigma({ connected: false, handle: null, connected_at: null }));
   }, [isGuest]);
 
   // Surface the OAuth round-trip result when Supabase redirects back to /settings.
@@ -65,6 +75,38 @@ export default function SettingsView({
     const qs = params.toString();
     window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
   }, []);
+
+  // Surface the OAuth round-trip result when Figma redirects back to /settings.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get("figma");
+    if (!result) return;
+    if (result === "connected") {
+      toast.success("Figma connected");
+      fetchFigmaStatus().then(setFigma).catch(() => {});
+    } else if (result === "error") {
+      toast.error(`Couldn't connect Figma${params.get("reason") ? `: ${params.get("reason")}` : ""}`);
+    }
+    params.delete("figma");
+    params.delete("reason");
+    const qs = params.toString();
+    window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
+  }, []);
+
+  async function handleDisconnectFigma(): Promise<void> {
+    setDisconnectingFigma(true);
+    try {
+      await disconnectFigmaApi();
+      setFigma({ connected: false, handle: null, connected_at: null });
+      setConfirmingFigmaDisconnect(false);
+      toast.success("Figma disconnected");
+    } catch (err) {
+      toast.error(`Couldn't disconnect Figma: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setDisconnectingFigma(false);
+    }
+  }
 
   async function handleDisconnectSupabase(): Promise<void> {
     setDisconnectingSupabase(true);
@@ -239,6 +281,51 @@ export default function SettingsView({
           </div>
         )}
 
+        {/* Figma — functional (standard accounts only). Reads a file's published
+            styles to seed a design system from the Design Systems tab. */}
+        {!isGuest && (
+          <div className="settings-card">
+            <h2>Figma</h2>
+            <p className="settings-card-sub">
+              Connect Figma so the agent can read a file&apos;s published color &amp; text
+              styles and infer a design system from them. Use it from the Design Systems tab.
+            </p>
+            {figma === null ? (
+              <div className="settings-row">
+                <span className="k">Status</span>
+                <span className="v">checking…</span>
+              </div>
+            ) : figma.connected ? (
+              <div className="settings-row">
+                <span className="k">
+                  Connected{figma.handle ? <> as <strong>{figma.handle}</strong></> : null}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setConfirmingFigmaDisconnect(true)}
+                  className="btn-ghost"
+                  style={{ fontSize: 12 }}
+                >
+                  Disconnect
+                </button>
+              </div>
+            ) : (
+              <div className="settings-row">
+                <span className="k">Not connected</span>
+                <a
+                  href={figmaOauthStartUrl(
+                    typeof window !== "undefined" ? window.location.origin + "/settings" : "/settings",
+                  )}
+                  className="btn-primary"
+                  style={{ fontSize: 12, padding: "6px 12px", textDecoration: "none" }}
+                >
+                  Connect Figma
+                </a>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Project-scoped configuration — pointers, not duplicated UI */}
         <div className="settings-card">
           <h2>Per-project configuration</h2>
@@ -350,6 +437,42 @@ export default function SettingsView({
           <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "var(--text-muted)" }}>
             The agent won’t be able to create or query databases until you reconnect.
             Databases already provisioned on Supabase are left untouched.
+          </p>
+        </Modal>
+      )}
+
+      {confirmingFigmaDisconnect && (
+        <Modal
+          title="Disconnect Figma?"
+          width={460}
+          onClose={() => !disconnectingFigma && setConfirmingFigmaDisconnect(false)}
+          footer={
+            <>
+              <span />
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setConfirmingFigmaDisconnect(false)}
+                  disabled={disconnectingFigma}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn-danger"
+                  onClick={handleDisconnectFigma}
+                  disabled={disconnectingFigma}
+                >
+                  {disconnectingFigma ? "Disconnecting…" : "Disconnect"}
+                </button>
+              </div>
+            </>
+          }
+        >
+          <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "var(--text-muted)" }}>
+            You’ll need to reconnect to infer design systems from Figma files. Your Figma
+            files are untouched.
           </p>
         </Modal>
       )}

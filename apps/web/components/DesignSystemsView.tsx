@@ -7,54 +7,108 @@ import {
   createDesignSystemApi,
   updateDesignSystemApi,
   deleteDesignSystemApi,
-  inferDesignSystemGithubApi,
-  inferDesignSystemZipApi,
+  analyzeDesignSystemApi,
+  tweakDesignSystemApi,
+  fetchProjects,
   fetchGithubStatus,
   fetchGithubRepos,
   githubOauthStartUrl,
+  fetchFigmaStatus,
+  figmaOauthStartUrl,
   type DesignSystem,
   type DesignTokens,
+  type DesignFindings,
   type GithubStatus,
   type GithubRepoSummary,
+  type FigmaStatus,
 } from "@/lib/api";
-import { DEFAULT_DESIGN_TOKENS } from "@uniqus/api-types";
+import type { ProjectSummary } from "@uniqus/api-types";
+import {
+  DEFAULT_DESIGN_TOKENS,
+  type DesignComponentTokens,
+  type ButtonVariantSpec,
+} from "@uniqus/api-types";
 import { toast } from "@/lib/toast";
 import DesignSystemPreview from "./DesignSystemPreview";
 
 /**
- * Design Systems tab on the projects page. Global, per-user, reusable token sets
- * the agent generates against. Create one (blank), infer one from a codebase
- * (a connected-GitHub repo, a public URL, or a .zip), edit its tokens with a
- * live preview, and attach it to projects from the new-project picker.
+ * Design Systems tab. Agent-driven: pick a source (a brief + reference images, an
+ * existing project, a public/private GitHub repo, a live URL, a .zip, or Figma),
+ * the agent analyzes it into an UNSAVED draft + a findings breakdown you approve
+ * or deny per-category, refine with AI at any time, then save. A saved system can
+ * be re-opened, refined, and edited; attach it to a project from the new-project
+ * picker so the coding agent generates on-system.
  */
-type CreateMode = "blank" | "github" | "url" | "zip";
+type CreateMode =
+  | "describe"
+  | "blank"
+  | "project"
+  | "github"
+  | "publicgithub"
+  | "url"
+  | "zip"
+  | "figma";
 
 const CREATE_TABS: ReadonlyArray<readonly [CreateMode, string]> = [
+  ["describe", "Describe"],
   ["blank", "Blank"],
-  ["github", "From GitHub"],
-  ["url", "From URL"],
+  ["project", "From Project"],
+  ["github", "Private GitHub"],
+  ["publicgithub", "Public GitHub"],
+  ["url", "Live URL"],
   ["zip", "Upload .zip"],
+  ["figma", "Figma"],
 ];
+
+type ApproveState = {
+  colors: boolean;
+  typography: boolean;
+  components: boolean;
+  spacing: boolean;
+  notes: boolean;
+};
+const ALL_APPROVED: ApproveState = {
+  colors: true,
+  typography: true,
+  components: true,
+  spacing: true,
+  notes: true,
+};
 
 export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
   const [systems, setSystems] = useState<DesignSystem[] | null>(null);
+  // The working editor doc. id === "" means an unsaved draft under review.
   const [draft, setDraft] = useState<DesignSystem | null>(null);
-  const [newName, setNewName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [createMode, setCreateMode] = useState<CreateMode>("blank");
-  const [repoUrl, setRepoUrl] = useState("");
-  const [importing, setImporting] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
+  const [reviewFindings, setReviewFindings] = useState<DesignFindings | null>(null);
+  const [approved, setApproved] = useState<ApproveState>(ALL_APPROVED);
+  const [creating, setCreating] = useState(false);
+  const [draftNonce, setDraftNonce] = useState(0);
 
-  // Connected-GitHub state — mirrors the new-project picker so the user can
-  // infer a system from a repo they already have access to (private included).
-  const [github, setGithub] = useState<GithubStatus | null>(null);
-  const [repos, setRepos] = useState<GithubRepoSummary[] | null>(null);
+  // Composer state
+  const [createMode, setCreateMode] = useState<CreateMode>("describe");
+  const [newName, setNewName] = useState("");
+  const [describeText, setDescribeText] = useState("");
+  const [images, setImages] = useState<File[]>([]);
+  const [repoUrl, setRepoUrl] = useState("");
+  const [liveUrl, setLiveUrl] = useState("");
+  const [figmaUrl, setFigmaUrl] = useState("");
+  const [zipFile, setZipFile] = useState<File | null>(null);
+  const [selectedProject, setSelectedProject] = useState("");
   const [selectedRepo, setSelectedRepo] = useState("");
 
-  // Editable color rows with STABLE ids — the editor's source of truth. Keying
-  // rows by a mutable color name remounts the row mid-rename (losing focus); ids
-  // fix that. The canonical tokens.colors Record is rebuilt from these on change.
+  const [busy, setBusy] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [refining, setRefining] = useState(false);
+  const [refineText, setRefineText] = useState("");
+
+  const fileRef = useRef<HTMLInputElement>(null);
+  const imageRef = useRef<HTMLInputElement>(null);
+
+  const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
+  const [github, setGithub] = useState<GithubStatus | null>(null);
+  const [repos, setRepos] = useState<GithubRepoSummary[] | null>(null);
+  const [figma, setFigma] = useState<FigmaStatus | null>(null);
+
   const [colorRows, setColorRows] = useState<{ id: string; name: string; value: string }[]>([]);
   const idc = useRef(0);
 
@@ -70,12 +124,15 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
   useEffect(() => {
     if (isGuest) return;
     load();
+    fetchProjects().then((r) => setProjects(r.projects)).catch(() => setProjects([]));
     fetchGithubStatus()
       .then(setGithub)
       .catch(() => setGithub({ connected: false, login: null, connected_at: null }));
+    fetchFigmaStatus()
+      .then(setFigma)
+      .catch(() => setFigma({ connected: false, handle: null, connected_at: null }));
   }, [isGuest, load]);
 
-  // Once connected, pull the repo list so the dropdown is ready.
   useEffect(() => {
     if (isGuest || !github?.connected) return;
     fetchGithubRepos()
@@ -83,8 +140,33 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
       .catch(() => setRepos([]));
   }, [github?.connected, isGuest]);
 
-  // Rebuild editable color rows whenever a DIFFERENT system is opened (draft.id
-  // changes). Editing fields on the same system keeps the id, so rows persist.
+  // Surface the Figma OAuth round-trip when it redirects back to /projects.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get("figma");
+    if (!result) return;
+    if (result === "connected") {
+      toast.success("Figma connected");
+      fetchFigmaStatus().then(setFigma).catch(() => {});
+      setCreateMode("figma");
+    } else if (result === "error") {
+      toast.error(`Couldn't connect Figma${params.get("reason") ? `: ${params.get("reason")}` : ""}`);
+    }
+    params.delete("figma");
+    params.delete("reason");
+    const qs = params.toString();
+    window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
+  }, []);
+
+  // Auto-open the most recent system so the page lands on something useful.
+  useEffect(() => {
+    if (!systems || systems.length === 0 || draft || creating) return;
+    select(systems[0].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [systems, draft, creating]);
+
+  // Rebuild editable color rows whenever a brand-new draft is loaded.
   useEffect(() => {
     if (!draft) {
       setColorRows([]);
@@ -98,29 +180,45 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
       })),
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draft?.id]);
+  }, [draftNonce]);
+
+  function openDraft(ds: DesignSystem, findings: DesignFindings | null) {
+    setDraft(ds);
+    setReviewFindings(findings);
+    setApproved(ALL_APPROVED);
+    setCreating(false);
+    setRefineText("");
+    setDraftNonce((n) => n + 1);
+  }
 
   const select = useCallback((id: string) => {
     getDesignSystemApi(id)
-      .then((r) => setDraft(r.design_system))
+      .then((r) => openDraft(r.design_system, null))
       .catch((e) => toast.error(e instanceof Error ? e.message : String(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function resetComposer() {
     setNewName("");
+    setDescribeText("");
+    setImages([]);
     setRepoUrl("");
+    setLiveUrl("");
+    setFigmaUrl("");
+    setZipFile(null);
+    setSelectedProject("");
     setSelectedRepo("");
   }
 
-  async function create() {
+  async function createBlank() {
     const name = newName.trim();
-    if (!name) return;
+    if (!name) return toast.error("Give the design system a name first.");
     setBusy(true);
     try {
       const { design_system } = await createDesignSystemApi(name, DEFAULT_DESIGN_TOKENS);
       resetComposer();
       load();
-      setDraft(design_system);
+      openDraft(design_system, null);
       toast.success("Design system created");
     } catch (e) {
       toast.error(`Couldn't create: ${e instanceof Error ? e.message : String(e)}`);
@@ -129,75 +227,109 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
     }
   }
 
-  async function importFromSelectedRepo() {
-    const name = newName.trim();
-    if (!name) return toast.error("Give the design system a name first.");
-    const repo = repos?.find((r) => r.full_name === selectedRepo);
-    if (!repo) return toast.error("Pick a repository from the list.");
-    setImporting(true);
+  async function runCreate() {
+    if (createMode === "blank") return void createBlank();
+
+    const fd = new FormData();
+    if (createMode === "describe") {
+      if (!describeText.trim() && images.length === 0) {
+        return toast.error("Describe the system or attach a reference image/PDF.");
+      }
+      fd.set("source", "brief");
+      if (describeText.trim()) fd.set("brief", describeText.trim());
+      images.forEach((f) => fd.append("file", f));
+    } else if (createMode === "project") {
+      if (!selectedProject) return toast.error("Pick a project.");
+      fd.set("source", "project");
+      fd.set("project_id", selectedProject);
+    } else if (createMode === "github") {
+      const repo = repos?.find((r) => r.full_name === selectedRepo);
+      if (!repo) return toast.error("Pick a repository from the list.");
+      fd.set("source", "github");
+      fd.set("repo_url", repo.clone_url);
+      fd.set("repo_full_name", repo.full_name);
+      fd.set("use_oauth", "true");
+    } else if (createMode === "publicgithub") {
+      if (!repoUrl.trim()) return toast.error("Enter a public GitHub repo URL.");
+      fd.set("source", "github");
+      fd.set("repo_url", repoUrl.trim());
+      fd.set("use_oauth", "false");
+    } else if (createMode === "url") {
+      if (!liveUrl.trim()) return toast.error("Enter a website URL.");
+      fd.set("source", "url");
+      fd.set("url", liveUrl.trim());
+    } else if (createMode === "zip") {
+      if (!zipFile) return toast.error("Choose a .zip file.");
+      fd.set("source", "zip");
+      fd.append("file", zipFile);
+    } else if (createMode === "figma") {
+      if (!figmaUrl.trim()) return toast.error("Paste a Figma file URL.");
+      fd.set("source", "figma");
+      fd.set("url", figmaUrl.trim());
+    }
+
+    setAnalyzing(true);
     try {
-      const { design_system } = await inferDesignSystemGithubApi(name, repo.clone_url, {
-        useOauth: true,
-      });
-      resetComposer();
-      load();
-      setDraft(design_system);
-      toast.success("Design system inferred — review and tweak the tokens.");
+      const { draft: d } = await analyzeDesignSystemApi(fd);
+      const name = newName.trim() || d.name;
+      openDraft({ id: "", name, tokens: d.tokens, created_at: "", updated_at: "" }, d.findings);
+      toast.success("Draft ready — review the findings, refine, then save.");
     } catch (e) {
-      toast.error(`Import failed: ${e instanceof Error ? e.message : String(e)}`);
+      const m = e instanceof Error ? e.message : String(e);
+      if (m.includes("github_not_connected")) toast.error("Connect GitHub first (Settings → GitHub).");
+      else if (m.includes("figma_not_connected")) toast.error("Connect Figma first.");
+      else toast.error(`Analyze failed: ${m}`);
     } finally {
-      setImporting(false);
+      setAnalyzing(false);
     }
   }
 
-  async function importFromUrl() {
-    const name = newName.trim();
-    if (!name) return toast.error("Give the design system a name first.");
-    if (!repoUrl.trim()) return toast.error("Enter a public GitHub repo URL.");
-    setImporting(true);
+  async function approveDraft() {
+    if (!draft) return;
+    let t = draft.tokens;
+    if (!approved.colors) t = { ...t, colors: DEFAULT_DESIGN_TOKENS.colors };
+    if (!approved.typography) t = { ...t, fonts: DEFAULT_DESIGN_TOKENS.fonts, typeScale: DEFAULT_DESIGN_TOKENS.typeScale };
+    if (!approved.spacing) t = { ...t, radius: DEFAULT_DESIGN_TOKENS.radius, spacing: DEFAULT_DESIGN_TOKENS.spacing };
+    if (!approved.components) t = { ...t, components: DEFAULT_DESIGN_TOKENS.components };
+    if (!approved.notes) t = { ...t, notes: "" };
+    setBusy(true);
     try {
-      const { design_system } = await inferDesignSystemGithubApi(name, repoUrl.trim());
+      const { design_system } = await createDesignSystemApi(draft.name.trim() || "Design system", t);
       resetComposer();
       load();
-      setDraft(design_system);
-      toast.success("Design system inferred — review and tweak the tokens.");
+      openDraft(design_system, null);
+      toast.success("Design system saved");
     } catch (e) {
-      toast.error(`Import failed: ${e instanceof Error ? e.message : String(e)}`);
+      toast.error(`Couldn't save: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
-      setImporting(false);
+      setBusy(false);
     }
   }
 
-  async function importFromZip(file: File) {
-    const name = newName.trim();
-    if (!name) {
-      toast.error("Give the design system a name first.");
-      return;
-    }
-    setImporting(true);
-    try {
-      const { design_system } = await inferDesignSystemZipApi(name, file);
-      resetComposer();
-      load();
-      setDraft(design_system);
-      toast.success("Design system inferred — review and tweak the tokens.");
-    } catch (e) {
-      toast.error(`Import failed: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setImporting(false);
-    }
+  function discardDraft() {
+    setDraft(null);
+    setReviewFindings(null);
+    setCreating(true);
   }
 
-  function runCreate() {
-    if (!newName.trim()) return toast.error("Give the design system a name first.");
-    if (createMode === "blank") return void create();
-    if (createMode === "github") return void importFromSelectedRepo();
-    if (createMode === "url") return void importFromUrl();
-    if (createMode === "zip") return fileRef.current?.click();
+  async function refine() {
+    if (!draft || !refineText.trim()) return;
+    setRefining(true);
+    try {
+      const { tokens } = await tweakDesignSystemApi(draft.tokens, refineText.trim());
+      setDraft({ ...draft, tokens });
+      setRefineText("");
+      setDraftNonce((n) => n + 1);
+      toast.success("Refined — review the changes.");
+    } catch (e) {
+      toast.error(`Refine failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setRefining(false);
+    }
   }
 
   async function save() {
-    if (!draft) return;
+    if (!draft || !draft.id) return;
     setBusy(true);
     try {
       const { design_system } = await updateDesignSystemApi(draft.id, {
@@ -218,7 +350,10 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
     setBusy(true);
     try {
       await deleteDesignSystemApi(id);
-      if (draft?.id === id) setDraft(null);
+      if (draft?.id === id) {
+        setDraft(null);
+        setReviewFindings(null);
+      }
       load();
       toast.success("Design system deleted");
     } catch (e) {
@@ -228,13 +363,10 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
     }
   }
 
-  // ── token editing helpers (operate on draft.tokens immutably) ──
+  // ── token editing helpers ──
   function patchTokens(patch: Partial<DesignTokens>) {
     setDraft((d) => (d ? { ...d, tokens: { ...d.tokens, ...patch } } : d));
   }
-  // Rebuild the canonical tokens.colors Record from the editable rows on every
-  // change. Empty-named rows are kept in the editor but excluded from the
-  // record; a later duplicate name wins (last write).
   function commitRows(rows: { id: string; name: string; value: string }[]) {
     setColorRows(rows);
     const rec: Record<string, string> = {};
@@ -244,36 +376,77 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
     }
     setDraft((d) => (d ? { ...d, tokens: { ...d.tokens, colors: rec } } : d));
   }
-  function setRow(id: string, patch: Partial<{ name: string; value: string }>) {
+  const setRow = (id: string, patch: Partial<{ name: string; value: string }>) =>
     commitRows(colorRows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  const addRow = () => commitRows([...colorRows, { id: `c${idc.current++}`, name: "", value: "#000000" }]);
+  const removeRow = (id: string) => commitRows(colorRows.filter((r) => r.id !== id));
+
+  function setComp(key: keyof DesignComponentTokens, value: unknown) {
+    setDraft((d) => (d ? { ...d, tokens: { ...d.tokens, components: { ...(d.tokens.components ?? {}), [key]: value } } } : d));
   }
-  function addRow() {
-    commitRows([...colorRows, { id: `c${idc.current++}`, name: "", value: "#000000" }]);
+  function patchButton(patch: Partial<NonNullable<DesignComponentTokens["button"]>>) {
+    setDraft((d) => {
+      if (!d) return d;
+      const b = d.tokens.components?.button ?? {};
+      return { ...d, tokens: { ...d.tokens, components: { ...(d.tokens.components ?? {}), button: { ...b, ...patch } } } };
+    });
   }
-  function removeRow(id: string) {
-    commitRows(colorRows.filter((r) => r.id !== id));
+  function setVariant(i: number, patch: Partial<ButtonVariantSpec>) {
+    setDraft((d) => {
+      if (!d) return d;
+      const b = d.tokens.components?.button ?? {};
+      const vs = [...(b.variants ?? [])];
+      vs[i] = { ...vs[i], ...patch };
+      return { ...d, tokens: { ...d.tokens, components: { ...(d.tokens.components ?? {}), button: { ...b, variants: vs } } } };
+    });
+  }
+  function addVariant() {
+    setDraft((d) => {
+      if (!d) return d;
+      const b = d.tokens.components?.button ?? {};
+      const vs = [...(b.variants ?? []), { name: "new", background: "primary", foreground: "#ffffff" }];
+      return { ...d, tokens: { ...d.tokens, components: { ...(d.tokens.components ?? {}), button: { ...b, variants: vs } } } };
+    });
+  }
+  function removeVariant(i: number) {
+    setDraft((d) => {
+      if (!d) return d;
+      const b = d.tokens.components?.button ?? {};
+      const vs = (b.variants ?? []).filter((_, j) => j !== i);
+      return { ...d, tokens: { ...d.tokens, components: { ...(d.tokens.components ?? {}), button: { ...b, variants: vs } } } };
+    });
   }
 
-  // Shared create/import composer (gradient-framed). Used both in the empty
-  // state and the right pane when nothing is selected.
-  const returnTo =
-    typeof window !== "undefined" ? window.location.origin + "/projects" : "/projects";
-  const actionLabel =
-    createMode === "blank"
-      ? "Create"
-      : importing
-        ? "Inferring…"
-        : createMode === "zip"
-          ? "Choose .zip"
-          : createMode === "github"
-            ? "Infer from repo"
-            : "Infer from URL";
-  const actionDisabled =
-    busy ||
-    importing ||
-    !newName.trim() ||
-    (createMode === "github" && !selectedRepo) ||
-    (createMode === "url" && !repoUrl.trim());
+  const returnTo = typeof window !== "undefined" ? window.location.origin + "/projects" : "/projects";
+
+  function actionLabel(): string {
+    if (createMode === "blank") return "+ Create";
+    if (analyzing) return "Analyzing…";
+    return createMode === "describe" ? "✨ Generate" : "Analyze";
+  }
+  function actionDisabled(): boolean {
+    if (busy || analyzing) return true;
+    switch (createMode) {
+      case "blank":
+        return !newName.trim();
+      case "describe":
+        return !describeText.trim() && images.length === 0;
+      case "project":
+        return !selectedProject;
+      case "github":
+        return !selectedRepo;
+      case "publicgithub":
+        return !repoUrl.trim();
+      case "url":
+        return !liveUrl.trim();
+      case "zip":
+        return !zipFile;
+      case "figma":
+        return !figma?.connected || !figmaUrl.trim();
+      default:
+        return false;
+    }
+  }
 
   function renderComposer() {
     return (
@@ -281,45 +454,67 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
         <div className="ds-composer">
           <div className="dash-tabs ds-tabs" role="tablist" aria-label="Create method">
             {CREATE_TABS.map(([m, label]) => (
-              <button
-                key={m}
-                type="button"
-                role="tab"
-                aria-selected={createMode === m}
-                onClick={() => setCreateMode(m)}
-              >
+              <button key={m} type="button" role="tab" aria-selected={createMode === m} onClick={() => setCreateMode(m)}>
                 {label}
               </button>
             ))}
           </div>
 
-          <input
-            className="ds-name"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && createMode === "blank") runCreate();
-            }}
-            placeholder="Design system name…"
-            aria-label="Design system name"
-          />
+          {createMode === "describe" && (
+            <>
+              <textarea
+                className="ds-brief"
+                value={describeText}
+                onChange={(e) => setDescribeText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                    e.preventDefault();
+                    runCreate();
+                  }
+                }}
+                placeholder={
+                  "Describe the brand or product. e.g.\n" +
+                  "“A warm, friendly neighbourhood bakery — soft creams and browns, rounded, approachable.”\n" +
+                  "Attach a moodboard, screenshot or brand PDF for the agent to match."
+                }
+                rows={5}
+                aria-label="Design brief"
+              />
+              <div className="ds-attach-row">
+                <button type="button" className="btn-secondary" style={smallBtn} onClick={() => imageRef.current?.click()}>
+                  + Attach image / PDF
+                </button>
+                {images.map((f, i) => (
+                  <span key={`${f.name}-${i}`} className="ds-chip">
+                    {f.name}
+                    <button type="button" aria-label="Remove" onClick={() => setImages((xs) => xs.filter((_, j) => j !== i))}>
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            </>
+          )}
 
           {createMode === "blank" && (
-            <p className="ds-hint">Starts from a sensible default palette and type you can edit.</p>
+            <p className="ds-hint">Starts from a sensible default palette, type and components you can edit.</p>
+          )}
+
+          {createMode === "project" && (
+            <select className="ds-name" value={selectedProject} onChange={(e) => setSelectedProject(e.target.value)} style={{ colorScheme: "dark" }} aria-label="Project">
+              <option value="">{projects === null ? "Loading your projects…" : "— select a project —"}</option>
+              {(projects ?? []).map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
           )}
 
           {createMode === "github" &&
             (github?.connected ? (
-              <select
-                className="ds-name"
-                value={selectedRepo}
-                onChange={(e) => setSelectedRepo(e.target.value)}
-                aria-label="Repository to infer from"
-                style={{ colorScheme: "dark" }}
-              >
-                <option value="">
-                  {repos === null ? "Loading your repos…" : "— select a repository —"}
-                </option>
+              <select className="ds-name" value={selectedRepo} onChange={(e) => setSelectedRepo(e.target.value)} style={{ colorScheme: "dark" }} aria-label="Repository">
+                <option value="">{repos === null ? "Loading your repos…" : "— select a repository —"}</option>
                 {(repos ?? []).map((r) => (
                   <option key={r.full_name} value={r.full_name}>
                     {r.full_name}
@@ -329,157 +524,322 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
               </select>
             ) : (
               <div className="ds-connect">
-                <span>Connect GitHub to infer from a repo you already have access to.</span>
+                <span>Connect GitHub to infer from a private repo you have access to.</span>
                 <a className="btn-primary" style={smallBtn} href={githubOauthStartUrl(returnTo)}>
                   Connect GitHub
                 </a>
               </div>
             ))}
 
+          {createMode === "publicgithub" && (
+            <>
+              <input className="ds-name" value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} placeholder="https://github.com/owner/repo" aria-label="Public repository URL" />
+              <p className="ds-hint">Clones a public repo and reads its Tailwind/CSS/theme files.</p>
+            </>
+          )}
+
           {createMode === "url" && (
             <>
-              <input
-                className="ds-name"
-                value={repoUrl}
-                onChange={(e) => setRepoUrl(e.target.value)}
-                placeholder="https://github.com/owner/repo"
-                disabled={importing}
-                aria-label="Public repository URL"
-              />
-              <p className="ds-hint">Reads a public repo&apos;s Tailwind/CSS/theme files and infers tokens.</p>
+              <input className="ds-name" value={liveUrl} onChange={(e) => setLiveUrl(e.target.value)} placeholder="https://stripe.com" aria-label="Website URL" />
+              <p className="ds-hint">Fetches the live site&apos;s CSS + theme colors and infers tokens from them.</p>
             </>
           )}
 
           {createMode === "zip" && (
-            <p className="ds-hint">Upload a project .zip — we read its theme files and infer tokens you can edit.</p>
+            <div className="ds-attach-row">
+              <button type="button" className="btn-secondary" style={smallBtn} onClick={() => fileRef.current?.click()}>
+                {zipFile ? "Change .zip" : "Choose .zip"}
+              </button>
+              {zipFile && <span className="ds-chip">{zipFile.name}</span>}
+              <span className="ds-hint" style={{ width: "100%" }}>We read the archive&apos;s theme files and infer tokens.</span>
+            </div>
           )}
 
-          <div className="ds-composer-actions">
-            <button type="button" className="btn-primary" onClick={runCreate} disabled={actionDisabled}>
-              {createMode === "blank" ? "+ " : ""}
-              {actionLabel}
-            </button>
-          </div>
+          {createMode === "figma" &&
+            (figma?.connected ? (
+              <>
+                <input className="ds-name" value={figmaUrl} onChange={(e) => setFigmaUrl(e.target.value)} placeholder="https://www.figma.com/design/<key>/…" aria-label="Figma file URL" />
+                <p className="ds-hint">
+                  Connected{figma.handle ? ` as ${figma.handle}` : ""}. Reads the file&apos;s published color &amp; text styles.
+                </p>
+              </>
+            ) : (
+              <div className="ds-connect">
+                <span>Connect Figma to infer a system from a file&apos;s published styles.</span>
+                <a className="btn-primary" style={smallBtn} href={figmaOauthStartUrl(returnTo)}>
+                  Connect Figma
+                </a>
+              </div>
+            ))}
+
+          {createMode !== "figma" || figma?.connected ? (
+            <div className="ds-composer-actions">
+              <input
+                className="ds-name ds-name-inline"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && createMode === "blank") runCreate();
+                }}
+                placeholder={createMode === "blank" ? "Design system name…" : "Name (optional)"}
+                aria-label="Name"
+              />
+              <button type="button" className="btn-primary" onClick={runCreate} disabled={actionDisabled()}>
+                {actionLabel()}
+              </button>
+            </div>
+          ) : null}
         </div>
       </div>
+    );
+  }
+
+  function renderFindings(f: DesignFindings) {
+    const cats: { key: keyof ApproveState; label: string; items: string[] }[] = [
+      { key: "colors", label: "Colors", items: f.colors },
+      { key: "typography", label: "Typography", items: f.typography },
+      { key: "components", label: "Components", items: f.components },
+      { key: "spacing", label: "Spacing & radius", items: f.spacing },
+      { key: "notes", label: "Notes", items: f.notes },
+    ];
+    return (
+      <div className="dash-card ds-findings">
+        <div className="ds-findings-head">
+          <div>
+            <h2>Review the agent&apos;s findings</h2>
+            <p className="card-sub" style={{ margin: 0 }}>
+              From {f.source}. Untick a group to drop it (it reverts to a sensible default), refine with AI, then approve.
+            </p>
+          </div>
+        </div>
+        <div className="ds-findings-grid">
+          {cats.map((c) => (
+            <label key={c.key} className={`ds-finding${approved[c.key] ? "" : " denied"}`}>
+              <div className="ds-finding-top">
+                <input type="checkbox" checked={approved[c.key]} onChange={(e) => setApproved((a) => ({ ...a, [c.key]: e.target.checked }))} />
+                <span className="ds-finding-label">{c.label}</span>
+              </div>
+              <ul>
+                {c.items.length === 0 ? <li className="muted">—</li> : c.items.map((it, i) => <li key={i}>{it}</li>)}
+              </ul>
+            </label>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  function renderRefine() {
+    return (
+      <div className="ds-refine">
+        <input
+          value={refineText}
+          onChange={(e) => setRefineText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") refine();
+          }}
+          placeholder="Refine with AI — e.g. “make it warmer and more rounded”"
+          style={{ ...inputStyle, flex: 1 }}
+          disabled={refining}
+        />
+        <button type="button" className="btn-secondary" style={smallBtn} onClick={refine} disabled={refining || !refineText.trim()}>
+          {refining ? "Refining…" : "✨ Refine"}
+        </button>
+      </div>
+    );
+  }
+
+  function renderComponentEditor(d: DesignSystem) {
+    const b = d.tokens.components?.button ?? {};
+    const inp = d.tokens.components?.input ?? {};
+    const card = d.tokens.components?.card ?? {};
+    const badge = d.tokens.components?.badge ?? {};
+    const variants = b.variants ?? [];
+    return (
+      <>
+        <Field label="Buttons">
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
+            <LabeledInput label="Radius" small value={b.radius ?? ""} onChange={(v) => patchButton({ radius: v })} />
+            <LabeledInput label="Pad X" small value={b.paddingX ?? ""} onChange={(v) => patchButton({ paddingX: v })} />
+            <LabeledInput label="Pad Y" small value={b.paddingY ?? ""} onChange={(v) => patchButton({ paddingY: v })} />
+            <LabeledInput
+              label="Weight"
+              small
+              value={b.fontWeight != null ? String(b.fontWeight) : ""}
+              onChange={(v) => patchButton({ fontWeight: v.trim() ? Number(v) || undefined : undefined })}
+            />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+            {variants.map((v, i) => (
+              <div key={i} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <input value={v.name} onChange={(e) => setVariant(i, { name: e.target.value })} placeholder="name" style={{ ...inputStyle, width: 92 }} />
+                <input value={v.background ?? ""} onChange={(e) => setVariant(i, { background: e.target.value })} placeholder="bg" style={{ ...inputStyle, minWidth: 0 }} />
+                <input value={v.foreground ?? ""} onChange={(e) => setVariant(i, { foreground: e.target.value })} placeholder="text" style={{ ...inputStyle, minWidth: 0 }} />
+                <input value={v.border ?? ""} onChange={(e) => setVariant(i, { border: e.target.value })} placeholder="border" style={{ ...inputStyle, minWidth: 0 }} />
+                <button type="button" className="btn-ghost" style={iconBtn} onClick={() => removeVariant(i)} aria-label="Remove variant">×</button>
+              </div>
+            ))}
+            <button type="button" className="btn-secondary" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={addVariant}>+ Add variant</button>
+          </div>
+          <p className="ds-hint" style={{ marginTop: 6 }}>
+            bg / text / border take a color token name (e.g. <code>primary</code>) or a CSS color (<code>transparent</code> for ghost).
+          </p>
+        </Field>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          <Field label="Input radius">
+            <input value={inp.radius ?? ""} onChange={(e) => setComp("input", { ...inp, radius: e.target.value })} style={inputStyle} />
+          </Field>
+          <Field label="Card radius">
+            <input value={card.radius ?? ""} onChange={(e) => setComp("card", { ...card, radius: e.target.value })} style={inputStyle} />
+          </Field>
+          <Field label="Badge style">
+            <select
+              value={badge.variant ?? "soft"}
+              onChange={(e) => setComp("badge", { ...badge, variant: e.target.value as NonNullable<DesignComponentTokens["badge"]>["variant"] })}
+              style={inputStyle}
+            >
+              <option value="soft">soft</option>
+              <option value="solid">solid</option>
+              <option value="outline">outline</option>
+            </select>
+          </Field>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <Field label="Card padding">
+            <input value={card.padding ?? ""} onChange={(e) => setComp("card", { ...card, padding: e.target.value })} style={inputStyle} />
+          </Field>
+          <Field label="Card shadow">
+            <input value={card.shadow ?? ""} onChange={(e) => setComp("card", { ...card, shadow: e.target.value })} style={inputStyle} placeholder="none" />
+          </Field>
+        </div>
+      </>
     );
   }
 
   function renderEditor(d: DesignSystem) {
+    const reviewing = reviewFindings != null;
     return (
-      <div className="ds-editor">
-        <div className="dash-card ds-editor-controls">
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 14 }}>
-            <input
-              value={d.name}
-              onChange={(e) => setDraft({ ...d, name: e.target.value })}
-              style={{ ...inputStyle, flex: 1, fontSize: 15, fontWeight: 600 }}
-              aria-label="Design system name"
-            />
-            <button type="button" className="btn-primary" style={smallBtn} onClick={save} disabled={busy}>
-              {busy ? "Saving…" : "Save"}
-            </button>
-            <button
-              type="button"
-              className="btn-ghost"
-              style={{ ...smallBtn, color: "var(--conf-medium, #d98a3d)" }}
-              onClick={() => remove(d.id)}
-              disabled={busy}
-            >
-              Delete
-            </button>
-          </div>
-
-          <Field label="Mode">
-            <select
-              value={d.tokens.mode}
-              onChange={(e) => patchTokens({ mode: e.target.value as DesignTokens["mode"] })}
-              style={inputStyle}
-            >
-              <option value="light">light</option>
-              <option value="dark">dark</option>
-              <option value="system">system</option>
-            </select>
-          </Field>
-
-          <Field label="Colors">
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {colorRows.map((row) => (
-                <div key={row.id} style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <input
-                    value={row.name}
-                    onChange={(e) => setRow(row.id, { name: e.target.value })}
-                    placeholder="name"
-                    style={{ ...inputStyle, width: 130 }}
-                  />
-                  <input
-                    type="color"
-                    value={normalizeHex(row.value)}
-                    onChange={(e) => setRow(row.id, { value: e.target.value })}
-                    style={{ width: 34, height: 28, padding: 0, border: "1px solid var(--border-default)", borderRadius: 6, background: "transparent" }}
-                  />
-                  <input
-                    value={row.value}
-                    onChange={(e) => setRow(row.id, { value: e.target.value })}
-                    style={{ ...inputStyle, flex: 1, fontFamily: "ui-monospace,monospace", fontSize: 11 }}
-                  />
-                  <button type="button" className="btn-ghost" style={iconBtn} onClick={() => removeRow(row.id)} aria-label="Remove color">
-                    ×
+      <>
+        {reviewing && reviewFindings ? renderFindings(reviewFindings) : null}
+        <div className="ds-editor">
+          <div className="dash-card ds-editor-controls">
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+              <input
+                value={d.name}
+                onChange={(e) => setDraft({ ...d, name: e.target.value })}
+                style={{ ...inputStyle, flex: 1, fontSize: 15, fontWeight: 600 }}
+                aria-label="Design system name"
+              />
+              {reviewing ? (
+                <>
+                  <button type="button" className="btn-primary" style={smallBtn} onClick={approveDraft} disabled={busy}>
+                    {busy ? "Saving…" : "Approve & save"}
                   </button>
-                </div>
-              ))}
-              <button type="button" className="btn-secondary" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={addRow}>
-                + Add color
-              </button>
+                  <button type="button" className="btn-ghost" style={smallBtn} onClick={discardDraft} disabled={busy}>
+                    Discard
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button type="button" className="btn-primary" style={smallBtn} onClick={save} disabled={busy}>
+                    {busy ? "Saving…" : "Save"}
+                  </button>
+                  <button type="button" className="btn-ghost" style={{ ...smallBtn, color: "var(--conf-medium, #d98a3d)" }} onClick={() => remove(d.id)} disabled={busy}>
+                    Delete
+                  </button>
+                </>
+              )}
             </div>
-          </Field>
 
-          <Field label="Fonts">
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <LabeledInput label="Body" value={d.tokens.fonts.body} onChange={(v) => patchTokens({ fonts: { ...d.tokens.fonts, body: v } })} />
-              <LabeledInput label="Heading" value={d.tokens.fonts.heading} onChange={(v) => patchTokens({ fonts: { ...d.tokens.fonts, heading: v } })} />
-              <LabeledInput label="Mono" value={d.tokens.fonts.mono ?? ""} onChange={(v) => patchTokens({ fonts: { ...d.tokens.fonts, mono: v } })} />
+            {renderRefine()}
+
+            <Field label="Mode">
+              <select value={d.tokens.mode} onChange={(e) => patchTokens({ mode: e.target.value as DesignTokens["mode"] })} style={inputStyle}>
+                <option value="light">light</option>
+                <option value="dark">dark</option>
+                <option value="system">system</option>
+              </select>
+            </Field>
+
+            <Field label="Colors">
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {colorRows.map((row) => (
+                  <div key={row.id} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <input value={row.name} onChange={(e) => setRow(row.id, { name: e.target.value })} placeholder="name" style={{ ...inputStyle, width: 130 }} />
+                    <input type="color" value={normalizeHex(row.value)} onChange={(e) => setRow(row.id, { value: e.target.value })} style={{ width: 34, height: 28, padding: 0, border: "1px solid var(--border-default)", borderRadius: 6, background: "transparent" }} />
+                    <input value={row.value} onChange={(e) => setRow(row.id, { value: e.target.value })} style={{ ...inputStyle, flex: 1, fontFamily: "ui-monospace,monospace", fontSize: 11 }} />
+                    <button type="button" className="btn-ghost" style={iconBtn} onClick={() => removeRow(row.id)} aria-label="Remove color">×</button>
+                  </div>
+                ))}
+                <button type="button" className="btn-secondary" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={addRow}>+ Add color</button>
+              </div>
+            </Field>
+
+            <Field label="Fonts">
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <LabeledInput label="Body" value={d.tokens.fonts.body} onChange={(v) => patchTokens({ fonts: { ...d.tokens.fonts, body: v } })} />
+                <LabeledInput label="Heading" value={d.tokens.fonts.heading} onChange={(v) => patchTokens({ fonts: { ...d.tokens.fonts, heading: v } })} />
+                <LabeledInput label="Mono" value={d.tokens.fonts.mono ?? ""} onChange={(v) => patchTokens({ fonts: { ...d.tokens.fonts, mono: v } })} />
+              </div>
+            </Field>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+              <Field label="Type scale">
+                <input value={d.tokens.typeScale ?? ""} onChange={(e) => patchTokens({ typeScale: e.target.value })} style={inputStyle} />
+              </Field>
+              <Field label="Radius">
+                <input value={d.tokens.radius} onChange={(e) => patchTokens({ radius: e.target.value })} style={inputStyle} />
+              </Field>
+              <Field label="Spacing unit">
+                <input value={d.tokens.spacing ?? ""} onChange={(e) => patchTokens({ spacing: e.target.value })} style={inputStyle} />
+              </Field>
             </div>
-          </Field>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-            <Field label="Type scale">
-              <input value={d.tokens.typeScale ?? ""} onChange={(e) => patchTokens({ typeScale: e.target.value })} style={inputStyle} />
-            </Field>
-            <Field label="Radius">
-              <input value={d.tokens.radius} onChange={(e) => patchTokens({ radius: e.target.value })} style={inputStyle} />
-            </Field>
-            <Field label="Spacing unit">
-              <input value={d.tokens.spacing ?? ""} onChange={(e) => patchTokens({ spacing: e.target.value })} style={inputStyle} />
+            <div className="ds-components-head">Components</div>
+            {renderComponentEditor(d)}
+
+            <Field label="Notes (voice, density, motion — freeform guidance for the agent)">
+              <textarea value={d.tokens.notes ?? ""} onChange={(e) => patchTokens({ notes: e.target.value })} rows={4} style={{ ...inputStyle, resize: "vertical", lineHeight: 1.5 }} />
             </Field>
           </div>
 
-          <Field label="Notes (voice, density, motion — freeform guidance for the agent)">
-            <textarea value={d.tokens.notes ?? ""} onChange={(e) => patchTokens({ notes: e.target.value })} rows={4} style={{ ...inputStyle, resize: "vertical", lineHeight: 1.5 }} />
-          </Field>
+          <div className="ds-preview-col">
+            <div className="ds-preview-label">Live preview</div>
+            <DesignSystemPreview tokens={d.tokens} name={d.name} />
+          </div>
         </div>
-
-        <div className="ds-preview-col">
-          <div className="ds-preview-label">Live preview</div>
-          <DesignSystemPreview tokens={d.tokens} name={d.name} />
-        </div>
-      </div>
+      </>
     );
   }
 
-  // Hidden file input shared by the zip-import flow (rendered once).
-  const hiddenFile = (
-    <input
-      ref={fileRef}
-      type="file"
-      accept=".zip"
-      style={{ display: "none" }}
-      onChange={(e) => {
-        const f = e.target.files?.[0];
-        e.target.value = "";
-        if (f) void importFromZip(f);
-      }}
-    />
+  const hiddenInputs = (
+    <>
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".zip"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          e.target.value = "";
+          if (f) setZipFile(f);
+        }}
+      />
+      <input
+        ref={imageRef}
+        type="file"
+        accept="image/*,application/pdf"
+        multiple
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const fs = Array.from(e.target.files ?? []);
+          e.target.value = "";
+          if (fs.length) setImages((xs) => [...xs, ...fs].slice(0, 6));
+        }}
+      />
+    </>
   );
 
   if (isGuest) {
@@ -495,84 +855,88 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
     );
   }
 
+  // Show the hero (composer) only when there's NO working draft and either no
+  // systems exist yet or the user explicitly hit "+ New". A draft (review or
+  // edit) always takes precedence so a first-ever generation is reviewable even
+  // with zero saved systems.
+  const hasSystems = (systems?.length ?? 0) > 0;
+  const showHero = systems !== null && !draft && (!hasSystems || creating);
+  const listCard = (
+    <div className="dash-card ds-list">
+      <div className="ds-list-head">
+        <span>Your systems</span>
+        <button
+          type="button"
+          className="btn-ghost ds-new"
+          onClick={() => {
+            setCreating(true);
+            setDraft(null);
+            setReviewFindings(null);
+          }}
+        >
+          + New
+        </button>
+      </div>
+      <div className="ds-list-items">
+        {(systems ?? []).map((s) => (
+          <button key={s.id} type="button" onClick={() => select(s.id)} className={`dash-listrow${draft?.id === s.id ? " active" : ""}`}>
+            <span style={{ display: "flex", gap: 3 }}>
+              {Object.values(s.tokens?.colors ?? {}).slice(0, 4).map((c, i) => (
+                <span key={`${i}-${c}`} style={{ width: 12, height: 12, borderRadius: 3, background: c, border: "1px solid var(--border-default)" }} />
+              ))}
+            </span>
+            <span style={{ fontSize: 13, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {s.name}
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
   return (
     <div className="dash-page ds-page">
       <h1>Design Systems</h1>
       <p className="lede">
-        Reusable token sets (color, type, spacing) the agent generates against.
-        Create one here, then attach it to a project from the new-project picker —
-        every screen stays on-system.
+        Reusable token sets — color, type, spacing AND components — the agent generates against. Describe a brand, point
+        it at a project / repo / live site / Figma file, review what it finds, then attach it to a project so every
+        screen stays on-system.
       </p>
-      {hiddenFile}
+      {hiddenInputs}
 
       {systems === null ? (
         <p style={mutedSmall}>Loading…</p>
-      ) : systems.length === 0 ? (
+      ) : showHero ? (
         <div className="ds-empty">
+          {hasSystems && (
+            <button type="button" className="btn-ghost ds-cancel" onClick={() => setCreating(false)}>
+              ← Back to your systems
+            </button>
+          )}
           <div className="ds-plus" aria-hidden="true">
             <PlusIcon />
           </div>
-          <h2>Create a design system</h2>
+          <h2>{hasSystems ? "New design system" : "Create your first design system"}</h2>
           <p>
-            Reusable color, type and spacing tokens the agent builds against. Start
-            from a sensible blank, or infer one from an existing codebase.
+            Describe your brand or point the agent at an existing source. It analyzes colors, type and components into a
+            draft you review, refine and save.
           </p>
           {renderComposer()}
         </div>
+      ) : draft ? (
+        hasSystems ? (
+          <div className="ds-layout">
+            {listCard}
+            <div className="ds-main">{renderEditor(draft)}</div>
+          </div>
+        ) : (
+          <div className="ds-main ds-main-solo">{renderEditor(draft)}</div>
+        )
       ) : (
         <div className="ds-layout">
-          <div className="dash-card ds-list">
-            <div className="ds-list-head">
-              <span>Your systems</span>
-              <button
-                type="button"
-                className="btn-ghost ds-new"
-                onClick={() => {
-                  setDraft(null);
-                  setCreateMode("blank");
-                }}
-              >
-                + New
-              </button>
-            </div>
-            <div className="ds-list-items">
-              {systems.map((s) => (
-                <button
-                  key={s.id}
-                  type="button"
-                  onClick={() => select(s.id)}
-                  className={`dash-listrow${draft?.id === s.id ? " active" : ""}`}
-                >
-                  <span style={{ display: "flex", gap: 3 }}>
-                    {Object.values(s.tokens?.colors ?? {})
-                      .slice(0, 4)
-                      .map((c, i) => (
-                        <span
-                          key={`${i}-${c}`}
-                          style={{ width: 12, height: 12, borderRadius: 3, background: c, border: "1px solid var(--border-default)" }}
-                        />
-                      ))}
-                  </span>
-                  <span style={{ fontSize: 13, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {s.name}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-
+          {listCard}
           <div className="ds-main">
-            {draft ? (
-              renderEditor(draft)
-            ) : (
-              <>
-                <div className="ds-main-head">
-                  <h2>New design system</h2>
-                  <p>Add another reusable token set — blank or inferred from a codebase.</p>
-                </div>
-                {renderComposer()}
-              </>
-            )}
+            <p style={mutedSmall}>Loading…</p>
           </div>
         </div>
       )}
@@ -597,7 +961,25 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function LabeledInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+function LabeledInput({
+  label,
+  value,
+  onChange,
+  small,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  small?: boolean;
+}) {
+  if (small) {
+    return (
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{label}</span>
+        <input value={value} onChange={(e) => onChange(e.target.value)} style={inputStyle} />
+      </label>
+    );
+  }
   return (
     <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
       <span style={{ width: 60, fontSize: 11, color: "var(--text-muted)" }}>{label}</span>
@@ -606,11 +988,6 @@ function LabeledInput({ label, value, onChange }: { label: string; value: string
   );
 }
 
-/**
- * <input type=color> only accepts 6-digit hex. Pass 6-digit through, expand
- * 3-digit (#fff → #ffffff), and fall back to black for non-hex (rgb()/hsl()/var)
- * — the text field beside it still holds the real value, this only feeds the swatch.
- */
 function normalizeHex(v: string): string {
   if (/^#[0-9a-fA-F]{6}$/.test(v)) return v;
   const m = /^#([0-9a-fA-F]{3})$/.exec(v.trim());

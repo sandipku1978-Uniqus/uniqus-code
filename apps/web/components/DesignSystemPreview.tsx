@@ -5,10 +5,11 @@ import type { DesignTokens } from "@uniqus/api-types";
 
 /**
  * A live, at-a-glance preview of a design system. Renders a self-contained
- * "mini app" styled entirely with the system's OWN tokens (not the app theme)
- * so colors, type and component shape are visible at a glance and update live
- * as the tokens are edited. Color math is defensive: non-hex values (rgb()/
- * hsl()/var()) skip the ramp and fall back gracefully.
+ * "mini app" styled entirely with the system's OWN tokens (not the app theme):
+ * palette, type, and the STRUCTURED components (button variants, inputs, badges,
+ * a card) so consistency of shape — not just color — is visible and updates
+ * live as tokens are edited. Color math is defensive: non-hex values
+ * (rgb()/hsl()/var()) skip the ramp and fall back gracefully.
  */
 export default function DesignSystemPreview({
   tokens,
@@ -29,7 +30,40 @@ export default function DesignSystemPreview({
   const radius = (tokens.radius || "8px").trim();
   const fonts = tokens.fonts ?? { body: "system-ui", heading: "system-ui" };
 
-  const swatches = Object.entries(c);
+  // ── resolve structured component specs (palette-key aware) ──
+  const comp = tokens.components ?? {};
+  const btn = comp.button ?? {};
+  const btnRadius = btn.radius ?? radius;
+  const btnPad = `${btn.paddingY ?? "8px"} ${btn.paddingX ?? "14px"}`;
+  const btnWeight = btn.fontWeight ?? 600;
+  const variants =
+    btn.variants && btn.variants.length
+      ? btn.variants
+      : [
+          { name: "primary", background: "primary", foreground: "#ffffff" },
+          { name: "secondary", background: "surface", foreground: "text", border: "border" },
+          { name: "outline", background: "transparent", foreground: "primary", border: "primary" },
+          { name: "ghost", background: "transparent", foreground: "muted" },
+        ];
+  const inp = comp.input ?? {};
+  const inRadius = inp.radius ?? radius;
+  const inBg = tok(inp.background, c, bg);
+  const inBorder = tok(inp.border, c, border);
+  const card = comp.card ?? {};
+  const cardRadius = card.radius ?? "12px";
+  const cardBg = tok(card.background, c, surface);
+  const cardBorder = tok(card.border, c, border);
+  const cardShadow = card.shadow && card.shadow !== "none" ? card.shadow : "none";
+  const cardPad = card.padding ?? "16px";
+  const badgeRadius = comp.badge?.radius ?? "999px";
+  const badgeVariant = comp.badge?.variant ?? "soft";
+
+  function badgeStyle(color: string): CSSProperties {
+    const base: CSSProperties = { borderRadius: badgeRadius, padding: "3px 11px", fontSize: 11, fontWeight: 600 };
+    if (badgeVariant === "solid") return { ...base, background: color, color: readableOn(color) };
+    if (badgeVariant === "outline") return { ...base, background: "transparent", color, border: `1px solid ${color}` };
+    return { ...base, background: withAlpha(color, 0.16), color };
+  }
 
   const shell: CSSProperties = {
     background: bg,
@@ -38,6 +72,12 @@ export default function DesignSystemPreview({
     border: `1px solid ${border}`,
     overflow: "hidden",
     fontFamily: fonts.body || "system-ui, sans-serif",
+  };
+  const panel: CSSProperties = {
+    padding: 14,
+    borderRadius: 12,
+    border: `1px solid ${border}`,
+    background: surface,
   };
 
   return (
@@ -74,28 +114,14 @@ export default function DesignSystemPreview({
       <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 18 }}>
         {/* ── Palette ── */}
         <Section label="Palette" muted={muted}>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fill, minmax(112px, 1fr))",
-              gap: 10,
-            }}
-          >
-            {swatches.length === 0 ? (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(112px, 1fr))", gap: 10 }}>
+            {Object.entries(c).length === 0 ? (
               <span style={{ fontSize: 12, color: muted }}>No colors yet.</span>
             ) : (
-              swatches.map(([key, value]) => {
+              Object.entries(c).map(([key, value]) => {
                 const r = ramp(value);
                 return (
-                  <div
-                    key={key}
-                    style={{
-                      borderRadius: 10,
-                      overflow: "hidden",
-                      border: `1px solid ${border}`,
-                      background: surface,
-                    }}
-                  >
+                  <div key={key} style={{ borderRadius: 10, overflow: "hidden", border: `1px solid ${border}`, background: surface }}>
                     <div style={{ height: 44, background: value }} />
                     {r.length > 0 && (
                       <div style={{ display: "flex", height: 8 }}>
@@ -106,9 +132,7 @@ export default function DesignSystemPreview({
                     )}
                     <div style={{ padding: "7px 9px" }}>
                       <div style={{ fontSize: 11.5, fontWeight: 600, textTransform: "capitalize" }}>{key}</div>
-                      <div style={{ fontSize: 10.5, color: muted, fontFamily: fonts.mono || "ui-monospace, monospace" }}>
-                        {value}
-                      </div>
+                      <div style={{ fontSize: 10.5, color: muted, fontFamily: fonts.mono || "ui-monospace, monospace" }}>{value}</div>
                     </div>
                   </div>
                 );
@@ -119,28 +143,8 @@ export default function DesignSystemPreview({
 
         {/* ── Typography ── */}
         <Section label="Typography" muted={muted}>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "auto 1fr",
-              gap: 16,
-              alignItems: "center",
-              padding: 14,
-              borderRadius: 12,
-              border: `1px solid ${border}`,
-              background: surface,
-            }}
-          >
-            <div
-              style={{
-                fontFamily: fonts.heading || fonts.body,
-                fontSize: 52,
-                fontWeight: 700,
-                lineHeight: 1,
-              }}
-            >
-              Aa
-            </div>
+          <div style={{ ...panel, display: "grid", gridTemplateColumns: "auto 1fr", gap: 16, alignItems: "center" }}>
+            <div style={{ fontFamily: fonts.heading || fonts.body, fontSize: 52, fontWeight: 700, lineHeight: 1 }}>Aa</div>
             <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 6 }}>
               <div style={{ fontFamily: fonts.heading || fonts.body, fontSize: 18, fontWeight: 600 }}>
                 {familyName(fonts.heading)}
@@ -151,37 +155,42 @@ export default function DesignSystemPreview({
               </div>
               {fonts.mono ? (
                 <div style={{ fontFamily: fonts.mono, fontSize: 12, color: muted }}>
-                  const tokens = {"{"} radius: &quot;{radius}&quot; {"}"};
+                  const radius = &quot;{radius}&quot;;
                 </div>
               ) : null}
-              {tokens.typeScale ? (
-                <div style={{ fontSize: 11, color: muted }}>Scale · {tokens.typeScale}</div>
-              ) : null}
+              {tokens.typeScale ? <div style={{ fontSize: 11, color: muted }}>Scale · {tokens.typeScale}</div> : null}
             </div>
           </div>
         </Section>
 
         {/* ── Components ── */}
         <Section label="Components" muted={muted}>
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: 14,
-              padding: 14,
-              borderRadius: 12,
-              border: `1px solid ${border}`,
-              background: surface,
-            }}
-          >
-            {/* buttons */}
+          <div style={{ ...panel, display: "flex", flexDirection: "column", gap: 14 }}>
+            {/* button variants */}
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-              <button style={btn({ background: primary, color: readableOn(primary), radius })}>Primary</button>
-              <button style={btn({ background: accent, color: readableOn(accent), radius })}>Secondary</button>
-              <button style={btn({ background: "transparent", color: primary, radius, border: `1px solid ${primary}` })}>
-                Outlined
-              </button>
-              <button style={btn({ background: "transparent", color: muted, radius })}>Ghost</button>
+              {variants.map((v) => {
+                const vbg = tok(v.background, c, primary);
+                const vfg = v.foreground ? tok(v.foreground, c, readableOn(vbg)) : readableOn(vbg);
+                const vborder = v.border ? `1px solid ${tok(v.border, c, border)}` : "1px solid transparent";
+                return (
+                  <span
+                    key={v.name}
+                    style={{
+                      background: vbg,
+                      color: vfg,
+                      border: vborder,
+                      borderRadius: btnRadius,
+                      padding: btnPad,
+                      fontSize: 12.5,
+                      fontWeight: btnWeight,
+                      lineHeight: 1.2,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {cap(v.name)}
+                  </span>
+                );
+              })}
             </div>
 
             {/* input + icon buttons */}
@@ -194,9 +203,9 @@ export default function DesignSystemPreview({
                   alignItems: "center",
                   gap: 8,
                   padding: "8px 12px",
-                  borderRadius: radius,
-                  border: `1px solid ${border}`,
-                  background: bg,
+                  borderRadius: inRadius,
+                  border: `1px solid ${inBorder}`,
+                  background: inBg,
                   color: muted,
                   fontSize: 12.5,
                 }}
@@ -204,19 +213,40 @@ export default function DesignSystemPreview({
                 <SearchIcon color={muted} />
                 Search…
               </div>
-              <span style={iconBtn({ background: primary, color: readableOn(primary), radius })}>+</span>
-              <span style={iconBtn({ background: withAlpha(accent, 0.16), color: accent, radius })}>★</span>
+              <span style={iconBtn(primary, readableOn(primary), btnRadius)}>+</span>
+              <span style={iconBtn(withAlpha(accent, 0.16), accent, btnRadius)}>★</span>
             </div>
 
-            {/* badges + divider */}
+            {/* badges */}
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-              <span style={pill({ background: withAlpha(primary, 0.16), color: primary })}>Primary</span>
-              <span style={pill({ background: withAlpha(accent, 0.16), color: accent })}>Accent</span>
-              <span style={pill({ background: "transparent", color: muted, border: `1px solid ${border}` })}>
-                Neutral
-              </span>
+              <span style={badgeStyle(primary)}>Primary</span>
+              <span style={badgeStyle(accent)}>Accent</span>
+              <span style={badgeStyle(muted)}>Neutral</span>
             </div>
-            <div style={{ height: 1, background: border, width: "100%" }} />
+          </div>
+        </Section>
+
+        {/* ── Card sample ── */}
+        <Section label="Card" muted={muted}>
+          <div style={{ background: cardBg, border: `1px solid ${cardBorder}`, borderRadius: cardRadius, boxShadow: cardShadow, padding: cardPad }}>
+            <div style={{ fontFamily: fonts.heading || fonts.body, fontSize: 15, fontWeight: 700, marginBottom: 4 }}>
+              Card title
+            </div>
+            <div style={{ fontSize: 12.5, color: muted, lineHeight: 1.55, marginBottom: 12 }}>
+              Surfaces, borders and shadow come straight from the card spec — components stay on-system.
+            </div>
+            <span
+              style={{
+                background: tok(variants[0]?.background, c, primary),
+                color: variants[0]?.foreground ? tok(variants[0].foreground, c, readableOn(primary)) : readableOn(primary),
+                borderRadius: btnRadius,
+                padding: btnPad,
+                fontSize: 12.5,
+                fontWeight: btnWeight,
+              }}
+            >
+              {cap(variants[0]?.name ?? "Primary")}
+            </span>
           </div>
         </Section>
       </div>
@@ -227,9 +257,7 @@ export default function DesignSystemPreview({
 function Section({ label, muted, children }: { label: string; muted: string; children: React.ReactNode }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: 0.6, textTransform: "uppercase", color: muted }}>
-        {label}
-      </div>
+      <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: 0.6, textTransform: "uppercase", color: muted }}>{label}</div>
       {children}
     </div>
   );
@@ -244,55 +272,41 @@ function SearchIcon({ color }: { color: string }) {
   );
 }
 
-// ── style builders ──
-function btn(o: { background: string; color: string; radius: string; border?: string }): CSSProperties {
-  return {
-    appearance: "none",
-    border: o.border ?? "1px solid transparent",
-    background: o.background,
-    color: o.color,
-    borderRadius: o.radius,
-    padding: "7px 14px",
-    fontSize: 12.5,
-    fontWeight: 600,
-    fontFamily: "inherit",
-    cursor: "default",
-    lineHeight: 1.2,
-  };
-}
-function iconBtn(o: { background: string; color: string; radius: string }): CSSProperties {
+function iconBtn(background: string, color: string, radius: string): CSSProperties {
   return {
     display: "grid",
     placeItems: "center",
     width: 32,
     height: 32,
     flexShrink: 0,
-    background: o.background,
-    color: o.color,
-    borderRadius: o.radius,
+    background,
+    color,
+    borderRadius: radius,
     fontSize: 15,
     fontWeight: 700,
   };
 }
-function pill(o: { background: string; color: string; border?: string }): CSSProperties {
-  return {
-    background: o.background,
-    color: o.color,
-    border: o.border ?? "1px solid transparent",
-    borderRadius: 999,
-    padding: "3px 11px",
-    fontSize: 11,
-    fontWeight: 600,
-  };
+
+// ── token + color helpers (defensive: only operate on hex; otherwise pass through) ──
+
+/** Resolve a component color field: a palette token name → its color, else the
+ *  raw value ("transparent"/hex/rgb()), else the fallback. */
+function tok(value: string | undefined, colors: Record<string, string>, fallback: string): string {
+  if (!value) return fallback;
+  if (value === "transparent") return "transparent";
+  return colors[value] ?? value;
 }
 
-// ── color helpers (defensive: only operate on hex; otherwise pass through) ──
 function pick(colors: Record<string, string>, names: string[], fallback: string): string {
   for (const n of names) {
     const v = colors[n];
     if (typeof v === "string" && v.trim()) return v.trim();
   }
   return fallback;
+}
+
+function cap(s: string): string {
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 }
 
 function parseHex(input: string): { r: number; g: number; b: number } | null {

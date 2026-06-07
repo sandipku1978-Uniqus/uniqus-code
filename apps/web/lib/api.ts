@@ -101,7 +101,13 @@ export const createProjectFromBriefApi = (
 
 // ── Design systems (global, per-user) ─────────────────────────────────────────
 
-export type { DesignSystem, DesignTokens } from "@uniqus/api-types";
+export type {
+  DesignSystem,
+  DesignTokens,
+  DesignFindings,
+  DesignSystemDraft,
+} from "@uniqus/api-types";
+import type { DesignSystemDraft as _DesignSystemDraft } from "@uniqus/api-types";
 
 export const listDesignSystemsApi = (): Promise<{ design_systems: DesignSystem[] }> =>
   api("/api/design-systems");
@@ -131,6 +137,47 @@ export const setProjectDesignSystemApi = (
   api(`/api/projects/${projectId}/design-system`, {
     method: "POST",
     body: JSON.stringify({ design_system_id: designSystemId }),
+  });
+
+/**
+ * Agent-driven analysis → an UNSAVED draft (tokens + findings) from any source.
+ * Multipart so it can carry a brief + reference images/PDFs or a .zip. Build the
+ * FormData with `source` plus the fields that source needs (see the view).
+ */
+export const analyzeDesignSystemApi = async (
+  form: FormData,
+): Promise<{ draft: _DesignSystemDraft }> => {
+  const res = await fetch(`${API_BASE}/api/design-systems/analyze`, {
+    method: "POST",
+    credentials: "include",
+    body: form,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`API ${res.status}: ${body || res.statusText}`);
+  }
+  return (await res.json()) as { draft: _DesignSystemDraft };
+};
+
+/** Stateless AI refinement: apply a free-text instruction to a tokens object. */
+export const tweakDesignSystemApi = (
+  tokens: DesignTokens,
+  instruction: string,
+): Promise<{ tokens: DesignTokens }> =>
+  api("/api/design-systems/tweak", {
+    method: "POST",
+    body: JSON.stringify({ tokens, instruction }),
+  });
+
+/** Agent-driven creation: design a full system (colors, type, components) from
+ *  a free-form brief. `name` is optional — the model proposes one when omitted. */
+export const generateDesignSystemApi = (
+  brief: string,
+  name?: string,
+): Promise<{ design_system: DesignSystem }> =>
+  api("/api/design-systems/generate", {
+    method: "POST",
+    body: JSON.stringify({ brief, name }),
   });
 
 /** Import a codebase from GitHub and let the agent infer a design system from it.
@@ -375,6 +422,25 @@ export const disconnectSupabaseApi = (): Promise<{ ok: true }> =>
 
 export function supabaseOauthStartUrl(returnTo: string): string {
   const u = new URL(`${API_BASE}/api/supabase/start`);
+  u.searchParams.set("return", returnTo);
+  return u.toString();
+}
+
+// ── Figma ─────────────────────────────────────────────────────────────────────
+
+export interface FigmaStatus {
+  connected: boolean;
+  handle: string | null;
+  connected_at: string | null;
+}
+
+export const fetchFigmaStatus = (): Promise<FigmaStatus> => api("/api/figma/status");
+
+export const disconnectFigmaApi = (): Promise<{ ok: true }> =>
+  api("/api/figma/disconnect", { method: "POST" });
+
+export function figmaOauthStartUrl(returnTo: string): string {
+  const u = new URL(`${API_BASE}/api/figma/start`);
   u.searchParams.set("return", returnTo);
   return u.toString();
 }

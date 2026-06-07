@@ -43,6 +43,17 @@ alter table users add column if not exists supabase_org_id text;
 alter table users add column if not exists supabase_org_name text;
 alter table users add column if not exists supabase_connected_at timestamptz;
 
+-- Figma OAuth (account-level, per-user). Used to read a Figma file's styles and
+-- infer a design system from it. Like Supabase, Figma access tokens EXPIRE and
+-- ship a refresh token, so we persist both (AES-256-GCM encrypted) plus expiry
+-- and refresh on demand (see figma.ts). figma_handle is the Figma username,
+-- plaintext, only for "Connected as <handle>" display.
+alter table users add column if not exists figma_access_token text;
+alter table users add column if not exists figma_refresh_token text;
+alter table users add column if not exists figma_token_expires_at timestamptz;
+alter table users add column if not exists figma_handle text;
+alter table users add column if not exists figma_connected_at timestamptz;
+
 -- Guest / education accounts. A guest signs up with no Google account and no
 -- email — districts control what students can sign into, so this is the only
 -- way to get students using the product before a district approves it.

@@ -27,6 +27,9 @@ import type {
   AccountUsageStats,
   ModelProvider,
   DesignTokens,
+  DesignComponentTokens,
+  DesignFindings,
+  DesignSystemDraft,
 } from "@uniqus/api-types";
 import { MODEL_CATALOG, estimateCostUsd, DEFAULT_DESIGN_TOKENS } from "@uniqus/api-types";
 import { runAgentLoop } from "./agent/loop.js";
@@ -158,6 +161,14 @@ import {
   handleDisconnect as supabaseDisconnect,
   supabaseFetch,
 } from "./supabase.js";
+import {
+  handleStart as figmaStart,
+  handleCallback as figmaCallback,
+  handleStatus as figmaStatus,
+  handleDisconnect as figmaDisconnect,
+  parseFigmaFileKey,
+  extractFigmaDesignContext,
+} from "./figma.js";
 import { startDeploy, pollUntilTerminal } from "./deploy.js";
 import {
   getLatestDeployment,
@@ -609,6 +620,14 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // app instead. Lives before the global authenticate gate for that reason.
   if (req.url?.startsWith("/api/github/callback") && req.method === "GET") {
     return await githubCallback(req, res, ALLOWED_ORIGINS, async (r) => {
+      const a = await authenticate(r);
+      return a ? { user: a.user } : null;
+    });
+  }
+
+  // Figma OAuth callback — above the auth gate for the same reason as GitHub's.
+  if (req.url?.startsWith("/api/figma/callback") && req.method === "GET") {
+    return await figmaCallback(req, res, ALLOWED_ORIGINS, async (r) => {
       const a = await authenticate(r);
       return a ? { user: a.user } : null;
     });
@@ -1447,6 +1466,20 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return json(res, 200, { ok: true });
   }
 
+  // ── Figma OAuth ─────────────────────────────────────────────────────────
+  if (req.url === "/api/figma/status" && req.method === "GET") {
+    return json(res, 200, await figmaStatus(user));
+  }
+  if (req.url?.startsWith("/api/figma/start") && req.method === "GET") {
+    if (guestForbidden(res, user)) return;
+    return await figmaStart(req, res, user, ALLOWED_ORIGINS);
+  }
+  if (req.url === "/api/figma/disconnect" && req.method === "POST") {
+    if (guestForbidden(res, user)) return;
+    await figmaDisconnect(user);
+    return json(res, 200, { ok: true });
+  }
+
   // ── Supabase OAuth ──────────────────────────────────────────────────────
   if (req.url === "/api/supabase/status" && req.method === "GET") {
     return json(res, 200, await supabaseStatus(user));
@@ -1554,6 +1587,47 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (req.url === "/api/design-systems/infer-zip" && req.method === "POST") {
     if (guestForbidden(res, user)) return;
     return await handleDesignSystemZipInfer(req, res, user.id);
+  }
+  // Agent-driven creation: design a full system (colors, type, components) from
+  // a free-form brief, then save it.
+  if (req.url === "/api/design-systems/generate" && req.method === "POST") {
+    if (guestForbidden(res, user)) return;
+    const body = await readJsonBody<{ name?: string; brief?: string }>(req);
+    const brief = (body.brief ?? "").trim();
+    if (!brief) return json(res, 400, { error: "brief is required" });
+    if (brief.length > 4000) return json(res, 400, { error: "brief exceeds 4 KB cap" });
+    try {
+      const { tokens, name: genName } = await generateDesignTokensFromBrief(brief);
+      const name = (body.name ?? "").trim() || genName || "Design system";
+      const ds = await createDesignSystem(user.id, { name, tokens });
+      return json(res, 201, { design_system: ds });
+    } catch (err) {
+      return json(res, 502, {
+        error: `generate failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
+  // Agent-driven analysis → an UNSAVED draft (tokens + findings) from any source
+  // (brief/images, an existing project, a live URL, GitHub, a .zip, or Figma).
+  // The UI reviews + approves, then saves via POST /api/design-systems.
+  if (req.url === "/api/design-systems/analyze" && req.method === "POST") {
+    if (guestForbidden(res, user)) return;
+    return await handleDesignSystemAnalyze(req, res, user);
+  }
+  // Stateless AI refinement: apply a free-text instruction to a tokens object.
+  if (req.url === "/api/design-systems/tweak" && req.method === "POST") {
+    if (guestForbidden(res, user)) return;
+    const body = await readJsonBody<{ tokens?: unknown; instruction?: string }>(req);
+    const instruction = (body.instruction ?? "").trim();
+    if (!instruction) return json(res, 400, { error: "instruction is required" });
+    const baseTokens = mergeDesignTokens(DEFAULT_DESIGN_TOKENS, body.tokens);
+    try {
+      const tokens = await tweakDesignTokens(baseTokens, instruction);
+      return json(res, 200, { tokens });
+    } catch (err) {
+      return json(res, 502, { error: `refine failed: ${err instanceof Error ? err.message : String(err)}` });
+    }
   }
 
   // Attach (or detach with null) a design system to a project.
@@ -4113,8 +4187,72 @@ function mergeDesignTokens(base: DesignTokens, raw: unknown): DesignTokens {
     typeScale: typeof r.typeScale === "string" ? r.typeScale : base.typeScale,
     radius: typeof r.radius === "string" ? r.radius : base.radius,
     spacing: typeof r.spacing === "string" ? r.spacing : base.spacing,
+    components: mergeComponents(base.components, r.components),
     notes: typeof r.notes === "string" ? r.notes : base.notes,
   };
+}
+
+/** Defensively merge a model-produced `components` object onto the base spec. */
+function mergeComponents(
+  base: DesignComponentTokens | undefined,
+  raw: unknown,
+): DesignComponentTokens | undefined {
+  if (!raw || typeof raw !== "object") return base;
+  const r = raw as Record<string, unknown>;
+  const b = base ?? {};
+  const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v : undefined);
+  const num = (v: unknown): number | undefined => (typeof v === "number" && isFinite(v) ? v : undefined);
+  const out: DesignComponentTokens = { ...b };
+
+  if (r.button && typeof r.button === "object") {
+    const rb = r.button as Record<string, unknown>;
+    const variants = (Array.isArray(rb.variants) ? rb.variants : [])
+      .filter((v): v is Record<string, unknown> => !!v && typeof v === "object")
+      .map((v) => ({
+        name: str(v.name) ?? "variant",
+        background: str(v.background),
+        foreground: str(v.foreground),
+        border: str(v.border),
+      }))
+      .filter((v) => v.name);
+    out.button = {
+      radius: str(rb.radius) ?? b.button?.radius,
+      paddingX: str(rb.paddingX) ?? b.button?.paddingX,
+      paddingY: str(rb.paddingY) ?? b.button?.paddingY,
+      fontWeight: num(rb.fontWeight) ?? b.button?.fontWeight,
+      variants: variants.length ? variants : b.button?.variants,
+    };
+  }
+  if (r.input && typeof r.input === "object") {
+    const ri = r.input as Record<string, unknown>;
+    out.input = {
+      radius: str(ri.radius) ?? b.input?.radius,
+      background: str(ri.background) ?? b.input?.background,
+      border: str(ri.border) ?? b.input?.border,
+    };
+  }
+  if (r.card && typeof r.card === "object") {
+    const rc = r.card as Record<string, unknown>;
+    out.card = {
+      radius: str(rc.radius) ?? b.card?.radius,
+      background: str(rc.background) ?? b.card?.background,
+      border: str(rc.border) ?? b.card?.border,
+      shadow: str(rc.shadow) ?? b.card?.shadow,
+      padding: str(rc.padding) ?? b.card?.padding,
+    };
+  }
+  if (r.badge && typeof r.badge === "object") {
+    const rg = r.badge as Record<string, unknown>;
+    const variant = rg.variant;
+    out.badge = {
+      radius: str(rg.radius) ?? b.badge?.radius,
+      variant:
+        variant === "soft" || variant === "solid" || variant === "outline"
+          ? variant
+          : b.badge?.variant,
+    };
+  }
+  return out;
 }
 
 /**
@@ -4137,7 +4275,7 @@ async function inferDesignTokensFromDir(dir: string): Promise<DesignTokens> {
       '"notes":"<short guidance: voice, density, motion>"}. Use SEMANTIC color names (primary, accent, ' +
       "background, surface, text, muted, border, …), not raw hue names. Omit any value you cannot determine.";
     const response = await client.messages.create({
-      model: ensureAnthropic("classify"),
+      model: ensureAnthropic("design"),
       max_tokens: 1200,
       system,
       messages: [{ role: "user", content: files }],
@@ -4153,6 +4291,57 @@ async function inferDesignTokensFromDir(dir: string): Promise<DesignTokens> {
     console.error("design token inference failed (falling back to defaults):", err);
     return DEFAULT_DESIGN_TOKENS;
   }
+}
+
+/**
+ * Agent-driven creation: design a COMPLETE design system (colors, type,
+ * spacing AND component specs) from a free-form brief. Unlike inference, this
+ * throws on failure — the caller surfaces it so the user can retry, rather than
+ * silently saving a generic default that ignores their description.
+ */
+async function generateDesignTokensFromBrief(
+  brief: string,
+): Promise<{ tokens: DesignTokens; name: string }> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
+  const client = new AnthropicCtor({ apiKey });
+  const system =
+    "You are a senior product designer. From the user's brief, design a COMPLETE, coherent, tasteful design " +
+    "system. Reply with ONLY a JSON object (no prose, no markdown fences) of this shape:\n" +
+    '{"name":"<short system name>","mode":"light"|"dark"|"system",' +
+    '"colors":{"primary":"#..","accent":"#..","background":"#..","surface":"#..","text":"#..","muted":"#..","border":"#.."},' +
+    '"fonts":{"body":"<css font stack>","heading":"<css font stack>","mono":"<css font stack>"},' +
+    '"typeScale":"<e.g. 1.25 — major third>","radius":"<e.g. 10px>","spacing":"<e.g. 4px>",' +
+    '"components":{"button":{"radius":"..","paddingX":"..","paddingY":"..","fontWeight":600,' +
+    '"variants":[{"name":"primary","background":"primary","foreground":"#ffffff"},' +
+    '{"name":"secondary","background":"surface","foreground":"text","border":"border"},' +
+    '{"name":"outline","background":"transparent","foreground":"primary","border":"primary"},' +
+    '{"name":"ghost","background":"transparent","foreground":"muted"}]},' +
+    '"input":{"radius":"..","background":"background","border":"border"},' +
+    '"card":{"radius":"..","background":"surface","border":"border","shadow":"<css box-shadow or none>","padding":".."},' +
+    '"badge":{"radius":"999px","variant":"soft"}},"notes":"<voice, density, motion guidance>"}\n' +
+    "Rules: use SEMANTIC color names (primary, accent, background, surface, text, muted, border; add success/warning " +
+    "etc. if the brand needs them). Ensure WCAG-AA contrast (text on background; each button foreground on its " +
+    "background). In component color fields PREFER referencing a color token BY NAME (e.g. \"primary\", \"surface\", " +
+    "\"border\"); use a raw hex only when necessary (e.g. white labels) and \"transparent\" for ghost/outline fills. " +
+    "Make specific choices that fit the brief's industry, mood and audience — never generic filler.";
+  const response = await client.messages.create({
+    model: ensureAnthropic("design"),
+    max_tokens: 2000,
+    system,
+    messages: [{ role: "user", content: `Brief: ${brief}` }],
+  });
+  const text = response.content
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("")
+    .trim();
+  const jsonStr = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+  const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
+  const tokens = mergeDesignTokens(DEFAULT_DESIGN_TOKENS, parsed);
+  const name =
+    typeof parsed.name === "string" && parsed.name.trim() ? parsed.name.trim().slice(0, 80) : "";
+  return { tokens, name };
 }
 
 /** Multipart .zip → infer tokens → save a design system. Mirrors handleZipImport. */
@@ -4205,6 +4394,311 @@ async function handleDesignSystemZipInfer(
     return json(res, 400, { error: `infer failed: ${err instanceof Error ? err.message : String(err)}` });
   } finally {
     await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// ── Agent-driven design-system analysis (draft + findings) ──────────────────
+
+/** Validate a model-produced findings object into the typed shape. */
+function normalizeFindings(raw: unknown, source: string): DesignFindings {
+  const r = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const arr = (v: unknown): string[] =>
+    Array.isArray(v)
+      ? v.filter((x): x is string => typeof x === "string" && x.trim().length > 0).slice(0, 20)
+      : [];
+  return {
+    source,
+    colors: arr(r.colors),
+    typography: arr(r.typography),
+    components: arr(r.components),
+    spacing: arr(r.spacing),
+    notes: arr(r.notes),
+  };
+}
+
+/** Anthropic content blocks for uploaded image/PDF references (capped). */
+function buildReferenceBlocks(
+  files: { filename: string; mime: string; buf: Buffer }[],
+): Anthropic.ContentBlockParam[] {
+  const blocks: Anthropic.ContentBlockParam[] = [];
+  for (const f of files.slice(0, 6)) {
+    if (/^image\/(png|jpe?g|gif|webp)$/.test(f.mime)) {
+      blocks.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mime as "image/png", data: f.buf.toString("base64") },
+      });
+    } else if (f.mime === "application/pdf") {
+      blocks.push({
+        type: "document",
+        source: { type: "base64", media_type: "application/pdf", data: f.buf.toString("base64") },
+      });
+    }
+  }
+  return blocks;
+}
+
+/**
+ * Core analyzer: feed the gathered design context (text + optional image/PDF
+ * blocks) to the design model and return an UNSAVED draft — tokens + a findings
+ * breakdown for the approve/deny step. Throws (no silent default) so the caller
+ * can surface a retryable error.
+ */
+async function analyzeDesignSystem(input: {
+  contextText: string;
+  imageBlocks?: Anthropic.ContentBlockParam[];
+  sourceLabel: string;
+}): Promise<DesignSystemDraft> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
+  const client = new AnthropicCtor({ apiKey });
+  const system =
+    "You are a senior product designer. From the provided context (a brief, codebase/theme files, a live site's CSS, " +
+    "Figma styles, and/or reference images), design a COMPLETE, coherent, tasteful design system AND report what you " +
+    "found. Reply with ONLY a JSON object (no prose, no markdown fences) of this shape:\n" +
+    '{"name":"<short system name>","mode":"light"|"dark"|"system",' +
+    '"colors":{"primary":"#..","accent":"#..","background":"#..","surface":"#..","text":"#..","muted":"#..","border":"#.."},' +
+    '"fonts":{"body":"<css font stack>","heading":"<css font stack>","mono":"<css font stack>"},' +
+    '"typeScale":"<e.g. 1.25 — major third>","radius":"<e.g. 10px>","spacing":"<e.g. 4px>",' +
+    '"components":{"button":{"radius":"..","paddingX":"..","paddingY":"..","fontWeight":600,' +
+    '"variants":[{"name":"primary","background":"primary","foreground":"#ffffff"},' +
+    '{"name":"secondary","background":"surface","foreground":"text","border":"border"},' +
+    '{"name":"outline","background":"transparent","foreground":"primary","border":"primary"},' +
+    '{"name":"ghost","background":"transparent","foreground":"muted"}]},' +
+    '"input":{"radius":"..","background":"background","border":"border"},' +
+    '"card":{"radius":"..","background":"surface","border":"border","shadow":"<css box-shadow or none>","padding":".."},' +
+    '"badge":{"radius":"999px","variant":"soft"}},"notes":"<voice, density, motion guidance>",' +
+    '"findings":{"colors":["short notes on palette you detected/chose"],"typography":["fonts + scale"],' +
+    '"components":["button/input/card/badge decisions"],"spacing":["radius/spacing"],"notes":["other rules/observations"]}}\n' +
+    "Rules: use SEMANTIC color names. Ensure WCAG-AA contrast (text on background; each button foreground on its " +
+    "background). In component color fields PREFER a color token name (e.g. \"primary\"); use raw hex only when needed " +
+    "and \"transparent\" for ghost/outline. When the context contains real values (detected colors/fonts/styles), " +
+    "honor them; otherwise infer tastefully from the brief/images. Keep each findings entry short and specific.";
+  const content: Anthropic.ContentBlockParam[] = [
+    { type: "text", text: input.contextText.slice(0, 120_000) },
+    ...(input.imageBlocks ?? []),
+  ];
+  const response = await client.messages.create({
+    model: ensureAnthropic("design"),
+    max_tokens: 2400,
+    system,
+    messages: [{ role: "user", content }],
+  });
+  const text = response.content
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("")
+    .trim();
+  const jsonStr = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+  const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
+  const tokens = mergeDesignTokens(DEFAULT_DESIGN_TOKENS, parsed);
+  const name =
+    typeof parsed.name === "string" && parsed.name.trim() ? parsed.name.trim().slice(0, 80) : "Design system";
+  return { name, tokens, findings: normalizeFindings(parsed.findings, input.sourceLabel) };
+}
+
+/** Apply a free-text instruction to a tokens object and return updated tokens. */
+async function tweakDesignTokens(base: DesignTokens, instruction: string): Promise<DesignTokens> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
+  const client = new AnthropicCtor({ apiKey });
+  const system =
+    "You refine an existing design system. Apply the user's instruction to the given tokens JSON and reply with " +
+    "ONLY the COMPLETE updated tokens JSON (same shape), no prose, no fences. Leave everything the instruction " +
+    "doesn't touch unchanged. Keep semantic color names and the component/variant structure; preserve WCAG-AA contrast.";
+  const response = await client.messages.create({
+    model: ensureAnthropic("design"),
+    max_tokens: 2200,
+    system,
+    messages: [
+      { role: "user", content: `Current tokens:\n${JSON.stringify(base)}\n\nInstruction: ${instruction}` },
+    ],
+  });
+  const text = response.content
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("")
+    .trim();
+  const jsonStr = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+  return mergeDesignTokens(base, JSON.parse(jsonStr));
+}
+
+/**
+ * Fetch a LIVE website and distill a text design context from it: inline
+ * <style> blocks, a few linked stylesheets, theme-color and title. SSRF-guarded
+ * (rejects private/loopback hosts), size-capped.
+ */
+async function fetchLiveSiteContext(rawUrl: string): Promise<string> {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error("Enter a valid URL (e.g. https://stripe.com).");
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error("URL must be http(s).");
+  }
+  await assertPublicHost(url.hostname);
+  const pageRes = await fetch(url.toString(), {
+    headers: { "User-Agent": "uniqus-code design-system bot" },
+    redirect: "follow",
+  });
+  if (!pageRes.ok) throw new Error(`couldn't fetch the page (${pageRes.status})`);
+  const html = (await pageRes.text()).slice(0, 400_000);
+
+  const styleBlocks = [...html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)]
+    .map((m) => m[1])
+    .join("\n")
+    .slice(0, 30_000);
+
+  const linkHrefs = [...html.matchAll(/<link\b[^>]*>/gi)]
+    .filter((m) => /rel=["']?stylesheet/i.test(m[0]))
+    .map((m) => m[0].match(/href=["']([^"']+)["']/i)?.[1])
+    .filter((h): h is string => !!h)
+    .slice(0, 4);
+
+  let cssText = "";
+  for (const href of linkHrefs) {
+    try {
+      const cssUrl = new URL(href, url);
+      if (cssUrl.protocol !== "https:" && cssUrl.protocol !== "http:") continue;
+      await assertPublicHost(cssUrl.hostname);
+      const cssRes = await fetch(cssUrl.toString(), { headers: { "User-Agent": "uniqus-code" } });
+      if (cssRes.ok) cssText += `\n/* ${cssUrl.pathname} */\n${(await cssRes.text()).slice(0, 20_000)}`;
+      if (cssText.length > 60_000) break;
+    } catch {
+      /* skip unreachable/blocked stylesheet */
+    }
+  }
+
+  const themeColor = html.match(/<meta[^>]+name=["']theme-color["'][^>]+content=["']([^"']+)["']/i)?.[1];
+  const title = html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1];
+  return [
+    `Live site: ${url.toString()}`,
+    title ? `Page title: ${title.trim()}` : "",
+    themeColor ? `theme-color: ${themeColor}` : "",
+    styleBlocks ? `\nInline <style>:\n${styleBlocks}` : "",
+    cssText ? `\nLinked CSS:\n${cssText}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, 100_000);
+}
+
+/** Multipart dispatcher for /api/design-systems/analyze across all sources. */
+async function handleDesignSystemAnalyze(
+  req: IncomingMessage,
+  res: ServerResponse,
+  user: { id: string },
+): Promise<void> {
+  const fields: Record<string, string> = {};
+  const files: { field: string; filename: string; mime: string; buf: Buffer }[] = [];
+  let parseError: string | null = null;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const bb = Busboy({ headers: req.headers, limits: { fileSize: 100 * 1024 * 1024, files: 8 } });
+      bb.on("file", (field, file, info) => {
+        const chunks: Buffer[] = [];
+        file.on("data", (d: Buffer) => chunks.push(d));
+        file.on("limit", () => {
+          parseError = "a file exceeds the 100 MB limit";
+        });
+        file.on("end", () => {
+          if (!parseError && info.filename) {
+            files.push({ field, filename: info.filename, mime: info.mimeType, buf: Buffer.concat(chunks) });
+          }
+        });
+      });
+      bb.on("field", (n, v) => {
+        fields[n] = v;
+      });
+      bb.on("finish", () => resolve());
+      bb.on("error", (err) => reject(err));
+      req.pipe(bb);
+    });
+  } catch (err) {
+    return json(res, 400, { error: `multipart parse failed: ${err instanceof Error ? err.message : String(err)}` });
+  }
+  if (parseError) return json(res, 400, { error: parseError });
+
+  const source = fields.source ?? "brief";
+  try {
+    let contextText = "";
+    let imageBlocks: Anthropic.ContentBlockParam[] = [];
+    let sourceLabel = source;
+
+    if (source === "brief") {
+      const brief = (fields.brief ?? "").trim();
+      imageBlocks = buildReferenceBlocks(files);
+      if (!brief && imageBlocks.length === 0) {
+        return json(res, 400, { error: "Describe the system or attach a reference image/PDF." });
+      }
+      contextText = brief
+        ? `Design brief: ${brief}`
+        : "Infer a complete design system from the attached reference image(s)/document(s).";
+      sourceLabel = "brief";
+    } else if (source === "project") {
+      const projectId = fields.project_id ?? "";
+      const project = await getProject(projectId, user.id);
+      if (!project) return json(res, 404, { error: "project not found" });
+      const dir = sandboxDirFor(projectId);
+      await getTracker(projectId, dir).hydrateFromStorage().catch(() => 0);
+      contextText = await collectDesignFiles(dir);
+      if (!contextText.trim()) return json(res, 400, { error: "No design-relevant files found in that project." });
+      sourceLabel = `project: ${project.name}`;
+    } else if (source === "url") {
+      const u = (fields.url ?? "").trim();
+      if (!u) return json(res, 400, { error: "url is required" });
+      contextText = await fetchLiveSiteContext(u);
+      sourceLabel = `live site: ${(() => { try { return new URL(u).host; } catch { return u; } })()}`;
+    } else if (source === "github") {
+      const repoUrl = (fields.repo_url ?? "").trim();
+      if (!repoUrl) return json(res, 400, { error: "repo_url is required" });
+      const urlError = await validateCloneUrl(repoUrl);
+      if (urlError) return json(res, 400, { error: urlError });
+      let authToken: string | undefined;
+      if (fields.use_oauth === "true") {
+        const stored = await getGithubToken(user.id);
+        if (!stored) return json(res, 409, { error: "github_not_connected" });
+        authToken = stored;
+      }
+      const tmp = path.join(tmpdir(), `uniqus-ds-${randomUUID()}`);
+      try {
+        await importGithub({ repo_url: repoUrl, branch: fields.branch || undefined, pat: authToken }, tmp);
+        contextText = await collectDesignFiles(tmp);
+      } finally {
+        await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+      }
+      if (!contextText.trim()) return json(res, 400, { error: "No design-relevant files found in that repo." });
+      sourceLabel = `repo: ${fields.repo_full_name || repoUrl}`;
+    } else if (source === "zip") {
+      const zip = files.find((f) => f.filename.toLowerCase().endsWith(".zip"));
+      if (!zip) return json(res, 400, { error: "no .zip uploaded" });
+      const tmp = path.join(tmpdir(), `uniqus-ds-${randomUUID()}`);
+      try {
+        await importZip(zip.buf, tmp);
+        contextText = await collectDesignFiles(tmp);
+      } finally {
+        await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+      }
+      if (!contextText.trim()) return json(res, 400, { error: "No design-relevant files found in that .zip." });
+      sourceLabel = `zip: ${zip.filename}`;
+    } else if (source === "figma") {
+      const key = parseFigmaFileKey(fields.file_key ?? fields.url ?? "");
+      if (!key) return json(res, 400, { error: "Enter a Figma file URL or key." });
+      const { contextText: ctx } = await extractFigmaDesignContext(user.id, key);
+      contextText = ctx;
+      sourceLabel = `figma: ${key}`;
+    } else {
+      return json(res, 400, { error: `unknown source '${source}'` });
+    }
+
+    const draft = await analyzeDesignSystem({ contextText, imageBlocks, sourceLabel });
+    return json(res, 200, { draft });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "github_not_connected") return json(res, 409, { error: "github_not_connected" });
+    if (msg === "figma_not_connected") return json(res, 409, { error: "figma_not_connected" });
+    return json(res, 502, { error: `analyze failed: ${msg}` });
   }
 }
 

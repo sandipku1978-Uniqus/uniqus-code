@@ -16,7 +16,12 @@
       "WebFetch(domain:api.github.com)",
       "WebFetch(domain:community.openai.com)",
       "WebFetch(domain:www.latforge.com)",
-      "mcp__claude_ai_Tiny_Fish__fetch_content"
+      "mcp__claude_ai_Tiny_Fish__fetch_content",
+      "WebFetch(domain:venturebeat.com)",
+      "WebFetch(domain:blog.google)",
+      "WebFetch(domain:thenewstack.io)",
+      "WebFetch(domain:www.mindstudio.ai)",
+      "WebFetch(domain:developers.figma.com)"
     ],
     "additionalDirectories": [
       "c:\\Users\\thech\\AppData\\Local\\Temp\\uniqus-shot"

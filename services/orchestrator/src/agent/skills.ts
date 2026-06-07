@@ -90,12 +90,38 @@ export function formatDesignSystemForPrompt(tokens: DesignTokens | null): string
   if (tokens.typeScale) lines.push(`type scale: ${tokens.typeScale}`);
   if (tokens.radius) lines.push(`radius: ${tokens.radius}`);
   if (tokens.spacing) lines.push(`spacing unit: ${tokens.spacing}`);
+  const cp = tokens.components;
+  if (cp && (cp.button || cp.input || cp.card || cp.badge)) {
+    lines.push("components (build these to spec; variant colors reference the color tokens above by name):");
+    if (cp.button) {
+      const b = cp.button;
+      const vs = (b.variants ?? [])
+        .map(
+          (v) =>
+            `${v.name}(bg=${v.background ?? "-"}, fg=${v.foreground ?? "-"}${v.border ? `, border=${v.border}` : ""})`,
+        )
+        .join("; ");
+      lines.push(
+        `  button: radius=${b.radius ?? "-"}, padding=${b.paddingY ?? "-"} ${b.paddingX ?? "-"}, weight=${b.fontWeight ?? "-"}` +
+          (vs ? `\n    variants: ${vs}` : ""),
+      );
+    }
+    if (cp.input)
+      lines.push(`  input: radius=${cp.input.radius ?? "-"}, bg=${cp.input.background ?? "-"}, border=${cp.input.border ?? "-"}`);
+    if (cp.card)
+      lines.push(
+        `  card: radius=${cp.card.radius ?? "-"}, bg=${cp.card.background ?? "-"}, border=${cp.card.border ?? "-"}, shadow=${cp.card.shadow ?? "-"}, padding=${cp.card.padding ?? "-"}`,
+      );
+    if (cp.badge) lines.push(`  badge: radius=${cp.badge.radius ?? "-"}, style=${cp.badge.variant ?? "-"}`);
+  }
   if (tokens.notes && tokens.notes.trim()) lines.push(`notes: ${tokens.notes.trim()}`);
   return (
     `\n\nDesign System — this project has an attached design system. GENERATE AGAINST THESE TOKENS: ` +
     `scaffold a tokens file (CSS variables or the Tailwind theme) from them and reference styles by token ` +
-    `(e.g. var(--color-primary)) instead of hardcoding values, so every screen is consistent. Do not invent ` +
-    `off-system colors or fonts unless the user explicitly asks.\n<design_system>\n${lines.join("\n")}\n</design_system>\n`
+    `(e.g. var(--color-primary)) instead of hardcoding values. Build buttons, inputs, cards and badges to the ` +
+    `component specs below so every screen is consistent — match their radius/padding/weight and render each ` +
+    `button variant with its specified colors. Do not invent off-system colors, fonts or component shapes ` +
+    `unless the user explicitly asks.\n<design_system>\n${lines.join("\n")}\n</design_system>\n`
   );
 }
 

@@ -286,6 +286,105 @@ export async function getSupabaseTokens(userId: string): Promise<SupabaseTokens 
   }
 }
 
+// ── Figma ─────────────────────────────────────────────────────────────────
+// Like Supabase: access tokens expire and a refresh token is issued, so we
+// store both (encrypted) + an expiry and refresh on demand (see figma.ts).
+
+export interface FigmaLink {
+  handle: string | null;
+  connected_at: string;
+}
+
+export interface FigmaTokens {
+  access_token: string;
+  refresh_token: string;
+  /** Epoch ms at which the access token expires. */
+  expires_at: number;
+}
+
+export async function setFigmaToken(
+  userId: string,
+  tokens: { access_token: string; refresh_token: string; expires_in: number },
+  handle: string | null,
+): Promise<void> {
+  const expiresAt = new Date(Date.now() + tokens.expires_in * 1000).toISOString();
+  const { error } = await db()
+    .from("users")
+    .update({
+      figma_access_token: encryptToken(tokens.access_token),
+      figma_refresh_token: encryptToken(tokens.refresh_token),
+      figma_token_expires_at: expiresAt,
+      figma_handle: handle,
+      figma_connected_at: new Date().toISOString(),
+    })
+    .eq("id", userId);
+  if (error) throw new Error(`setFigmaToken failed: ${error.message}`);
+}
+
+export async function updateFigmaTokens(
+  userId: string,
+  tokens: { access_token: string; refresh_token: string; expires_in: number },
+): Promise<void> {
+  const expiresAt = new Date(Date.now() + tokens.expires_in * 1000).toISOString();
+  const { error } = await db()
+    .from("users")
+    .update({
+      figma_access_token: encryptToken(tokens.access_token),
+      figma_refresh_token: encryptToken(tokens.refresh_token),
+      figma_token_expires_at: expiresAt,
+    })
+    .eq("id", userId);
+  if (error) throw new Error(`updateFigmaTokens failed: ${error.message}`);
+}
+
+export async function clearFigmaToken(userId: string): Promise<void> {
+  const { error } = await db()
+    .from("users")
+    .update({
+      figma_access_token: null,
+      figma_refresh_token: null,
+      figma_token_expires_at: null,
+      figma_handle: null,
+      figma_connected_at: null,
+    })
+    .eq("id", userId);
+  if (error) throw new Error(`clearFigmaToken failed: ${error.message}`);
+}
+
+export async function getFigmaLink(userId: string): Promise<FigmaLink | null> {
+  const { data, error } = await db()
+    .from("users")
+    .select("figma_handle, figma_connected_at, figma_access_token")
+    .eq("id", userId)
+    .single();
+  if (error || !data?.figma_access_token) return null;
+  return {
+    handle: (data.figma_handle as string | null) ?? null,
+    connected_at: data.figma_connected_at as string,
+  };
+}
+
+export async function getFigmaTokens(userId: string): Promise<FigmaTokens | null> {
+  const { data, error } = await db()
+    .from("users")
+    .select("figma_access_token, figma_refresh_token, figma_token_expires_at")
+    .eq("id", userId)
+    .single();
+  if (error || !data?.figma_access_token || !data?.figma_refresh_token) return null;
+  try {
+    return {
+      access_token: decryptToken(data.figma_access_token as string),
+      refresh_token: decryptToken(data.figma_refresh_token as string),
+      expires_at: data.figma_token_expires_at
+        ? new Date(data.figma_token_expires_at as string).getTime()
+        : 0,
+    };
+  } catch (err) {
+    console.error(`getFigmaTokens decrypt failed for user ${userId}:`, err);
+    return null;
+  }
+}
+
 /**
  * Decrypt and return the user's GitHub access token, or null if not connected.
  * Caller must be the orchestrator on behalf of the authenticated user.
