@@ -4118,6 +4118,115 @@ section.band .sub {
 .dash-listrow.active { background: var(--bg-dark); border-color: var(--brand-magenta); }
 
 /* ==========================================================================
+   Design Systems workflow — empty-state hero, gradient create/import composer,
+   list + editor layout, and the sticky live preview.
+   ========================================================================== */
+.ds-page { max-width: 1280px; }
+
+/* Empty state: a centered hero with a gradient plus + the create composer. */
+.ds-empty {
+  max-width: 680px;
+  margin: 5vh auto 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 6px;
+  animation: fadeInUp var(--dur-base) var(--ease-out) backwards;
+}
+.ds-empty .ds-plus {
+  width: 56px; height: 56px; border-radius: 50%;
+  display: grid; place-items: center;
+  color: #fff; background: var(--brand-gradient);
+  box-shadow: 0 8px 30px rgba(178, 30, 125, 0.35);
+  margin-bottom: 10px;
+}
+.ds-empty h2 { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; margin: 0; }
+.ds-empty p { color: var(--text-muted); font-size: 14px; line-height: 1.6; margin: 0 0 14px; max-width: 46ch; }
+
+/* Gradient-framed create/import composer (echoes the home-page composer). */
+.ds-gradient-frame {
+  width: 100%;
+  background: var(--brand-gradient);
+  border-radius: 16px;
+  padding: 1.5px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  text-align: left;
+}
+.ds-composer {
+  background: var(--bg-surface);
+  border-radius: 14.5px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ds-tabs { align-self: flex-start; margin: 0; }
+.ds-name {
+  width: 100%;
+  background: var(--bg-dark);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  padding: 9px 11px;
+  font-size: 13.5px;
+  font-family: inherit;
+}
+.ds-name:focus { outline: none; border-color: var(--brand-magenta); }
+.ds-hint { margin: 0; font-size: 11.5px; color: var(--text-dim, var(--text-muted)); line-height: 1.5; }
+.ds-connect {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px; color: var(--text-muted);
+}
+.ds-composer-actions { display: flex; justify-content: flex-end; }
+
+/* Two-column workspace: list + main (editor / composer). */
+.ds-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 264px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.ds-list { padding: 12px; }
+.ds-list-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 2px 4px 10px;
+}
+.ds-list-head .ds-new { font-size: 11.5px; padding: 3px 8px; }
+.ds-list-items { display: flex; flex-direction: column; gap: 4px; }
+
+.ds-main-head { margin: 2px 2px 12px; }
+.ds-main-head h2 { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
+.ds-main-head p { font-size: 12.5px; color: var(--text-muted); margin: 0; }
+
+/* Editor: token controls beside a sticky, live token preview. */
+.ds-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.ds-preview-col { position: sticky; top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.ds-preview-label {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase;
+  color: var(--text-muted); padding: 0 2px;
+}
+
+@media (max-width: 1180px) {
+  .ds-editor { grid-template-columns: 1fr; }
+  .ds-preview-col { position: static; }
+}
+@media (max-width: 760px) {
+  .ds-layout { grid-template-columns: 1fr; }
+}
+
+/* ==========================================================================
    Motion overhaul — consistent entrances, micro-interactions, reduced-motion.
    Everything here animates only opacity/transform (compositor-cheap) and uses
    the shared --dur-* / --ease-* tokens so motion feels of-a-piece. Entrances

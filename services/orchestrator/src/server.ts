@@ -1518,16 +1518,29 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // Infer a design system from a GitHub repo: clone → extract tokens → save.
   if (req.url === "/api/design-systems/infer-github" && req.method === "POST") {
     if (guestForbidden(res, user)) return;
-    const body = await readJsonBody<{ name?: string; repo_url?: string; branch?: string; pat?: string }>(req);
+    const body = await readJsonBody<{ name?: string; repo_url?: string; branch?: string; pat?: string; use_oauth?: boolean }>(req);
     const name = (body.name ?? "").trim();
     const repoUrl = (body.repo_url ?? "").trim();
     if (!name) return json(res, 400, { error: "name is required" });
     if (!repoUrl) return json(res, 400, { error: "repo_url is required" });
     const urlError = await validateCloneUrl(repoUrl);
     if (urlError) return json(res, 400, { error: urlError });
+    // Same auth resolution as project import: `use_oauth` pulls the stored
+    // GitHub token (so the repo picker can read private repos); otherwise fall
+    // back to a body PAT, which may be empty for public repos.
+    let authToken: string | undefined = body.pat?.trim() || undefined;
+    if (body.use_oauth) {
+      const stored = await getGithubToken(user.id);
+      if (!stored) {
+        return json(res, 409, {
+          error: "github_not_connected — connect GitHub from the project picker, or paste a PAT instead",
+        });
+      }
+      authToken = stored;
+    }
     const tmp = path.join(tmpdir(), `uniqus-ds-${randomUUID()}`);
     try {
-      await importGithub({ repo_url: repoUrl, branch: body.branch, pat: body.pat }, tmp);
+      await importGithub({ repo_url: repoUrl, branch: body.branch, pat: authToken }, tmp);
       const tokens = await inferDesignTokensFromDir(tmp);
       const ds = await createDesignSystem(user.id, { name, tokens });
       return json(res, 201, { design_system: ds });

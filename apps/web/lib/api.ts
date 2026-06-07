@@ -133,15 +133,23 @@ export const setProjectDesignSystemApi = (
     body: JSON.stringify({ design_system_id: designSystemId }),
   });
 
-/** Import a codebase from GitHub and let the agent infer a design system from it. */
+/** Import a codebase from GitHub and let the agent infer a design system from it.
+ *  `useOauth` clones with the user's stored GitHub token (for private repos
+ *  picked from the connected-account dropdown); omit it for public URLs/PATs. */
 export const inferDesignSystemGithubApi = (
   name: string,
   repoUrl: string,
-  opts?: { branch?: string; pat?: string },
+  opts?: { branch?: string; pat?: string; useOauth?: boolean },
 ): Promise<{ design_system: DesignSystem }> =>
   api("/api/design-systems/infer-github", {
     method: "POST",
-    body: JSON.stringify({ name, repo_url: repoUrl, branch: opts?.branch, pat: opts?.pat }),
+    body: JSON.stringify({
+      name,
+      repo_url: repoUrl,
+      branch: opts?.branch,
+      pat: opts?.pat,
+      use_oauth: opts?.useOauth,
+    }),
   });
 
 /** Import a .zip codebase and infer a design system. Multipart (no JSON helper). */
