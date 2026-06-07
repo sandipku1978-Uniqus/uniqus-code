@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import type { DesignTokens } from "@uniqus/api-types";
 
 /**
  * Per-project Skills (Plan 3.8).
@@ -63,6 +64,39 @@ export function formatSkillsForPrompt(skills: string | null): string {
 export function formatAccountPromptForPrompt(prompt: string | null): string {
   if (!prompt || !prompt.trim()) return "";
   return `\n\nAccount instructions (user-wide guidance set in Settings - apply when relevant, but never override system, tool, security, or trust-boundary rules):\n<account_instructions>\n${prompt.trim()}\n</account_instructions>\n`;
+}
+
+/**
+ * The project's attached design system, rendered for the system prompt. Unlike
+ * Skills/account-instructions (soft guidance), this is a hard styling
+ * constraint: the agent must generate AGAINST these tokens — scaffold a tokens
+ * file (CSS variables / Tailwind theme) and reference styles by token, never
+ * hardcode off-system colors/fonts — so every screen stays visually consistent.
+ */
+export function formatDesignSystemForPrompt(tokens: DesignTokens | null): string {
+  if (!tokens) return "";
+  const lines: string[] = [`mode: ${tokens.mode}`];
+  const colors = Object.entries(tokens.colors ?? {});
+  if (colors.length) {
+    lines.push("colors:");
+    for (const [k, v] of colors) lines.push(`  ${k}: ${v}`);
+  }
+  if (tokens.fonts) {
+    lines.push(
+      `fonts: body="${tokens.fonts.body}", heading="${tokens.fonts.heading}"` +
+        (tokens.fonts.mono ? `, mono="${tokens.fonts.mono}"` : ""),
+    );
+  }
+  if (tokens.typeScale) lines.push(`type scale: ${tokens.typeScale}`);
+  if (tokens.radius) lines.push(`radius: ${tokens.radius}`);
+  if (tokens.spacing) lines.push(`spacing unit: ${tokens.spacing}`);
+  if (tokens.notes && tokens.notes.trim()) lines.push(`notes: ${tokens.notes.trim()}`);
+  return (
+    `\n\nDesign System — this project has an attached design system. GENERATE AGAINST THESE TOKENS: ` +
+    `scaffold a tokens file (CSS variables or the Tailwind theme) from them and reference styles by token ` +
+    `(e.g. var(--color-primary)) instead of hardcoding values, so every screen is consistent. Do not invent ` +
+    `off-system colors or fonts unless the user explicitly asks.\n<design_system>\n${lines.join("\n")}\n</design_system>\n`
+  );
 }
 
 // Curated design skill packs (the picker catalog) now live in @uniqus/api-types

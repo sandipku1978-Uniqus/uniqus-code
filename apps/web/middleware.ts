@@ -6,10 +6,39 @@ import {
 } from "next/server";
 import { GUEST_COOKIE_NAME, unsealGuestCookie } from "@/lib/guest-session";
 
+/**
+ * Public marketing + resource pages (app/(marketing)/* and app/guide). These
+ * must be reachable without a WorkOS session or guest cookie, so they're
+ * allow-listed here. Patterns are matched with path-to-regexp v6 (anchored,
+ * exact), so nested blog posts need the `:path*` wildcard. Keep this in sync
+ * with the footer/nav links in components/SiteFooter.tsx + MarketingNav.tsx.
+ */
+const PUBLIC_PATHS = [
+  "/",
+  "/login",
+  "/callback",
+  "/guide",
+  "/pricing",
+  "/enterprise",
+  "/security",
+  "/models",
+  "/workspaces",
+  "/templates",
+  "/changelog",
+  "/about",
+  "/careers",
+  "/contact",
+  "/support",
+  "/community",
+  "/status",
+  "/blog",
+  "/blog/:path*",
+];
+
 const workosMiddleware = authkitMiddleware({
   middlewareAuth: {
     enabled: true,
-    unauthenticatedPaths: ["/", "/login", "/callback", "/guide"],
+    unauthenticatedPaths: PUBLIC_PATHS,
   },
 });
 

@@ -3,6 +3,7 @@ import { withAuth } from "@workos-inc/authkit-nextjs";
 import BrandLockup from "@/components/BrandLockup";
 import GuestBanner from "@/components/GuestBanner";
 import LandingPrompt from "@/components/LandingPrompt";
+import SiteFooter from "@/components/SiteFooter";
 import { getGuestSession } from "@/lib/guest-server";
 
 export default async function MarketingPage() {
@@ -28,8 +29,9 @@ export default async function MarketingPage() {
           <a href="#how">How it works</a>
           <a href="#models">AI models</a>
           <a href="#workspaces">Workspaces</a>
+          <Link href="/pricing">Pricing</Link>
           <a href="#trust">Trust</a>
-          <a href="/guide">Guide</a>
+          <Link href="/guide">Guide</Link>
         </div>
         <div className="right">
           {!user && (
@@ -176,11 +178,8 @@ export default async function MarketingPage() {
                 <span className="feature-kicker">{feature.kicker}</span>
                 <h3>{feature.title}</h3>
                 <p>{feature.body}</p>
-                <div className={`feature-visual ${feature.visual}`} aria-hidden="true">
-                  <span />
-                  <span />
-                  <span />
-                  <span />
+                <div className="feature-visual" aria-hidden="true">
+                  <FeatureArt kind={feature.visual} />
                 </div>
               </article>
             ))}
@@ -239,30 +238,163 @@ export default async function MarketingPage() {
             </p>
           </div>
 
-          <footer className="site-footer">
-            <div className="footer-panel">
-              <div className="footer-brand-block">
-                <BrandLockup style={{ fontSize: 14 }} />
-                <span>&copy; 2026 Uniqus Consultech</span>
-              </div>
-              <div className="footer-columns">
-                {FOOTER_COLUMNS.map((column) => (
-                  <div className="footer-column" key={column.title}>
-                    <h3>{column.title}</h3>
-                    {column.links.map((link) => (
-                      <a href={link.href} key={link.label}>
-                        {link.label}
-                      </a>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </footer>
+          <SiteFooter />
         </section>
       </main>
     </div>
   );
+}
+
+// Meaningful mini-illustration per feature card. Each one literally depicts the
+// capability (a checklist for Plan, chat + editor for Build, etc.) instead of
+// the old abstract squares. Colours come from CSS classes (globals.css) so they
+// stay theme-aware. preserveAspectRatio="meet" keeps the whole scene visible.
+function FeatureArt({ kind }: { kind: string }) {
+  const svgProps = {
+    className: "feature-art",
+    viewBox: "0 0 360 150",
+    preserveAspectRatio: "xMidYMid meet",
+    "aria-hidden": true as const,
+  };
+
+  switch (kind) {
+    // Plan — a plan/checklist card: two approved steps, one still pending.
+    case "visual-plan":
+      return (
+        <svg {...svgProps}>
+          <rect className="fa-panel" x="92" y="20" width="176" height="110" rx="16" />
+          <rect className="fa-stroke" x="92" y="20" width="176" height="110" rx="16" />
+          <rect className="fa-line-soft" x="112" y="34" width="76" height="9" rx="4" />
+          <circle className="fa-green" cx="120" cy="64" r="8" />
+          <path className="fa-check" d="M116 64 l2.6 2.8 l5.4 -6.2" />
+          <rect className="fa-line" x="138" y="60" width="104" height="8" rx="4" />
+          <circle className="fa-green" cx="120" cy="88" r="8" />
+          <path className="fa-check" d="M116 88 l2.6 2.8 l5.4 -6.2" />
+          <rect className="fa-line" x="138" y="84" width="86" height="8" rx="4" />
+          <circle className="fa-stroke" cx="120" cy="112" r="8" />
+          <rect className="fa-line-soft" x="138" y="108" width="70" height="8" rx="4" />
+        </svg>
+      );
+
+    // Build — a chat bubble next to a code editor with syntax-coloured lines.
+    case "visual-build":
+      return (
+        <svg {...svgProps}>
+          <rect className="fa-panel-2" x="24" y="32" width="118" height="80" rx="16" />
+          <path className="fa-panel-2" d="M44 108 L44 128 L66 110 Z" />
+          <rect className="fa-line" x="42" y="54" width="82" height="8" rx="4" />
+          <rect className="fa-magenta" x="42" y="72" width="46" height="8" rx="4" />
+          <rect className="fa-line-soft" x="94" y="72" width="30" height="8" rx="4" />
+          <rect className="fa-panel" x="160" y="26" width="176" height="98" rx="14" />
+          <rect className="fa-stroke" x="160" y="26" width="176" height="98" rx="14" />
+          <line className="fa-stroke" x1="160" y1="50" x2="336" y2="50" />
+          <circle className="fa-line" cx="174" cy="38" r="3" />
+          <circle className="fa-line" cx="186" cy="38" r="3" />
+          <circle className="fa-line" cx="198" cy="38" r="3" />
+          <rect className="fa-magenta" x="172" y="62" width="38" height="7" rx="3.5" />
+          <rect className="fa-line" x="216" y="62" width="64" height="7" rx="3.5" />
+          <rect className="fa-purple-hi" x="184" y="78" width="50" height="7" rx="3.5" />
+          <rect className="fa-line" x="240" y="78" width="40" height="7" rx="3.5" />
+          <rect className="fa-line-soft" x="184" y="94" width="72" height="7" rx="3.5" />
+          <rect className="fa-magenta" x="172" y="110" width="30" height="7" rx="3.5" />
+        </svg>
+      );
+
+    // Preview — a browser window rendering an app, with a screenshot-capture badge.
+    case "visual-preview":
+      return (
+        <svg {...svgProps}>
+          <defs>
+            <linearGradient id="faGradPrev" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" className="fa-grad-a" />
+              <stop offset="1" className="fa-grad-b" />
+            </linearGradient>
+          </defs>
+          <rect className="fa-panel" x="40" y="20" width="280" height="110" rx="14" />
+          <rect className="fa-stroke" x="40" y="20" width="280" height="110" rx="14" />
+          <circle className="fa-line" cx="58" cy="36" r="3.5" />
+          <circle className="fa-line" cx="70" cy="36" r="3.5" />
+          <circle className="fa-line" cx="82" cy="36" r="3.5" />
+          <rect className="fa-line-soft" x="100" y="31" width="204" height="11" rx="5.5" />
+          <line className="fa-stroke" x1="40" y1="52" x2="320" y2="52" />
+          <rect fill="url(#faGradPrev)" x="58" y="64" width="116" height="54" rx="9" />
+          <rect className="fa-line" x="188" y="66" width="112" height="9" rx="4.5" />
+          <rect className="fa-line-soft" x="188" y="82" width="92" height="9" rx="4.5" />
+          <rect className="fa-line-soft" x="188" y="98" width="74" height="9" rx="4.5" />
+          <circle className="fa-panel-2" cx="300" cy="112" r="15" />
+          <circle className="fa-stroke" cx="300" cy="112" r="15" />
+          <circle className="fa-magenta" cx="300" cy="112" r="6" />
+        </svg>
+      );
+
+    // Search — a search bar with a magnifying glass and a ranked result list.
+    case "visual-search":
+      return (
+        <svg {...svgProps}>
+          <rect className="fa-panel-2" x="46" y="30" width="268" height="36" rx="18" />
+          <rect className="fa-stroke" x="46" y="30" width="268" height="36" rx="18" />
+          <circle className="fa-icon" cx="72" cy="48" r="8" />
+          <line className="fa-icon" x1="78" y1="54" x2="86" y2="62" />
+          <rect className="fa-line" x="98" y="44" width="130" height="8" rx="4" />
+          <rect className="fa-magenta" x="276" y="40" width="26" height="16" rx="8" />
+          <circle className="fa-green" cx="64" cy="94" r="6" />
+          <rect className="fa-line" x="80" y="90" width="150" height="8" rx="4" />
+          <rect className="fa-line-soft" x="80" y="104" width="98" height="6" rx="3" />
+          <circle className="fa-purple-hi" cx="64" cy="124" r="6" />
+          <rect className="fa-line" x="80" y="120" width="126" height="8" rx="4" />
+        </svg>
+      );
+
+    // Customize — a palette of design swatches above reusable "skill" chips.
+    case "visual-customize":
+      return (
+        <svg {...svgProps}>
+          <rect className="fa-magenta" x="67" y="26" width="46" height="46" rx="13" />
+          <rect className="fa-purple-hi" x="127" y="26" width="46" height="46" rx="13" />
+          <rect className="fa-purple" x="187" y="26" width="46" height="46" rx="13" />
+          <rect className="fa-green" x="247" y="26" width="46" height="46" rx="13" />
+          <rect className="fa-panel-2" x="67" y="90" width="112" height="26" rx="13" />
+          <rect className="fa-stroke" x="67" y="90" width="112" height="26" rx="13" />
+          <circle className="fa-magenta" cx="84" cy="103" r="4.5" />
+          <rect className="fa-line" x="96" y="99" width="68" height="8" rx="4" />
+          <rect className="fa-panel-2" x="187" y="90" width="106" height="26" rx="13" />
+          <rect className="fa-stroke" x="187" y="90" width="106" height="26" rx="13" />
+          <circle className="fa-green" cx="204" cy="103" r="4.5" />
+          <rect className="fa-line" x="216" y="99" width="62" height="8" rx="4" />
+        </svg>
+      );
+
+    // Ship — a "Publish" button above a version timeline with a rewind control.
+    case "visual-ship":
+      return (
+        <svg {...svgProps}>
+          <defs>
+            <linearGradient id="faGradShip" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0" className="fa-grad-a" />
+              <stop offset="1" className="fa-grad-b" />
+            </linearGradient>
+          </defs>
+          <rect fill="url(#faGradShip)" x="98" y="26" width="164" height="36" rx="18" />
+          <path
+            className="fa-icon"
+            style={{ stroke: "rgba(255,255,255,0.95)" }}
+            d="M122 52 L122 38 M115 45 L122 38 L129 45"
+          />
+          <rect className="fa-on-grad" x="142" y="40" width="96" height="8" rx="4" />
+          <path className="fa-purple-hi" d="M58 99 L46 106 L58 113 Z" />
+          <path className="fa-purple-hi" d="M46 99 L34 106 L46 113 Z" />
+          <rect className="fa-line-soft" x="70" y="104" width="220" height="4" rx="2" />
+          <circle className="fa-stroke" cx="92" cy="106" r="11" />
+          <circle className="fa-green" cx="92" cy="106" r="7" />
+          <circle className="fa-line" cx="148" cy="106" r="7" />
+          <circle className="fa-line" cx="204" cy="106" r="7" />
+          <circle className="fa-line" cx="260" cy="106" r="7" />
+        </svg>
+      );
+
+    default:
+      return null;
+  }
 }
 
 const HERO_PROOF = [
@@ -406,41 +538,3 @@ const TRUST = [
   },
 ];
 
-const FOOTER_COLUMNS = [
-  {
-    title: "Company",
-    links: [
-      { label: "uniqus.com", href: "https://uniqus.com" },
-      { label: "Enterprise", href: "#trust" },
-      { label: "Security", href: "#trust" },
-      { label: "Trust center", href: "#trust" },
-    ],
-  },
-  {
-    title: "Product",
-    links: [
-      { label: "AI models", href: "#models" },
-      { label: "Workspaces", href: "#workspaces" },
-      { label: "How it works", href: "#how" },
-      { label: "Pricing", href: "#pricing" },
-    ],
-  },
-  {
-    title: "Resources",
-    links: [
-      { label: "Guide", href: "/guide" },
-      { label: "Projects", href: "/projects" },
-      { label: "Templates", href: "#features" },
-      { label: "Support", href: "https://uniqus.com" },
-    ],
-  },
-  {
-    title: "Legal",
-    links: [
-      { label: "Privacy", href: "https://uniqus.com" },
-      { label: "Terms", href: "https://uniqus.com" },
-      { label: "Security", href: "#trust" },
-      { label: "Report abuse", href: "https://uniqus.com" },
-    ],
-  },
-];

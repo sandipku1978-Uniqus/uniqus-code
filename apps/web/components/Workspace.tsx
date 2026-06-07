@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -16,6 +16,7 @@ import { toast } from "@/lib/toast";
 import ChatPanel from "./ChatPanel";
 import FileExplorer from "./FileExplorer";
 import EditorPreviewArea from "./EditorPreviewArea";
+import PreviewPanel from "./PreviewPanel";
 import TerminalPanel from "./TerminalPanel";
 import DeployButton from "./DeployButton";
 import BrandLockup from "./BrandLockup";
@@ -38,6 +39,10 @@ export default function Workspace({
   const panels = useStore((s) => s.panels);
   const togglePanel = useStore((s) => s.togglePanel);
   const resetPanels = useStore((s) => s.resetPanels);
+  // Workspace surface: "builder" (Chat + big live Preview, beginner default)
+  // or "code" (the full IDE). Persisted account-wide in the store.
+  const view = useStore((s) => s.view);
+  const setView = useStore((s) => s.setView);
   const project = useStore((s) => s.project);
   const reset = useStore((s) => s.reset);
   const lastSyncedAt = useStore((s) => s.lastSyncedAt);
@@ -135,11 +140,12 @@ export default function Workspace({
     setOverflowOpen(false);
     overflowTriggerRef.current?.focus();
   };
-  // Close the menu when leaving mobile so it can't linger as a stray popover
-  // after a resize back to desktop.
+  // Close the menu whenever we're in a context with NO ⋯ trigger (desktop Code
+  // view), so it can't linger as a stray popover after a resize or a view
+  // switch. The ⋯ exists on mobile (any view) and on desktop Builder view.
   useEffect(() => {
-    if (!isMobile) setOverflowOpen(false);
-  }, [isMobile]);
+    if (!isMobile && view === "code") setOverflowOpen(false);
+  }, [isMobile, view]);
   // Move focus to the first item when the menu opens (a11y).
   useEffect(() => {
     if (!overflowOpen) return;
@@ -269,11 +275,21 @@ export default function Workspace({
     router,
   ]);
 
-  // Secondary topbar actions, shared between the desktop topbar (inline) and
-  // the mobile overflow (⋯) menu so there's a single source for each button.
-  const secondaryActions = (
+  // Secondary topbar actions, split so each context can place them right:
+  //   • deployAction        — the Publish/Deploy button. Inline in Builder &
+  //     in the desktop Code cluster; in the mobile ⋯ menu.
+  //   • secondaryActionsRest — GitHub + Skills + Secrets + Rewind. Inline in
+  //     Code; folded into the ⋯ menu in Builder and on mobile so the
+  //     beginner topbar stays uncluttered.
+  // The resting Deploy button reads "Publish" in Builder (plain language).
+  const deployAction = !isGuest ? (
+    <DeployButton
+      projectId={projectId}
+      label={view === "builder" ? "Publish" : "Deploy"}
+    />
+  ) : null;
+  const secondaryActionsRest = (
     <>
-      {!isGuest && <DeployButton projectId={projectId} />}
       {!isGuest && <GithubRepoButton projectId={projectId} />}
       <button
         onClick={() => {
@@ -322,6 +338,84 @@ export default function Workspace({
     </>
   );
 
+  // The ⋯ overflow menu, shared by mobile (any view) and desktop Builder view.
+  // `leading` is the context-specific action rows (mobile includes Deploy;
+  // Builder doesn't, since Publish sits inline); Reset layout + Sign out always
+  // close the menu. Only one trigger is ever mounted at a time, so reusing the
+  // open-state + refs is safe.
+  const renderOverflow = (leading: React.ReactNode) => (
+    <div
+      className="topbar-overflow-wrap"
+      onKeyDown={(e) => {
+        if (e.key === "Escape" && overflowOpen) {
+          e.stopPropagation();
+          closeOverflow();
+        }
+      }}
+    >
+      <button
+        ref={overflowTriggerRef}
+        type="button"
+        onClick={() => setOverflowOpen((v) => !v)}
+        className="icon-btn"
+        title="More"
+        aria-label="More actions"
+        aria-haspopup="true"
+        aria-expanded={overflowOpen}
+        data-on={overflowOpen}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+          <circle cx="5" cy="12" r="2" />
+          <circle cx="12" cy="12" r="2" />
+          <circle cx="19" cy="12" r="2" />
+        </svg>
+      </button>
+      {overflowOpen && (
+        <>
+          <button
+            type="button"
+            className="topbar-overflow-backdrop"
+            aria-label="Close menu"
+            tabIndex={-1}
+            onClick={closeOverflow}
+          />
+          {/* Not a true role="menu" — it hosts components (Deploy / GitHub) that
+              render their own dialogs, so we keep native tab order rather than
+              the menu/menuitem keyboard model. Deploy & GitHub intentionally
+              DON'T close the menu on click: their modals render inside this
+              subtree, so unmounting the menu would unmount the dialog. Their
+              full-screen overlay covers the menu instead. */}
+          <div ref={overflowMenuRef} className="topbar-overflow">
+            {leading}
+            <button
+              type="button"
+              className="toggle-btn"
+              onClick={() => {
+                resetLayout();
+                closeOverflow();
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="23 4 23 10 17 10" />
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+              </svg>
+              <span>Reset layout</span>
+            </button>
+            <span className="topbar-overflow-sep" />
+            <a href={signOutUrl} className="toggle-btn" style={{ textDecoration: "none" }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
+              <span>Sign out</span>
+            </a>
+          </div>
+        </>
+      )}
+    </div>
+  );
+
   return (
     <div className="ide-shell" data-mobile={isMobile}>
       {/* Topbar */}
@@ -334,102 +428,82 @@ export default function Workspace({
           <Link href="/projects" className="proj" style={{ color: "var(--text-primary)" }}>
             {project?.name ?? "loading…"}
           </Link>
-          <span className="branch">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <line x1="6" y1="3" x2="6" y2="15" />
-              <circle cx="18" cy="6" r="3" />
-              <circle cx="6" cy="18" r="3" />
-              <path d="M18 9a9 9 0 0 1-9 9" />
-            </svg>
-            {project?.linked_branch ?? "main"}
-          </span>
+          {/* Git branch is developer jargon — only shown in Code view. */}
+          {view === "code" && (
+            <span className="branch">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="6" y1="3" x2="6" y2="15" />
+                <circle cx="18" cy="6" r="3" />
+                <circle cx="6" cy="18" r="3" />
+                <path d="M18 9a9 9 0 0 1-9 9" />
+              </svg>
+              {project?.linked_branch ?? "main"}
+            </span>
+          )}
         </div>
 
         <div className="actions">
+          {/* Builder ⇄ Code switch (desktop only; mobile uses the bottom tab
+              bar to move between Chat / Preview / Code). */}
+          {!isMobile && (
+            <div className="view-toggle" role="group" aria-label="Workspace view">
+              <button
+                type="button"
+                className="view-seg"
+                data-on={view === "builder"}
+                aria-pressed={view === "builder"}
+                onClick={() => setView("builder")}
+                title="Chat with a live preview of your app"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="2" y1="12" x2="22" y2="12" />
+                  <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                </svg>
+                <span>Preview</span>
+              </button>
+              <button
+                type="button"
+                className="view-seg"
+                data-on={view === "code"}
+                aria-pressed={view === "code"}
+                onClick={() => setView("code")}
+                title="Open the full code editor, files, and logs"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="16 18 22 12 16 6" />
+                  <polyline points="8 6 2 12 8 18" />
+                </svg>
+                <span>Code</span>
+              </button>
+            </div>
+          )}
+
           <RunButton projectId={projectId} />
 
           {isMobile ? (
-            /* Phone: keep Run inline; fold the rest into a ⋯ overflow menu.
-               The Files/Logs toggles are dropped here — the bottom tab bar
-               navigates to those panes instead. */
-            <div
-              className="topbar-overflow-wrap"
-              onKeyDown={(e) => {
-                if (e.key === "Escape" && overflowOpen) {
-                  e.stopPropagation();
-                  closeOverflow();
-                }
-              }}
-            >
-              <button
-                ref={overflowTriggerRef}
-                type="button"
-                onClick={() => setOverflowOpen((v) => !v)}
-                className="icon-btn"
-                title="More"
-                aria-label="More actions"
-                aria-haspopup="true"
-                aria-expanded={overflowOpen}
-                data-on={overflowOpen}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                  <circle cx="5" cy="12" r="2" />
-                  <circle cx="12" cy="12" r="2" />
-                  <circle cx="19" cy="12" r="2" />
-                </svg>
-              </button>
-              {overflowOpen && (
-                <>
-                  <button
-                    type="button"
-                    className="topbar-overflow-backdrop"
-                    aria-label="Close menu"
-                    tabIndex={-1}
-                    onClick={closeOverflow}
-                  />
-                  {/* Not a true role="menu" — it hosts components (Deploy /
-                      GitHub) that render their own dialogs, so we keep native
-                      tab order rather than the menu/menuitem keyboard model.
-                      Deploy & GitHub intentionally DON'T close the menu on click:
-                      their modals render inside this subtree, so unmounting the
-                      menu would unmount the dialog. Their full-screen overlay
-                      covers the menu instead. */}
-                  <div ref={overflowMenuRef} className="topbar-overflow">
-                    {secondaryActions}
-                    <button
-                      type="button"
-                      className="toggle-btn"
-                      onClick={() => {
-                        resetLayout();
-                        closeOverflow();
-                      }}
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <polyline points="23 4 23 10 17 10" />
-                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-                      </svg>
-                      <span>Reset layout</span>
-                    </button>
-                    <span className="topbar-overflow-sep" />
-                    <a
-                      href={signOutUrl}
-                      className="toggle-btn"
-                      style={{ textDecoration: "none" }}
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-                        <polyline points="16 17 21 12 16 7" />
-                        <line x1="21" y1="12" x2="9" y2="12" />
-                      </svg>
-                      <span>Sign out</span>
-                    </a>
-                  </div>
-                </>
-              )}
-            </div>
-          ) : (
+            /* Phone: Run inline; everything else folds into the ⋯ menu. The
+               Files/Logs toggles are dropped — the bottom tab bar navigates
+               to those panes instead. */
+            renderOverflow(
+              <>
+                {deployAction}
+                {secondaryActionsRest}
+              </>,
+            )
+          ) : view === "builder" ? (
+            /* Desktop Builder: Publish inline; the developer tools tuck under
+               the ⋯ menu so the beginner topbar stays clean. No Files/Logs
+               toggles — the Code switch is the path to them. */
             <>
-              {secondaryActions}
+              {deployAction}
+              {renderOverflow(secondaryActionsRest)}
+            </>
+          ) : (
+            /* Desktop Code: the full developer cluster, inline (unchanged). */
+            <>
+              {deployAction}
+              {secondaryActionsRest}
               <ToggleButton
                 on={panels.files}
                 onClick={() => togglePanel("files")}
@@ -538,9 +612,9 @@ export default function Workspace({
               </ErrorBoundary>
             </div>
           </div>
-        ) : (
+        ) : view === "code" ? (
           <PanelGroup
-            key={layoutKey}
+            key={`code-${layoutKey}`}
             direction="horizontal"
             autoSaveId={`uniqus-h-${panels.files ? "f" : "nf"}`}
           >
@@ -596,6 +670,30 @@ export default function Workspace({
                   </>
                 )}
               </PanelGroup>
+            </Panel>
+          </PanelGroup>
+        ) : (
+          /* Builder view (default): Chat + a big live Preview. Its own
+             autoSaveId keeps the split from colliding with the IDE's saved
+             sizes, while still being swept by reset-layout's "uniqus-h-"
+             filter. */
+          <PanelGroup
+            key={`builder-${layoutKey}`}
+            direction="horizontal"
+            autoSaveId="uniqus-h-builder"
+          >
+            <Panel id="chat" defaultSize={42} minSize={28} order={1}>
+              <ErrorBoundary label="chat">
+                <ChatPanel />
+              </ErrorBoundary>
+            </Panel>
+            <PanelResizeHandle
+              className="resize-handle-h"
+              aria-label="Resize the preview"
+              title="Drag to resize · arrow keys when focused"
+            />
+            <Panel id="builder-stage" defaultSize={58} minSize={35} order={2}>
+              <BuilderStage projectId={projectId} />
             </Panel>
           </PanelGroup>
         )}
@@ -678,9 +776,10 @@ export default function Workspace({
         <CheckpointsModal projectId={projectId} onClose={() => setCheckpointsOpen(false)} />
       )}
 
-      {/* Status bar — hidden on mobile, where the bottom tab bar owns the
-          bottom edge and vertical space is at a premium. */}
-      {!isMobile && (
+      {/* Status bar — Code view only. It's developer plumbing (connection,
+          sync state, branch), so Builder hides it; mobile hides it too (the
+          bottom tab bar owns the bottom edge). */}
+      {!isMobile && view === "code" && (
       <div className="status-bar">
         <span className="seg">
           <span
@@ -718,7 +817,6 @@ export default function Workspace({
         </span>
         <div className="right">
           <span className="seg">{project?.linked_branch ?? "main"}</span>
-          <span className="seg">utf-8</span>
         </div>
       </div>
       )}
@@ -748,11 +846,17 @@ function relativeAge(epochMs: number): string {
   return `${Math.floor(sec / 3600)}h ago`;
 }
 
-function RunButton({ projectId }: { projectId: string }) {
+/**
+ * Shared dev-server start/restart logic: stop any running server, then start
+ * (or restart) the project's dev server, surfacing progress via the global
+ * toast + a system chat line. Consumed by the topbar Run button AND the Builder
+ * empty-state "Start preview" button so both behave identically.
+ */
+function useRunProject(projectId: string) {
   const [busy, setBusy] = useState(false);
   const addSystem = useStore((s) => s.addSystem);
 
-  const onClick = async () => {
+  const run = useCallback(async () => {
     if (busy) return;
     setBusy(true);
     try {
@@ -762,16 +866,24 @@ function RunButton({ projectId }: { projectId: string }) {
     } catch (err) {
       // Surface via the global toast system (aria-live) instead of a stray
       // absolute-positioned popover above the topbar (§E).
-      toast.error(`Couldn't start the server: ${err instanceof Error ? err.message : String(err)}`);
+      toast.error(
+        `Couldn't start the server: ${err instanceof Error ? err.message : String(err)}`,
+      );
     } finally {
       setBusy(false);
     }
-  };
+  }, [busy, projectId, addSystem]);
+
+  return { run, busy };
+}
+
+function RunButton({ projectId }: { projectId: string }) {
+  const { run, busy } = useRunProject(projectId);
 
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={run}
       disabled={busy}
       className="toggle-btn"
       title="Stop any running server, then start (or restart) the project's dev server"
@@ -788,6 +900,85 @@ function RunButton({ projectId }: { projectId: string }) {
       </svg>
       <span>{busy ? "Starting…" : "Run"}</span>
     </button>
+  );
+}
+
+/**
+ * Builder view's right-hand surface: the running app, big. Reuses PreviewPanel
+ * for the active/first running preview server. When nothing is running yet it
+ * shows a friendly empty state with a prominent "Start preview" button (and a
+ * note that the preview also appears on its own once the app runs). When more
+ * than one server is up, a small pill row switches between them.
+ */
+function BuilderStage({ projectId }: { projectId: string }) {
+  const previews = useStore((s) => s.previews);
+  const editorTab = useStore((s) => s.editorTab);
+  const setEditorTab = useStore((s) => s.setEditorTab);
+  const { run, busy } = useRunProject(projectId);
+
+  // Prefer the preview the shared editorTab points at — addPreview sets it to
+  // the newest server, so an agent- or user-started preview "just appears" —
+  // else the first running server, else nothing (empty state).
+  const active =
+    (editorTab.startsWith("preview:") &&
+      previews.find((p) => previewTabId(p.id) === editorTab)) ||
+    previews[0] ||
+    null;
+
+  if (!active) {
+    return (
+      <div className="builder-stage">
+        <div className="builder-empty">
+          <h2>See your app come to life</h2>
+          <p>
+            Start a live preview to watch your app right here — it refreshes as
+            you chat and make changes.
+          </p>
+          <button
+            type="button"
+            className="btn-primary btn-lg"
+            onClick={run}
+            disabled={busy}
+          >
+            {busy ? "Starting…" : "Start preview"}
+          </button>
+          <span className="builder-empty-hint">
+            Or just ask in chat — your preview appears automatically once the app
+            is running.
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="builder-stage">
+      {previews.length > 1 && (
+        <div
+          className="builder-preview-bar"
+          role="tablist"
+          aria-label="Running previews"
+        >
+          {previews.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              role="tab"
+              aria-selected={p.id === active.id}
+              className="toggle-btn"
+              data-on={p.id === active.id}
+              onClick={() => setEditorTab(previewTabId(p.id))}
+              title={`Show the app running on port ${p.port}`}
+            >
+              :{p.port}
+            </button>
+          ))}
+        </div>
+      )}
+      <ErrorBoundary label="preview">
+        <PreviewPanel server={active} />
+      </ErrorBoundary>
+    </div>
   );
 }
 

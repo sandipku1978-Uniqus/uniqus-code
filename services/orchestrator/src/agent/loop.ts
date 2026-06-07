@@ -8,7 +8,12 @@ import {
   pruneStaleImagesInPlace,
 } from "./messageHistory.js";
 import { maybeCompact, type CompactionResult } from "./compact.js";
-import { formatAccountPromptForPrompt, formatSkillsForPrompt, readSkills } from "./skills.js";
+import {
+  formatAccountPromptForPrompt,
+  formatDesignSystemForPrompt,
+  formatSkillsForPrompt,
+  readSkills,
+} from "./skills.js";
 import { isImageAsset, listAssets, readAssetBase64, readAssetText } from "./assets.js";
 import {
   startBackgroundJob,
@@ -19,7 +24,7 @@ import {
 import { takeScreenshot } from "./screenshot.js";
 import { resolveModel } from "./router.js";
 import { getProvider, providerKeysFromEnv, type ProviderKeys, type TokenUsage } from "./providers/index.js";
-import type { ModelChoice, ThinkingEffort } from "@uniqus/api-types";
+import type { DesignTokens, ModelChoice, ThinkingEffort } from "@uniqus/api-types";
 import { setTodos, type TodoItem } from "./todos.js";
 import { listProjectSecrets, plumbSecretToEnvFile } from "../secrets.js";
 import { callConnector, listProjectConnectors } from "../connectors/index.js";
@@ -36,6 +41,7 @@ function buildSystemPrompt(
   accountPrompt: string | null,
   hasWebSearch: boolean,
   repo: { fullName: string; url: string } | null,
+  designTokens: DesignTokens | null,
 ): string {
   const { name: shellName, isUnixLike } = sb.shellInfo();
   const platform = process.platform;
@@ -127,7 +133,7 @@ Conventions:
    (b) run_command kills the child on timeout, but the kernel can hold the socket briefly afterward — start_server has logic to clear the port before binding (fuser -k + lsof fallback), but you'll still spend 5–60s of every turn waiting on it.
    (c) The user only sees a preview tab when start_server succeeds; run_command output is ephemeral and not interactive.
    If you need to debug why a dev server fails to start, use start_server then read_server_log — do NOT re-run \`npm run dev\` via run_command to "see what happens", that creates the very zombie state you'd then have to clean up.
-   Prefer binding dev servers to 127.0.0.1 or localhost unless the framework requires a host flag for the preview proxy. The proxy reaches the server from the orchestrator host, so broad LAN exposure is not required.
+   ALWAYS bind dev servers to 0.0.0.0 (all interfaces), NEVER 127.0.0.1/localhost. The preview proxy reaches the server from the orchestrator host ACROSS the sandbox/VM network boundary (it dials the VM's IP, not loopback), so a server listening only on 127.0.0.1 is unreachable: the proxy gets connection-refused, the preview shows a 502, and read_server_log comes back EMPTY because the server actually started fine — it just bound the wrong interface. This is the single most common cause of a broken preview. Pass the framework's host flag every time: Vite/Astro/SvelteKit \`--host 0.0.0.0\`, Next.js \`next dev -H 0.0.0.0\`, Nuxt \`--host 0.0.0.0\`, Flask \`flask run --host=0.0.0.0\` (or \`app.run(host="0.0.0.0")\`), Django \`runserver 0.0.0.0:8000\`, FastAPI/uvicorn \`--host 0.0.0.0\`, Express \`app.listen(port, "0.0.0.0")\`, Streamlit \`--server.address=0.0.0.0\`. If a 502 appears with an empty server log, assume a localhost bind first and restart with 0.0.0.0 before anything else.
 
    Preview-server reliability checklist — go through this BEFORE the first start_server call, not after it fails:
    • Dependencies: when package.json is at the SANDBOX ROOT, start_server auto-installs missing deps as part of starting — do NOT run your own \`npm install\` first. A manual install (especially via run_in_background) races the auto-install in the same directory and can corrupt node_modules (the "disappearing modules" failure). The ONE case where you must install yourself is a project in a SUBDIRECTORY (auto-install only sees the root): then run a single \`cd <subdir> && npm install\` once. Never have two installs running in the same directory at the same time.
@@ -137,14 +143,14 @@ Conventions:
    • Use ready_timeout_ms = 120000 (or 180000 for Next.js + TypeScript on a cold cache). The default 60000 is tight for first-run compilation and you'll get a "did not open port" error on a server that just needed another 10s.
    • If start_server fails: call read_server_log on the returned id (or list_servers to find recent ids). 90% of the time the log shows the real reason (missing dep, port already in use, syntax error, EACCES on a privileged port). Fix the root cause; do NOT retry the same command twice.
    • Do NOT call start_server back-to-back on the same port — the second call will pre-kill the first. If you want to restart, call stop_server explicitly, then start_server with the new args.
-   • When using next dev, always add --turbopack for faster startup unless the project explicitly configures webpack. Example: "cd my-app && npx next dev --turbopack -p 3000".
+   • When using next dev, always add --turbopack for faster startup unless the project explicitly configures webpack, and bind the host. Example: "cd my-app && npx next dev --turbopack -p 3000 -H 0.0.0.0".
 4. For interactive scaffolders (create-next-app, create-vite, etc.): always pass non-interactive flags (--yes, -y, --typescript, --tailwind, --no-git, --use-npm). stdin is closed in the sandbox — any prompt will block until timeout. If a scaffolder is too prompt-heavy, write the project files yourself with write_file.
 5. Use longer timeout_ms (120000–300000) for npm/yarn/pnpm install, builds, and Docker pulls.
 6. After a non-zero exit, read the error and fix the root cause before retrying. Do not retry blindly — if the same command fails twice, change your approach.
 7. Use list_dir or grep to verify state when you're unsure (e.g., after a scaffold) instead of guessing paths.
 8. When the task is complete, briefly summarize what you built, include the public URL if you started a server, and describe how to use it inside Uniqus Code. Do not end by telling the user to run local terminal commands.
 9. File size: write_file content is part of your output token budget (~16k tokens). For files larger than ~500 lines, write a smaller version first then grow it with edit_file or additional write_file calls — do NOT try to dump 1000+ lines in a single tool call, the response will be truncated and the tool input will arrive without the content field. If that happens you'll see "write_file requires 'content' as a string" — split the work and retry.
-10. Currency of facts: when the task names specific products, models, versions, or prices — ESPECIALLY anything about AI/LLM models (benchmark dashboards, model pickers, "compare the latest models" apps) — do NOT trust your training data for the current lineup; it lags reality by months. ${currencyGuidance} Naming a stale model (an old version when a newer one has shipped, or omitting a current flagship) is a failure the user will immediately notice. The same applies to "latest" library versions, framework releases, and API endpoints.${formatAccountPromptForPrompt(accountPrompt)}${formatSkillsForPrompt(skillsBody)}`;
+10. Currency of facts: when the task names specific products, models, versions, or prices — ESPECIALLY anything about AI/LLM models (benchmark dashboards, model pickers, "compare the latest models" apps) — do NOT trust your training data for the current lineup; it lags reality by months. ${currencyGuidance} Naming a stale model (an old version when a newer one has shipped, or omitting a current flagship) is a failure the user will immediately notice. The same applies to "latest" library versions, framework releases, and API endpoints.${formatAccountPromptForPrompt(accountPrompt)}${formatDesignSystemForPrompt(designTokens)}${formatSkillsForPrompt(skillsBody)}`;
 }
 
 export interface LoopHooks {
@@ -159,6 +165,8 @@ export interface LoopHooks {
     input: unknown,
     result: string,
     isError: boolean,
+    /** Per-file line stats for write_file/edit_file, for the UI diff badge. */
+    editStats?: { linesAdded: number; linesRemoved: number },
   ) => void;
   onIteration?: (iter: number) => void;
   /**
@@ -284,6 +292,13 @@ export interface LoopOptions extends LoopHooks {
    */
   repo?: { fullName: string; url: string } | null;
   /**
+   * The project's attached design-system tokens, if any. Injected into the
+   * system prompt as a hard styling constraint so generation stays on-system.
+   * Resolved by the caller per turn (like `repo`) so attach/detach takes effect
+   * on the next turn.
+   */
+  designSystem?: DesignTokens | null;
+  /**
    * The element the user clicked in the live preview (via the iframe picker),
    * attached to THIS turn only. Rendered as a structured "selected element"
    * block appended to the user message so the agent knows which UI node the
@@ -371,6 +386,7 @@ export async function runAgentLoop(
     opts.accountPrompt ?? null,
     hasWebSearch,
     opts.repo ?? null,
+    opts.designSystem ?? null,
   );
   const messages = opts.messages ?? [];
   // Append every message this turn produces to both the live history AND the
@@ -507,6 +523,9 @@ export async function runAgentLoop(
         continue;
       }
       try {
+        // Captured by executeTool's onEditStats callback for write_file/edit_file,
+        // then forwarded on the tool_result so the UI can show a "+A −R" badge.
+        let editStats: { linesAdded: number; linesRemoved: number } | undefined;
         const result = await executeTool(
           opts.sandbox,
           call.name,
@@ -520,6 +539,9 @@ export async function runAgentLoop(
           opts.requestPlan,
           opts.onTodoWrite,
           opts.userId ?? null,
+          (added, removed) => {
+            editStats = { linesAdded: added, linesRemoved: removed };
+          },
         );
         // Multimodal results (e.g. screenshots) include image content blocks.
         if (result && typeof result === "object" && (result as any).__multimodal) {
@@ -538,7 +560,7 @@ export async function runAgentLoop(
           // iteration. Not every tool truncates at the source (run_command
           // does, grep/read_file historically didn't), so enforce it here too.
           const text = truncateToolResultText(raw);
-          opts.onToolResult?.(call.id, call.name, call.input, text, false);
+          opts.onToolResult?.(call.id, call.name, call.input, text, false, editStats);
           toolResults.push({
             type: "tool_result",
             tool_use_id: call.id,
@@ -591,6 +613,34 @@ function isAbortError(err: unknown): boolean {
   return false;
 }
 
+/**
+ * Count added/removed LINES between two texts (LCS-based, like `diff --stat`).
+ * Used to annotate write_file/edit_file activities with "+A −R". Capped so a
+ * pathological pair of huge files can't blow up the O(n·m) DP.
+ */
+function lineDiffStats(oldText: string, newText: string): { added: number; removed: number } {
+  const a = oldText ? oldText.split("\n") : [];
+  const b = newText ? newText.split("\n") : [];
+  if (a.length === 0) return { added: b.length, removed: 0 };
+  if (b.length === 0) return { added: 0, removed: a.length };
+  if (a.length * b.length > 4_000_000) {
+    // Too large for the DP — fall back to a coarse net-line estimate.
+    return { added: Math.max(0, b.length - a.length), removed: Math.max(0, a.length - b.length) };
+  }
+  const m = a.length;
+  const n = b.length;
+  let prev = new Array<number>(n + 1).fill(0);
+  for (let i = 1; i <= m; i++) {
+    const cur = new Array<number>(n + 1).fill(0);
+    for (let j = 1; j <= n; j++) {
+      cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], cur[j - 1]);
+    }
+    prev = cur;
+  }
+  const lcs = prev[n];
+  return { added: n - lcs, removed: m - lcs };
+}
+
 export async function executeTool(
   sandbox: Sandbox,
   name: string,
@@ -604,6 +654,8 @@ export async function executeTool(
   requestPlan: LoopHooks["requestPlan"],
   onTodoWrite: LoopHooks["onTodoWrite"],
   userId: string | null,
+  /** Fires once with per-file line stats for write_file/edit_file (UI diff badge). */
+  onEditStats?: (added: number, removed: number) => void,
 ): Promise<string | { __multimodal: true; content: unknown[] }> {
   const args = input as Record<string, any>;
   switch (name) {
@@ -621,8 +673,14 @@ export async function executeTool(
           "write_file requires 'content' as a string. This usually means your previous response hit the max output tokens (~16k) — the file you tried to write was too large for one tool call. Split it: write a smaller initial version, then grow it with edit_file or additional write_file calls.",
         );
       }
-      await sb.writeFile(sandbox, args.path, args.content);
-      return `Wrote ${args.content.length} bytes to ${args.path}`;
+      {
+        // Diff against the prior contents (empty for a new file) for the UI badge.
+        const beforeWrite = await sb.readFile(sandbox, args.path).catch(() => "");
+        const stats = lineDiffStats(typeof beforeWrite === "string" ? beforeWrite : "", args.content);
+        await sb.writeFile(sandbox, args.path, args.content);
+        onEditStats?.(stats.added, stats.removed);
+        return `Wrote ${args.content.length} bytes to ${args.path} (+${stats.added} −${stats.removed})`;
+      }
     case "edit_file":
       if (
         typeof args.path !== "string" ||
@@ -633,8 +691,12 @@ export async function executeTool(
           "edit_file requires 'path', 'old_string', and 'new_string' as strings (any may have been truncated by max_tokens)",
         );
       }
-      await sb.editFile(sandbox, args.path, args.old_string, args.new_string);
-      return `Edited ${args.path}`;
+      {
+        const stats = lineDiffStats(args.old_string, args.new_string);
+        await sb.editFile(sandbox, args.path, args.old_string, args.new_string);
+        onEditStats?.(stats.added, stats.removed);
+        return `Edited ${args.path} (+${stats.added} −${stats.removed})`;
+      }
     case "run_command": {
       const r = await sb.runCommand(sandbox, args.command, args.timeout_ms, signal);
       return `exit_code: ${r.exitCode}\n--- stdout ---\n${r.stdout}\n--- stderr ---\n${r.stderr}`;

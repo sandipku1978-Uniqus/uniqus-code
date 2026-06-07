@@ -19,6 +19,10 @@ export interface ProjectRecord {
   latest_deploy_state?: DeploymentState | null;
   /** created_at of the most recent deployment row. */
   latest_deploy_at?: string | null;
+  /** Attached global design system (null = none). */
+  design_system_id?: string | null;
+  /** Supabase project ref linked to this project, if provisioned. */
+  supabase_project_ref?: string | null;
 }
 
 /**
@@ -68,6 +72,7 @@ export async function createProject(input: {
   owner_id: string;
   name: string;
   description?: string | null;
+  design_system_id?: string | null;
 }): Promise<ProjectRecord> {
   const { data, error } = await db()
     .from("projects")
@@ -75,11 +80,26 @@ export async function createProject(input: {
       owner_id: input.owner_id,
       name: input.name,
       description: input.description ?? null,
+      design_system_id: input.design_system_id ?? null,
     })
     .select("*")
     .single();
   if (error || !data) throw new Error(`createProject failed: ${error?.message}`);
   return data as ProjectRecord;
+}
+
+/** Attach (or detach with null) a design system to a project. Owner-scoped. */
+export async function setProjectDesignSystem(
+  id: string,
+  ownerId: string,
+  designSystemId: string | null,
+): Promise<void> {
+  const { error } = await db()
+    .from("projects")
+    .update({ design_system_id: designSystemId })
+    .eq("id", id)
+    .eq("owner_id", ownerId);
+  if (error) throw new Error(`setProjectDesignSystem failed: ${error.message}`);
 }
 
 export async function getProject(
@@ -213,6 +233,29 @@ export async function setVercelProject(
     .eq("id", id)
     .eq("owner_id", ownerId);
   if (error) throw new Error(`setVercelProject failed: ${error.message}`);
+}
+
+/**
+ * Link a Supabase project (ref + name + org) onto a uniqus project after the
+ * agent provisions or attaches one. The keys/connection string live in
+ * project_secrets, not here. ownerId-scoped so a connector can only touch the
+ * acting user's own project row.
+ */
+export async function setSupabaseProject(
+  id: string,
+  ownerId: string,
+  link: { ref: string; name: string; orgId: string | null },
+): Promise<void> {
+  const { error } = await db()
+    .from("projects")
+    .update({
+      supabase_project_ref: link.ref,
+      supabase_project_name: link.name,
+      supabase_org_id: link.orgId,
+    })
+    .eq("id", id)
+    .eq("owner_id", ownerId);
+  if (error) throw new Error(`setSupabaseProject failed: ${error.message}`);
 }
 
 /**

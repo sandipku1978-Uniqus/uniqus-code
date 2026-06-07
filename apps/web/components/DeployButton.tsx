@@ -20,7 +20,19 @@ import { toast } from "@/lib/toast";
 type EnvRow = { id: number; key: string; value: string };
 let envIdSeq = 1;
 
-export default function DeployButton({ projectId }: { projectId: string }) {
+export default function DeployButton({
+  projectId,
+  label: restingLabel = "Deploy",
+}: {
+  projectId: string;
+  /**
+   * Word shown on the resting button before anything is deployed. Defaults to
+   * "Deploy"; the beginner-facing Builder view passes "Publish". Only the
+   * resting `!live` case uses it — every live/error state stays verbatim so
+   * deploy status remains truthful.
+   */
+  label?: string;
+}) {
   const live = useStore((s) => s.deployment);
   const redeploySuggested = useStore((s) => s.redeploySuggested);
   const setRedeploySuggested = useStore((s) => s.setRedeploySuggested);
@@ -50,12 +62,12 @@ export default function DeployButton({ projectId }: { projectId: string }) {
 
   const label = useMemo(() => {
     if (needsVercel) return "Connect Vercel";
-    if (!live) return "Deploy";
+    if (!live) return restingLabel;
     if (live.state === "READY") return "Redeploy";
     if (live.state === "ERROR") return "Failed";
     if (live.state === "CANCELED") return "Canceled";
     return "Deploying…";
-  }, [needsVercel, live]);
+  }, [needsVercel, live, restingLabel]);
 
   return (
     <>

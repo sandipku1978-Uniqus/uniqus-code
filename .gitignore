@@ -12,3 +12,4 @@ setup-files/
 
 # Local product/strategy notes — not for git
 /notes/
+.claude/scheduled_tasks.lock

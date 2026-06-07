@@ -338,16 +338,19 @@ const HOP_BY_HOP = new Set([
 
 /**
  * Inject our preview bridge scripts into the head of every HTML preview
- * response: the navigation reporter and the element picker. Both are
- * self-contained IIFEs guarded by an install flag (idempotent if injected
- * twice) and only ever postMessage OUTWARD to window.parent — cross-origin
- * safe; we never read parent or iframe state.
+ * response: the navigation reporter, the element picker, and the runtime-error
+ * reporter. All are self-contained IIFEs guarded by an install flag (idempotent
+ * if injected twice) and only ever postMessage OUTWARD to window.parent —
+ * cross-origin safe; we never read parent or iframe state.
  *
  * Exported for unit testing — the injected payload is stringified JS that the
  * compiler can't validate, so a test parses it to catch escape/quote breakage.
  */
 export function injectPreviewScripts(html: string, serverId: string): string {
-  const script = navReporterScript(serverId) + elementPickerScript(serverId);
+  const script =
+    navReporterScript(serverId) +
+    elementPickerScript(serverId) +
+    errorReporterScript(serverId);
   // Prefer to inject at the start of <head> so we run before app code; fall
   // back to <body> or just prepending if neither tag exists (rare).
   const headOpen = html.search(/<head[^>]*>/i);
@@ -560,6 +563,85 @@ function elementPickerScript(serverId: string): string {
   document.addEventListener("mouseup", swallow, true);
   document.addEventListener("keydown", onKey, true);
   window.addEventListener("scroll", function(){ if (active && hovered) paint(hovered); }, true);
+})();</script>`;
+}
+
+/**
+ * Runtime-error reporter. Hooks window.onerror, unhandledrejection, and
+ * console.error inside the preview app and posts each one to window.parent as
+ *   { type:"uniqus:runtime-error", server_id, kind, message, stack, source, line, col, path }
+ * so the workspace can surface errors the agent otherwise can NEVER see (they
+ * happen in the user's browser, not the dev-server logs). Capped per page load
+ * so a render loop that logs on every frame can't flood postMessage; wraps
+ * console.error transparently (always calls through to the original) and guards
+ * every hook in try/catch so a reporter bug can't break the previewed app.
+ */
+function errorReporterScript(serverId: string): string {
+  return `<script>(function(){
+  if (window.__uniqusErrorReporterInstalled) return;
+  window.__uniqusErrorReporterInstalled = true;
+  var serverId = ${JSON.stringify(serverId)};
+  // Separate budgets so a chatty console.* logger (React dev warnings, a render
+  // loop) can't starve out genuine uncaught errors / rejections, which are the
+  // ones worth surfacing. console.* gets a smaller, independent cap.
+  var MAX = 100, MAX_CONSOLE = 30, sent = 0, sentConsole = 0;
+  function clip(s, n) { s = String(s == null ? "" : s); return s.length > n ? s.slice(0, n) : s; }
+  function post(kind, message, stack, source, line, col) {
+    if (kind === "console") { if (sentConsole >= MAX_CONSOLE) return; sentConsole++; }
+    else { if (sent >= MAX) return; sent++; }
+    try {
+      window.parent.postMessage({
+        type: "uniqus:runtime-error",
+        server_id: serverId,
+        kind: kind,
+        message: clip(message, 1000),
+        stack: clip(stack, 4000),
+        source: clip(source, 300),
+        line: (typeof line === "number" ? line : null),
+        col: (typeof col === "number" ? col : null),
+        path: location.pathname + location.search
+      }, "*");
+    } catch (e) {}
+  }
+  function fromError(err) {
+    if (err && typeof err === "object") return { message: err.message || String(err), stack: err.stack || "" };
+    return { message: String(err), stack: "" };
+  }
+  window.addEventListener("error", function(e) {
+    try {
+      if (e && e.message) {
+        var st = e.error && e.error.stack ? e.error.stack : "";
+        post("error", e.message, st, e.filename || "", e.lineno, e.colno);
+      } else if (e && e.target && (e.target.src || e.target.href)) {
+        var url = e.target.src || e.target.href;
+        post("resource", "Failed to load resource: " + url, "", url, null, null);
+      }
+    } catch (err) {}
+  }, true);
+  window.addEventListener("unhandledrejection", function(e) {
+    try { var info = fromError(e && e.reason); post("unhandledrejection", info.message, info.stack, "", null, null); }
+    catch (err) {}
+  });
+  try {
+    var origErr = console.error;
+    if (typeof origErr === "function") {
+      console.error = function() {
+        try {
+          var parts = [];
+          for (var i = 0; i < arguments.length; i++) {
+            var a = arguments[i];
+            if (a && a.stack && a.message) parts.push(a.message);
+            else if (a && typeof a === "object") { try { parts.push(JSON.stringify(a)); } catch (e2) { parts.push(String(a)); } }
+            else parts.push(String(a));
+          }
+          var first = arguments[0];
+          var st = (first && first.stack) ? first.stack : "";
+          post("console", parts.join(" "), st, "", null, null);
+        } catch (err) {}
+        return origErr.apply(console, arguments);
+      };
+    }
+  } catch (err) {}
 })();</script>`;
 }
 

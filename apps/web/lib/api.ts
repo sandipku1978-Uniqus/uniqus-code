@@ -5,6 +5,8 @@ import type {
   AccountUsageStats,
   CurrentUser,
   DeploymentState,
+  DesignSystem,
+  DesignTokens,
   ProjectSummary,
   UploadedFileSummary,
 } from "@uniqus/api-types";
@@ -90,11 +92,77 @@ export const createProjectApi = (
  */
 export const createProjectFromBriefApi = (
   brief: string,
+  designSystemId?: string | null,
 ): Promise<{ project: ProjectSummary; first_message: string }> =>
   api("/api/projects/from-brief", {
     method: "POST",
-    body: JSON.stringify({ brief }),
+    body: JSON.stringify({ brief, design_system_id: designSystemId ?? null }),
   });
+
+// ── Design systems (global, per-user) ─────────────────────────────────────────
+
+export type { DesignSystem, DesignTokens } from "@uniqus/api-types";
+
+export const listDesignSystemsApi = (): Promise<{ design_systems: DesignSystem[] }> =>
+  api("/api/design-systems");
+
+export const getDesignSystemApi = (id: string): Promise<{ design_system: DesignSystem }> =>
+  api(`/api/design-systems/${id}`);
+
+export const createDesignSystemApi = (
+  name: string,
+  tokens?: DesignTokens,
+): Promise<{ design_system: DesignSystem }> =>
+  api("/api/design-systems", { method: "POST", body: JSON.stringify({ name, tokens }) });
+
+export const updateDesignSystemApi = (
+  id: string,
+  patch: { name?: string; tokens?: DesignTokens },
+): Promise<{ design_system: DesignSystem }> =>
+  api(`/api/design-systems/${id}`, { method: "PUT", body: JSON.stringify(patch) });
+
+export const deleteDesignSystemApi = (id: string): Promise<{ ok: true }> =>
+  api(`/api/design-systems/${id}`, { method: "DELETE" });
+
+export const setProjectDesignSystemApi = (
+  projectId: string,
+  designSystemId: string | null,
+): Promise<{ ok: true; design_system_id: string | null }> =>
+  api(`/api/projects/${projectId}/design-system`, {
+    method: "POST",
+    body: JSON.stringify({ design_system_id: designSystemId }),
+  });
+
+/** Import a codebase from GitHub and let the agent infer a design system from it. */
+export const inferDesignSystemGithubApi = (
+  name: string,
+  repoUrl: string,
+  opts?: { branch?: string; pat?: string },
+): Promise<{ design_system: DesignSystem }> =>
+  api("/api/design-systems/infer-github", {
+    method: "POST",
+    body: JSON.stringify({ name, repo_url: repoUrl, branch: opts?.branch, pat: opts?.pat }),
+  });
+
+/** Import a .zip codebase and infer a design system. Multipart (no JSON helper). */
+export async function inferDesignSystemZipApi(
+  name: string,
+  file: File,
+): Promise<{ design_system: DesignSystem }> {
+  const fd = new FormData();
+  fd.append("name", name);
+  fd.append("file", file);
+  const res = await fetch(`${API_BASE}/api/design-systems/infer-zip`, {
+    method: "POST",
+    credentials: "include",
+    body: fd,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`API ${res.status}: ${body || res.statusText}`);
+  }
+  return (await res.json()) as { design_system: DesignSystem };
+}
 
 export interface CreateGithubRepoResult {
   repo_url: string;
@@ -281,6 +349,40 @@ export function vercelOauthStartUrl(returnTo: string): string {
   u.searchParams.set("return", returnTo);
   return u.toString();
 }
+
+// ── Supabase ────────────────────────────────────────────────────────────────────
+
+export interface SupabaseStatus {
+  connected: boolean;
+  org_id: string | null;
+  org_name: string | null;
+  connected_at: string | null;
+}
+
+export const fetchSupabaseStatus = (): Promise<SupabaseStatus> =>
+  api("/api/supabase/status");
+
+export const disconnectSupabaseApi = (): Promise<{ ok: true }> =>
+  api("/api/supabase/disconnect", { method: "POST" });
+
+export function supabaseOauthStartUrl(returnTo: string): string {
+  const u = new URL(`${API_BASE}/api/supabase/start`);
+  u.searchParams.set("return", returnTo);
+  return u.toString();
+}
+
+export interface SupabaseProjectInfo {
+  id?: string;
+  ref?: string;
+  name?: string;
+  region?: string;
+  status?: string;
+  organization_id?: string;
+  created_at?: string;
+}
+
+export const fetchSupabaseProjects = (): Promise<{ projects: SupabaseProjectInfo[] }> =>
+  api("/api/supabase/projects");
 
 // ── Deployments ───────────────────────────────────────────────────────────────
 

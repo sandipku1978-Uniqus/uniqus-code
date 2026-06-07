@@ -289,7 +289,63 @@ export interface ProjectSummary {
   latest_deploy_state?: DeploymentState | null;
   /** ISO timestamp of the project's most recent deploy, if any. */
   latest_deploy_at?: string | null;
+  /** Attached global design system (null = none). The agent generates against its tokens. */
+  design_system_id?: string | null;
 }
+
+// ── Design systems ──────────────────────────────────────────────────────────
+// Global, per-user reusable token sets attached to a project (or none) and
+// injected into the agent's system prompt so generation stays on-system. The
+// single source of truth for the token shape, shared by the UI editor and the
+// orchestrator's prompt formatter.
+
+export interface DesignTokens {
+  /** The mode the palette primarily targets. */
+  mode: "light" | "dark" | "system";
+  /** Semantic color tokens: name → CSS color. Use semantic names (primary,
+   *  background, surface, text, muted, border, accent, …), not raw hues. */
+  colors: Record<string, string>;
+  fonts: { body: string; heading: string; mono?: string };
+  /** Type-scale ratio label, e.g. "1.25 — major third". */
+  typeScale?: string;
+  /** Base border radius, e.g. "8px". */
+  radius: string;
+  /** Base spacing unit, e.g. "4px". */
+  spacing?: string;
+  /** Freeform guidance the agent should follow (voice, density, motion, etc.). */
+  notes?: string;
+}
+
+export interface DesignSystem {
+  id: string;
+  name: string;
+  tokens: DesignTokens;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Sensible starting point for "start blank". Semantic names map to AI consistency. */
+export const DEFAULT_DESIGN_TOKENS: DesignTokens = {
+  mode: "light",
+  colors: {
+    primary: "#6d5efc",
+    accent: "#22c55e",
+    background: "#ffffff",
+    surface: "#f6f6f8",
+    text: "#0e0e14",
+    muted: "#6b7280",
+    border: "#e5e7eb",
+  },
+  fonts: {
+    body: "Inter, system-ui, sans-serif",
+    heading: "Inter, system-ui, sans-serif",
+    mono: "ui-monospace, SFMono-Regular, Menlo, monospace",
+  },
+  typeScale: "1.25 — major third",
+  radius: "8px",
+  spacing: "4px",
+  notes: "",
+};
 
 export interface CurrentUser {
   id: string;
@@ -360,7 +416,15 @@ export type ServerEvent =
       content: string;
     }
   | { type: "tool_call"; call_id: string; name: string; input: unknown }
-  | { type: "tool_result"; call_id: string; result: string; is_error: boolean }
+  | {
+      type: "tool_result";
+      call_id: string;
+      result: string;
+      is_error: boolean;
+      /** Lines added/removed for write_file/edit_file, for the "+A −R" diff badge. */
+      lines_added?: number;
+      lines_removed?: number;
+    }
   | { type: "plan_proposed"; plan: Plan }
   | { type: "plan_running" }
   | { type: "tree_listing"; entries: TreeEntry[] }

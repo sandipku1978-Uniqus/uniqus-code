@@ -13,12 +13,20 @@ function scriptBodies(html: string): string[] {
 const HTML = "<html><head><title>x</title></head><body><h1>hi</h1></body></html>";
 
 describe("injectPreviewScripts", () => {
-  it("injects the nav reporter + element picker at the start of <head>", () => {
+  it("injects the nav reporter + element picker + error reporter at the start of <head>", () => {
     const out = injectPreviewScripts(HTML, "srv_1234abcd");
     expect(out).toContain("__uniqusNavReporterInstalled");
     expect(out).toContain("__uniqusElementPickerInstalled");
+    expect(out).toContain("__uniqusErrorReporterInstalled");
     // Scripts land immediately after the opening <head> tag, before app code.
     expect(out.indexOf("<script>")).toBeLessThan(out.indexOf("<title>"));
+  });
+
+  it("emits the uniqus:runtime-error contract shape from the error reporter", () => {
+    const out = injectPreviewScripts(HTML, "srv_1234abcd");
+    for (const key of ["uniqus:runtime-error", "unhandledrejection", "console.error"]) {
+      expect(out).toContain(key);
+    }
   });
 
   it("emits the uniqus:element contract shape from the picker", () => {
@@ -32,7 +40,7 @@ describe("injectPreviewScripts", () => {
 
   it("emits JS that actually parses (guards against escape/quote breakage)", () => {
     const bodies = scriptBodies(injectPreviewScripts(HTML, "srv_x"));
-    expect(bodies.length).toBe(2);
+    expect(bodies.length).toBe(3);
     for (const body of bodies) {
       // new Function only PARSES the body; it never runs (so window/document
       // refs are fine). A SyntaxError here means the stringified JS is broken.

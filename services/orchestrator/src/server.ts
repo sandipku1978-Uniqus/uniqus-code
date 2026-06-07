@@ -26,8 +26,9 @@ import type {
   ThinkingEffort,
   AccountUsageStats,
   ModelProvider,
+  DesignTokens,
 } from "@uniqus/api-types";
-import { MODEL_CATALOG, estimateCostUsd } from "@uniqus/api-types";
+import { MODEL_CATALOG, estimateCostUsd, DEFAULT_DESIGN_TOKENS } from "@uniqus/api-types";
 import { runAgentLoop } from "./agent/loop.js";
 import {
   parseSelectedElement,
@@ -95,7 +96,16 @@ import {
   updateProject,
   setGithubRepo,
   clearGithubRepo,
+  setProjectDesignSystem,
 } from "./db/projects.js";
+import {
+  listDesignSystems,
+  getDesignSystem,
+  getDesignSystemTokens,
+  createDesignSystem,
+  updateDesignSystem,
+  deleteDesignSystem,
+} from "./db/designSystems.js";
 import { loadHistory, appendMessage, clearHistory } from "./db/messages.js";
 import {
   recordUsageEvent,
@@ -141,6 +151,13 @@ import {
   handleDisconnect as vercelDisconnect,
   getVercelAuth,
 } from "./vercel.js";
+import {
+  handleStart as supabaseStart,
+  handleCallback as supabaseCallback,
+  handleStatus as supabaseStatus,
+  handleDisconnect as supabaseDisconnect,
+  supabaseFetch,
+} from "./supabase.js";
 import { startDeploy, pollUntilTerminal } from "./deploy.js";
 import {
   getLatestDeployment,
@@ -607,6 +624,16 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     });
   }
 
+  // Supabase OAuth callback — above the auth gate for the same reason as the
+  // GitHub/Vercel callbacks (top-level redirect-back may carry a stale session;
+  // the sealed state cookie + re-authenticate() establish identity).
+  if (req.url?.startsWith("/api/supabase/callback") && req.method === "GET") {
+    return await supabaseCallback(req, res, ALLOWED_ORIGINS, async (r) => {
+      const a = await authenticate(r);
+      return a ? { user: a.user } : null;
+    });
+  }
+
   // Guest account signup + restore. Called server-to-server by the web app's
   // route handlers (apps/web/app/api/guest/*), which relay the sealed cookie
   // value we return into a first-party cookie. No session needed, so these run
@@ -703,13 +730,14 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   }
 
   if (req.url === "/api/projects" && req.method === "POST") {
-    const body = await readJsonBody<{ name?: string; description?: string }>(req);
+    const body = await readJsonBody<{ name?: string; description?: string; design_system_id?: string | null }>(req);
     const name = (body.name ?? "").trim();
     if (!name) return json(res, 400, { error: "name is required" });
     const project = await createProject({
       owner_id: user.id,
       name,
       description: body.description ?? null,
+      design_system_id: await resolveDesignSystemId(user.id, body.design_system_id),
     });
     const sandboxDir = sandboxDirFor(project.id);
     await fs.mkdir(sandboxDir, { recursive: true });
@@ -722,7 +750,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // name and the brief is forwarded to the agent verbatim. Cheaper than making
   // the user pick a name; refineBrief never throws (falls back to a slug).
   if (req.url === "/api/projects/from-brief" && req.method === "POST") {
-    const body = await readJsonBody<{ brief?: string; description?: string }>(req);
+    const body = await readJsonBody<{ brief?: string; description?: string; design_system_id?: string | null }>(req);
     const brief = (body.brief ?? "").trim();
     if (!brief) return json(res, 400, { error: "brief is required" });
     if (brief.length > 4000) {
@@ -740,6 +768,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       owner_id: user.id,
       name: refined.name,
       description: body.description ?? brief.slice(0, 200),
+      design_system_id: await resolveDesignSystemId(user.id, body.design_system_id),
     });
     const sandboxDir = sandboxDirFor(project.id);
     await fs.mkdir(sandboxDir, { recursive: true });
@@ -1416,6 +1445,114 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (guestForbidden(res, user)) return;
     await vercelDisconnect(user);
     return json(res, 200, { ok: true });
+  }
+
+  // ── Supabase OAuth ──────────────────────────────────────────────────────
+  if (req.url === "/api/supabase/status" && req.method === "GET") {
+    return json(res, 200, await supabaseStatus(user));
+  }
+  if (req.url?.startsWith("/api/supabase/start") && req.method === "GET") {
+    if (guestForbidden(res, user)) return;
+    return await supabaseStart(req, res, user, ALLOWED_ORIGINS);
+  }
+  if (req.url === "/api/supabase/disconnect" && req.method === "POST") {
+    if (guestForbidden(res, user)) return;
+    await supabaseDisconnect(user);
+    return json(res, 200, { ok: true });
+  }
+  // List the connected account's Supabase projects for the Databases tab.
+  if (req.url === "/api/supabase/projects" && req.method === "GET") {
+    try {
+      const projects = await supabaseFetch(user.id, "/projects");
+      return json(res, 200, { projects });
+    } catch (err) {
+      // supabaseFetch's own errors ("Supabase API …", "Supabase is not
+      // connected …") are user-actionable and safe to surface. Anything else
+      // (a raw network failure like "fetch failed") gets a generic message so
+      // we don't leak infra internals.
+      const raw = err instanceof Error ? err.message : String(err);
+      const msg = raw.startsWith("Supabase ") ? raw : "Failed to list Supabase projects.";
+      return json(res, 502, { error: msg });
+    }
+  }
+
+  // ── Design systems (global, per-user) ────────────────────────────────────
+  if (req.url === "/api/design-systems" && req.method === "GET") {
+    return json(res, 200, { design_systems: await listDesignSystems(user.id) });
+  }
+  if (req.url === "/api/design-systems" && req.method === "POST") {
+    const body = await readJsonBody<{ name?: string; tokens?: unknown }>(req);
+    const name = (body.name ?? "").trim();
+    if (!name) return json(res, 400, { error: "name is required" });
+    const tokens =
+      body.tokens && typeof body.tokens === "object" && !Array.isArray(body.tokens)
+        ? (body.tokens as DesignTokens)
+        : undefined;
+    const ds = await createDesignSystem(user.id, { name, tokens });
+    return json(res, 201, { design_system: ds });
+  }
+  const dsMatch = req.url?.match(/^\/api\/design-systems\/([0-9a-fA-F-]{8,})$/);
+  if (dsMatch) {
+    const id = dsMatch[1];
+    if (req.method === "GET") {
+      const ds = await getDesignSystem(user.id, id);
+      if (!ds) return json(res, 404, { error: "design system not found" });
+      return json(res, 200, { design_system: ds });
+    }
+    if (req.method === "PUT") {
+      const body = await readJsonBody<{ name?: string; tokens?: unknown }>(req);
+      const patch: { name?: string; tokens?: DesignTokens } = {};
+      if (typeof body.name === "string" && body.name.trim()) patch.name = body.name.trim();
+      if (body.tokens && typeof body.tokens === "object" && !Array.isArray(body.tokens)) {
+        patch.tokens = body.tokens as DesignTokens;
+      }
+      const ds = await updateDesignSystem(user.id, id, patch);
+      if (!ds) return json(res, 404, { error: "design system not found" });
+      return json(res, 200, { design_system: ds });
+    }
+    if (req.method === "DELETE") {
+      await deleteDesignSystem(user.id, id);
+      return json(res, 200, { ok: true });
+    }
+  }
+  // Infer a design system from a GitHub repo: clone → extract tokens → save.
+  if (req.url === "/api/design-systems/infer-github" && req.method === "POST") {
+    if (guestForbidden(res, user)) return;
+    const body = await readJsonBody<{ name?: string; repo_url?: string; branch?: string; pat?: string }>(req);
+    const name = (body.name ?? "").trim();
+    const repoUrl = (body.repo_url ?? "").trim();
+    if (!name) return json(res, 400, { error: "name is required" });
+    if (!repoUrl) return json(res, 400, { error: "repo_url is required" });
+    const urlError = await validateCloneUrl(repoUrl);
+    if (urlError) return json(res, 400, { error: urlError });
+    const tmp = path.join(tmpdir(), `uniqus-ds-${randomUUID()}`);
+    try {
+      await importGithub({ repo_url: repoUrl, branch: body.branch, pat: body.pat }, tmp);
+      const tokens = await inferDesignTokensFromDir(tmp);
+      const ds = await createDesignSystem(user.id, { name, tokens });
+      return json(res, 201, { design_system: ds });
+    } catch (err) {
+      return json(res, 400, { error: `infer failed: ${err instanceof Error ? err.message : String(err)}` });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+  // Infer a design system from an uploaded .zip.
+  if (req.url === "/api/design-systems/infer-zip" && req.method === "POST") {
+    if (guestForbidden(res, user)) return;
+    return await handleDesignSystemZipInfer(req, res, user.id);
+  }
+
+  // Attach (or detach with null) a design system to a project.
+  const projDsMatch = req.url?.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/design-system$/);
+  if (projDsMatch && req.method === "POST") {
+    const projectId = projDsMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const body = await readJsonBody<{ design_system_id?: string | null }>(req);
+    const resolved = await resolveDesignSystemId(user.id, body.design_system_id);
+    await setProjectDesignSystem(projectId, user.id, resolved);
+    return json(res, 200, { ok: true, design_system_id: resolved });
   }
 
   // Per-project usage rollup (same shape as /api/account/usage-stats, scoped
@@ -2510,6 +2647,20 @@ async function projectUsageStats(
   };
 }
 
+/**
+ * Validate that a design-system id belongs to `userId` before attaching it to a
+ * project — prevents a user from pinning their project to someone else's system.
+ * Returns the id if valid, or null (null/unknown/not-owned ⇒ "no design system").
+ */
+async function resolveDesignSystemId(
+  userId: string,
+  id: string | null | undefined,
+): Promise<string | null> {
+  if (!id) return null;
+  const ds = await getDesignSystem(userId, id).catch(() => null);
+  return ds ? ds.id : null;
+}
+
 function toProjectSummary(p: {
   id: string;
   name: string;
@@ -2523,6 +2674,7 @@ function toProjectSummary(p: {
   linked_branch?: string | null;
   latest_deploy_state?: DeploymentState | null;
   latest_deploy_at?: string | null;
+  design_system_id?: string | null;
 }): ProjectSummary {
   return {
     id: p.id,
@@ -2537,6 +2689,7 @@ function toProjectSummary(p: {
     linked_branch: p.linked_branch ?? null,
     latest_deploy_state: p.latest_deploy_state ?? null,
     latest_deploy_at: p.latest_deploy_at ?? null,
+    design_system_id: p.design_system_id ?? null,
   };
 }
 
@@ -3302,13 +3455,18 @@ async function runSession(
   // Linked GitHub repo (per-turn read so connect/disconnect takes effect on the
   // next turn without a reconnect). Injected into the system prompt so the agent
   // knows the project has a repo. Non-fatal if the lookup fails.
-  const repo = await getProject(projectId, userId)
-    .then((p) =>
-      p?.github_repo_url
-        ? { fullName: p.github_repo_full_name ?? p.github_repo_url, url: p.github_repo_url }
-        : null,
-    )
-    .catch(() => null);
+  const projectRow = await getProject(projectId, userId).catch(() => null);
+  const repo = projectRow?.github_repo_url
+    ? {
+        fullName: projectRow.github_repo_full_name ?? projectRow.github_repo_url,
+        url: projectRow.github_repo_url,
+      }
+    : null;
+  // The project's attached design system (per-turn read so attach/detach in the
+  // Design Systems tab takes effect on the next turn). Non-fatal on lookup error.
+  const designSystem = projectRow?.design_system_id
+    ? await getDesignSystemTokens(userId, projectRow.design_system_id).catch(() => null)
+    : null;
   let finalMessage = messageWithRefs;
   // The selected-element block, rendered once. The execute loop appends its own
   // copy from `selectedElement` (LoopOptions); the planner — which runs before
@@ -3452,6 +3610,7 @@ async function runSession(
     thinkingEffort: effort,
     userId,
     repo,
+    designSystem,
     selectedElement,
     // Per-session so a sibling chat session in the same project doesn't see this
     // turn's todos pop into its Tasks pane (B-11).
@@ -3482,8 +3641,15 @@ async function runSession(
       // dedupes on call_id and updates the existing row in place.
       send({ type: "tool_call", call_id: callId, name, input });
     },
-    onToolResult: (callId, name, input, toolResult, isError) => {
-      send({ type: "tool_result", call_id: callId, result: toolResult, is_error: isError });
+    onToolResult: (callId, name, input, toolResult, isError, editStats) => {
+      send({
+        type: "tool_result",
+        call_id: callId,
+        result: toolResult,
+        is_error: isError,
+        lines_added: editStats?.linesAdded,
+        lines_removed: editStats?.linesRemoved,
+      });
       if (isError) return;
       // Broadcast file_changed for write/edit so the file explorer updates
       // in real-time (not just at turn end). Also triggers Storage sync.
@@ -3862,6 +4028,170 @@ async function nameFromBrief(brief: string): Promise<string> {
     return name.startsWith("untitled-") ? fallback : name;
   } catch {
     return fallback;
+  }
+}
+
+// ── Design-system inference (import a codebase → infer its tokens) ───────────
+
+/** Files most likely to encode a design system, by basename. */
+function isDesignRelevantFile(rel: string): boolean {
+  const base = (rel.toLowerCase().split("/").pop() ?? rel).toLowerCase();
+  if (/^tailwind\.config\.(js|cjs|mjs|ts)$/.test(base)) return true;
+  if (/^(globals?|index|app|theme|tokens|variables|colou?rs?)\.(css|scss|sass)$/.test(base)) return true;
+  if (/^theme\.(ts|js|tsx|jsx|json)$/.test(base)) return true;
+  if (base === "tokens.json" || base === "package.json") return true;
+  return false;
+}
+
+/** Collect the contents of design-relevant files under `dir`, capped in size. */
+async function collectDesignFiles(dir: string): Promise<string> {
+  const MAX_TOTAL = 40_000;
+  const PER_FILE = 8_000;
+  const out: string[] = [];
+  let total = 0;
+  const skip = new Set(["node_modules", ".git", ".next", "dist", "build", ".turbo"]);
+  async function walk(d: string, depth: number): Promise<void> {
+    if (depth > 5 || total >= MAX_TOTAL) return;
+    const entries = await fs.readdir(d, { withFileTypes: true }).catch(() => null);
+    if (!entries) return;
+    for (const e of entries) {
+      if (total >= MAX_TOTAL) return;
+      if (e.isDirectory()) {
+        if (!skip.has(e.name)) await walk(path.join(d, e.name), depth + 1);
+        continue;
+      }
+      const full = path.join(d, e.name);
+      const rel = path.relative(dir, full).replace(/\\/g, "/");
+      if (!isDesignRelevantFile(rel)) continue;
+      try {
+        const slice = (await fs.readFile(full, "utf-8")).slice(0, PER_FILE);
+        out.push(`// ===== ${rel} =====\n${slice}`);
+        total += slice.length;
+      } catch {
+        /* unreadable file — skip */
+      }
+    }
+  }
+  await walk(dir, 0);
+  return out.join("\n\n").slice(0, MAX_TOTAL);
+}
+
+/** Merge an LLM-produced token object onto the defaults, validating each field. */
+function mergeDesignTokens(base: DesignTokens, raw: unknown): DesignTokens {
+  if (!raw || typeof raw !== "object") return base;
+  const r = raw as Record<string, unknown>;
+  const colors =
+    r.colors && typeof r.colors === "object" && !Array.isArray(r.colors)
+      ? Object.fromEntries(
+          Object.entries(r.colors as Record<string, unknown>)
+            .filter(([, v]) => typeof v === "string")
+            .map(([k, v]) => [k, String(v)]),
+        )
+      : {};
+  const fontsRaw = r.fonts && typeof r.fonts === "object" ? (r.fonts as Record<string, unknown>) : {};
+  return {
+    mode: r.mode === "dark" || r.mode === "system" ? r.mode : base.mode,
+    colors: Object.keys(colors).length ? colors : base.colors,
+    fonts: {
+      body: typeof fontsRaw.body === "string" ? fontsRaw.body : base.fonts.body,
+      heading: typeof fontsRaw.heading === "string" ? fontsRaw.heading : base.fonts.heading,
+      mono: typeof fontsRaw.mono === "string" ? fontsRaw.mono : base.fonts.mono,
+    },
+    typeScale: typeof r.typeScale === "string" ? r.typeScale : base.typeScale,
+    radius: typeof r.radius === "string" ? r.radius : base.radius,
+    spacing: typeof r.spacing === "string" ? r.spacing : base.spacing,
+    notes: typeof r.notes === "string" ? r.notes : base.notes,
+  };
+}
+
+/**
+ * Infer a DesignTokens object from a codebase directory by feeding its
+ * design-relevant files to the model and parsing a JSON token object. Falls back
+ * to DEFAULT_DESIGN_TOKENS on any error / missing key, so a caller always gets a
+ * usable (editable) result.
+ */
+async function inferDesignTokensFromDir(dir: string): Promise<DesignTokens> {
+  const files = await collectDesignFiles(dir);
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey || !files.trim()) return DEFAULT_DESIGN_TOKENS;
+  try {
+    const client = new AnthropicCtor({ apiKey });
+    const system =
+      "You extract a design system from a codebase. From the provided config/CSS/theme files, infer the visual " +
+      "tokens. Reply with ONLY a JSON object (no prose, no markdown fences) of shape: " +
+      '{"mode":"light"|"dark"|"system","colors":{"<semantic-name>":"<css color>"},"fonts":{"body":"...",' +
+      '"heading":"...","mono":"..."},"typeScale":"...","radius":"<e.g. 8px>","spacing":"<e.g. 4px>",' +
+      '"notes":"<short guidance: voice, density, motion>"}. Use SEMANTIC color names (primary, accent, ' +
+      "background, surface, text, muted, border, …), not raw hue names. Omit any value you cannot determine.";
+    const response = await client.messages.create({
+      model: ensureAnthropic("classify"),
+      max_tokens: 1200,
+      system,
+      messages: [{ role: "user", content: files }],
+    });
+    const text = response.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("")
+      .trim();
+    const jsonStr = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+    return mergeDesignTokens(DEFAULT_DESIGN_TOKENS, JSON.parse(jsonStr));
+  } catch (err) {
+    console.error("design token inference failed (falling back to defaults):", err);
+    return DEFAULT_DESIGN_TOKENS;
+  }
+}
+
+/** Multipart .zip → infer tokens → save a design system. Mirrors handleZipImport. */
+async function handleDesignSystemZipInfer(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ownerId: string,
+): Promise<void> {
+  let zipBuffer: Buffer | null = null;
+  let name = "";
+  let parseError: string | null = null;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const bb = Busboy({ headers: req.headers, limits: { fileSize: 100 * 1024 * 1024, files: 1 } });
+      const chunks: Buffer[] = [];
+      bb.on("file", (_field, file, info) => {
+        if (!info.filename.toLowerCase().endsWith(".zip")) {
+          parseError = "uploaded file must be a .zip";
+          file.resume();
+          return;
+        }
+        file.on("data", (d: Buffer) => chunks.push(d));
+        file.on("limit", () => {
+          parseError = "zip file exceeds 100 MB upload limit";
+        });
+        file.on("end", () => {
+          if (!parseError) zipBuffer = Buffer.concat(chunks);
+        });
+      });
+      bb.on("field", (n, v) => {
+        if (n === "name") name = v.trim();
+      });
+      bb.on("finish", () => resolve());
+      bb.on("error", (err) => reject(err));
+      req.pipe(bb);
+    });
+  } catch (err) {
+    return json(res, 400, { error: `multipart parse failed: ${err instanceof Error ? err.message : String(err)}` });
+  }
+  if (parseError) return json(res, 400, { error: parseError });
+  if (!name) return json(res, 400, { error: "name is required" });
+  if (!zipBuffer) return json(res, 400, { error: "no zip file uploaded" });
+  const tmp = path.join(tmpdir(), `uniqus-ds-${randomUUID()}`);
+  try {
+    await importZip(zipBuffer, tmp);
+    const tokens = await inferDesignTokensFromDir(tmp);
+    const ds = await createDesignSystem(ownerId, { name, tokens });
+    return json(res, 201, { design_system: ds });
+  } catch (err) {
+    return json(res, 400, { error: `infer failed: ${err instanceof Error ? err.message : String(err)}` });
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
   }
 }
 

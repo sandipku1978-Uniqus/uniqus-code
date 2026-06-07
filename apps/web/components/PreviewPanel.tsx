@@ -11,6 +11,7 @@ import {
 import type { PreviewServer } from "@uniqus/api-types";
 import { useIsMobile } from "@/lib/use-is-mobile";
 import { useStore, type SelectedElement } from "@/lib/store";
+import { toast } from "@/lib/toast";
 import PreviewAnnotator from "./PreviewAnnotator";
 
 // Match the page's TLS state for the dev fallback so the iframe doesn't get
@@ -86,6 +87,53 @@ function describeElement(el: SelectedElement): string {
   return `${el.tag || "element"}${id}${cls}` || el.selector;
 }
 
+/**
+ * A runtime error reported by the proxy-injected error reporter (window.onerror,
+ * unhandledrejection, or console.error from inside the preview app). These never
+ * reach the dev-server logs — they happen in the user's browser — so the agent
+ * is blind to them unless we capture them here and hand them over. `count` folds
+ * repeats of the same error (a render loop) into one row.
+ */
+interface RuntimeError {
+  kind: string; // "error" | "unhandledrejection" | "console" | "resource"
+  message: string;
+  stack: string;
+  source: string;
+  line: number | null;
+  col: number | null;
+  path: string;
+  count: number;
+}
+
+/**
+ * Validate + clamp an inbound `uniqus:runtime-error` message, rejecting anything
+ * not addressed to `serverId`. Returns null if off-shape or for another server.
+ */
+function parseRuntimeError(data: unknown, serverId: string): Omit<RuntimeError, "count"> | null {
+  if (!data || typeof data !== "object") return null;
+  const d = data as Record<string, unknown>;
+  if (d.type !== "uniqus:runtime-error") return null;
+  if (d.server_id !== serverId) return null;
+  const str = (v: unknown, n: number) => (typeof v === "string" ? v.slice(0, n) : "");
+  const numOrNull = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const message = str(d.message, 1000).trim();
+  if (!message) return null;
+  return {
+    kind: typeof d.kind === "string" ? d.kind : "error",
+    message,
+    stack: str(d.stack, 4000),
+    source: str(d.source, 300),
+    line: numOrNull(d.line),
+    col: numOrNull(d.col),
+    path: str(d.path, 300) || "/",
+  };
+}
+
+/** Dedup key — same kind + message + top stack frame counts as one error. */
+function errSig(e: { kind: string; message: string; stack: string }): string {
+  return `${e.kind}|${e.message}|${e.stack.split("\n")[0] ?? ""}`;
+}
+
 // ── Device-breakpoint presets ───────────────────────────────────────────────
 // "Responsive" fills the pane exactly like the plain preview. Fixed presets
 // render the app at a real device width (height drives the frame's aspect) and
@@ -144,6 +192,39 @@ const reloadBtnStyle: CSSProperties = {
   fontFamily: "inherit",
   cursor: "pointer",
 };
+// Floating panel listing captured runtime errors. Anchored to .preview-wrap
+// (position:relative), just under the 32px toolbar. Inline-styled off the design
+// tokens like the overlays above, since the panel can't reach the cross-origin
+// iframe's CSS.
+const errPanelStyle: CSSProperties = {
+  position: "absolute",
+  top: 36,
+  right: 8,
+  zIndex: 7,
+  width: 380,
+  maxWidth: "calc(100% - 16px)",
+  maxHeight: "60%",
+  display: "flex",
+  flexDirection: "column",
+  background: "var(--bg-surface)",
+  border: "1px solid var(--border-default)",
+  borderRadius: "var(--radius-md)",
+  boxShadow: "0 8px 28px rgba(0,0,0,0.35)",
+  overflow: "hidden",
+};
+const errStackStyle: CSSProperties = {
+  margin: "4px 0 0",
+  padding: "6px 8px",
+  background: "var(--bg-dark)",
+  border: "1px solid var(--border-default)",
+  borderRadius: "var(--radius-sm)",
+  font: "11px/1.5 ui-monospace,Menlo,Consolas,monospace",
+  color: "var(--text-muted)",
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-word",
+  maxHeight: 96,
+  overflow: "auto",
+};
 
 export default function PreviewPanel({ server }: { server: PreviewServer }) {
   const [reloadKey, setReloadKey] = useState(0);
@@ -164,6 +245,44 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
   const [candidate, setCandidate] = useState<SelectedElement | null>(null);
   const [justAttached, setJustAttached] = useState(false);
   const setPendingSelectedElement = useStore((s) => s.setPendingSelectedElement);
+  const setPendingComposerText = useStore((s) => s.setPendingComposerText);
+
+  // Runtime errors captured from inside the preview iframe (see RuntimeError).
+  // The ref mirrors state so the toast action — invoked long after it's created
+  // — always hands over the latest set, not a stale snapshot.
+  const [runtimeErrors, setRuntimeErrors] = useState<RuntimeError[]>([]);
+  const [errPanelOpen, setErrPanelOpen] = useState(false);
+  const runtimeErrorsRef = useRef<RuntimeError[]>([]);
+  const errorToastedRef = useRef(false);
+
+  const sendErrorsToAgent = useCallback(() => {
+    const errs = runtimeErrorsRef.current;
+    if (errs.length === 0) return;
+    const SEND_LIMIT = 20;
+    const blocks = errs
+      .slice(0, SEND_LIMIT)
+      .map((e) => {
+        const loc = e.source ? ` (${e.source}${e.line != null ? `:${e.line}` : ""})` : "";
+        const times = e.count > 1 ? ` ×${e.count}` : "";
+        const head = `[${e.kind}] ${e.message}${loc}${times}`;
+        const stack = e.stack ? `\n${e.stack.split("\n").slice(0, 6).join("\n")}` : "";
+        return head + stack;
+      })
+      .join("\n\n");
+    // Don't silently drop the tail — tell the agent the list was truncated so it
+    // knows there's more to find than what it can see.
+    const extra = errs.length - SEND_LIMIT;
+    const more = extra > 0 ? `\n\n…and ${extra} more error${extra === 1 ? "" : "s"} in the preview (not shown above).` : "";
+    const page = errs[0]?.path || "/";
+    const msg =
+      `The live preview is throwing runtime errors I can see in the browser but you can't ` +
+      `(they're client-side, so they never hit the dev-server log). Please diagnose and fix ` +
+      `the root cause.\n\nPage: ${page}\n\n\`\`\`\n${blocks}\n\`\`\`${more}`;
+    setPendingComposerText(msg);
+    setRuntimeErrors([]);
+    setErrPanelOpen(false);
+    toast.success("Preview errors added to chat — review and send.");
+  }, [setPendingComposerText]);
 
   // Screenshot annotator modal.
   const [annotateOpen, setAnnotateOpen] = useState(false);
@@ -385,6 +504,60 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
     setCandidate(null);
   }, [server.id, reloadKey]);
 
+  // Keep the ref in sync so deferred callers (the toast action) read fresh data.
+  useEffect(() => {
+    runtimeErrorsRef.current = runtimeErrors;
+  }, [runtimeErrors]);
+
+  // Listen for runtime errors the proxy-injected reporter posts out of the
+  // preview. Origin- and server-id-guarded like the picker listener so a stray
+  // frame can't inject fake errors. Repeats fold into a count; the list is
+  // capped so a render loop can't grow it unbounded.
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      if (previewOrigin !== "*" && e.origin !== previewOrigin) return;
+      const err = parseRuntimeError(e.data, server.id);
+      if (!err) return;
+      setRuntimeErrors((prev) => {
+        const sig = errSig(err);
+        const idx = prev.findIndex((x) => errSig(x) === sig);
+        if (idx >= 0) {
+          const next = prev.slice();
+          next[idx] = { ...next[idx], count: next[idx].count + 1 };
+          return next;
+        }
+        if (prev.length >= 50) return prev;
+        return [...prev, { ...err, count: 1 }];
+      });
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [server.id, previewOrigin]);
+
+  // A fresh load (server change / Reload) clears the slate — errors from a
+  // previous build are no longer relevant and would mislead the agent.
+  useEffect(() => {
+    setRuntimeErrors([]);
+    setErrPanelOpen(false);
+    errorToastedRef.current = false;
+  }, [server.id, reloadKey]);
+
+  // Surface the first error of a batch as a toast with a one-click hand-off, so
+  // the user notices even without opening the panel. Fires once per batch
+  // (re-arms after a clear) to avoid toast spam on a chatty app.
+  useEffect(() => {
+    if (runtimeErrors.length === 0) {
+      errorToastedRef.current = false;
+      return;
+    }
+    if (errorToastedRef.current) return;
+    errorToastedRef.current = true;
+    const n = runtimeErrors.length;
+    toast.error(n === 1 ? "The preview hit a runtime error." : `The preview hit ${n} runtime errors.`, {
+      action: { label: "Send to agent", onClick: sendErrorsToAgent },
+    });
+  }, [runtimeErrors.length, sendErrorsToAgent]);
+
   useEffect(() => {
     // Re-arm the load state whenever the iframe re-points (server change or
     // Reload). The iframe stays mounted the whole time, so a late `onLoad`
@@ -418,6 +591,7 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
   };
 
   const highlightRect = candidate?.rect ?? null;
+  const totalErrorCount = runtimeErrors.reduce((n, e) => n + e.count, 0);
 
   return (
     <div className="preview-wrap">
@@ -582,6 +756,27 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
           </div>
         )}
 
+        {/* Runtime-error badge — only shows when the preview has thrown. */}
+        {totalErrorCount > 0 && (
+          <button
+            type="button"
+            onClick={() => setErrPanelOpen((v) => !v)}
+            className="icon-btn-sm"
+            data-on={errPanelOpen}
+            title={`${totalErrorCount} runtime error${totalErrorCount === 1 ? "" : "s"} in the preview — click to view`}
+            aria-expanded={errPanelOpen}
+            aria-label={`${totalErrorCount} runtime errors in the preview`}
+            style={{ width: "auto", gap: 5, padding: "0 7px", fontSize: 11, color: "var(--conf-medium)" }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+              <line x1="12" y1="9" x2="12" y2="13" />
+              <line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+            <span>{totalErrorCount}</span>
+          </button>
+        )}
+
         <a
           href={displayedUrl}
           target="_blank"
@@ -597,6 +792,110 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
           </svg>
         </a>
       </div>
+
+      {/* Runtime-error panel — lists what the preview threw, with a one-click
+          hand-off that stages a fix prompt into the composer. */}
+      {errPanelOpen && totalErrorCount > 0 && (
+        <div style={errPanelStyle} role="dialog" aria-label="Preview runtime errors">
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "8px 10px",
+              borderBottom: "1px solid var(--border-default)",
+            }}
+          >
+            <strong style={{ fontSize: 12.5, color: "var(--text-primary)" }}>
+              Runtime error{totalErrorCount === 1 ? "" : "s"} · {totalErrorCount}
+            </strong>
+            <button
+              type="button"
+              onClick={() => setErrPanelOpen(false)}
+              className="icon-btn-sm"
+              aria-label="Close errors panel"
+              title="Close"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+          <div style={{ overflow: "auto", padding: "8px 10px", display: "flex", flexDirection: "column", gap: 10 }}>
+            {runtimeErrors.map((e, i) => (
+              <div key={i} style={{ fontSize: 12 }}>
+                <div style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
+                  <span
+                    style={{
+                      fontSize: 10,
+                      textTransform: "uppercase",
+                      letterSpacing: 0.3,
+                      color: "var(--conf-medium)",
+                      fontWeight: 600,
+                    }}
+                  >
+                    {e.kind}
+                  </span>
+                  {e.count > 1 && <span style={{ fontSize: 10, color: "var(--text-muted)" }}>×{e.count}</span>}
+                </div>
+                <div style={{ color: "var(--text-primary)", wordBreak: "break-word", marginTop: 2 }}>{e.message}</div>
+                {(e.source || e.line != null) && (
+                  <div style={{ color: "var(--text-muted)", fontSize: 11, marginTop: 1, wordBreak: "break-all" }}>
+                    {e.source}
+                    {e.line != null ? `:${e.line}` : ""}
+                  </div>
+                )}
+                {e.stack && <pre style={errStackStyle}>{e.stack.split("\n").slice(0, 6).join("\n")}</pre>}
+              </div>
+            ))}
+            {runtimeErrors.length >= 50 && (
+              <div style={{ fontSize: 11, color: "var(--text-muted)", fontStyle: "italic" }}>
+                Showing 50 distinct errors — newer ones are hidden until you clear.
+              </div>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8, padding: "8px 10px", borderTop: "1px solid var(--border-default)" }}>
+            <button
+              type="button"
+              onClick={sendErrorsToAgent}
+              style={{
+                flex: 1,
+                padding: "6px 12px",
+                fontSize: 12.5,
+                fontFamily: "inherit",
+                cursor: "pointer",
+                border: "none",
+                borderRadius: "var(--radius-sm)",
+                background: "var(--brand-gradient, var(--brand-magenta))",
+                color: "#fff",
+                fontWeight: 600,
+              }}
+            >
+              Send to agent
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setRuntimeErrors([]);
+                setErrPanelOpen(false);
+              }}
+              style={{
+                padding: "6px 12px",
+                fontSize: 12.5,
+                fontFamily: "inherit",
+                cursor: "pointer",
+                border: "1px solid var(--border-default)",
+                borderRadius: "var(--radius-sm)",
+                background: "transparent",
+                color: "var(--text-primary)",
+              }}
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Pick-mode hint + confirm card float over the preview area (not the
           scrollable stage) so they stay put regardless of frame scroll. */}

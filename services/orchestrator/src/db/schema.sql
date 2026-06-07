@@ -30,6 +30,19 @@ alter table users add column if not exists vercel_user_login text;
 alter table users add column if not exists vercel_team_id text;
 alter table users add column if not exists vercel_connected_at timestamptz;
 
+-- Supabase OAuth (account-level, per-user). Unlike Vercel, Supabase access
+-- tokens EXPIRE (~1h) and refresh tokens ROTATE (single-use), so we persist the
+-- refresh token + an expiry and refresh on demand (see supabase.ts). Both
+-- tokens are AES-256-GCM encrypted with the same key as the other OAuth tokens.
+-- org_id/org_name are the Supabase organization picked as the default place to
+-- create projects (stored in plaintext only for "Connected to <org>" display).
+alter table users add column if not exists supabase_access_token text;
+alter table users add column if not exists supabase_refresh_token text;
+alter table users add column if not exists supabase_token_expires_at timestamptz;
+alter table users add column if not exists supabase_org_id text;
+alter table users add column if not exists supabase_org_name text;
+alter table users add column if not exists supabase_connected_at timestamptz;
+
 -- Guest / education accounts. A guest signs up with no Google account and no
 -- email — districts control what students can sign into, so this is the only
 -- way to get students using the product before a district approves it.
@@ -92,6 +105,14 @@ $$ language plpgsql;
 -- subsequent deploys hit the same project and the dashboard URL is stable.
 alter table projects add column if not exists vercel_project_id text;
 alter table projects add column if not exists vercel_project_name text;
+
+-- Per-project Supabase link. Populated when the agent provisions (or the user
+-- attaches) a Supabase project. `ref` is the 20-char project ref; the anon key,
+-- service_role key, db password and connection string live in project_secrets,
+-- never here.
+alter table projects add column if not exists supabase_project_ref text;
+alter table projects add column if not exists supabase_project_name text;
+alter table projects add column if not exists supabase_org_id text;
 
 -- Per-project GitHub repo. Populated when the user clicks "Create GitHub
 -- repo" in the workspace topbar. The orchestrator creates a fresh repo via
@@ -382,3 +403,32 @@ returns jsonb language sql stable as $$
     )
   );
 $$;
+
+-- Global, per-user design systems (Design Systems tab on the projects page).
+-- Reusable token sets (color/typography/spacing/...) attached to a project (or
+-- none) and injected into the agent's system prompt so generation stays
+-- on-system. `tokens` is the canonical JSON artifact — shape = DesignTokens in
+-- @uniqus/api-types. Created once, used across many projects.
+create table if not exists design_systems (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  name text not null,
+  tokens jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists design_systems_user_idx
+  on design_systems (user_id, updated_at desc);
+
+drop trigger if exists design_systems_updated_at on design_systems;
+create trigger design_systems_updated_at
+  before update on design_systems
+  for each row execute function touch_project_updated_at();
+
+alter table design_systems enable row level security;
+
+-- Which design system a project uses (null = none). ON DELETE SET NULL so
+-- deleting a design system detaches it from projects rather than deleting them.
+alter table projects add column if not exists design_system_id uuid
+  references design_systems(id) on delete set null;

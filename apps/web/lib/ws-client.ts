@@ -248,7 +248,10 @@ function handleEvent(event: ServerEvent): void {
       s.addToolCall(event.call_id, event.name, event.input);
       break;
     case "tool_result":
-      s.setToolResult(event.call_id, event.result, event.is_error);
+      s.setToolResult(event.call_id, event.result, event.is_error, {
+        lines_added: event.lines_added,
+        lines_removed: event.lines_removed,
+      });
       break;
     case "plan_proposed":
       s.addPlanProposal(event.plan);

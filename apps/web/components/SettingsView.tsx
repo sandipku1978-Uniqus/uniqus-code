@@ -12,7 +12,11 @@ import {
   fetchGithubStatus,
   disconnectGithubApi,
   githubOauthStartUrl,
+  fetchSupabaseStatus,
+  disconnectSupabaseApi,
+  supabaseOauthStartUrl,
   type GithubStatus,
+  type SupabaseStatus,
 } from "@/lib/api";
 
 export default function SettingsView({
@@ -30,13 +34,53 @@ export default function SettingsView({
   const [github, setGithub] = useState<GithubStatus | null>(null);
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
+  const [supabase, setSupabase] = useState<SupabaseStatus | null>(null);
+  const [confirmingSupabaseDisconnect, setConfirmingSupabaseDisconnect] = useState(false);
+  const [disconnectingSupabase, setDisconnectingSupabase] = useState(false);
 
   useEffect(() => {
     if (isGuest) return;
     fetchGithubStatus()
       .then(setGithub)
       .catch(() => setGithub({ connected: false, login: null, connected_at: null }));
+    fetchSupabaseStatus()
+      .then(setSupabase)
+      .catch(() =>
+        setSupabase({ connected: false, org_id: null, org_name: null, connected_at: null }),
+      );
   }, [isGuest]);
+
+  // Surface the OAuth round-trip result when Supabase redirects back to /settings.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get("supabase");
+    if (!result) return;
+    if (result === "connected") toast.success("Supabase connected");
+    else if (result === "error") {
+      toast.error(`Couldn't connect Supabase${params.get("reason") ? `: ${params.get("reason")}` : ""}`);
+    }
+    params.delete("supabase");
+    params.delete("reason");
+    const qs = params.toString();
+    window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
+  }, []);
+
+  async function handleDisconnectSupabase(): Promise<void> {
+    setDisconnectingSupabase(true);
+    try {
+      await disconnectSupabaseApi();
+      setSupabase({ connected: false, org_id: null, org_name: null, connected_at: null });
+      setConfirmingSupabaseDisconnect(false);
+      toast.success("Supabase disconnected");
+    } catch (err) {
+      toast.error(
+        `Couldn't disconnect Supabase: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      setDisconnectingSupabase(false);
+    }
+  }
 
   async function handleDisconnectGithub(): Promise<void> {
     setDisconnecting(true);
@@ -147,6 +191,54 @@ export default function SettingsView({
           </div>
         )}
 
+        {/* Supabase — functional (standard accounts only). Lets the agent
+            provision a Postgres DB per project + wire env vars. */}
+        {!isGuest && (
+          <div className="settings-card">
+            <h2>Supabase</h2>
+            <p className="settings-card-sub">
+              Connect Supabase so the agent can create a Postgres database for a
+              project and wire its keys automatically. Manage databases from the
+              Databases tab on the projects page.
+            </p>
+            {supabase === null ? (
+              <div className="settings-row">
+                <span className="k">Status</span>
+                <span className="v">checking…</span>
+              </div>
+            ) : supabase.connected ? (
+              <div className="settings-row">
+                <span className="k">
+                  Connected{supabase.org_name ? <> to <strong>{supabase.org_name}</strong></> : null}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setConfirmingSupabaseDisconnect(true)}
+                  className="btn-ghost"
+                  style={{ fontSize: 12 }}
+                >
+                  Disconnect
+                </button>
+              </div>
+            ) : (
+              <div className="settings-row">
+                <span className="k">Not connected</span>
+                <a
+                  href={supabaseOauthStartUrl(
+                    typeof window !== "undefined"
+                      ? window.location.origin + "/settings"
+                      : "/settings",
+                  )}
+                  className="btn-primary"
+                  style={{ fontSize: 12, padding: "6px 12px", textDecoration: "none" }}
+                >
+                  Connect Supabase
+                </a>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Project-scoped configuration — pointers, not duplicated UI */}
         <div className="settings-card">
           <h2>Per-project configuration</h2>
@@ -222,6 +314,42 @@ export default function SettingsView({
           <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "var(--text-muted)" }}>
             You’ll need to reconnect to import private repos or create repos. Repositories
             already on github.com are left untouched.
+          </p>
+        </Modal>
+      )}
+
+      {confirmingSupabaseDisconnect && (
+        <Modal
+          title="Disconnect Supabase?"
+          width={460}
+          onClose={() => !disconnectingSupabase && setConfirmingSupabaseDisconnect(false)}
+          footer={
+            <>
+              <span />
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setConfirmingSupabaseDisconnect(false)}
+                  disabled={disconnectingSupabase}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn-danger"
+                  onClick={handleDisconnectSupabase}
+                  disabled={disconnectingSupabase}
+                >
+                  {disconnectingSupabase ? "Disconnecting…" : "Disconnect"}
+                </button>
+              </div>
+            </>
+          }
+        >
+          <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, color: "var(--text-muted)" }}>
+            The agent won’t be able to create or query databases until you reconnect.
+            Databases already provisioned on Supabase are left untouched.
           </p>
         </Modal>
       )}

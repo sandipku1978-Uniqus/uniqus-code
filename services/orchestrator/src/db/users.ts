@@ -175,6 +175,117 @@ export async function getVercelToken(userId: string): Promise<string | null> {
   }
 }
 
+// ── Supabase ────────────────────────────────────────────────────────────────
+// Differs from Vercel: access tokens expire (~1h) and refresh tokens rotate, so
+// we store BOTH (encrypted) plus an expiry, and supabase.ts refreshes on demand.
+
+export interface SupabaseLink {
+  org_id: string | null;
+  org_name: string | null;
+  connected_at: string;
+}
+
+export interface SupabaseTokens {
+  access_token: string;
+  refresh_token: string;
+  /** Epoch ms at which the access token expires. */
+  expires_at: number;
+}
+
+/** Persist the full token set after the initial OAuth exchange (sets org + connected_at). */
+export async function setSupabaseToken(
+  userId: string,
+  tokens: { access_token: string; refresh_token: string; expires_in: number },
+  org: { id: string | null; name: string | null },
+): Promise<void> {
+  const expiresAt = new Date(Date.now() + tokens.expires_in * 1000).toISOString();
+  const { error } = await db()
+    .from("users")
+    .update({
+      supabase_access_token: encryptToken(tokens.access_token),
+      supabase_refresh_token: encryptToken(tokens.refresh_token),
+      supabase_token_expires_at: expiresAt,
+      supabase_org_id: org.id,
+      supabase_org_name: org.name,
+      supabase_connected_at: new Date().toISOString(),
+    })
+    .eq("id", userId);
+  if (error) throw new Error(`setSupabaseToken failed: ${error.message}`);
+}
+
+/** Persist only the rotated tokens after a refresh — leaves org/connected_at alone. */
+export async function updateSupabaseTokens(
+  userId: string,
+  tokens: { access_token: string; refresh_token: string; expires_in: number },
+): Promise<void> {
+  const expiresAt = new Date(Date.now() + tokens.expires_in * 1000).toISOString();
+  const { error } = await db()
+    .from("users")
+    .update({
+      supabase_access_token: encryptToken(tokens.access_token),
+      supabase_refresh_token: encryptToken(tokens.refresh_token),
+      supabase_token_expires_at: expiresAt,
+    })
+    .eq("id", userId);
+  if (error) throw new Error(`updateSupabaseTokens failed: ${error.message}`);
+}
+
+export async function clearSupabaseToken(userId: string): Promise<void> {
+  const { error } = await db()
+    .from("users")
+    .update({
+      supabase_access_token: null,
+      supabase_refresh_token: null,
+      supabase_token_expires_at: null,
+      supabase_org_id: null,
+      supabase_org_name: null,
+      supabase_connected_at: null,
+    })
+    .eq("id", userId);
+  if (error) throw new Error(`clearSupabaseToken failed: ${error.message}`);
+}
+
+/** Connection metadata for the status endpoint / UI. Null when not connected. */
+export async function getSupabaseLink(userId: string): Promise<SupabaseLink | null> {
+  const { data, error } = await db()
+    .from("users")
+    .select(
+      "supabase_org_id, supabase_org_name, supabase_connected_at, supabase_access_token",
+    )
+    .eq("id", userId)
+    .single();
+  if (error || !data?.supabase_access_token) return null;
+  return {
+    org_id: (data.supabase_org_id as string | null) ?? null,
+    org_name: (data.supabase_org_name as string | null) ?? null,
+    connected_at: data.supabase_connected_at as string,
+  };
+}
+
+/** Decrypt the stored access+refresh tokens (+ expiry). supabase.ts refreshes when stale. */
+export async function getSupabaseTokens(userId: string): Promise<SupabaseTokens | null> {
+  const { data, error } = await db()
+    .from("users")
+    .select(
+      "supabase_access_token, supabase_refresh_token, supabase_token_expires_at",
+    )
+    .eq("id", userId)
+    .single();
+  if (error || !data?.supabase_access_token || !data?.supabase_refresh_token) return null;
+  try {
+    return {
+      access_token: decryptToken(data.supabase_access_token as string),
+      refresh_token: decryptToken(data.supabase_refresh_token as string),
+      expires_at: data.supabase_token_expires_at
+        ? new Date(data.supabase_token_expires_at as string).getTime()
+        : 0,
+    };
+  } catch (err) {
+    console.error(`getSupabaseTokens decrypt failed for user ${userId}:`, err);
+    return null;
+  }
+}
+
 /**
  * Decrypt and return the user's GitHub access token, or null if not connected.
  * Caller must be the orchestrator on behalf of the authenticated user.

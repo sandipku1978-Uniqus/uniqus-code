@@ -159,11 +159,14 @@ export default function ChatPanel() {
   }, [project, briefFiles, clearBriefFiles]);
 
   // Adopt one-shot text staged from outside the composer (plan "Reject &
-  // revise" seeds a revision prompt). Replaces the draft and focuses so the
-  // user can finish the sentence and send.
+  // revise" seeds a revision prompt; the preview error panel stages a fix
+  // request). APPENDS to a non-empty draft rather than clobbering it — losing
+  // half-typed text the user can't get back is worse than a slightly long
+  // composer — then focuses so they can finish and send.
   useEffect(() => {
     if (pendingComposerText == null) return;
-    setInput(pendingComposerText);
+    const incoming = pendingComposerText;
+    setInput((prev) => (prev.trim().length > 0 ? `${prev.trimEnd()}\n\n${incoming}` : incoming));
     setPendingComposerText(null);
     requestAnimationFrame(() => {
       const ta = textareaRef.current;
@@ -1840,6 +1843,16 @@ function ToolCard({
         <div className="row">
           <span className={`name ${isError ? "error" : ""}`}>{item.name}</span>
           <span className="summary">{summary}</span>
+          {(item.lines_added !== undefined || item.lines_removed !== undefined) && (
+            <span
+              className="tool-diff"
+              style={{ fontSize: 11, fontFamily: "ui-monospace,Menlo,Consolas,monospace", whiteSpace: "nowrap" }}
+              title={`${item.lines_added ?? 0} added, ${item.lines_removed ?? 0} removed`}
+            >
+              <span style={{ color: "var(--conf-high, #3ea76a)" }}>+{item.lines_added ?? 0}</span>{" "}
+              <span style={{ color: "var(--conf-medium, #d98a3d)" }}>−{item.lines_removed ?? 0}</span>
+            </span>
+          )}
           <span className={`status ${!hasResult ? "run" : isError ? "err" : "ok"}`}>
             {!hasResult ? "running…" : isError ? "error" : "✓"}
           </span>

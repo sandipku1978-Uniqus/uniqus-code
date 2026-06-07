@@ -34,6 +34,12 @@ export interface ConnectorMethod {
 export interface ConnectorCtx {
   projectId: string;
   /**
+   * The acting user (project owner), or null for non-interactive runs. Needed
+   * by connectors that authenticate with a PER-USER OAuth token (e.g. Supabase)
+   * rather than a project secret.
+   */
+  userId: string | null;
+  /**
    * Resolve a secret by name. Throws if not configured. Plaintext stays
    * server-side; the agent never sees the return value.
    */
@@ -51,12 +57,14 @@ import { httpConnector } from "./http.js";
 import { slackConnector } from "./slack.js";
 import { postgresConnector } from "./postgres.js";
 import { githubConnector } from "./github.js";
+import { supabaseConnector } from "./supabase.js";
 
 const REGISTRY: Map<string, ConnectorDefinition> = new Map([
   [httpConnector.id, httpConnector],
   [slackConnector.id, slackConnector],
   [postgresConnector.id, postgresConnector],
   [githubConnector.id, githubConnector],
+  [supabaseConnector.id, supabaseConnector],
 ]);
 
 export function listConnectors(): ConnectorDefinition[] {
@@ -102,6 +110,7 @@ export async function callConnector(args: {
 
   const ctx: ConnectorCtx = {
     projectId: args.projectId,
+    userId: args.userId,
     secret: async (name: string) => {
       const v = await getSecretValue(args.projectId, name);
       if (v === null) {

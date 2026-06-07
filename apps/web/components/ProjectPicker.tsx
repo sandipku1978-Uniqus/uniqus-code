@@ -6,6 +6,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import type { DeploymentState, ProjectSummary } from "@uniqus/api-types";
 import BrandLockup from "./BrandLockup";
 import GuestBanner from "./GuestBanner";
+import DatabasesView from "./DatabasesView";
+import DesignSystemsView from "./DesignSystemsView";
 import Modal from "./Modal";
 import { Skeleton } from "./Skeleton";
 import { PENDING_BRIEF_KEY } from "./LandingPrompt";
@@ -21,9 +23,11 @@ import {
   fetchGithubRepos,
   disconnectGithubApi,
   githubOauthStartUrl,
+  listDesignSystemsApi,
   type AccountUsageStats,
   type GithubStatus,
   type GithubRepoSummary,
+  type DesignSystem,
 } from "@/lib/api";
 
 const ICON_CHOICES = [
@@ -227,7 +231,7 @@ export default function ProjectPicker({
   // recent tiles). "all" shows every project as a richer card with URL +
   // repo + status; "recent" shows the same data sorted by activity with
   // more verbose timestamps.
-  type View = "home" | "all" | "recent";
+  type View = "home" | "all" | "recent" | "databases" | "design-systems";
   const [view, setView] = useState<View>("home");
 
   const [editing, setEditing] = useState<{
@@ -240,6 +244,16 @@ export default function ProjectPicker({
   const [branch, setBranch] = useState("");
   const [pat, setPat] = useState("");
   const [zipFile, setZipFile] = useState<File | null>(null);
+
+  // Design systems available to attach to a new project ("" = none).
+  const [designSystems, setDesignSystems] = useState<DesignSystem[]>([]);
+  const [designSystemId, setDesignSystemId] = useState<string>("");
+  useEffect(() => {
+    if (isGuest) return;
+    listDesignSystemsApi()
+      .then((r) => setDesignSystems(r.design_systems))
+      .catch(() => setDesignSystems([]));
+  }, [isGuest]);
 
   // Clone-GitHub link choice: when set, the "Connect this project to the repo?"
   // modal is open and the import is paused until the user answers.
@@ -384,7 +398,10 @@ export default function ProjectPicker({
       setRefining(true);
       setError(null);
       try {
-        const { project, first_message } = await createProjectFromBriefApi(trimmed);
+        const { project, first_message } = await createProjectFromBriefApi(
+          trimmed,
+          designSystemId || null,
+        );
         router.push(
           `/projects/${project.id}?brief=${encodeURIComponent(first_message)}`,
         );
@@ -638,6 +655,50 @@ export default function ProjectPicker({
               </span>
               Recent
             </button>
+            <button
+              type="button"
+              onClick={() => setView("databases")}
+              className={`nav-item${view === "databases" ? " active" : ""}`}
+            >
+              <span className="ic">
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <ellipse cx="12" cy="5" rx="9" ry="3" />
+                  <path d="M3 5v14a9 3 0 0 0 18 0V5" />
+                  <path d="M3 12a9 3 0 0 0 18 0" />
+                </svg>
+              </span>
+              Databases
+            </button>
+            <button
+              type="button"
+              onClick={() => setView("design-systems")}
+              className={`nav-item${view === "design-systems" ? " active" : ""}`}
+            >
+              <span className="ic">
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <circle cx="13.5" cy="6.5" r="2.5" />
+                  <circle cx="17.5" cy="10.5" r="2.5" />
+                  <circle cx="8.5" cy="7.5" r="2.5" />
+                  <circle cx="6.5" cy="12.5" r="2.5" />
+                  <path d="M12 2a10 10 0 1 0 0 20 2 2 0 0 0 2-2 2 2 0 0 1 2-2h1a4 4 0 0 0 4-4 8 8 0 0 0-9-8z" />
+                </svg>
+              </span>
+              Design Systems
+            </button>
           </div>
 
 
@@ -694,7 +755,11 @@ export default function ProjectPicker({
         </aside>
 
         <main className="dash-main">
-          {view === "all" || view === "recent" ? (
+          {view === "databases" ? (
+            <DatabasesView isGuest={isGuest} />
+          ) : view === "design-systems" ? (
+            <DesignSystemsView isGuest={isGuest} />
+          ) : view === "all" || view === "recent" ? (
             <ProjectListView
               view={view}
               projects={projects}
@@ -761,13 +826,40 @@ export default function ProjectPicker({
                       We&apos;ll name the project and turn this into your first prompt.{" "}
                       <span style={{ color: "var(--text-dim)" }}>Ctrl/⌘ + Enter to start.</span>
                     </span>
-                    <button
-                      type="submit"
-                      className="btn-primary"
-                      disabled={refining || !describeText.trim()}
-                    >
-                      {refining ? "Starting…" : "Start building →"}
-                    </button>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      {designSystems.length > 0 && (
+                        <select
+                          value={designSystemId}
+                          onChange={(e) => setDesignSystemId(e.target.value)}
+                          disabled={refining}
+                          title="Attach a design system so the agent generates against your tokens"
+                          aria-label="Design system"
+                          style={{
+                            background: "var(--bg-dark)",
+                            border: "1px solid var(--border-default)",
+                            borderRadius: "var(--radius-sm)",
+                            color: "var(--text-primary)",
+                            padding: "6px 8px",
+                            fontSize: 12,
+                            fontFamily: "inherit",
+                          }}
+                        >
+                          <option value="">No design system</option>
+                          {designSystems.map((d) => (
+                            <option key={d.id} value={d.id}>
+                              {d.name}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      <button
+                        type="submit"
+                        className="btn-primary"
+                        disabled={refining || !describeText.trim()}
+                      >
+                        {refining ? "Starting…" : "Start building →"}
+                      </button>
+                    </div>
                   </div>
                 </div>
               ) : (

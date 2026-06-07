@@ -202,6 +202,9 @@ export type ChatItem =
       input: unknown;
       result?: string;
       is_error?: boolean;
+      /** Lines added/removed for write_file/edit_file — rendered as a "+A −R" badge. */
+      lines_added?: number;
+      lines_removed?: number;
     }
   | {
       /**
@@ -301,6 +304,35 @@ function persistPanels(panels: PanelVisibility): void {
   }
 }
 
+/**
+ * Which surface the workspace shows. "builder" (default) is the beginner-facing
+ * Chat + big-live-Preview reframe; "code" reveals the full IDE (file tree, code
+ * editor, logs). Like panel visibility, it's an account-wide layout preference
+ * persisted to localStorage and deliberately NOT reset per project, so a user's
+ * Builder/Code choice survives reloads and project switches.
+ */
+export type WorkspaceView = "builder" | "code";
+const VIEW_STORAGE_KEY = "uniqus.view";
+const DEFAULT_VIEW: WorkspaceView = "builder";
+
+function readStoredView(): WorkspaceView {
+  if (typeof window === "undefined") return DEFAULT_VIEW;
+  try {
+    return window.localStorage.getItem(VIEW_STORAGE_KEY) === "code" ? "code" : DEFAULT_VIEW;
+  } catch {
+    return DEFAULT_VIEW;
+  }
+}
+
+function persistView(view: WorkspaceView): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(VIEW_STORAGE_KEY, view);
+  } catch {
+    /* private mode / quota — non-fatal */
+  }
+}
+
 interface State {
   connected: boolean;
   /**
@@ -362,6 +394,12 @@ interface State {
   /** Active tab id in the editor area: "file:<path>" or "preview:<id>". */
   editorTab: string;
   panels: PanelVisibility;
+  /**
+   * Which workspace surface is shown: "builder" (Chat + big live Preview, the
+   * beginner default) or "code" (the full IDE). Account-wide, localStorage-
+   * backed, and never reset per project (see `reset()`).
+   */
+  view: WorkspaceView;
   user: CurrentUser | null;
   project: ProjectSummary | null;
   /** Epoch ms of the last storage_synced event we received, or null. */
@@ -457,7 +495,12 @@ interface State {
   /** Append a reasoning/thinking delta to the current reasoning block. */
   appendThinking(content: string): void;
   addToolCall(callId: string, name: string, input: unknown): void;
-  setToolResult(callId: string, result: string, isError: boolean): void;
+  setToolResult(
+    callId: string,
+    result: string,
+    isError: boolean,
+    stats?: { lines_added?: number; lines_removed?: number },
+  ): void;
   addUserQuestion(
     callId: string,
     question: string,
@@ -508,6 +551,8 @@ interface State {
   setPanel(name: keyof PanelVisibility, value: boolean): void;
   /** Restore default panel visibility (used by "Reset layout"). */
   resetPanels(): void;
+  /** Switch the workspace surface (Builder ⇄ Code); persists account-wide. */
+  setView(v: WorkspaceView): void;
   setUser(u: CurrentUser | null): void;
   setProject(p: ProjectSummary | null): void;
   setLastSyncedAt(at: number): void;
@@ -572,6 +617,9 @@ export const useStore = create<State>((set, get) => ({
   // Terminal stays opt-in (it's currently a log viewer, not a real shell).
   // Persisted account-wide so a user's open/closed choice survives reloads.
   panels: readStoredPanels(),
+  // Beginner-facing Builder view (Chat + live Preview) is the default; the
+  // full IDE is one toggle away. Persisted account-wide like `panels`.
+  view: readStoredView(),
   user: null,
   project: null,
   lastSyncedAt: null,
@@ -680,11 +728,17 @@ export const useStore = create<State>((set, get) => ({
       };
     }),
 
-  setToolResult: (callId, result, isError) => {
+  setToolResult: (callId, result, isError, stats) => {
     set((s) => ({
       chat: s.chat.map((item) =>
         item.kind === "tool" && item.call_id === callId
-          ? { ...item, result, is_error: isError }
+          ? {
+              ...item,
+              result,
+              is_error: isError,
+              lines_added: stats?.lines_added,
+              lines_removed: stats?.lines_removed,
+            }
           : item,
       ),
     }));
@@ -878,6 +932,10 @@ export const useStore = create<State>((set, get) => ({
     persistPanels(panels);
     set({ panels });
   },
+  setView: (v) => {
+    persistView(v);
+    set({ view: v });
+  },
 
   setUser: (u) => set({ user: u }),
   setProject: (p) => set({ project: p }),
@@ -957,9 +1015,9 @@ export const useStore = create<State>((set, get) => ({
       previews: [],
       openFiles: [],
       editorTab: "",
-      // panels intentionally omitted — it's an account-wide layout pref persisted
-      // to localStorage; a project switch must not reset the user's open/closed
-      // choice (UI/UX audit §B).
+      // panels + view intentionally omitted — both are account-wide layout prefs
+      // persisted to localStorage; a project switch must not reset the user's
+      // open/closed panel choice (UI/UX audit §B) or their Builder/Code view.
       user: null,
       project: null,
       lastSyncedAt: null,
