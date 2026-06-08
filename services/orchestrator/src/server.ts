@@ -4495,9 +4495,10 @@ async function analyzeDesignSystem(input: {
     "and \"transparent\" for ghost/outline. When the context contains real values (detected colors/fonts/styles), " +
     "honor them; otherwise infer tastefully from the brief/images. " +
     "CATALOG: enumerate the DISTINCT real components present in the source — multiple button styles, inputs/search, " +
-    "cards, tables, badges, nav, chat bubbles, etc. (up to ~12). Each catalog `html` MUST be a self-contained snippet " +
+    "cards, tables, badges, nav, chat bubbles, etc. (up to ~10). Each catalog `html` MUST be a self-contained snippet " +
     "with NO <script> or external resources, styled via CSS variables var(--color-<token>) (one per color token), " +
-    "var(--radius), var(--font-heading)/var(--font-body), or inline styles, so it renders on-system. " +
+    "var(--radius), var(--font-heading)/var(--font-body), or inline styles, so it renders on-system. Keep each snippet " +
+    "concise — one representative component, roughly under 80 words of HTML. " +
     "ASSETS: if the source reveals a brand logo image, set assets.logo to its absolute URL. " +
     "Keep each findings entry short and specific.";
   const content: Anthropic.ContentBlockParam[] = [
@@ -4506,7 +4507,10 @@ async function analyzeDesignSystem(input: {
   ];
   const response = await client.messages.create({
     model: ensureAnthropic("design"),
-    max_tokens: 2400,
+    // Generous ceiling: the JSON now carries a full token set + findings + a
+    // component catalog with HTML snippets, which easily exceeds a few thousand
+    // tokens. Too low here truncates the JSON ("Unterminated string").
+    max_tokens: 16000,
     system,
     messages: [{ role: "user", content }],
   });
@@ -4534,7 +4538,9 @@ async function tweakDesignTokens(base: DesignTokens, instruction: string): Promi
     "doesn't touch unchanged. Keep semantic color names and the component/variant structure; preserve WCAG-AA contrast.";
   const response = await client.messages.create({
     model: ensureAnthropic("design"),
-    max_tokens: 2200,
+    // Echoes the COMPLETE tokens JSON (incl. any component catalog), so keep the
+    // ceiling high enough that the returned JSON is never truncated.
+    max_tokens: 16000,
     system,
     messages: [
       { role: "user", content: `Current tokens:\n${JSON.stringify(base)}\n\nInstruction: ${instruction}` },
@@ -4800,7 +4806,7 @@ async function handleDesignSystemAnalyze(
     const msg = err instanceof Error ? err.message : String(err);
     if (msg === "github_not_connected") return fail(409, "github_not_connected");
     if (msg === "figma_not_connected") return fail(409, "figma_not_connected");
-    return fail(502, `analyze failed: ${msg}`);
+    return fail(502, msg);
   }
 }
 
