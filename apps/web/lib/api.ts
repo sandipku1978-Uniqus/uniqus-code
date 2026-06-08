@@ -106,6 +106,7 @@ export type {
   DesignTokens,
   DesignFindings,
   DesignSystemDraft,
+  DiscoveredComponent,
 } from "@uniqus/api-types";
 import type { DesignSystemDraft as _DesignSystemDraft } from "@uniqus/api-types";
 
@@ -146,17 +147,53 @@ export const setProjectDesignSystemApi = (
  */
 export const analyzeDesignSystemApi = async (
   form: FormData,
+  onPhase?: (message: string) => void,
 ): Promise<{ draft: _DesignSystemDraft }> => {
   const res = await fetch(`${API_BASE}/api/design-systems/analyze`, {
     method: "POST",
     credentials: "include",
     body: form,
   });
-  if (!res.ok) {
+  // Non-OK (e.g. 400/409 before streaming begins) is a JSON error body.
+  if (!res.ok || !res.body) {
     const body = await res.text().catch(() => "");
     throw new Error(`API ${res.status}: ${body || res.statusText}`);
   }
-  return (await res.json()) as { draft: _DesignSystemDraft };
+  // Otherwise it's a text/event-stream of phase/done/error events.
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let draft: _DesignSystemDraft | null = null;
+  let errMsg: string | null = null;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep: number;
+    while ((sep = buf.indexOf("\n\n")) >= 0) {
+      const rawEvent = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      let event = "message";
+      let data = "";
+      for (const line of rawEvent.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
+      }
+      if (!data) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      if (event === "phase") onPhase?.((parsed as { message?: string }).message ?? "");
+      else if (event === "done") draft = (parsed as { draft: _DesignSystemDraft }).draft;
+      else if (event === "error") errMsg = (parsed as { error?: string }).error ?? "analyze failed";
+    }
+  }
+  if (errMsg) throw new Error(errMsg);
+  if (!draft) throw new Error("analyze returned no draft");
+  return { draft };
 };
 
 /** Stateless AI refinement: apply a free-text instruction to a tokens object. */

@@ -113,7 +113,14 @@ export function formatDesignSystemForPrompt(tokens: DesignTokens | null): string
         `  card: radius=${cp.card.radius ?? "-"}, bg=${cp.card.background ?? "-"}, border=${cp.card.border ?? "-"}, shadow=${cp.card.shadow ?? "-"}, padding=${cp.card.padding ?? "-"}`,
       );
     if (cp.badge) lines.push(`  badge: radius=${cp.badge.radius ?? "-"}, style=${cp.badge.variant ?? "-"}`);
+    if (cp.catalog && cp.catalog.length) {
+      lines.push("  catalog (reuse these components — match their look, name and role):");
+      for (const c of cp.catalog) {
+        lines.push(`    - ${c.name} (${c.type})${c.description ? `: ${c.description}` : ""}`);
+      }
+    }
   }
+  if (tokens.assets?.logo) lines.push(`logo: ${tokens.assets.logo}`);
   if (tokens.notes && tokens.notes.trim()) lines.push(`notes: ${tokens.notes.trim()}`);
   return (
     `\n\nDesign System — this project has an attached design system. GENERATE AGAINST THESE TOKENS: ` +

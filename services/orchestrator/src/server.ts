@@ -4188,6 +4188,11 @@ function mergeDesignTokens(base: DesignTokens, raw: unknown): DesignTokens {
     radius: typeof r.radius === "string" ? r.radius : base.radius,
     spacing: typeof r.spacing === "string" ? r.spacing : base.spacing,
     components: mergeComponents(base.components, r.components),
+    assets: (() => {
+      const a = r.assets && typeof r.assets === "object" ? (r.assets as Record<string, unknown>) : {};
+      const logo = typeof a.logo === "string" && a.logo.trim() ? a.logo.trim() : base.assets?.logo;
+      return logo ? { logo } : base.assets;
+    })(),
     notes: typeof r.notes === "string" ? r.notes : base.notes,
   };
 }
@@ -4251,6 +4256,19 @@ function mergeComponents(
           ? variant
           : b.badge?.variant,
     };
+  }
+  if (Array.isArray(r.catalog)) {
+    const catalog = r.catalog
+      .filter((c): c is Record<string, unknown> => !!c && typeof c === "object")
+      .map((c) => ({
+        type: str(c.type) ?? "component",
+        name: str(c.name) ?? "Component",
+        description: str(c.description),
+        html: typeof c.html === "string" ? c.html.slice(0, 6000) : undefined,
+      }))
+      .filter((c) => c.name)
+      .slice(0, 24);
+    if (catalog.length) out.catalog = catalog;
   }
   return out;
 }
@@ -4466,13 +4484,22 @@ async function analyzeDesignSystem(input: {
     '{"name":"ghost","background":"transparent","foreground":"muted"}]},' +
     '"input":{"radius":"..","background":"background","border":"border"},' +
     '"card":{"radius":"..","background":"surface","border":"border","shadow":"<css box-shadow or none>","padding":".."},' +
-    '"badge":{"radius":"999px","variant":"soft"}},"notes":"<voice, density, motion guidance>",' +
+    '"badge":{"radius":"999px","variant":"soft"},' +
+    '"catalog":[{"type":"primary-button","name":"Primary button","description":"short look/role","html":"<button>Label</button>"}]},' +
+    '"assets":{"logo":"<absolute logo image URL if identifiable, else omit>"},' +
+    '"notes":"<voice, density, motion guidance>",' +
     '"findings":{"colors":["short notes on palette you detected/chose"],"typography":["fonts + scale"],' +
     '"components":["button/input/card/badge decisions"],"spacing":["radius/spacing"],"notes":["other rules/observations"]}}\n' +
     "Rules: use SEMANTIC color names. Ensure WCAG-AA contrast (text on background; each button foreground on its " +
     "background). In component color fields PREFER a color token name (e.g. \"primary\"); use raw hex only when needed " +
     "and \"transparent\" for ghost/outline. When the context contains real values (detected colors/fonts/styles), " +
-    "honor them; otherwise infer tastefully from the brief/images. Keep each findings entry short and specific.";
+    "honor them; otherwise infer tastefully from the brief/images. " +
+    "CATALOG: enumerate the DISTINCT real components present in the source — multiple button styles, inputs/search, " +
+    "cards, tables, badges, nav, chat bubbles, etc. (up to ~12). Each catalog `html` MUST be a self-contained snippet " +
+    "with NO <script> or external resources, styled via CSS variables var(--color-<token>) (one per color token), " +
+    "var(--radius), var(--font-heading)/var(--font-body), or inline styles, so it renders on-system. " +
+    "ASSETS: if the source reveals a brand logo image, set assets.logo to its absolute URL. " +
+    "Keep each findings entry short and specific.";
   const content: Anthropic.ContentBlockParam[] = [
     { type: "text", text: input.contextText.slice(0, 120_000) },
     ...(input.imageBlocks ?? []),
@@ -4572,10 +4599,37 @@ async function fetchLiveSiteContext(rawUrl: string): Promise<string> {
 
   const themeColor = html.match(/<meta[^>]+name=["']theme-color["'][^>]+content=["']([^"']+)["']/i)?.[1];
   const title = html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1];
+
+  // Candidate logo/brand images — og:image, twitter:image, <link rel=*icon>, and
+  // <img> tags whose markup mentions "logo". Resolved to absolute URLs.
+  const abs = (h: string): string | null => {
+    try {
+      return new URL(h, url).toString();
+    } catch {
+      return null;
+    }
+  };
+  const logos: string[] = [];
+  const pushLogo = (h?: string | null) => {
+    if (!h) return;
+    const a = abs(h);
+    if (a && !logos.includes(a)) logos.push(a);
+  };
+  pushLogo(html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)?.[1]);
+  pushLogo(html.match(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i)?.[1]);
+  for (const m of html.matchAll(/<link\b[^>]*>/gi)) {
+    if (/rel=["'][^"'>]*icon/i.test(m[0])) pushLogo(m[0].match(/href=["']([^"']+)["']/i)?.[1]);
+  }
+  for (const m of html.matchAll(/<img\b[^>]*>/gi)) {
+    if (/logo/i.test(m[0])) pushLogo(m[0].match(/src=["']([^"']+)["']/i)?.[1]);
+    if (logos.length >= 6) break;
+  }
+
   return [
     `Live site: ${url.toString()}`,
     title ? `Page title: ${title.trim()}` : "",
     themeColor ? `theme-color: ${themeColor}` : "",
+    logos.length ? `Candidate logo/brand image URLs (pick the best for assets.logo):\n${logos.slice(0, 6).join("\n")}` : "",
     styleBlocks ? `\nInline <style>:\n${styleBlocks}` : "",
     cssText ? `\nLinked CSS:\n${cssText}` : "",
   ]
@@ -4621,6 +4675,33 @@ async function handleDesignSystemAnalyze(
   if (parseError) return json(res, 400, { error: parseError });
 
   const source = fields.source ?? "brief";
+
+  // Cheap validation above stays JSON; the gather + analyze below stream live
+  // progress over Server-Sent Events so the UI can show what the agent is doing.
+  let sseStarted = false;
+  const startSse = (): void => {
+    if (sseStarted) return;
+    sseStarted = true;
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no", // ask nginx-style proxies not to buffer
+    });
+  };
+  const phase = (message: string): void => {
+    startSse();
+    res.write(`event: phase\ndata: ${JSON.stringify({ message })}\n\n`);
+  };
+  const fail = (status: number, error: string): void => {
+    if (sseStarted) {
+      res.write(`event: error\ndata: ${JSON.stringify({ error })}\n\n`);
+      res.end();
+    } else {
+      json(res, status, { error });
+    }
+  };
+
   try {
     let contextText = "";
     let imageBlocks: Anthropic.ContentBlockParam[] = [];
@@ -4629,9 +4710,12 @@ async function handleDesignSystemAnalyze(
     if (source === "brief") {
       const brief = (fields.brief ?? "").trim();
       imageBlocks = buildReferenceBlocks(files);
-      if (!brief && imageBlocks.length === 0) {
-        return json(res, 400, { error: "Describe the system or attach a reference image/PDF." });
-      }
+      if (!brief && imageBlocks.length === 0) return fail(400, "Describe the system or attach a reference image/PDF.");
+      phase(
+        imageBlocks.length
+          ? `Reading your brief + ${imageBlocks.length} reference${imageBlocks.length === 1 ? "" : "s"}…`
+          : "Reading your brief…",
+      );
       contextText = brief
         ? `Design brief: ${brief}`
         : "Infer a complete design system from the attached reference image(s)/document(s).";
@@ -4639,66 +4723,84 @@ async function handleDesignSystemAnalyze(
     } else if (source === "project") {
       const projectId = fields.project_id ?? "";
       const project = await getProject(projectId, user.id);
-      if (!project) return json(res, 404, { error: "project not found" });
+      if (!project) return fail(404, "project not found");
+      phase(`Loading files from “${project.name}”…`);
       const dir = sandboxDirFor(projectId);
       await getTracker(projectId, dir).hydrateFromStorage().catch(() => 0);
       contextText = await collectDesignFiles(dir);
-      if (!contextText.trim()) return json(res, 400, { error: "No design-relevant files found in that project." });
+      if (!contextText.trim()) return fail(400, "No design-relevant files found in that project.");
+      phase("Scanning theme & style files…");
       sourceLabel = `project: ${project.name}`;
     } else if (source === "url") {
       const u = (fields.url ?? "").trim();
-      if (!u) return json(res, 400, { error: "url is required" });
+      if (!u) return fail(400, "url is required");
+      let host = u;
+      try {
+        host = new URL(u).host;
+      } catch {
+        /* keep raw */
+      }
+      phase(`Fetching ${host}…`);
       contextText = await fetchLiveSiteContext(u);
-      sourceLabel = `live site: ${(() => { try { return new URL(u).host; } catch { return u; } })()}`;
+      phase("Reading the page’s styles & assets…");
+      sourceLabel = `live site: ${host}`;
     } else if (source === "github") {
       const repoUrl = (fields.repo_url ?? "").trim();
-      if (!repoUrl) return json(res, 400, { error: "repo_url is required" });
+      if (!repoUrl) return fail(400, "repo_url is required");
       const urlError = await validateCloneUrl(repoUrl);
-      if (urlError) return json(res, 400, { error: urlError });
+      if (urlError) return fail(400, urlError);
       let authToken: string | undefined;
       if (fields.use_oauth === "true") {
         const stored = await getGithubToken(user.id);
-        if (!stored) return json(res, 409, { error: "github_not_connected" });
+        if (!stored) return fail(409, "github_not_connected");
         authToken = stored;
       }
+      phase(`Cloning ${fields.repo_full_name || repoUrl}…`);
       const tmp = path.join(tmpdir(), `uniqus-ds-${randomUUID()}`);
       try {
         await importGithub({ repo_url: repoUrl, branch: fields.branch || undefined, pat: authToken }, tmp);
+        phase("Scanning theme & style files…");
         contextText = await collectDesignFiles(tmp);
       } finally {
         await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
       }
-      if (!contextText.trim()) return json(res, 400, { error: "No design-relevant files found in that repo." });
+      if (!contextText.trim()) return fail(400, "No design-relevant files found in that repo.");
       sourceLabel = `repo: ${fields.repo_full_name || repoUrl}`;
     } else if (source === "zip") {
       const zip = files.find((f) => f.filename.toLowerCase().endsWith(".zip"));
-      if (!zip) return json(res, 400, { error: "no .zip uploaded" });
+      if (!zip) return fail(400, "no .zip uploaded");
+      phase("Extracting the archive…");
       const tmp = path.join(tmpdir(), `uniqus-ds-${randomUUID()}`);
       try {
         await importZip(zip.buf, tmp);
+        phase("Scanning theme & style files…");
         contextText = await collectDesignFiles(tmp);
       } finally {
         await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
       }
-      if (!contextText.trim()) return json(res, 400, { error: "No design-relevant files found in that .zip." });
+      if (!contextText.trim()) return fail(400, "No design-relevant files found in that .zip.");
       sourceLabel = `zip: ${zip.filename}`;
     } else if (source === "figma") {
       const key = parseFigmaFileKey(fields.file_key ?? fields.url ?? "");
-      if (!key) return json(res, 400, { error: "Enter a Figma file URL or key." });
+      if (!key) return fail(400, "Enter a Figma file URL or key.");
+      phase("Reading the Figma file’s published styles…");
       const { contextText: ctx } = await extractFigmaDesignContext(user.id, key);
       contextText = ctx;
       sourceLabel = `figma: ${key}`;
     } else {
-      return json(res, 400, { error: `unknown source '${source}'` });
+      return fail(400, `unknown source '${source}'`);
     }
 
+    phase("Designing the system & extracting components…");
     const draft = await analyzeDesignSystem({ contextText, imageBlocks, sourceLabel });
-    return json(res, 200, { draft });
+    startSse();
+    res.write(`event: done\ndata: ${JSON.stringify({ draft })}\n\n`);
+    res.end();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg === "github_not_connected") return json(res, 409, { error: "github_not_connected" });
-    if (msg === "figma_not_connected") return json(res, 409, { error: "figma_not_connected" });
-    return json(res, 502, { error: `analyze failed: ${msg}` });
+    if (msg === "github_not_connected") return fail(409, "github_not_connected");
+    if (msg === "figma_not_connected") return fail(409, "figma_not_connected");
+    return fail(502, `analyze failed: ${msg}`);
   }
 }
 

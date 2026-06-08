@@ -57,6 +57,24 @@ export default function DesignSystemPreview({
   const cardPad = card.padding ?? "16px";
   const badgeRadius = comp.badge?.radius ?? "999px";
   const badgeVariant = comp.badge?.variant ?? "soft";
+  const catalog = comp.catalog ?? [];
+  const logo = tokens.assets?.logo;
+
+  // Self-contained HTML document for a catalog component, sandboxed in an iframe.
+  // Injects the palette as --color-<token> + --radius/--font-* so snippets that
+  // reference those variables render on-system.
+  function srcFor(html: string): string {
+    const vars = Object.entries(c)
+      .map(([k, v]) => `--color-${k.replace(/[^a-z0-9-]/gi, "-")}: ${v};`)
+      .join("");
+    const body = fonts.body || "system-ui, sans-serif";
+    return (
+      `<!doctype html><html><head><meta charset="utf-8"><style>` +
+      `:root{${vars}--radius:${radius};--font-body:${body};--font-heading:${fonts.heading || body};}` +
+      `html,body{margin:0;background:${bg};color:${text};font-family:${body};padding:12px;}*{box-sizing:border-box;}` +
+      `</style></head><body>${html}</body></html>`
+    );
+  }
 
   function badgeStyle(color: string): CSSProperties {
     const base: CSSProperties = { borderRadius: badgeRadius, padding: "3px 11px", fontSize: 11, fontWeight: 600 };
@@ -95,6 +113,17 @@ export default function DesignSystemPreview({
       >
         <span style={{ width: 9, height: 9, borderRadius: 999, background: primary }} />
         <span style={{ width: 9, height: 9, borderRadius: 999, background: accent }} />
+        {logo ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={logo}
+            alt=""
+            style={{ height: 16, maxWidth: 84, objectFit: "contain", marginLeft: 4 }}
+            onError={(e) => {
+              (e.currentTarget as HTMLImageElement).style.display = "none";
+            }}
+          />
+        ) : null}
         <span
           style={{
             marginLeft: 6,
@@ -249,6 +278,32 @@ export default function DesignSystemPreview({
             </span>
           </div>
         </Section>
+
+        {/* ── Discovered component catalog (sandboxed) ── */}
+        {catalog.length > 0 && (
+          <Section label={`Component catalog (${catalog.length})`} muted={muted}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {catalog.map((cmp, i) => (
+                <div key={i} style={{ border: `1px solid ${border}`, borderRadius: 10, overflow: "hidden", background: surface }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", gap: 8 }}>
+                    <span style={{ fontSize: 12, fontWeight: 600 }}>{cmp.name}</span>
+                    <span style={{ fontSize: 10.5, color: muted, fontFamily: fonts.mono || "ui-monospace, monospace" }}>{cmp.type}</span>
+                  </div>
+                  {cmp.html ? (
+                    <iframe
+                      sandbox=""
+                      title={cmp.name}
+                      srcDoc={srcFor(cmp.html)}
+                      style={{ width: "100%", height: 132, border: 0, borderTop: `1px solid ${border}`, background: bg, display: "block" }}
+                    />
+                  ) : cmp.description ? (
+                    <div style={{ padding: "0 10px 10px", fontSize: 11.5, color: muted }}>{cmp.description}</div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </Section>
+        )}
       </div>
     </div>
   );

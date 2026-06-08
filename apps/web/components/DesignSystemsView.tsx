@@ -98,8 +98,12 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
 
   const [busy, setBusy] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeActivity, setAnalyzeActivity] = useState("");
   const [refining, setRefining] = useState(false);
   const [refineText, setRefineText] = useState("");
+  // Per-item approve flags for the discovered component catalog (parallel to
+  // draft.tokens.components.catalog). Rebuilt whenever a new draft loads.
+  const [approvedCatalog, setApprovedCatalog] = useState<boolean[]>([]);
 
   const fileRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLInputElement>(null);
@@ -170,6 +174,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
   useEffect(() => {
     if (!draft) {
       setColorRows([]);
+      setApprovedCatalog([]);
       return;
     }
     setColorRows(
@@ -179,6 +184,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
         value,
       })),
     );
+    setApprovedCatalog((draft.tokens.components?.catalog ?? []).map(() => true));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draftNonce]);
 
@@ -269,8 +275,9 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
     }
 
     setAnalyzing(true);
+    setAnalyzeActivity("");
     try {
-      const { draft: d } = await analyzeDesignSystemApi(fd);
+      const { draft: d } = await analyzeDesignSystemApi(fd, (m) => setAnalyzeActivity(m));
       const name = newName.trim() || d.name;
       openDraft({ id: "", name, tokens: d.tokens, created_at: "", updated_at: "" }, d.findings);
       toast.success("Draft ready — review the findings, refine, then save.");
@@ -281,6 +288,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
       else toast.error(`Analyze failed: ${m}`);
     } finally {
       setAnalyzing(false);
+      setAnalyzeActivity("");
     }
   }
 
@@ -292,6 +300,11 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
     if (!approved.spacing) t = { ...t, radius: DEFAULT_DESIGN_TOKENS.radius, spacing: DEFAULT_DESIGN_TOKENS.spacing };
     if (!approved.components) t = { ...t, components: DEFAULT_DESIGN_TOKENS.components };
     if (!approved.notes) t = { ...t, notes: "" };
+    // Keep only the catalog components the user approved.
+    if (t.components?.catalog && t.components.catalog.length && approvedCatalog.length) {
+      const kept = t.components.catalog.filter((_, i) => approvedCatalog[i] !== false);
+      t = { ...t, components: { ...t.components, catalog: kept.length ? kept : undefined } };
+    }
     setBusy(true);
     try {
       const { design_system } = await createDesignSystemApi(draft.name.trim() || "Design system", t);
@@ -589,12 +602,20 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
               </button>
             </div>
           ) : null}
+
+          {analyzing && (
+            <div className="ds-activity" aria-live="polite">
+              <span className="ds-spinner" aria-hidden="true" />
+              {analyzeActivity || "Working…"}
+            </div>
+          )}
         </div>
       </div>
     );
   }
 
   function renderFindings(f: DesignFindings) {
+    const catalog = draft?.tokens.components?.catalog ?? [];
     const cats: { key: keyof ApproveState; label: string; items: string[] }[] = [
       { key: "colors", label: "Colors", items: f.colors },
       { key: "typography", label: "Typography", items: f.typography },
@@ -625,6 +646,27 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
             </label>
           ))}
         </div>
+
+        {catalog.length > 0 && (
+          <div className="ds-catalog-review">
+            <div className="ds-catalog-review-head">
+              Components found — keep which? <span>(rendered in the live preview →)</span>
+            </div>
+            <div className="ds-catalog-list">
+              {catalog.map((c, i) => (
+                <label key={i} className={`ds-catalog-chip${approvedCatalog[i] === false ? " denied" : ""}`} title={c.description ?? ""}>
+                  <input
+                    type="checkbox"
+                    checked={approvedCatalog[i] !== false}
+                    onChange={(e) => setApprovedCatalog((a) => a.map((v, j) => (j === i ? e.target.checked : v)))}
+                  />
+                  <span className="ds-catalog-chip-name">{c.name}</span>
+                  <span className="ds-catalog-chip-type">{c.type}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -763,7 +805,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
               </select>
             </Field>
 
-            <Field label="Colors">
+            <Collapsible title="Colors" defaultOpen>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {colorRows.map((row) => (
                   <div key={row.id} style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -775,34 +817,37 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
                 ))}
                 <button type="button" className="btn-secondary" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={addRow}>+ Add color</button>
               </div>
-            </Field>
+            </Collapsible>
 
-            <Field label="Fonts">
+            <Collapsible title="Fonts">
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <LabeledInput label="Body" value={d.tokens.fonts.body} onChange={(v) => patchTokens({ fonts: { ...d.tokens.fonts, body: v } })} />
                 <LabeledInput label="Heading" value={d.tokens.fonts.heading} onChange={(v) => patchTokens({ fonts: { ...d.tokens.fonts, heading: v } })} />
                 <LabeledInput label="Mono" value={d.tokens.fonts.mono ?? ""} onChange={(v) => patchTokens({ fonts: { ...d.tokens.fonts, mono: v } })} />
               </div>
-            </Field>
+            </Collapsible>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-              <Field label="Type scale">
-                <input value={d.tokens.typeScale ?? ""} onChange={(e) => patchTokens({ typeScale: e.target.value })} style={inputStyle} />
-              </Field>
-              <Field label="Radius">
-                <input value={d.tokens.radius} onChange={(e) => patchTokens({ radius: e.target.value })} style={inputStyle} />
-              </Field>
-              <Field label="Spacing unit">
-                <input value={d.tokens.spacing ?? ""} onChange={(e) => patchTokens({ spacing: e.target.value })} style={inputStyle} />
-              </Field>
-            </div>
+            <Collapsible title="Scale, radius & spacing">
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+                <Field label="Type scale">
+                  <input value={d.tokens.typeScale ?? ""} onChange={(e) => patchTokens({ typeScale: e.target.value })} style={inputStyle} />
+                </Field>
+                <Field label="Radius">
+                  <input value={d.tokens.radius} onChange={(e) => patchTokens({ radius: e.target.value })} style={inputStyle} />
+                </Field>
+                <Field label="Spacing unit">
+                  <input value={d.tokens.spacing ?? ""} onChange={(e) => patchTokens({ spacing: e.target.value })} style={inputStyle} />
+                </Field>
+              </div>
+            </Collapsible>
 
-            <div className="ds-components-head">Components</div>
-            {renderComponentEditor(d)}
+            <Collapsible title="Components" defaultOpen>
+              {renderComponentEditor(d)}
+            </Collapsible>
 
-            <Field label="Notes (voice, density, motion — freeform guidance for the agent)">
+            <Collapsible title="Notes (voice, density, motion)">
               <textarea value={d.tokens.notes ?? ""} onChange={(e) => patchTokens({ notes: e.target.value })} rows={4} style={{ ...inputStyle, resize: "vertical", lineHeight: 1.5 }} />
-            </Field>
+            </Collapsible>
           </div>
 
           <div className="ds-preview-col">
@@ -957,6 +1002,23 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
     <div style={{ marginBottom: 14 }}>
       <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 6 }}>{label}</div>
       {children}
+    </div>
+  );
+}
+
+/**
+ * Collapsible editor section. Uses local state (not a controlled `open` prop) so
+ * a parent re-render on every keystroke doesn't snap it back to its default.
+ */
+function Collapsible({ title, defaultOpen = false, children }: { title: string; defaultOpen?: boolean; children: React.ReactNode }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="ds-collapse">
+      <button type="button" className="ds-collapse-head" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        <span>{title}</span>
+        <span className="ds-collapse-chev" aria-hidden="true">▾</span>
+      </button>
+      {open && <div className="ds-collapse-body">{children}</div>}
     </div>
   );
 }

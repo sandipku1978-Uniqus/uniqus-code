@@ -315,6 +315,25 @@ export interface ButtonVariantSpec {
 }
 
 /**
+ * One real component discovered from a source (a live site, a codebase, …) — an
+ * open-ended catalog beyond the fixed button/input/card/badge specs, e.g. a
+ * search bar, a data table, a chat bubble, a nav, multiple button styles. Each
+ * carries a self-contained HTML snippet rendered (sandboxed) in the preview.
+ */
+export interface DiscoveredComponent {
+  /** Slug, e.g. "primary-button", "search-input", "data-table", "chat-bubble". */
+  type: string;
+  /** Human label, e.g. "Primary button". */
+  name: string;
+  /** One-line description of its look/role. */
+  description?: string;
+  /** Self-contained HTML snippet (NO <script>/external refs) for the live preview.
+   *  Should style via the injected CSS vars: var(--color-<token>), var(--radius),
+   *  var(--font-heading)/var(--font-body), or inline styles. */
+  html?: string;
+}
+
+/**
  * Structured component specs so a design system constrains not just color/type
  * but the SHAPE of common UI: buttons, inputs, cards, badges. The coding agent
  * generates components against these; the web preview renders them. Color-ish
@@ -346,6 +365,9 @@ export interface DesignComponentTokens {
     /** "soft" = tinted bg, "solid" = filled, "outline" = bordered. */
     variant?: "soft" | "solid" | "outline";
   };
+  /** Open catalog of real components discovered from the source (renders in the
+   *  preview; the user approves which to keep; injected into the agent prompt). */
+  catalog?: DiscoveredComponent[];
 }
 
 export interface DesignTokens {
@@ -363,6 +385,8 @@ export interface DesignTokens {
   spacing?: string;
   /** Component-level specs so generated UIs stay on-system (buttons, inputs, …). */
   components?: DesignComponentTokens;
+  /** Brand assets pulled from the source, e.g. a logo image URL. */
+  assets?: { logo?: string };
   /** Freeform guidance the agent should follow (voice, density, motion, etc.). */
   notes?: string;
 }

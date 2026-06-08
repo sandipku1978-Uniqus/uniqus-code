@@ -4218,6 +4218,30 @@ section.band .sub {
 .ds-finding li { font-size: 11.5px; color: var(--text-muted); line-height: 1.45; }
 .ds-finding li.muted { list-style: none; margin-left: -16px; color: var(--text-dim); }
 
+/* Live "what the agent is doing" activity line under the composer. */
+.ds-activity { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); padding: 8px 2px 2px; }
+.ds-spinner {
+  width: 12px; height: 12px; flex-shrink: 0; border-radius: 50%;
+  border: 2px solid var(--border-default); border-top-color: var(--brand-magenta);
+  animation: ds-spin 0.7s linear infinite;
+}
+@keyframes ds-spin { to { transform: rotate(360deg); } }
+
+/* Discovered-component catalog: per-item approve chips in the findings panel. */
+.ds-catalog-review { margin-top: 14px; border-top: 1px solid var(--border-default); padding-top: 12px; }
+.ds-catalog-review-head { font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; color: var(--text-primary); margin-bottom: 8px; }
+.ds-catalog-review-head span { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text-dim); }
+.ds-catalog-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.ds-catalog-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--bg-dark); border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm); padding: 5px 9px; cursor: pointer; font-size: 11.5px; color: var(--text-primary);
+}
+.ds-catalog-chip:hover { border-color: var(--text-muted); }
+.ds-catalog-chip.denied { opacity: 0.45; }
+.ds-catalog-chip input { accent-color: var(--brand-magenta); }
+.ds-catalog-chip-type { font-size: 10px; color: var(--text-dim); font-family: var(--font-mono-stack); }
+
 /* Agent-driven "describe" brief box. */
 .ds-brief {
   width: 100%;
@@ -4273,8 +4297,21 @@ section.band .sub {
   gap: 16px;
   align-items: start;
 }
-.ds-main-solo { max-width: 1120px; }
+.ds-main-solo { width: 100%; }
 .ds-preview-col { position: sticky; top: 8px; display: flex; flex-direction: column; gap: 8px; }
+
+/* Collapsible editor sections (the controls pane gets long). */
+.ds-collapse { border-top: 1px solid var(--border-default); }
+.ds-collapse-head {
+  width: 100%; display: flex; align-items: center; justify-content: space-between;
+  background: none; border: 0; cursor: pointer; font-family: inherit;
+  padding: 12px 2px; color: var(--text-primary);
+  font-size: 11px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase;
+}
+.ds-collapse-head:hover { color: var(--brand-magenta); }
+.ds-collapse-chev { color: var(--text-muted); transition: transform var(--dur-base) ease; }
+.ds-collapse-head[aria-expanded="false"] .ds-collapse-chev { transform: rotate(-90deg); }
+.ds-collapse-body { padding: 2px 2px 14px; }
 .ds-preview-label {
   font-size: 11px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase;
   color: var(--text-muted); padding: 0 2px;
