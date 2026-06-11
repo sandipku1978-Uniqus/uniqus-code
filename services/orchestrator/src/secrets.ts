@@ -1,7 +1,11 @@
-import { promises as fs } from "node:fs";
 import path from "node:path";
 import { listSecrets, getSecretValue, normalizeEnv, DEFAULT_ENV } from "./db/secrets.js";
 import { audit } from "./db/audit.js";
+import {
+  readFile as sandboxReadFile,
+  writeFile as sandboxWriteFile,
+  type Sandbox,
+} from "./agent/sandbox.js";
 
 /**
  * Agent-facing secret helpers.
@@ -31,7 +35,12 @@ export async function listProjectSecrets(
 }
 
 export async function plumbSecretToEnvFile(args: {
-  sandboxDir: string;
+  /**
+   * The sandbox to write into. MUST be the live `Sandbox` (not just a host
+   * path) so the write is routed through the VM when one is active — see the
+   * note below the validation.
+   */
+  sandbox: Sandbox;
   projectId: string;
   userId: string | null;
   name: string;
@@ -56,14 +65,25 @@ export async function plumbSecretToEnvFile(args: {
   if (envFile.includes("..") || envFile.startsWith("/")) {
     throw new Error(`env_file must be a sandbox-relative path, got '${envFile}'`);
   }
-  const full = path.resolve(args.sandboxDir, envFile);
-  if (!full.startsWith(path.resolve(args.sandboxDir) + path.sep)) {
+  // Defense in depth: ensure the resolved path can't escape the sandbox root.
+  // (writeFile/readFile re-validate, but this gives a clearer message.)
+  const root = path.resolve(args.sandbox.rootDir);
+  const full = path.resolve(root, envFile);
+  if (full !== root && !full.startsWith(root + path.sep)) {
     throw new Error("env_file escapes sandbox");
   }
-  await fs.mkdir(path.dirname(full), { recursive: true });
+
+  // Read + write THROUGH the sandbox (VM-aware). In Firecracker mode the
+  // agent's shell and the live preview process run INSIDE the VM, whose
+  // `/sandbox` is a different filesystem from the host staging dir. A raw
+  // host `fs.writeFile` (what this used to do) landed the .env on the host —
+  // so it showed up in the file tree but `cat /sandbox/.env` in the VM 404'd
+  // and the running app never saw the value. `sandboxWriteFile` writes into
+  // the VM (and mirrors to the host for the tree), so the secret actually
+  // materializes where code runs.
   let existing = "";
   try {
-    existing = await fs.readFile(full, "utf-8");
+    existing = await sandboxReadFile(args.sandbox, envFile);
   } catch {
     // file doesn't exist yet — fine.
   }
@@ -82,20 +102,19 @@ export async function plumbSecretToEnvFile(args: {
   // any further occurrences are dropped to canonicalise the file.
   const line = `${args.name}=${escapeForEnv(value)}`;
   const next = upsertEnvLine(existing, args.name, line);
-  await fs.writeFile(full, next, "utf-8");
+  await sandboxWriteFile(args.sandbox, envFile, next);
 
   // Make sure the env file is gitignored. Best-effort — if .gitignore is
   // missing or unreadable, log and continue.
   try {
-    const gitignore = path.resolve(args.sandboxDir, ".gitignore");
     let body = "";
     try {
-      body = await fs.readFile(gitignore, "utf-8");
+      body = await sandboxReadFile(args.sandbox, ".gitignore");
     } catch {}
     const lines = body.split(/\r?\n/);
     if (!gitignoreCovers(lines, envFile)) {
       const append = body.endsWith("\n") || !body ? `${envFile}\n` : `\n${envFile}\n`;
-      await fs.writeFile(gitignore, body + append, "utf-8");
+      await sandboxWriteFile(args.sandbox, ".gitignore", body + append);
     }
   } catch {}
 

@@ -17,30 +17,36 @@
   --accent:              #B21E7D;
   --accent-primary:      #B21E7D;
 
-  /* Surfaces (dark only) */
-  --bg-dark:             #0c0c11;
-  --bg-pane:             #0e0e14;   /* IDE panes / topbar / status bar */
-  --bg-surface:          #16161e;
-  --bg-surface-hover:    #1e1e28;
-  --bg-surface-active:   #252530;
-  --bg-elev:             #1e1e28;   /* raised fields (inputs, textareas) */
-  --bg-base:             #0c0c11;   /* alias used by modal/guest surfaces */
-  --bg-canvas:           #0e0e14;   /* markdown/document canvas */
-  --bg-code:             #07070b;   /* deepest surface: code / tool-output blocks */
-  --bg-chat:             #131319;   /* marketing IDE chat column */
+  /* Surfaces (dark only) — bridged toward the marketing ramp (--mk-*): a
+     slightly deeper page with a faint blue-violet cast, so the app and the
+     public site read as one product. Keep the ladder's relative steps. */
+  --bg-dark:             #0a0b10;
+  --bg-pane:             #0d0e14;   /* IDE panes / topbar / status bar */
+  --bg-surface:          #15161f;
+  --bg-surface-hover:    #1d1e29;
+  --bg-surface-active:   #242532;
+  --bg-elev:             #1d1e29;   /* raised fields (inputs, textareas) */
+  --bg-base:             #0a0b10;   /* alias used by modal/guest surfaces */
+  --bg-canvas:           #0d0e14;   /* markdown/document canvas */
+  --bg-code:             #07080d;   /* deepest surface: code / tool-output blocks */
+  --bg-chat:             #12131c;   /* marketing IDE chat column */
 
-  /* Text — warm ramp, not cool gray */
-  --text-primary:        #e4e2dc;
-  --text-muted:          #8a8880;
+  /* Text — warm ramp, not cool gray. Primary brightened toward the marketing
+     pages' #f4f2ee so app surfaces don't read duller than the public site. */
+  --text-primary:        #efede7;
+  --text-muted:          #93908a;
   /* Lifted from #5a5850 (~3.0:1, below WCAG AA) to ~4.6:1 on the dark surfaces
      so genuine small informational text (chips, hints, step criteria) is
      legible (UI/UX audit §E). --text-xdim stays for non-text decoration only. */
   --text-dim:            #7c7a72;
   --text-xdim:           #3a3830;
 
-  /* Borders */
-  --border-default:      #2a2a35;
-  --border-light:        #1e1e28;
+  /* Borders. --border-strong mirrors the marketing --mk-line-strong: the
+     emphasis step for hover/focused cards, so lift reads as a border change
+     instead of piling on shadows. */
+  --border-default:      #2a2b37;
+  --border-light:        #1d1e29;
+  --border-strong:       rgba(255, 255, 255, 0.17);
   --border-active:       #482879;
 
   /* Semantic */
@@ -117,6 +123,7 @@
   /* Borders */
   --border-default:    #e3e0e6;
   --border-light:      #eeecf0;
+  --border-strong:     rgba(28, 27, 34, 0.22);
   --border-active:     #482879;
 
   /* Semantic — slightly deeper foregrounds for AA contrast on white;
@@ -136,7 +143,9 @@
 :root[data-density="compact"] .settings-row { padding: 7px 0; }
 :root[data-density="compact"] .settings-wrap { padding-top: 28px; }
 :root[data-density="compact"] .dash-main { padding: 22px 28px 48px; }
-:root[data-density="compact"] .proj { padding: 14px; }
+/* Tiles manage their own (zero) padding for the cover band — only pad the
+   plain .proj cards in compact mode. */
+:root[data-density="compact"] .proj:not(.proj-tile) { padding: 14px; }
 :root[data-density="compact"] .msg { margin-bottom: 12px; }
 :root[data-density="compact"] .tool-card { padding: 6px 8px; }
 :root[data-density="compact"] .chat-scroll { padding: 12px 12px 6px; }
@@ -323,7 +332,7 @@ code, pre, .mono {
   justify-content: space-between;
   padding: 0 32px;
   border-bottom: 1px solid var(--border-default);
-  background: rgba(12, 12, 17, 0.85);
+  background: rgba(10, 11, 16, 0.82);
   -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
   position: sticky;
@@ -839,27 +848,17 @@ section.band .sub {
   font-family: inherit;
 }
 .dash-side .nav-item:hover { background: var(--bg-surface-hover); color: var(--text-primary); }
-.dash-side .nav-item.soon {
-  cursor: default;
-  opacity: 0.55;
-}
-.dash-side .nav-item.soon:hover { background: transparent; color: var(--text-muted); }
-.dash-side .nav-item.soon .count {
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 9px;
-}
 .dash-side .nav-item.active {
-  background: var(--bg-surface);
+  background: color-mix(in srgb, var(--brand-magenta) 9%, var(--bg-surface));
   color: var(--text-primary);
-  border: 1px solid var(--border-default);
+  border: 1px solid color-mix(in srgb, var(--brand-magenta) 28%, var(--border-default));
 }
 .dash-side .nav-item .ic {
   width: 16px; height: 16px;
   color: var(--text-dim);
   display: flex; align-items: center; justify-content: center;
 }
-.dash-side .nav-item.active .ic { color: var(--text-primary); }
+.dash-side .nav-item.active .ic { color: var(--brand-magenta); }
 .dash-side .nav-item .count {
   margin-left: auto;
   font-size: 11px;
@@ -868,23 +867,27 @@ section.band .sub {
 }
 .dash-side .label-micro { padding: 0 10px; margin-bottom: 8px; }
 .dash-side .usage {
-  background: var(--bg-surface);
+  /* Faint brand wash from the top — same translucent-panel language as the
+     marketing cards, quiet enough to live in a sidebar. */
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--brand-magenta) 7%, transparent), transparent 62%),
+    var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   padding: 14px;
   margin-top: auto;
 }
 .dash-side .usage .row { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted); margin-bottom: 6px; }
-.dash-side .usage .v { color: var(--text-primary); font-family: var(--font-mono-stack); }
+.dash-side .usage .v { color: var(--text-primary); font-family: var(--font-mono-stack); font-variant-numeric: tabular-nums; }
 .dash-side .usage .bar { height: 4px; background: var(--bg-surface-active); border-radius: 2px; overflow: hidden; margin-top: 8px; }
-.dash-side .usage .bar .fill { height: 100%; background: var(--text-muted); }
+.dash-side .usage .bar .fill { height: 100%; background: var(--brand-gradient); }
 
 .dash-main { padding: 32px 40px 64px; overflow-y: auto; }
 .pagehead {
   display: flex; align-items: flex-end; justify-content: space-between;
   margin-bottom: 32px;
 }
-.pagehead h1 { font-size: 24px; font-weight: 500; letter-spacing: -0.02em; margin: 0 0 6px; }
+.pagehead h1 { font-size: 26px; font-weight: 650; letter-spacing: -0.02em; margin: 0 0 8px; }
 .pagehead p { color: var(--text-muted); margin: 0; font-size: 14px; }
 .pagehead .actions { display: flex; gap: 10px; }
 
@@ -920,10 +923,28 @@ section.band .sub {
 .newproj-form input::placeholder { color: var(--text-muted); }
 
 .section-title {
-  display: flex; align-items: center; justify-content: space-between;
-  margin: 32px 0 16px;
+  display: flex; align-items: flex-end; justify-content: space-between;
+  margin: 36px 0 16px;
 }
-.section-title h2 { font-size: 16px; font-weight: 600; margin: 0; }
+/* Marketing-style section language, sized for a work surface: a mono eyebrow
+   over a slightly larger head. The eyebrow is optional — plain h2-only
+   section titles keep working. */
+.section-title .head { display: flex; flex-direction: column; gap: 6px; }
+.section-title .eyebrow {
+  font-family: var(--font-mono-stack);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: color-mix(in srgb, var(--brand-magenta) 72%, var(--text-muted));
+}
+.section-title h2 {
+  font-size: 19px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  margin: 0;
+}
+.section-title .sub { font-size: 11px; color: var(--text-dim); }
 
 .proj-grid {
   display: grid;
@@ -948,14 +969,20 @@ section.band .sub {
   flex-direction: column;
   gap: 4px;
   padding: 16px 18px;
-  background: var(--bg-surface);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 56%),
+    var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg, 12px);
+  transition: border-color var(--dur-base) ease;
 }
+.stat-card:hover { border-color: var(--border-strong); }
 .stat-label {
-  font-size: 11px;
+  font-family: var(--font-mono-stack);
+  font-size: 10px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.09em;
   color: var(--text-muted);
 }
 .stat-value {
@@ -964,13 +991,16 @@ section.band .sub {
   line-height: 1.1;
   color: var(--text-primary);
   font-family: var(--font-mono-stack);
+  font-variant-numeric: tabular-nums;
 }
-.stat-sub { font-size: 11px; color: var(--text-dim); }
+.stat-sub { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 
 .top-models {
   margin-top: 14px;
   padding: 16px 18px;
-  background: var(--bg-surface);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 56%),
+    var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg, 12px);
 }
@@ -1028,7 +1058,42 @@ section.band .sub {
   transition: border-color var(--dur-base) ease, background var(--dur-base) ease;
   display: block;
 }
-.proj:hover { border-color: var(--text-muted); background: var(--bg-surface-hover); }
+.proj:hover { border-color: var(--border-strong); background: var(--bg-surface-hover); }
+
+/* Deterministic per-project cover band (hue from the project id — see
+   coverBackground() in ProjectPicker). The avatar overlaps its bottom edge so
+   the tile reads as cover + identity, not a gray box with a letter in it. */
+.proj-cover {
+  position: relative;
+  height: 64px;
+  border-radius: calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px) 0 0;
+  overflow: hidden;
+}
+.proj-cover::after {
+  /* Fine dot grid over the gradient so covers have texture, not just color. */
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.14) 1px, transparent 1.2px);
+  background-size: 14px 14px;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.9), transparent);
+  -webkit-mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.9), transparent);
+}
+/* Overlap rules key off the cover sibling so the All/Recent LIST rows (which
+   reuse .proj-tile without a cover) keep their plain inline avatar. */
+.proj-cover + .proj-tile-head { align-items: flex-start; padding-top: 0; }
+.proj-cover + .proj-tile-head .proj-avatar {
+  /* Straddle the cover's bottom edge; the surface-colored ring separates the
+     avatar from whatever hue the cover landed on. */
+  margin-top: -18px;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  font-size: 15px;
+  border: 2px solid var(--bg-surface);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+.proj-cover + .proj-tile-head .proj-menu-btn { margin-top: 2px; }
 .proj h3 { font-size: 14px; font-weight: 600; margin: 0 0 6px; }
 .proj .desc { color: var(--text-muted); font-size: 12px; line-height: 1.5; margin: 0 0 14px; min-height: 36px; }
 .proj .meta {
@@ -1676,6 +1741,9 @@ section.band .sub {
   padding: 10px 12px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
   text-align: left;
+  /* Opacity+scale only (no translate) so it animates in regardless of which
+     side it's anchored to. */
+  animation: scaleIn var(--dur-base) var(--ease-spring) backwards;
 }
 .cm-bottom { top: calc(100% + 10px); left: 0; }
 .cm-top { bottom: calc(100% + 10px); left: 0; }
@@ -3698,7 +3766,18 @@ section.band .sub {
   font-family: inherit;
 }
 .starter-card:hover { border-color: var(--brand-magenta); background: var(--bg-surface-hover); transform: translateY(-1px); }
-.starter-card .ic { font-size: 20px; }
+.starter-card .ic {
+  font-size: 18px;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--brand-magenta) 12%, var(--bg-elev));
+  border: 1px solid color-mix(in srgb, var(--brand-magenta) 22%, var(--border-default));
+  margin-bottom: 2px;
+}
 .starter-card .t { font-size: 13px; font-weight: 600; color: var(--text-primary); }
 .starter-card .d { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
 
@@ -3889,6 +3968,12 @@ section.band .sub {
     border: 1.5px solid var(--bg-pane);
   }
 
+  /* Keep the chat composer compact on phones so it doesn't dominate a short
+     screen — tighter padding and a smaller resting textarea (the JS
+     auto-resize also caps growth at ~30vh). */
+  .composer { padding: 8px 10px 10px; }
+  .composer .field { padding: 9px 11px; border-radius: var(--radius-lg); }
+  .composer textarea { min-height: 34px; }
 }
 
 /* ==========================================================================
@@ -4289,15 +4374,20 @@ section.band .sub {
 
 /* Settings */
 .settings-wrap { max-width: 760px; margin: 0 auto; padding: 40px 32px 96px; }
-.settings-wrap h1 { font-size: 24px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.02em; }
+.settings-wrap h1 { font-size: 26px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.02em; }
 .settings-wrap .settings-lede { color: var(--text-muted); font-size: 14px; margin: 0 0 28px; }
 .settings-card {
   border: 1px solid var(--border-default);
-  background: var(--bg-surface);
+  /* Faint top-light over the surface — the shared card language. */
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 56%),
+    var(--bg-surface);
   border-radius: var(--radius-lg);
   padding: 20px 22px;
   margin-bottom: 16px;
+  transition: border-color var(--dur-base) ease;
 }
+.settings-card:hover { border-color: var(--border-strong); }
 .settings-card h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
 .settings-card .settings-card-sub { color: var(--text-muted); font-size: 12.5px; margin: 0 0 16px; }
 .settings-row {
@@ -4330,7 +4420,19 @@ section.band .sub {
    look). This gives them the same header rhythm + card chrome as Settings.
    ========================================================================== */
 .dash-page { animation: fadeIn var(--dur-base) var(--ease-out) backwards; }
-.dash-page > h1 { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 6px; }
+/* Mono eyebrow above page titles — the dashboard-scale echo of the marketing
+   pages' .mk-eyebrow, shared by Databases / Design Systems / Settings. */
+.page-eyebrow {
+  display: block;
+  font-family: var(--font-mono-stack);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: color-mix(in srgb, var(--brand-magenta) 72%, var(--text-muted));
+  margin-bottom: 8px;
+}
+.dash-page > h1 { font-size: 26px; font-weight: 650; letter-spacing: -0.02em; margin: 0 0 8px; }
 .dash-page > .lede {
   color: var(--text-muted);
   font-size: 14px;
@@ -4340,12 +4442,16 @@ section.band .sub {
 }
 
 .dash-card {
-  background: var(--bg-surface);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 56%),
+    var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-lg);
   padding: 20px 22px;
   animation: fadeInUp var(--dur-base) var(--ease-out) backwards;
+  transition: border-color var(--dur-base) ease;
 }
+.dash-card:hover { border-color: var(--border-strong); }
 .dash-card h2 { font-size: 15px; font-weight: 600; margin: 0 0 6px; }
 .dash-card .card-sub { color: var(--text-muted); font-size: 12.5px; line-height: 1.6; margin: 0 0 16px; }
 :root[data-density="compact"] .dash-card { padding: 14px 16px; }
@@ -4570,7 +4676,23 @@ section.band .sub {
 .ds-collapse-head:hover { color: var(--brand-magenta); }
 .ds-collapse-chev { color: var(--text-muted); transition: transform var(--dur-base) ease; }
 .ds-collapse-head[aria-expanded="false"] .ds-collapse-chev { transform: rotate(-90deg); }
-.ds-collapse-body { padding: 2px 2px 14px; }
+/* Smooth height animation via the grid-template-rows 0fr↔1fr trick — animates
+   to the body's natural height with no JS measuring. The body must clip its
+   overflow and allow min-height:0 so it can collapse fully. */
+.ds-collapse-region {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--dur-base) var(--ease-out);
+}
+.ds-collapse-region[data-open="true"] { grid-template-rows: 1fr; }
+.ds-collapse-body {
+  padding: 2px 2px 14px;
+  overflow: hidden;
+  min-height: 0;
+  opacity: 0;
+  transition: opacity var(--dur-base) var(--ease-out);
+}
+.ds-collapse-region[data-open="true"] .ds-collapse-body { opacity: 1; }
 .ds-preview-label {
   font-size: 11px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase;
   color: var(--text-muted); padding: 0 2px;
@@ -7274,6 +7396,23 @@ select {
 }
 .faq-item[open] summary::after { transform: rotate(45deg); }
 .faq-item .faq-a { padding: 0 4px 20px; margin: 0; color: var(--mk-muted); font-size: 15px; line-height: 1.65; max-width: 72ch; }
+
+/* Smoothly grow/shrink the answer on toggle where the browser supports the
+   ::details-content pseudo + interpolate-size (Chromium 129+, Safari 18.2+).
+   Everywhere else <details> simply snaps open as before — no regression, no JS. */
+@supports selector(::details-content) {
+  .faq-item { interpolate-size: allow-keywords; }
+  .faq-item::details-content {
+    block-size: 0;
+    overflow: clip;
+    opacity: 0;
+    transition:
+      block-size var(--dur-base) var(--ease-out),
+      opacity var(--dur-base) var(--ease-out),
+      content-visibility var(--dur-base) allow-discrete;
+  }
+  .faq-item[open]::details-content { block-size: auto; opacity: 1; }
+}
 
 /* ── Contact ───────────────────────────────────────────────────────────── */
 .contact-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.9fr); gap: 48px; align-items: start; }

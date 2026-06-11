@@ -890,6 +890,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
   if (isGuest) {
     return (
       <div className="dash-page" style={{ maxWidth: 880 }}>
+        <span className="page-eyebrow">Brand</span>
         <h1>Design Systems</h1>
         <div className="dash-card">
           <p className="card-sub" style={{ marginBottom: 0 }}>
@@ -941,6 +942,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
 
   return (
     <div className="dash-page ds-page">
+      <span className="page-eyebrow">Brand</span>
       <h1>Design Systems</h1>
       <p className="lede">
         Reusable token sets — color, type, spacing AND components — the agent generates against. Describe a brand, point
@@ -1018,7 +1020,11 @@ function Collapsible({ title, defaultOpen = false, children }: { title: string; 
         <span>{title}</span>
         <span className="ds-collapse-chev" aria-hidden="true">▾</span>
       </button>
-      {open && <div className="ds-collapse-body">{children}</div>}
+      {/* Always mounted so the body can animate open/closed via the
+          grid-template-rows 0fr↔1fr trick (no fixed height needed). */}
+      <div className="ds-collapse-region" data-open={open}>
+        <div className="ds-collapse-body">{children}</div>
+      </div>
     </div>
   );
 }

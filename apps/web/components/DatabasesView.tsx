@@ -45,6 +45,7 @@ export default function DatabasesView({ isGuest }: { isGuest: boolean }) {
 
   return (
     <div className="dash-page" style={{ maxWidth: 880 }}>
+      <span className="page-eyebrow">Storage</span>
       <h1>Databases</h1>
       <p className="lede">
         Postgres databases provisioned through your connected Supabase account.

@@ -7,6 +7,7 @@ import { getProvider, providerKeysFromEnv, type ProviderKeys } from "./providers
 import { TOOLS } from "./tools.js";
 import { executeTool, truncateToolResultText, type LoopHooks } from "./loop.js";
 import type { Sandbox } from "./sandbox.js";
+import { PLAN_DESIGN_STEP_LINE } from "./designGuidance.js";
 
 const PLAN_SYSTEM_PROMPT_BASE = `You are an AI software engineer in plan mode. The user has described what they want built; your job is to INSPECT the project as needed and then produce a structured plan, NOT to execute it.
 
@@ -24,6 +25,7 @@ For a plan whose result is a VISUAL screen or app, optionally include a "wirefra
 
 When planning frontend or design work, include steps for:
 - Finding existing design tokens, components, routes, assets, and styling conventions before proposing new ones.
+${PLAN_DESIGN_STEP_LINE}
 - Building the real usable screen or flow, including responsive layout, empty/loading/error states, accessibility, and plausible content.
 - Starting or reusing a preview server and checking the result visually at desktop and mobile sizes before declaring the work complete.
 

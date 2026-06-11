@@ -125,13 +125,32 @@ function parseGithubFullName(repoUrl: string): string | null {
   return `${owner}/${repo}`;
 }
 
-function fallbackTileColor(projectId: string): string {
+/** Stable hue for a project id — shared by the avatar and the tile cover so
+ *  the two always agree. */
+function projectHue(projectId: string): number {
   let hash = 0;
   for (let i = 0; i < projectId.length; i++) {
     hash = (hash * 31 + projectId.charCodeAt(i)) | 0;
   }
-  const hue = Math.abs(hash) % 360;
-  return `hsl(${hue} 55% 28%)`;
+  return Math.abs(hash) % 360;
+}
+
+function fallbackTileColor(projectId: string): string {
+  return `hsl(${projectHue(projectId)} 55% 28%)`;
+}
+
+/**
+ * Deterministic duotone cover for a project tile: a diagonal gradient on the
+ * project's hue plus a brighter radial bloom from the top-right corner. Pure
+ * CSS — gives every project a visual identity without any stored artwork.
+ */
+function coverBackground(projectId: string): string {
+  const h = projectHue(projectId);
+  const h2 = (h + 42) % 360;
+  return [
+    `radial-gradient(130% 160% at 88% -30%, hsl(${h2} 72% 48% / 0.8), transparent 58%)`,
+    `linear-gradient(118deg, hsl(${h} 58% 31%), hsl(${(h + 24) % 360} 54% 19%))`,
+  ].join(", ");
 }
 
 /**
@@ -1155,7 +1174,10 @@ export default function ProjectPicker({
           )}
 
           <div className="section-title">
-            <h2>Recent projects</h2>
+            <div className="head">
+              <span className="eyebrow">Workspace</span>
+              <h2>Recent projects</h2>
+            </div>
             {projects !== null && projects.length > 3 && (
               <button
                 type="button"
@@ -1342,8 +1364,11 @@ function DashboardWidgets({
   return (
     <section className="usage-widgets">
       <div className="section-title">
-        <h2>Your usage</h2>
-        <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+        <div className="head">
+          <span className="eyebrow">This account</span>
+          <h2>Your usage</h2>
+        </div>
+        <span className="sub">
           across {projectCount} project{projectCount === 1 ? "" : "s"} · cost is an estimate
         </span>
       </div>
@@ -1513,6 +1538,11 @@ function ProjectTile({
   useOutsideClick(tileRef, menuOpen, () => onOpenMenu(false));
   return (
     <div className="proj proj-tile" ref={tileRef}>
+      <div
+        className="proj-cover"
+        style={{ background: coverBackground(project.id) }}
+        aria-hidden="true"
+      />
       <div className="proj-tile-head">
         <ProjectAvatar project={project} />
         <button
@@ -1595,8 +1625,9 @@ function ProjectGridSkeleton() {
     <div className="proj-grid" aria-hidden="true">
       {[0, 1, 2].map((i) => (
         <div key={i} className="proj proj-tile">
+          <div className="proj-cover" style={{ background: "var(--bg-surface-active)" }} />
           <div className="proj-tile-head">
-            <Skeleton width={32} height={32} radius={8} />
+            <Skeleton width={36} height={36} radius={10} />
             <Skeleton width={24} height={24} radius={4} />
           </div>
           <div className="proj-tile-link">
@@ -1921,6 +1952,7 @@ function ProjectListView({
     <>
       <div className="pagehead">
         <div>
+          <span className="page-eyebrow">Workspace</span>
           <h1>{view === "all" ? "All projects" : "Recent activity"}</h1>
           <p>
             {view === "all"

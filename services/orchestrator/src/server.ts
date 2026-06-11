@@ -82,6 +82,7 @@ import {
   startServer as sandboxStartServer,
   stopServer as sandboxStopServer,
   writeFile as sandboxWriteFile,
+  readFile as sandboxReadFile,
 } from "./agent/sandbox.js";
 import {
   createShareToken,
@@ -3172,7 +3173,19 @@ async function handleConnection(
       }
 
       if (event.type === "request_file") {
-        const content = await readSandboxFile(sandboxDir, event.path);
+        // When a VM is active it's the authoritative copy — the agent, the
+        // editor save path, and the preview process all read/write there; the
+        // host `sandboxDir` is only a mirror for the file tree / storage sync
+        // and can lag (a failed host-mirror after a save left the editor
+        // showing stale content on reopen). Read from the VM first so a
+        // just-saved edit shows its new content; fall back to the host copy.
+        let content: string | null = null;
+        if (vmHandle) {
+          content = await sandboxReadFile({ rootDir: sandboxDir, vm: vmHandle }, event.path).catch(
+            () => null,
+          );
+        }
+        if (content === null) content = await readSandboxFile(sandboxDir, event.path);
         send({ type: "file_content", path: event.path, content });
         return;
       }
@@ -4526,8 +4539,12 @@ async function nameFromBrief(brief: string): Promise<string> {
       messages: [
         { role: "user", content: `Brief to name:\n${brief}` },
         // Prefill the start of the reply so the model can only continue with the
-        // name itself — it can't pivot into answering the brief.
-        { role: "assistant", content: "Project name: " },
+        // name itself — it can't pivot into answering the brief. NOTE: the
+        // prefill must NOT end in whitespace — the Messages API rejects a final
+        // assistant turn with trailing whitespace (400), which previously threw
+        // on EVERY call and silently fell back to the slugified brief. The model
+        // continues fine from the colon (its leading space is trimmed below).
+        { role: "assistant", content: "Project name:" },
       ],
     });
     const text = response.content
@@ -4538,8 +4555,13 @@ async function nameFromBrief(brief: string): Promise<string> {
     const name = sanitizeProjectName(text);
     // sanitizeProjectName returns an "untitled-…" slug for unusable input;
     // prefer the brief slug in that case if it's any better.
-    return name.startsWith("untitled-") ? fallback : name;
-  } catch {
+    if (name.startsWith("untitled-")) {
+      console.warn(`[name-from-brief] Haiku returned unusable name (raw=${JSON.stringify(text)}); using brief slug`);
+      return fallback;
+    }
+    return name;
+  } catch (err) {
+    console.warn(`[name-from-brief] Haiku call failed; using brief slug:`, err instanceof Error ? err.message : err);
     return fallback;
   }
 }

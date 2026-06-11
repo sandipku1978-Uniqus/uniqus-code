@@ -32,6 +32,7 @@ import {
   formatSelectedElementBlock,
   type SelectedElement,
 } from "./selectedElement.js";
+import { DESIGN_GUIDANCE } from "./designGuidance.js";
 
 const MAX_ITERATIONS = 125;
 const MAX_TOKENS = 16384*2;
@@ -96,14 +97,14 @@ Default working style:
 
 Product and design quality:
 - When building UI, make the first screen the usable product experience, not a marketing placeholder, unless the user explicitly asked for a landing page.
-- Match the interface to the product domain. Operational tools should be dense, calm, scannable, and task-focused; consumer, editorial, game, or portfolio work can be more expressive.
 - Reuse existing design tokens, components, icon sets, routes, and state patterns before adding new ones. Keep spacing, radii, type scale, and color usage internally consistent.
-- Use real, specific copy and plausible data. Include empty, loading, disabled, error, and success states where users would naturally hit them.
+- Include empty, loading, disabled, error, and success states where users would naturally hit them.
 - Build responsive layouts deliberately: stable dimensions, no text overlap, usable touch targets on mobile, and no viewport-width font scaling.
 - Include accessible semantics, labels, keyboard reachability, visible focus states, sufficient contrast, and reduced-motion-friendly animation.
 - Use visual assets when a site, app, or game needs them. Prefer uploaded assets, local assets, generated bitmap assets, or relevant public assets over generic placeholder blocks.
 - After meaningful frontend work, start or reuse a preview server and inspect it with screenshot_preview at desktop and mobile sizes. Fix obvious layout, contrast, or rendering issues before reporting completion.
 - Screenshot viewport: keep viewport dimensions reasonable (max ~1920x1080). Do NOT use full_page=true on pages with very long scroll — the resulting image may exceed the 8000px dimension limit and fail. For long pages, take multiple viewport-sized screenshots at different scroll positions instead.
+${DESIGN_GUIDANCE}
 
 Environment:
 - OS platform: ${platform}
@@ -947,7 +948,7 @@ export async function executeTool(
         throw new Error("get_secret requires 'name' as a non-empty string");
       }
       const r = await plumbSecretToEnvFile({
-        sandboxDir: sandbox.rootDir,
+        sandbox,
         projectId,
         userId,
         name: args.name.trim(),
@@ -958,7 +959,9 @@ export async function executeTool(
         env_var: r.env_var,
         env_file: r.env_file,
         env: r.env,
-        note: `The plaintext value (from env '${r.env}') was written to ${r.env_file}; read it from process.env.${r.env_var} (Node) or os.environ["${r.env_var}"] (Python). The value is NOT in the agent's tool-result context.`,
+        note:
+          `The plaintext value (from env '${r.env}') was written to ${r.env_file} in the sandbox; the value is NOT in the agent's tool-result context. ` +
+          `Next.js/Vite/CRA load ${r.env_file} automatically. A bare Node script does NOT — run it with \`node --env-file=${r.env_file} <script>\` (Node 20.6+) or \`require('dotenv').config()\`; Python: \`python-dotenv\` / \`os.environ["${r.env_var}"]\`. Then read it from process.env.${r.env_var}.`,
       });
     }
     case "list_assets": {

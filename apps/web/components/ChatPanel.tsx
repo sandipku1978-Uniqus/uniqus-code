@@ -198,13 +198,18 @@ export default function ChatPanel() {
     };
   }, [project]);
 
-  // Auto-resize textarea: grow up to ~15 lines, then scroll
+  // Auto-resize textarea: grow with the content, then scroll. Grows up to
+  // ~15 lines on a tall screen, but never past ~30% of the viewport — otherwise
+  // a long draft swallows half a short (mobile) screen, which is exactly the
+  // "the chatbox takes up half the screen on mobile" complaint. Keeps the
+  // compact, hero-composer feel at every size.
   const autoResize = useCallback(() => {
     const ta = textareaRef.current;
     if (!ta) return;
     ta.style.height = "auto";
     const lineHeight = 20; // approx line-height in px
-    const maxHeight = lineHeight * 15;
+    const vh = typeof window !== "undefined" ? window.innerHeight : 800;
+    const maxHeight = Math.min(lineHeight * 15, Math.round(vh * 0.3));
     ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
     ta.style.overflowY = ta.scrollHeight > maxHeight ? "auto" : "hidden";
   }, []);
@@ -212,6 +217,13 @@ export default function ChatPanel() {
   useEffect(() => {
     autoResize();
   }, [input, autoResize]);
+
+  // Recompute on viewport changes (rotation, on-screen keyboard) so the cap
+  // tracks the live screen height.
+  useEffect(() => {
+    window.addEventListener("resize", autoResize);
+    return () => window.removeEventListener("resize", autoResize);
+  }, [autoResize]);
 
   // Hydrate whenever the key changes (first load OR a project switch). Always
   // replaces `input` with the new key's saved value (or "") so stale text from

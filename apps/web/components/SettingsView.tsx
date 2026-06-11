@@ -158,6 +158,7 @@ export default function SettingsView({
       </nav>
 
       <div className="settings-wrap">
+        <span className="page-eyebrow">Account</span>
         <h1>Settings</h1>
         <p className="settings-lede">
           Account and workspace preferences. Some items are project-scoped and
