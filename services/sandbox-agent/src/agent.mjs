@@ -10,8 +10,9 @@
  * Endpoints (mirror agentRpc.ts):
  *   GET  /health                     → { ok: true, kind: "node" }
  *   POST /net/configure              body: { ip, gw, mac?, mount_sandbox?, seed?, time_ms? } → { ok: true }
- *   GET  /fs/file?path=…             → { content }
+ *   GET  /fs/file?path=…             → { content } (+&encoding=base64 → { content, encoding: "base64" })
  *   PUT  /fs/file                    body: { path, content, encoding? }
+ *   GET  /fs/manifest                → { files: [{ path, size, mtime_ms }] } (storage-sync exclusions applied)
  *   POST /fs/edit                    body: { path, old_string, new_string }
  *   GET  /fs/dir?path=…              → { entries }
  *   POST /fs/grep                    body: { pattern, path? } → { matches }
@@ -207,8 +208,19 @@ async function handleRequest(req, res) {
     }
     if (method === "GET" && url.pathname === "/fs/file") {
       const p = resolveSandbox(url.searchParams.get("path") ?? "");
+      // Binary-safe read for the VM→host pull (C-18). The `encoding` echo in
+      // the response is the capability signal: an agent without this support
+      // ignores the param and replies without it, telling the orchestrator to
+      // use the exec-based fallback instead of mojibake-ing a binary.
+      if (url.searchParams.get("encoding") === "base64") {
+        const buf = await fs.readFile(p);
+        return json(res, 200, { content: buf.toString("base64"), encoding: "base64" });
+      }
       const content = await fs.readFile(p, "utf-8");
       return json(res, 200, { content });
+    }
+    if (method === "GET" && url.pathname === "/fs/manifest") {
+      return json(res, 200, { files: await buildManifest() });
     }
     if (method === "PUT" && url.pathname === "/fs/file") {
       const body = await readBody(req);
@@ -336,6 +348,51 @@ function readBody(req) {
 function truncate(s) {
   if (s.length <= HALF_MAX * 2) return s;
   return `${s.slice(0, HALF_MAX)}\n\n[... truncated ${s.length - HALF_MAX * 2} bytes ...]\n\n${s.slice(-HALF_MAX)}`;
+}
+
+/**
+ * /fs/manifest walk (C-18 VM→host pull). The skip list mirrors the
+ * orchestrator's storage-sync exclusions (storage/sync.ts SKIP_DIRS) so the
+ * pull diff and the Storage push agree on what counts as project state.
+ * Mirrors build_manifest in main.rs — wire format must stay identical.
+ */
+const MANIFEST_SKIP_DIRS = new Set([
+  "node_modules", ".git", ".next", ".turbo", ".cache", "dist", "build", "out",
+  "coverage", "__pycache__", ".pytest_cache", "target", "vendor", ".venv", "venv",
+]);
+const MANIFEST_MAX_FILES = 20000;
+
+async function buildManifest() {
+  const root = path.resolve(SANDBOX_DIR);
+  const files = [];
+  async function walkDir(dir) {
+    if (files.length >= MANIFEST_MAX_FILES) return;
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (files.length >= MANIFEST_MAX_FILES) return;
+      if (MANIFEST_SKIP_DIRS.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        await walkDir(full);
+      } else if (e.isFile()) {
+        try {
+          const st = await fs.stat(full);
+          files.push({
+            path: path.relative(root, full).split(path.sep).join("/"),
+            size: st.size,
+            mtime_ms: Math.round(st.mtimeMs),
+          });
+        } catch {}
+      }
+    }
+  }
+  await walkDir(root);
+  return files;
 }
 
 async function grep(pattern, sub) {

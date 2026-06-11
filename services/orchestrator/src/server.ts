@@ -73,6 +73,7 @@ import {
 } from "./firecracker/index.js";
 import type { VmHandle } from "./firecracker/types.js";
 import * as fcAgent from "./firecracker/agentRpc.js";
+import { pullVmChanges } from "./firecracker/pull.js";
 import { startGuestSweeper, stopGuestSweeper } from "./guest/sweeper.js";
 import {
   shellInfo,
@@ -1223,6 +1224,9 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       });
     }
     try {
+      // Fly builds from the host mirror — pull VM-side command-created files
+      // first so the shipped tree is complete (C-18).
+      await pullVmChanges(projectId, sandboxDirFor(projectId));
       const result = await flyDeploy({
         sandboxDir: sandboxDirFor(projectId),
         appName,
@@ -1249,6 +1253,9 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const project = await getProject(projectId, user.id);
     if (!project) return json(res, 404, { error: "project not found" });
     try {
+      // The zip is built from the host mirror — pull any VM-side files a
+      // command created first so the export isn't missing them (C-18).
+      await pullVmChanges(projectId, sandboxDirFor(projectId));
       const buf = await buildProjectZip(sandboxDirFor(projectId));
       const safeName = (project.name || "project")
         .replace(/[^a-z0-9-_]+/gi, "-")
@@ -2123,6 +2130,9 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
 
     let result;
     try {
+      // Deploys read the host mirror — pull VM-side command-created files
+      // first so the shipped tree is complete (C-18).
+      await pullVmChanges(projectId, dest);
       result = await startDeploy(
         {
           uniqusProjectId: projectId,
@@ -4399,12 +4409,10 @@ async function runSession(
       // (file_changed broadcast + Storage sync for write/edit happens once,
       // below — see C-109/C-110. A duplicate block here previously fired a
       // second concurrent syncFile + a second file_changed to the origin.)
-      // Per-tool-call checkpoint (Plan §3.5). Fires for tools that modified
-      // sandbox state. Background — never blocks the loop.
-      if (name === "write_file" || name === "edit_file" || name === "run_command") {
-        const summary = name === "run_command"
-          ? `run_command: ${String((input as { command?: unknown })?.command ?? "").slice(0, 80)}`
-          : `${name}: ${String((input as { path?: unknown })?.path ?? "")}`;
+      // Per-tool-call checkpoint (Plan §3.5) for write/edit. Background —
+      // never blocks the loop. run_command checkpoints below, AFTER the
+      // VM→host pull, so the checkpoint captures command-created files.
+      const checkpointNow = (summary: string): void => {
         commitCheckpoint(sandboxDir, projectId, summary)
           .then((meta) => {
             if (meta) {
@@ -4425,8 +4433,9 @@ async function runSession(
             }
           })
           .catch((err) => console.error("commitCheckpoint failed:", err));
-      }
+      };
       if (name === "write_file" || name === "edit_file") {
+        checkpointNow(`${name}: ${String((input as { path?: unknown })?.path ?? "")}`);
         const p = (input as { path?: unknown })?.path;
         if (typeof p === "string") {
           // Single broadcast (reaches every session on the project, incl. the
@@ -4440,12 +4449,25 @@ async function runSession(
         return;
       }
       if (name === "run_command") {
-        // run_command may have created/modified arbitrary files. Background
-        // walk + push.
-        getTracker(projectId, sandboxDir)
-          .syncChanges()
+        // The command ran INSIDE the VM in Firecracker mode — the host mirror
+        // saw none of it (C-18). Pull VM-created/changed files to the host
+        // FIRST, so the checkpoint, the Storage walk, and the file tree all
+        // see a complete tree; pullVmChanges is a fast no-op for the process
+        // backend. Background — never blocks the loop.
+        pullVmChanges(projectId, sandboxDir)
+          .then((pull) => {
+            // Surface pulled files to open sessions so the Files pane shows
+            // command-created files immediately (cap the fan-out).
+            for (const p of (pull?.pulled ?? []).slice(0, 50)) {
+              broadcastToProject(projectId, { type: "file_changed", path: p });
+            }
+            checkpointNow(
+              `run_command: ${String((input as { command?: unknown })?.command ?? "").slice(0, 80)}`,
+            );
+            return getTracker(projectId, sandboxDir).syncChanges();
+          })
           .then(() => emitSynced())
-          .catch((err) => console.error("syncChanges failed:", err));
+          .catch((err) => console.error("post-run_command sync failed:", err));
         return;
       }
       if (name === "start_server") {

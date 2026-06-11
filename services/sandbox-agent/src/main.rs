@@ -11,8 +11,9 @@
 //
 // Endpoints:
 //   GET  /health                     → { ok: true, kind: "rust" }
-//   GET  /fs/file?path=…             → { content }
+//   GET  /fs/file?path=…             → { content } (+&encoding=base64 → { content, encoding: "base64" })
 //   PUT  /fs/file                    body: { path, content, encoding? }
+//   GET  /fs/manifest                → { files: [{ path, size, mtime_ms }] } (storage-sync exclusions applied)
 //   POST /fs/edit                    body: { path, old_string, new_string }
 //   GET  /fs/dir?path=…              → { entries }
 //   POST /fs/grep                    body: { pattern, path? } → { matches }
@@ -323,9 +324,25 @@ fn handle(mut req: Request, servers: ServerTable, auth: Arc<Option<String>>) -> 
             (Method::Get, "/fs/file") => {
                 let p = require_query(&query, "path")?;
                 let full = resolve_sandbox(&p)?;
-                let content = fs::read_to_string(&full)
-                    .map_err(|e| AgentError::Io(format!("read {}: {}", p, e)))?;
-                Ok(json_response(200, &json!({ "content": content })))
+                // Binary-safe read for the VM→host pull (C-18). Echoing
+                // `encoding` back is the capability signal — agents without
+                // this support reply without it, so the orchestrator falls
+                // back to an exec-based read instead of corrupting binaries.
+                if query.get("encoding").map(String::as_str) == Some("base64") {
+                    let bytes = fs::read(&full)
+                        .map_err(|e| AgentError::Io(format!("read {}: {}", p, e)))?;
+                    Ok(json_response(
+                        200,
+                        &json!({ "content": base64_encode(&bytes), "encoding": "base64" }),
+                    ))
+                } else {
+                    let content = fs::read_to_string(&full)
+                        .map_err(|e| AgentError::Io(format!("read {}: {}", p, e)))?;
+                    Ok(json_response(200, &json!({ "content": content })))
+                }
+            }
+            (Method::Get, "/fs/manifest") => {
+                Ok(json_response(200, &json!({ "files": build_manifest() })))
             }
             (Method::Put, "/fs/file") => {
                 let body = read_body(&mut req)?;
@@ -659,6 +676,71 @@ fn truncate_for_response(s: &str) -> String {
         "{}\n\n[... truncated {} bytes ...]\n\n{}",
         head, dropped, tail
     )
+}
+
+/// /fs/manifest walk (C-18 VM→host pull). The skip list mirrors the
+/// orchestrator's storage-sync exclusions (storage/sync.ts SKIP_DIRS) so the
+/// pull diff and the Storage push agree on what counts as project state.
+/// Mirrors buildManifest in agent.mjs — wire format must stay identical.
+const MANIFEST_SKIP_DIRS: [&str; 15] = [
+    "node_modules", ".git", ".next", ".turbo", ".cache", "dist", "build", "out",
+    "coverage", "__pycache__", ".pytest_cache", "target", "vendor", ".venv", "venv",
+];
+const MANIFEST_MAX_FILES: usize = 20_000;
+
+fn build_manifest() -> Vec<serde_json::Value> {
+    let root = sandbox_dir();
+    let mut files = Vec::new();
+    manifest_walk(&root, &root, &mut files);
+    files
+}
+
+fn manifest_walk(dir: &Path, root: &Path, out: &mut Vec<serde_json::Value>) {
+    if out.len() >= MANIFEST_MAX_FILES {
+        return;
+    }
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        if out.len() >= MANIFEST_MAX_FILES {
+            return;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if MANIFEST_SKIP_DIRS.contains(&name_str.as_ref()) {
+            continue;
+        }
+        let kind = match entry.file_type() {
+            Ok(k) => k,
+            Err(_) => continue,
+        };
+        let full = entry.path();
+        if kind.is_dir() {
+            manifest_walk(&full, root, out);
+            continue;
+        }
+        if !kind.is_file() {
+            continue;
+        }
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let mtime_ms = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let rel = full.strip_prefix(root).unwrap_or(&full);
+        out.push(json!({
+            "path": rel.to_string_lossy().replace('\\', "/"),
+            "size": meta.len(),
+            "mtime_ms": mtime_ms,
+        }));
+    }
 }
 
 fn grep_walk(pattern: &str, sub: Option<&str>) -> Result<String, AgentError> {
@@ -1002,6 +1084,33 @@ fn random_hex(bytes: usize) -> String {
 /// Tiny base64 decoder — we only need it for `/fs/file` PUT with
 /// `encoding=base64`. Pulling in the `base64` crate for ~30 lines isn't
 /// worth the binary-size cost; this matches the standard alphabet exactly.
+/// Std-only base64 encoder (no padding-free variants needed) — pairs with
+/// base64_decode below for the binary-safe GET /fs/file?encoding=base64.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHA: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHA[((triple >> 18) & 63) as usize] as char);
+        out.push(ALPHA[((triple >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHA[((triple >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHA[(triple & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     const TABLE: [i8; 256] = {
         let mut t = [-1i8; 256];
@@ -1064,6 +1173,17 @@ mod tests {
             base64_decode("aGVsbG8gd29ybGQh").unwrap(),
             b"hello world!"
         );
+    }
+
+    #[test]
+    fn base64_encode_decode_roundtrip() {
+        assert_eq!(base64_encode(b"uniqus"), "dW5pcXVz");
+        assert_eq!(base64_encode(b"hello world!"), "aGVsbG8gd29ybGQh");
+        // Padding variants (1 and 2 trailing bytes) + binary bytes survive a
+        // full encode→decode loop — this is the path a pulled PNG rides.
+        for input in [&b"a"[..], &b"ab"[..], &b"abc"[..], &[0u8, 255, 128, 7, 9][..]] {
+            assert_eq!(base64_decode(&base64_encode(input)).unwrap(), input);
+        }
     }
 
     // C-20/21/22: truncation must never panic on a multibyte char straddling

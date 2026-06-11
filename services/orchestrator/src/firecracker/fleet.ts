@@ -1125,6 +1125,17 @@ export function listVms(): VmHandle[] {
 }
 
 /**
+ * The project's VM handle iff it is currently RUNNING (i.e. RPC-able right
+ * now). Paused/snapshotted VMs return null on purpose: their disk state is
+ * frozen, RPCs would hang, and resuming a VM just to sync files would defeat
+ * the idle policy. Used by the VM→host pull (pull.ts).
+ */
+export function getRunningVm(projectId: string): VmHandle | null {
+  const entry = vms.get(projectId);
+  return entry && entry.handle.state === "running" ? entry.handle : null;
+}
+
+/**
  * Per-project sandbox image. Each VM mounts this as `/sandbox`; the
  * in-VM agent's filesystem ops happen inside it. Created on first boot
  * with `mkfs.ext4 -F` against a sparse file.

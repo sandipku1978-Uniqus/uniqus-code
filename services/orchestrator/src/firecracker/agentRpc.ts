@@ -148,6 +148,41 @@ export async function pingAgent(
   }
 }
 
+/** One row of the in-VM file inventory (GET /fs/manifest). */
+export interface VmFileEntry {
+  path: string;
+  size: number;
+  mtime_ms: number;
+}
+
+/**
+ * Inventory of every file under /sandbox (storage-sync exclusions applied
+ * in-guest). Powers the VM→host pull (C-18). Throws HTTP 404 on agents that
+ * predate the endpoint — callers fall back to an exec-based walk.
+ */
+export async function manifest(vm: VmHandle): Promise<VmFileEntry[]> {
+  const r = await rpc<{ files: VmFileEntry[] }>(vm, "GET", "/fs/manifest", undefined, {
+    readTimeoutMs: 20_000,
+  });
+  return Array.isArray(r.files) ? r.files : [];
+}
+
+/**
+ * Binary-safe file read. Returns null when the agent predates base64 reads —
+ * an old agent ignores the query param and replies without `encoding`, and
+ * treating that UTF-8-mangled text as file content would corrupt binaries.
+ * Callers fall back to a chunked in-guest `dd | base64` exec read.
+ */
+export async function readFileBinary(vm: VmHandle, p: string): Promise<Buffer | null> {
+  const r = await rpc<{ content: string; encoding?: string }>(
+    vm,
+    "GET",
+    `/fs/file?path=${encodeURIComponent(p)}&encoding=base64`,
+  );
+  if (r.encoding !== "base64") return null;
+  return Buffer.from(r.content, "base64");
+}
+
 /**
  * Push a file into the VM during boot-time hydration. Used by the fleet
  * manager to seed the project files into the guest before handing the
