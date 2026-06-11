@@ -1772,11 +1772,17 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     await supabaseDisconnect(user);
     return json(res, 200, { ok: true });
   }
-  // List the connected account's Supabase projects for the Databases tab.
+  // List the connected account's Supabase projects for the Databases tab,
+  // plus which uniqus project each database is linked to (so the tab can show
+  // "powers <project>" chips without an N+1 from the client).
   if (req.url === "/api/supabase/projects" && req.method === "GET") {
     try {
       const projects = await supabaseFetch(user.id, "/projects");
-      return json(res, 200, { projects });
+      const owned = await listProjects(user.id);
+      const links = owned
+        .filter((p) => p.supabase_project_ref)
+        .map((p) => ({ ref: p.supabase_project_ref as string, project_id: p.id, project_name: p.name }));
+      return json(res, 200, { projects, links });
     } catch (err) {
       // supabaseFetch's own errors ("Supabase API …", "Supabase is not
       // connected …") are user-actionable and safe to surface. Anything else
@@ -1784,6 +1790,51 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       // we don't leak infra internals.
       const raw = err instanceof Error ? err.message : String(err);
       const msg = raw.startsWith("Supabase ") ? raw : "Failed to list Supabase projects.";
+      return json(res, 502, { error: msg });
+    }
+  }
+  // Operate on one of the user's Supabase databases from the Databases tab.
+  // The ref pattern (20-char lowercase alphanumeric, same as the connector's
+  // assertValidRef) keeps agent/user input out of the Management-API path;
+  // ownership is enforced by Supabase itself — the user's OAuth token only
+  // reaches projects their account can access. Endpoint shapes doc-verified:
+  // POST /v1/projects/{ref}/database/query, POST …/pause, POST …/restore,
+  // DELETE /v1/projects/{ref} (all within the app's projects:write +
+  // database:write scopes — no OAuth-app changes needed).
+  const sbActionMatch = req.url?.match(/^\/api\/supabase\/projects\/([a-z0-9]{20})\/(query|pause|restore)$/);
+  if (sbActionMatch && req.method === "POST") {
+    if (guestForbidden(res, user)) return;
+    const [, ref, action] = sbActionMatch;
+    try {
+      if (action === "query") {
+        const body = await readJsonBody<{ query?: string }>(req);
+        const query = (body.query ?? "").trim();
+        if (!query) return json(res, 400, { error: "query is required" });
+        if (query.length > 20_000) return json(res, 400, { error: "query exceeds 20 KB cap" });
+        const rows = await supabaseFetch(user.id, `/projects/${ref}/database/query`, {
+          method: "POST",
+          body: { query },
+        });
+        return json(res, 200, { rows });
+      }
+      await supabaseFetch(user.id, `/projects/${ref}/${action}`, { method: "POST" });
+      return json(res, 200, { ok: true });
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      const msg = raw.startsWith("Supabase ") ? raw : `Supabase ${action} failed.`;
+      return json(res, 502, { error: msg });
+    }
+  }
+  // Delete a Supabase project (permanent — the UI requires a typed confirm).
+  const sbDeleteMatch = req.url?.match(/^\/api\/supabase\/projects\/([a-z0-9]{20})$/);
+  if (sbDeleteMatch && req.method === "DELETE") {
+    if (guestForbidden(res, user)) return;
+    try {
+      await supabaseFetch(user.id, `/projects/${sbDeleteMatch[1]}`, { method: "DELETE" });
+      return json(res, 200, { ok: true });
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      const msg = raw.startsWith("Supabase ") ? raw : "Supabase delete failed.";
       return json(res, 502, { error: msg });
     }
   }
@@ -1893,6 +1944,25 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const owned = await resolveOwnedSkillIds(user.id, ids);
     await setProjectSkillLibraries(projectId, user.id, owned);
     return json(res, 200, { ok: true, skill_library_ids: owned });
+  }
+  // Agent-driven skill authoring: draft a reusable skill (name + description +
+  // markdown body) from a free-form brief. Returns an UNSAVED draft — the UI
+  // opens it in the editor for review, and nothing persists until the user
+  // saves (mirrors the design-systems analyze→review→save idiom).
+  if (req.url === "/api/skill-libraries/generate" && req.method === "POST") {
+    if (guestForbidden(res, user)) return;
+    const body = await readJsonBody<{ brief?: string }>(req);
+    const brief = (body.brief ?? "").trim();
+    if (!brief) return json(res, 400, { error: "brief is required" });
+    if (brief.length > 4000) return json(res, 400, { error: "brief exceeds 4 KB cap" });
+    try {
+      const draft = await generateSkillFromBrief(brief);
+      return json(res, 200, { draft });
+    } catch (err) {
+      return json(res, 502, {
+        error: `generate failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
   }
 
   // Infer a design system from a GitHub repo: clone → extract tokens → save.
@@ -5088,6 +5158,54 @@ async function generateDesignTokensFromBrief(
   const name =
     typeof parsed.name === "string" && parsed.name.trim() ? parsed.name.trim().slice(0, 80) : "";
   return { tokens, name };
+}
+
+/**
+ * Agent-driven skill authoring: turn a free-form brief into a reusable Skill
+ * (name + one-line description + markdown body) for the user's Skills library.
+ * Throws on failure — the caller surfaces it so the user can retry, rather than
+ * silently saving an empty shell.
+ */
+async function generateSkillFromBrief(
+  brief: string,
+): Promise<{ name: string; description: string; body: string }> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
+  const client = new AnthropicCtor({ apiKey });
+  const system =
+    "You author reusable 'skills' for an AI coding agent. A skill is a concise markdown rule-set that is " +
+    "injected into the agent's system prompt on every turn of projects it is attached to — standing guidance " +
+    "like coding conventions, review checklists, domain rules, or brand voice. From the user's brief, write ONE " +
+    "complete skill. Reply with ONLY a JSON object (no prose, no markdown fences) of this shape:\n" +
+    '{"name":"<short title-case name, max 60 chars>",' +
+    '"description":"<one line: what it does / when to attach it, max 200 chars>",' +
+    '"body":"<the full markdown skill>"}\n' +
+    "Rules for the body: start with a `# <name>` heading; use short sections and imperative bullet points " +
+    "(\"Always …\", \"Prefer …\", \"Never …\"); be specific and actionable, never generic filler; include concrete " +
+    "examples (code snippets, naming patterns, phrasings) where they sharpen the rule; stay under ~400 lines. " +
+    "Cover the brief's intent fully, and add the obvious adjacent rules an expert would expect, but do not pad.";
+  const response = await client.messages.create({
+    model: ensureAnthropic("design"),
+    max_tokens: 4000,
+    system,
+    messages: [{ role: "user", content: `Brief: ${brief}` }],
+  });
+  const text = response.content
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("")
+    .trim();
+  const jsonStr = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+  const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
+  const name = typeof parsed.name === "string" ? parsed.name.trim().slice(0, 120) : "";
+  const body = typeof parsed.body === "string" ? parsed.body.trim() : "";
+  if (!name || !body) throw new Error("model returned an incomplete skill");
+  return {
+    name,
+    description:
+      typeof parsed.description === "string" ? parsed.description.trim().slice(0, 280) : "",
+    body: body.slice(0, 64 * 1024),
+  };
 }
 
 /** Multipart .zip → infer tokens → save a design system. Mirrors handleZipImport. */

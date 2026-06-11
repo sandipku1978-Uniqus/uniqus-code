@@ -1384,7 +1384,13 @@ section.band .sub {
   color: var(--text-dim);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  /* Shrinkable so the head's Copy action stays on-screen at narrow widths. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.msg .head .name { flex-shrink: 0; }
 .thinking-indicator {
   animation: pulse-dim 1.5s ease-in-out infinite;
 }
@@ -1428,11 +1434,22 @@ section.band .sub {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
-.tool-card .name { color: var(--brand-magenta); font-weight: 600; }
+.tool-card .name { color: var(--brand-magenta); font-weight: 600; flex-shrink: 0; }
 .tool-card .name.error { color: var(--conf-low); }
-.tool-card .summary { color: var(--text-muted); }
-.tool-card .status { margin-left: auto; }
+/* The summary (usually a file path) is the one shrinkable item in the row —
+   it ellipsizes on narrow panes instead of forcing the row's min-content
+   width past the container (the mobile right-edge-clipping bug). */
+.tool-card .summary {
+  color: var(--text-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-card .tool-diff { flex-shrink: 0; }
+.tool-card .status { margin-left: auto; flex-shrink: 0; }
 .tool-card .status.ok { color: var(--conf-high); }
 .tool-card .status.err { color: var(--conf-low); }
 .tool-card .status.run { color: var(--text-dim); }
@@ -1692,20 +1709,6 @@ section.band .sub {
   white-space: pre-wrap;
   color: var(--text-muted);
 }
-
-/* Post-build "Does this look right?" confirmation (C1). */
-.post-run-confirm {
-  margin: 8px 0 4px 30px;
-  padding: 10px 12px;
-  border: 1px dashed var(--border-default);
-  border-radius: var(--radius-md, 8px);
-  background: var(--bg-surface);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.prc-q { font-size: 13px; font-weight: 600; color: var(--text-primary); }
-.prc-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
 /* Accessible hover/focus tooltip (B7). */
 .tt-wrap { position: relative; display: inline-flex; }
@@ -3906,11 +3909,23 @@ section.band .sub {
   .ide-topbar .actions { gap: 4px; }
 
   /* Single-pane body: the active pane fills; the others are display:none but
-     stay mounted, so their state (editor, scroll, live preview) survives. */
-  .ide-mobile { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-  .ide-mobile-pane { flex: 1; min-height: 0; flex-direction: column; }
+     stay mounted, so their state (editor, scroll, live preview) survives.
+     min-width: 0 is load-bearing — .ide-grid is a flex ROW, so without it the
+     widest unshrinkable chat row (a long mono tool-card line) propagates its
+     min-content width up and pushes the whole pane past the viewport, clipping
+     everything on the right edge (clear/Copy/toolbar buttons). overflow-x is
+     the backstop for anything that still refuses to shrink. */
+  .ide-mobile { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+  .ide-mobile-pane { flex: 1; min-height: 0; min-width: 0; flex-direction: column; overflow-x: hidden; }
   .ide-mobile-pane[data-active="false"] { display: none; }
   .ide-mobile-pane[data-active="true"] { display: flex; }
+
+  /* Preview toolbar: 8 controls + the URL field on a ~375px row — tighter
+     gaps, and the URL field keeps a usable floor while staying the only
+     flexible item so the trailing actions (select element, screenshot, share,
+     open in new tab) never fall off the edge. */
+  .preview-toolbar { gap: 5px; padding: 0 8px; }
+  .preview-toolbar .url { min-width: 56px; }
 
   /* Bottom tab bar — full-screen pane switcher pinned to the bottom edge. */
   .mobile-tabbar {
@@ -4704,6 +4719,228 @@ section.band .sub {
 }
 @media (max-width: 760px) {
   .ds-layout { grid-template-columns: 1fr; }
+}
+
+/* ── Skills tab (account Skills library) ──────────────────────────────────
+   Tiles reuse the project-dashboard card language (.proj/.proj-tile with a
+   cover band); these rules only adapt them to button semantics and add the
+   starter-pack cards. */
+.skills-actions { display: flex; gap: 8px; margin: 2px 0 8px; flex-wrap: wrap; }
+
+/* The tile body is a <button> (opens the editor), not a <Link>. */
+.skill-tile-btn {
+  background: none;
+  border: 0;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+}
+
+/* Dashed "create" tile at the end of the grid. */
+.skill-new-tile {
+  border-style: dashed;
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 178px;
+  padding: 20px;
+  font: inherit;
+  color: var(--text-muted);
+  text-align: center;
+}
+.skill-new-tile:hover { border-color: var(--brand-magenta); color: var(--text-primary); background: var(--bg-surface); }
+.skill-new-plus {
+  width: 34px; height: 34px; border-radius: 50%;
+  display: grid; place-items: center;
+  font-size: 18px;
+  background: var(--bg-surface-active);
+  color: var(--text-primary);
+}
+.skill-new-tile:hover .skill-new-plus { background: var(--brand-gradient); color: #fff; }
+.skill-new-label { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.skill-new-sub { font-size: 11.5px; color: var(--text-muted); max-width: 24ch; line-height: 1.45; }
+
+/* Empty state: centered card with the two CTAs. */
+.skills-empty {
+  display: flex; flex-direction: column; align-items: center; text-align: center;
+  gap: 6px; padding: 40px 24px;
+}
+.skills-empty-plus {
+  width: 48px; height: 48px; border-radius: 50%;
+  display: grid; place-items: center;
+  color: #fff; font-size: 20px;
+  background: var(--brand-gradient);
+  box-shadow: 0 8px 30px rgba(178, 30, 125, 0.35);
+  margin-bottom: 6px;
+}
+.skills-empty h2 { font-size: 18px; font-weight: 600; margin: 0; }
+.skills-empty p { color: var(--text-muted); font-size: 13px; line-height: 1.6; margin: 0 0 12px; max-width: 52ch; }
+
+/* Curated starter packs. */
+.pack-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 12px;
+}
+.pack-card {
+  display: flex; flex-direction: column; gap: 6px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+  transition: border-color var(--dur-base) ease, background var(--dur-base) ease;
+}
+.pack-card:hover { border-color: var(--border-strong); }
+.pack-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pack-card-head h3 { font-size: 13.5px; font-weight: 600; margin: 0; }
+.pack-summary {
+  color: var(--text-muted); font-size: 12px; line-height: 1.5; margin: 0 0 10px;
+  display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.pack-actions { margin-top: auto; display: flex; gap: 6px; }
+.pack-actions button { font-size: 11.5px; padding: 4px 10px; }
+
+/* Skill editor modal fields (name/description reuse .ds-name). */
+.skill-editor-grid { display: grid; gap: 12px; }
+.skill-editor-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 10px; }
+@media (max-width: 640px) { .skill-editor-row { grid-template-columns: 1fr; } }
+.skill-field { display: grid; gap: 6px; }
+.skill-field > label { font-size: 11.5px; font-weight: 600; color: var(--text-primary); }
+.skill-body-input {
+  width: 100%;
+  background: var(--bg-dark);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  padding: 10px 12px;
+  font-family: var(--font-mono-stack);
+  font-size: 12.5px;
+  line-height: 1.55;
+  resize: vertical;
+  min-height: 280px;
+}
+.skill-body-input:focus { outline: none; border-color: var(--brand-magenta); }
+.skill-body-input::placeholder { color: var(--text-muted); }
+
+/* ── Databases tab (Supabase explorer) ────────────────────────────────────
+   Tiles reuse the project-card language; these rules cover the inspector
+   modal: table browser, results grid, SQL console. */
+.db-status {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+.proj-cover + .proj-tile-head .db-status { margin-top: 2px; background: var(--bg-surface); }
+.db-mono { font-family: var(--font-mono-stack); font-size: 11.5px !important; }
+.db-empty-note { margin: 0; font-size: 12px; color: var(--text-muted); line-height: 1.6; }
+.db-subhead {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+.db-ext-link { color: var(--text-muted); text-decoration: none; font-size: 12px; }
+.db-ext-link:hover { color: var(--brand-magenta); }
+
+/* Table list: full-width rows, name left / size+rows right. */
+.db-table-list { display: flex; flex-direction: column; gap: 6px; }
+.db-table-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  background: var(--bg-dark);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  font: inherit;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--dur-base) ease;
+}
+.db-table-row:hover { border-color: var(--brand-magenta); }
+.db-table-name { font-family: var(--font-mono-stack); font-size: 12.5px; font-weight: 600; }
+.db-table-meta { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+
+/* Generic results grid (table preview + SQL console output). */
+.db-results-wrap { overflow: auto; max-height: 420px; border: 1px solid var(--border-default); border-radius: var(--radius-sm); }
+.db-results { border-collapse: collapse; width: 100%; font-size: 12px; }
+.db-results th {
+  position: sticky; top: 0;
+  background: var(--bg-surface);
+  text-align: left;
+  font-family: var(--font-mono-stack);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border-default);
+  white-space: nowrap;
+}
+.db-results td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-default);
+  font-family: var(--font-mono-stack);
+  font-size: 11.5px;
+  color: var(--text-primary);
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.db-results td.null { color: var(--text-dim); font-style: italic; }
+.db-results tbody tr:last-child td { border-bottom: 0; }
+.db-results tbody tr:hover td { background: var(--bg-surface); }
+
+/* SQL console. */
+.db-sql-input {
+  width: 100%;
+  min-height: 110px;
+  background: var(--bg-dark);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  padding: 10px 12px;
+  font-family: var(--font-mono-stack);
+  font-size: 12.5px;
+  line-height: 1.55;
+  resize: vertical;
+}
+.db-sql-input:focus { outline: none; border-color: var(--brand-magenta); }
+.db-sql-input::placeholder { color: var(--text-muted); }
+.db-sql-error {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--conf-low-bg, rgba(239, 68, 68, 0.1));
+  border: 1px solid var(--conf-low);
+  border-radius: var(--radius-sm);
+  color: var(--conf-low);
+  font-family: var(--font-mono-stack);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Read-only pack body in the preview modal. */
+.pack-preview-body {
+  margin: 0;
+  font-family: var(--font-mono-stack, monospace);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-primary);
+  background: var(--bg-dark);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 12px;
 }
 
 /* ==========================================================================

@@ -199,14 +199,31 @@ export default function PreviewAnnotator({
     [computePreviewCrop],
   );
 
+  // Hide the annotator dialog (card + backdrop) at the paint level while the
+  // frame is grabbed. getDisplayMedia captures the compositor output of the
+  // whole tab, and this modal sits on top of the preview — without this, the
+  // screenshot contains the annotator itself, recursively. visibility (not
+  // display) keeps layout and focus stable, and hidden elements are simply not
+  // painted, so they can't show up in the captured frame. Same trick native
+  // screenshot tools use to keep themselves out of the shot.
+  const setSelfHidden = useCallback((hidden: boolean) => {
+    const overlay = wrapRef.current?.closest<HTMLElement>(".modal-overlay");
+    if (overlay) overlay.style.visibility = hidden ? "hidden" : "";
+  }, []);
+
   // ── Capture the preview via the Screen Capture API ─────────────────────────
   const capture = useCallback(async () => {
     if (!canCapture) return;
     setError(null);
     setNotice(null);
     setCapturing(true);
+    setSelfHidden(true);
     let stream: MediaStream | null = null;
     try {
+      // Two rAFs so the hide has actually painted before the stream starts
+      // producing frames (the permission prompt usually adds time anyway, but
+      // preferCurrentTab can start the stream near-instantly in Chromium).
+      await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
       stream = await navigator.mediaDevices.getDisplayMedia({
         // `preferCurrentTab` (Chromium) skips the surface picker and grabs this
         // tab — which contains the preview iframe. Non-standard keys are cast.
@@ -236,9 +253,10 @@ export default function PreviewAnnotator({
     } finally {
       // Always release the tracks even if we unmounted; only the setState is guarded.
       stream?.getTracks().forEach((t) => t.stop());
+      setSelfHidden(false);
       if (isMountedRef.current) setCapturing(false);
     }
-  }, [canCapture, loadImage, frameToDataUrl]);
+  }, [canCapture, loadImage, frameToDataUrl, setSelfHidden]);
 
   // ── Paste / drop an image ──────────────────────────────────────────────────
   const ingestFile = useCallback(

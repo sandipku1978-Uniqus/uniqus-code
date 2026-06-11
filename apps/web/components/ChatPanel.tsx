@@ -37,8 +37,6 @@ export default function ChatPanel() {
   const busy = useStore((s) => s.busy);
   const installInProgress = useStore((s) => s.installInProgress);
   const runReattaching = useStore((s) => s.runReattaching);
-  const postRunDismissed = useStore((s) => s.postRunDismissed);
-  const dismissPostRun = useStore((s) => s.dismissPostRun);
   const mode = useStore((s) => s.mode);
   const setModeManual = useStore((s) => s.setModeManual);
   const model = useStore((s) => s.model);
@@ -215,7 +213,9 @@ export default function ChatPanel() {
     ta.style.height = "auto";
     const lineHeight = 20; // approx line-height in px
     const vh = typeof window !== "undefined" ? window.innerHeight : 800;
-    const maxHeight = Math.min(lineHeight * 15, Math.round(vh * 0.3));
+    // Phones get a tighter cap — at 30vh the composer dominates a short screen.
+    const isNarrow = typeof window !== "undefined" && window.innerWidth <= 760;
+    const maxHeight = Math.min(lineHeight * 15, Math.round(vh * (isNarrow ? 0.22 : 0.3)));
     ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
     ta.style.overflowY = ta.scrollHeight > maxHeight ? "auto" : "hidden";
   }, []);
@@ -229,6 +229,25 @@ export default function ChatPanel() {
   useEffect(() => {
     window.addEventListener("resize", autoResize);
     return () => window.removeEventListener("resize", autoResize);
+  }, [autoResize]);
+
+  // Recompute when the textarea's own width changes (pane switches, panel
+  // drags, the first mobile layout pass). scrollHeight depends on width — a
+  // measurement taken while the box was momentarily narrow (placeholder
+  // wrapped into many lines) would otherwise stick as a huge inline height,
+  // leaving an empty composer that swallows a third of a phone screen.
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta || typeof ResizeObserver === "undefined") return;
+    let lastWidth = ta.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (ta.clientWidth !== lastWidth) {
+        lastWidth = ta.clientWidth;
+        autoResize();
+      }
+    });
+    ro.observe(ta);
+    return () => ro.disconnect();
   }, [autoResize]);
 
   // Hydrate whenever the key changes (first load OR a project switch). Always
@@ -812,61 +831,6 @@ export default function ChatPanel() {
             </ErrorBoundary>
           );
         })}
-        {/* Post-build "Does this look right?" confirmation (C1). Only after a
-            live, file-mutating turn that finished cleanly — scoped to file
-            mutations so tiny/read-only/question turns don't nag. */}
-        {(() => {
-          const last = visibleTurns[visibleTurns.length - 1];
-          const c = last?.complete;
-          if (
-            !c ||
-            c.aborted ||
-            !(c.changed_files && c.changed_files.length > 0) ||
-            postRunDismissed[c.id] ||
-            !connected ||
-            busy
-          ) {
-            return null;
-          }
-          return (
-            <div className="post-run-confirm" role="group" aria-label="Does this look right?">
-              <span className="prc-q">Does this look right?</span>
-              <div className="prc-actions">
-                <button
-                  type="button"
-                  className="btn-primary"
-                  style={{ fontSize: 12, padding: "5px 11px" }}
-                  onClick={() => dismissPostRun(c.id)}
-                >
-                  Yes, keep going
-                </button>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  style={{ fontSize: 12, padding: "5px 11px" }}
-                  onClick={() => {
-                    dismissPostRun(c.id);
-                    requestAnimationFrame(() => textareaRef.current?.focus());
-                  }}
-                >
-                  No, change something
-                </button>
-                <button
-                  type="button"
-                  className="btn-ghost"
-                  style={{ fontSize: 12, padding: "5px 11px" }}
-                  onClick={() => {
-                    dismissPostRun(c.id);
-                    setConfirmReset(true);
-                  }}
-                  title="Clears the chat history — your project files are kept"
-                >
-                  Clear chat &amp; restart
-                </button>
-              </div>
-            </div>
-          );
-        })()}
         {busy && (() => {
           // Show a thinking indicator when the agent is working but no tool
           // calls or text have streamed yet (e.g. planning, booting VM).

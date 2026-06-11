@@ -407,12 +407,6 @@ interface State {
    * "onboarded" marker (B6). Persisted to localStorage.
    */
   seenHints: Record<string, boolean>;
-  /**
-   * Per-complete-id dismissal of the post-build "Does this look right?" card
-   * (C1). In-memory for the session — the card only shows after a live,
-   * file-mutating turn, so it never needs to survive a reload.
-   */
-  postRunDismissed: Record<string, boolean>;
   mode: "plan-then-execute" | "execute-only";
   /**
    * Whether the user has explicitly chosen a plan/execute mode this session
@@ -541,8 +535,6 @@ interface State {
   setRunReattaching(v: boolean): void;
   /** Mark a one-time hint/coachmark (or the wizard) as seen (B6/B7). */
   markHintSeen(id: string): void;
-  /** Dismiss the post-build confirmation card for a given complete-marker id (C1). */
-  dismissPostRun(completeId: string): void;
   /** Set mode programmatically (auto-defaults). Does NOT mark modeTouched. */
   setMode(m: "plan-then-execute" | "execute-only"): void;
   /** Set mode from a user action (the Plan toggle). Marks modeTouched. */
@@ -683,7 +675,6 @@ export const useStore = create<State>((set, get) => ({
   installInProgress: null,
   runReattaching: false,
   seenHints: readStoredHints(),
-  postRunDismissed: {},
   mode: "execute-only",
   modeTouched: false,
   model: readStoredModel(),
@@ -740,8 +731,6 @@ export const useStore = create<State>((set, get) => ({
       persistHints(next);
       return { seenHints: next };
     }),
-  dismissPostRun: (completeId) =>
-    set((s) => ({ postRunDismissed: { ...s.postRunDismissed, [completeId]: true } })),
   setMode: (m) => set({ mode: m }),
   setModeManual: (m) => set({ mode: m, modeTouched: true }),
   setModel: (m) => {

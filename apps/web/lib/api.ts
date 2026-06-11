@@ -190,6 +190,12 @@ export const updateSkillLibraryApi = (
 export const deleteSkillLibraryApi = (id: string): Promise<{ ok: true }> =>
   api(`/api/skill-libraries/${id}`, { method: "DELETE" });
 
+/** AI-draft a skill from a brief. UNSAVED — the caller opens it in the editor. */
+export const generateSkillLibraryApi = (
+  brief: string,
+): Promise<{ draft: { name: string; description: string; body: string } }> =>
+  api("/api/skill-libraries/generate", { method: "POST", body: JSON.stringify({ brief }) });
+
 export const setProjectSkillLibrariesApi = (
   projectId: string,
   skillLibraryIds: string[],
@@ -549,10 +555,36 @@ export interface SupabaseProjectInfo {
   status?: string;
   organization_id?: string;
   created_at?: string;
+  database?: { host?: string; version?: string; postgres_engine?: string };
 }
 
-export const fetchSupabaseProjects = (): Promise<{ projects: SupabaseProjectInfo[] }> =>
-  api("/api/supabase/projects");
+/** A uniqus project ↔ Supabase database link (from projects.supabase_project_ref). */
+export interface SupabaseLinkInfo {
+  ref: string;
+  project_id: string;
+  project_name: string;
+}
+
+export const fetchSupabaseProjects = (): Promise<{
+  projects: SupabaseProjectInfo[];
+  links?: SupabaseLinkInfo[];
+}> => api("/api/supabase/projects");
+
+/** Run SQL against one of the user's Supabase databases (Management API query). */
+export const supabaseQueryApi = (
+  ref: string,
+  query: string,
+): Promise<{ rows: unknown }> =>
+  api(`/api/supabase/projects/${ref}/query`, { method: "POST", body: JSON.stringify({ query }) });
+
+export const supabasePauseApi = (ref: string): Promise<{ ok: true }> =>
+  api(`/api/supabase/projects/${ref}/pause`, { method: "POST" });
+
+export const supabaseRestoreApi = (ref: string): Promise<{ ok: true }> =>
+  api(`/api/supabase/projects/${ref}/restore`, { method: "POST" });
+
+export const supabaseDeleteApi = (ref: string): Promise<{ ok: true }> =>
+  api(`/api/supabase/projects/${ref}`, { method: "DELETE" });
 
 // ── Deployments ───────────────────────────────────────────────────────────────
 
