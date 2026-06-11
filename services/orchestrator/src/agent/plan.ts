@@ -13,11 +13,14 @@ const PLAN_SYSTEM_PROMPT_BASE = `You are an AI software engineer in plan mode. T
 You have READ-ONLY tools to ground the plan in reality: read_file, list_dir, grep, list_assets, and read_asset. For an existing or imported project, USE them before planning — check package.json, the framework, the directory layout, the files you'll touch, and any uploaded reference assets. Do NOT guess at file names or structure you can verify. You cannot modify files, run commands, or start servers in plan mode.
 
 When you have enough understanding, call the submit_plan tool to return:
-- A one-paragraph summary of what will be built and how it will work.
+- A plain_summary: ONE plain-English sentence a non-technical person understands, describing what they'll get — NOT how it's built. No file names, frameworks, or jargon. E.g. "I'll build a simple expense tracker where you can add expenses and watch a running total." This is the headline the user reads first.
+- A one-paragraph technical summary of what will be built and how it will work (this is the detailed, secondary view).
 - A list of concrete steps. Each step should be small enough to verify on its own — typically one file created, one command run, or one integration completed. Aim for 4–10 steps.
 - For each step, list the files it will touch (if any) and a one-line success criterion (how the agent will know the step worked).
 
 Be specific about file names, frameworks, and commands, grounded in what you actually saw. For a brand-new project where there is nothing to inspect, skip straight to the plan.
+
+For a plan whose result is a VISUAL screen or app, optionally include a "wireframe": a small ASCII sketch of the primary screen's layout (boxes + labels for header / nav / main regions / key components) so a non-technical user can picture it before anything is built. Keep it under ~16 lines and ASCII-only (no HTML/SVG). Omit it for backend-only or CLI work. A real rendered screenshot is impossible in plan mode — nothing is running yet — so this sketch is the substitute.
 
 When planning frontend or design work, include steps for:
 - Finding existing design tokens, components, routes, assets, and styling conventions before proposing new ones.
@@ -65,9 +68,19 @@ const SUBMIT_PLAN_TOOL: Anthropic.Tool = {
   input_schema: {
     type: "object",
     properties: {
+      plain_summary: {
+        type: "string",
+        description:
+          "ONE plain-English sentence a non-technical user understands — what they'll get, not how it's built. No file names or jargon.",
+      },
       summary: {
         type: "string",
-        description: "One-paragraph summary of what will be built.",
+        description: "One-paragraph technical summary of what will be built and how.",
+      },
+      wireframe: {
+        type: "string",
+        description:
+          "Optional ASCII wireframe of the primary screen (boxes + labels), ≤16 lines, ASCII-only. Omit for backend/CLI work.",
       },
       steps: {
         type: "array",

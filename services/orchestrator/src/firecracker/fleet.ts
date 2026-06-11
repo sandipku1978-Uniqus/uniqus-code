@@ -253,6 +253,15 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
   const guestCid = ++cidSeq;
   const agentPort = 51_000;
 
+  // Per-VM bearer token (F1). Declared OUTSIDE the try so it's in scope for the
+  // VmHandle below. Injected on the cmdline so the in-VM agent can require it on
+  // every request, closing the unauth-RCE where a peer VM on the shared bridge
+  // could drive another project's agent. `uniqus_auth=1` is only added when
+  // FIRECRACKER_AGENT_AUTH=1, so the token ships dark (provisioned + sent, but
+  // not enforced) until it's validated on the host.
+  const authToken = randomBytes(24).toString("hex");
+  const authEnforced = process.env.FIRECRACKER_AGENT_AUTH === "1";
+
   try {
     await client.putMachineConfig({ vcpu_count: VM_VCPUS, mem_size_mib: VM_MEM_MIB });
     // Pass our IP + gw as custom cmdline tokens. The in-VM agent reads
@@ -261,13 +270,15 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
     // kernels are built without CONFIG_IP_PNP — that arg is silently
     // ignored and eth0 ends up unconfigured.)
     const ipArg = `uniqus_ip=${ip}/16 uniqus_gw=${gatewayIp}`;
+    const authArg = `uniqus_token=${authToken}${authEnforced ? " uniqus_auth=1" : ""}`;
     await client.putBootSource({
       kernel_image_path: KERNEL_PATH,
       // Console, panic=1 so a kernel panic exits the firecracker process
       // (we restart cleanly instead of hanging). `random.trust_cpu=on`
-      // shaves boot time. uniqus_ip/uniqus_gw drive in-VM static config.
+      // shaves boot time. uniqus_ip/uniqus_gw drive in-VM static config;
+      // uniqus_token/uniqus_auth drive the in-VM agent's request auth (F1).
       boot_args:
-        `console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on ${ipArg} i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd`,
+        `console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on ${ipArg} ${authArg} i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd`,
     });
     await client.putDrive({
       drive_id: "rootfs",
@@ -316,6 +327,7 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
     ip,
     gatewayIp,
     guestMac: mac,
+    authToken,
     state: "running",
     lastUsedAt: Date.now(),
   };

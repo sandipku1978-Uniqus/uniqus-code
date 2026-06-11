@@ -6,11 +6,16 @@ import http, {
 import type { Duplex } from "node:stream";
 import { getServer } from "./agent/sandbox.js";
 import { touch as touchVm } from "./firecracker/index.js";
+import { resolveShareToken } from "./previewShare.js";
 
 // Match `/preview/{serverId}` optionally followed by `/...` rest.
 // The serverId starts with `srv_` (see startServer in sandbox.ts) and is followed
 // by 8 hex chars. Keep this loose so future id formats work without code changes.
 const PREVIEW_PREFIX = /^\/preview\/([^/?#]+)(\/.*)?$/;
+// A shared preview URL: /preview/share/<token>/... — resolved to a serverId via
+// a revocable, expiring token (C3) rather than exposing the bare serverId.
+const PREVIEW_SHARE_PREFIX = /^\/preview\/share\/([A-Za-z0-9_-]+)(\/.*)?$/;
+const PREVIEW_SHARE_COOKIE = "uniqus_preview_share";
 
 /**
  * Cookie name used to pin the iframe to its preview server. Set whenever we
@@ -29,16 +34,22 @@ export interface ProxyTarget {
   port: number;
   /** The path inside the sandbox app (always starts with `/`). */
   innerPath: string;
+  /**
+   * Set when the request was authorized by a SHARE TOKEN (C3) rather than the
+   * bare serverId. The proxy then pins the recipient's browser to the *token*
+   * (not the serverId) so revocation/expiry survives client-side soft nav.
+   */
+  shareToken?: string;
 }
 
-function readPreviewCookie(headers: IncomingHttpHeaders): string | null {
+function readCookie(headers: IncomingHttpHeaders, cookieName: string): string | null {
   const cookieHeader = headers.cookie;
   if (typeof cookieHeader !== "string") return null;
   for (const part of cookieHeader.split(";")) {
     const eq = part.indexOf("=");
     if (eq < 0) continue;
     const name = part.slice(0, eq).trim();
-    if (name !== PREVIEW_COOKIE) continue;
+    if (name !== cookieName) continue;
     const value = part.slice(eq + 1).trim();
     if (!value) return null;
     try {
@@ -50,6 +61,10 @@ function readPreviewCookie(headers: IncomingHttpHeaders): string | null {
   return null;
 }
 
+function readPreviewCookie(headers: IncomingHttpHeaders): string | null {
+  return readCookie(headers, PREVIEW_COOKIE);
+}
+
 function buildPreviewCookie(serverId: string): string {
   // SameSite=None; Secure is required because the preview iframe is
   // typically embedded in a different origin (the web app). Path=/ so the
@@ -59,6 +74,13 @@ function buildPreviewCookie(serverId: string): string {
   // preview to that server for its whole lifetime, so don't let it outlive an
   // ephemeral dev server by a day (M-7).
   return `${PREVIEW_COOKIE}=${encodeURIComponent(serverId)}; Path=/; Max-Age=3600; SameSite=None; Secure; HttpOnly`;
+}
+
+function buildShareCookie(token: string): string {
+  // Pin a SHARED recipient to the token (not the serverId) so revoking/expiring
+  // the token actually cuts off access on the next request, even after soft nav
+  // strips the share path. Same short Max-Age as the owner cookie (C3).
+  return `${PREVIEW_SHARE_COOKIE}=${encodeURIComponent(token)}; Path=/; Max-Age=3600; SameSite=None; Secure; HttpOnly`;
 }
 
 /**
@@ -88,6 +110,20 @@ export function resolveTarget(
     if (srv.project_id) touchVm(srv.project_id);
   };
 
+  // Shared preview (C3): /preview/share/<token>/... — resolve the revocable,
+  // expiring token to a serverId. Checked BEFORE the bare-serverId match (which
+  // would otherwise treat "share" as a serverId and 404).
+  const shareDirect = url.match(PREVIEW_SHARE_PREFIX);
+  if (shareDirect) {
+    const token = shareDirect[1];
+    const serverId = resolveShareToken(token);
+    if (!serverId) return null;
+    const srv = getServer(serverId);
+    if (!srv) return null;
+    keepAlive(srv);
+    return { serverId, host: srv.host, port: srv.port, innerPath: shareDirect[2] ?? "/", shareToken: token };
+  }
+
   const direct = url.match(PREVIEW_PREFIX);
   if (direct) {
     const serverId = direct[1];
@@ -102,8 +138,20 @@ export function resolveTarget(
   if (typeof referer === "string") {
     try {
       const parsed = new URL(referer);
+      // A shared-preview referer resolves via the token (C3).
+      const sm = parsed.pathname.match(/^\/preview\/share\/([A-Za-z0-9_-]+)/);
+      if (sm) {
+        const serverId = resolveShareToken(sm[1]);
+        if (serverId) {
+          const srv = getServer(serverId);
+          if (srv) {
+            keepAlive(srv);
+            return { serverId, host: srv.host, port: srv.port, innerPath: url, shareToken: sm[1] };
+          }
+        }
+      }
       const m = parsed.pathname.match(/^\/preview\/([^/?#]+)/);
-      if (m) {
+      if (m && m[1] !== "share") {
         const serverId = m[1];
         const srv = getServer(serverId);
         if (srv) {
@@ -113,6 +161,20 @@ export function resolveTarget(
       }
     } catch {
       // malformed referer, fall through
+    }
+  }
+
+  // Shared sessions are pinned to the TOKEN cookie, so revocation/expiry holds
+  // even after client-side soft navigation strips the share path (C3).
+  const shareCookie = readCookie(headers, PREVIEW_SHARE_COOKIE);
+  if (shareCookie) {
+    const serverId = resolveShareToken(shareCookie);
+    if (serverId) {
+      const srv = getServer(serverId);
+      if (srv) {
+        keepAlive(srv);
+        return { serverId, host: srv.host, port: srv.port, innerPath: url, shareToken: shareCookie };
+      }
     }
   }
 
@@ -175,7 +237,9 @@ export function proxyHttp(
       // Pin the iframe's browser to this preview server. We append rather
       // than overwrite so any cookies the dev server itself set still pass
       // through (Next.js auth flows, app-set session cookies, etc.).
-      const ourCookie = buildPreviewCookie(target.serverId);
+      const ourCookie = target.shareToken
+        ? buildShareCookie(target.shareToken)
+        : buildPreviewCookie(target.serverId);
       const existing = outHeaders["set-cookie"];
       if (Array.isArray(existing)) {
         outHeaders["set-cookie"] = [...existing, ourCookie];

@@ -122,6 +122,23 @@ function setClock(ms) {
 
 configureNetwork();
 
+// F1: per-VM bearer token required on every request except /health. Enforced
+// only when `uniqus_auth=1` is on the cmdline (dark-launch safe). Mirrors
+// main.rs::read_required_token.
+const REQUIRED_TOKEN = (() => {
+  let cmdline = "";
+  try {
+    cmdline = readFileSync("/proc/cmdline", "utf-8");
+  } catch {
+    return null;
+  }
+  if (!/(?:^|\s)uniqus_auth=1(?:\s|$)/.test(cmdline)) return null;
+  return (cmdline.match(/(?:^|\s)uniqus_token=([^\s]+)/) ?? [])[1] ?? null;
+})();
+if (REQUIRED_TOKEN) {
+  console.error("[uniqus-agent] request auth ENFORCED (per-VM bearer token)");
+}
+
 // ── server table for start-server / stop-server / log tail ─────────────────
 const servers = new Map();
 
@@ -152,6 +169,14 @@ async function handleRequest(req, res) {
   try {
     const url = new URL(req.url ?? "/", "http://vm");
     const method = req.method ?? "GET";
+
+    // F1: enforce the per-VM bearer token on every endpoint except /health.
+    if (url.pathname !== "/health" && REQUIRED_TOKEN) {
+      const authz = req.headers["authorization"];
+      if (authz !== `Bearer ${REQUIRED_TOKEN}`) {
+        return json(res, 401, { error: "unauthorized" });
+      }
+    }
 
     if (method === "GET" && url.pathname === "/health") return json(res, 200, { ok: true, kind: "node" });
     if (method === "POST" && url.pathname === "/net/configure") {

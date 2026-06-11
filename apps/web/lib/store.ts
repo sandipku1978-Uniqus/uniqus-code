@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 import type {
+  ChangedFile,
   CurrentUser,
   DeploymentState,
   ModelChoice,
@@ -229,6 +230,19 @@ export type ChatItem =
     }
   | { kind: "system"; id: string; content: string }
   /**
+   * A run-level failure (C7), rendered as a friendly card (title + plain-English
+   * cause + collapsible raw detail + Retry/Simplify actions) instead of a bare
+   * muted `error: <raw>` line. `code` selects the copy; `retryable` hints whether
+   * a retry is likely to help.
+   */
+  | {
+      kind: "error";
+      id: string;
+      message: string;
+      code?: string;
+      retryable?: boolean;
+    }
+  /**
    * Marks the end of a "turn" — everything between two `complete` markers (or
    * between a user message and the next complete) is foldable in the UI.
    * Inserted client-side when the `complete` server event fires.
@@ -242,6 +256,16 @@ export type ChatItem =
       /** Final token usage for the turn; absent on replayed turns. */
       input_tokens?: number;
       output_tokens?: number;
+      cache_read_tokens?: number;
+      cache_creation_tokens?: number;
+      /** Provider-native model id that served the turn (C5). */
+      model?: string;
+      /** Estimated USD cost for this run (C5) — an estimate, not a charge. */
+      cost_usd?: number;
+      /** Deterministic per-turn changeset, tool-derived (C6 Tier-1). */
+      changed_files?: ChangedFile[];
+      /** Context-aware follow-up prompt chips (C2). */
+      suggestions?: string[];
     };
 
 /**
@@ -305,6 +329,31 @@ function persistPanels(panels: PanelVisibility): void {
 }
 
 /**
+ * One-time onboarding hints / coachmarks (B7) — and the first-run wizard's
+ * "onboarded" marker (B6) live in the same map. Account-wide, persisted to
+ * localStorage (mirrors panels/view) so a coachmark fires once and never again.
+ * A hint id is set true when the user dismisses or auto-sees it.
+ */
+const HINTS_STORAGE_KEY = "uniqus.hints";
+function readStoredHints(): Record<string, boolean> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(HINTS_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, boolean>) : {};
+  } catch {
+    return {};
+  }
+}
+function persistHints(hints: Record<string, boolean>): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(HINTS_STORAGE_KEY, JSON.stringify(hints));
+  } catch {
+    /* private mode / quota — non-fatal */
+  }
+}
+
+/**
  * Which surface the workspace shows. "builder" (default) is the beginner-facing
  * Chat + big-live-Preview reframe; "code" reveals the full IDE (file tree, code
  * editor, logs). Like panel visibility, it's an account-wide layout preference
@@ -342,6 +391,28 @@ interface State {
    */
   connectionFailed: boolean;
   busy: boolean;
+  /**
+   * Set while the agent is running a dependency install (A4). Drives the
+   * prominent "Installing dependencies — don't refresh" banner above the
+   * composer and (with `busy`) the beforeunload guard. `command` captions it.
+   */
+  installInProgress: { command: string } | null;
+  /**
+   * Set on reconnect when the server reports a run is still alive (A1/A2). Drives
+   * a "your build kept running" banner; cleared when the turn completes.
+   */
+  runReattaching: boolean;
+  /**
+   * One-time onboarding hints/coachmarks the user has seen (B7) + the wizard's
+   * "onboarded" marker (B6). Persisted to localStorage.
+   */
+  seenHints: Record<string, boolean>;
+  /**
+   * Per-complete-id dismissal of the post-build "Does this look right?" card
+   * (C1). In-memory for the session — the card only shows after a live,
+   * file-mutating turn, so it never needs to survive a reload.
+   */
+  postRunDismissed: Record<string, boolean>;
   mode: "plan-then-execute" | "execute-only";
   /**
    * Whether the user has explicitly chosen a plan/execute mode this session
@@ -466,6 +537,12 @@ interface State {
   setConnected(c: boolean): void;
   setConnectionFailed(failed: boolean): void;
   setBusy(b: boolean): void;
+  setInstallInProgress(v: { command: string } | null): void;
+  setRunReattaching(v: boolean): void;
+  /** Mark a one-time hint/coachmark (or the wizard) as seen (B6/B7). */
+  markHintSeen(id: string): void;
+  /** Dismiss the post-build confirmation card for a given complete-marker id (C1). */
+  dismissPostRun(completeId: string): void;
   /** Set mode programmatically (auto-defaults). Does NOT mark modeTouched. */
   setMode(m: "plan-then-execute" | "execute-only"): void;
   /** Set mode from a user action (the Plan toggle). Marks modeTouched. */
@@ -513,12 +590,22 @@ interface State {
   /** Mark the pending plan rejected (user chose "Reject & revise"). */
   rejectPendingPlan(): void;
   addSystem(content: string): void;
+  /** Add a run-level error card (C7). */
+  addErrorItem(message: string, code?: string, retryable?: boolean): void;
   addCompleteMarker(
     toolCalls: number,
     elapsedMs: number,
     aborted: boolean,
     inputTokens?: number,
     outputTokens?: number,
+    extra?: {
+      cache_read_tokens?: number;
+      cache_creation_tokens?: number;
+      model?: string;
+      cost_usd?: number;
+      changed_files?: ChangedFile[];
+      suggestions?: string[];
+    },
   ): void;
   setLiveUsage(usage: { input: number; output: number } | null): void;
   /** Set (or clear) the element picked from the preview for the next turn. */
@@ -591,6 +678,10 @@ export const useStore = create<State>((set, get) => ({
   connected: false,
   connectionFailed: false,
   busy: false,
+  installInProgress: null,
+  runReattaching: false,
+  seenHints: readStoredHints(),
+  postRunDismissed: {},
   mode: "execute-only",
   modeTouched: false,
   model: readStoredModel(),
@@ -638,6 +729,17 @@ export const useStore = create<State>((set, get) => ({
   setConnected: (c) => set({ connected: c }),
   setConnectionFailed: (failed) => set({ connectionFailed: failed }),
   setBusy: (b) => set({ busy: b }),
+  setInstallInProgress: (v) => set({ installInProgress: v }),
+  setRunReattaching: (v) => set({ runReattaching: v }),
+  markHintSeen: (id) =>
+    set((s) => {
+      if (s.seenHints[id]) return {};
+      const next = { ...s.seenHints, [id]: true };
+      persistHints(next);
+      return { seenHints: next };
+    }),
+  dismissPostRun: (completeId) =>
+    set((s) => ({ postRunDismissed: { ...s.postRunDismissed, [completeId]: true } })),
   setMode: (m) => set({ mode: m }),
   setModeManual: (m) => set({ mode: m, modeTouched: true }),
   setModel: (m) => {
@@ -824,8 +926,10 @@ export const useStore = create<State>((set, get) => ({
 
   addSystem: (content) =>
     set((s) => ({ chat: [...s.chat, { kind: "system", id: id(), content }] })),
+  addErrorItem: (message, code, retryable) =>
+    set((s) => ({ chat: [...s.chat, { kind: "error", id: id(), message, code, retryable }] })),
 
-  addCompleteMarker: (toolCalls, elapsedMs, aborted, inputTokens, outputTokens) =>
+  addCompleteMarker: (toolCalls, elapsedMs, aborted, inputTokens, outputTokens, extra) =>
     set((s) => ({
       // Turn finished — drop the live counter; the final figure rides on the
       // complete marker below.
@@ -840,6 +944,12 @@ export const useStore = create<State>((set, get) => ({
           aborted,
           input_tokens: inputTokens,
           output_tokens: outputTokens,
+          cache_read_tokens: extra?.cache_read_tokens,
+          cache_creation_tokens: extra?.cache_creation_tokens,
+          model: extra?.model,
+          cost_usd: extra?.cost_usd,
+          changed_files: extra?.changed_files,
+          suggestions: extra?.suggestions,
         },
       ],
     })),

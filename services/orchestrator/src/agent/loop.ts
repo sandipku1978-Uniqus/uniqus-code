@@ -24,7 +24,7 @@ import {
 import { takeScreenshot } from "./screenshot.js";
 import { resolveModel } from "./router.js";
 import { getProvider, providerKeysFromEnv, type ProviderKeys, type TokenUsage } from "./providers/index.js";
-import type { DesignTokens, ModelChoice, ThinkingEffort } from "@uniqus/api-types";
+import type { ChangedFile, DesignTokens, ModelChoice, ThinkingEffort } from "@uniqus/api-types";
 import { setTodos, type TodoItem } from "./todos.js";
 import { listProjectSecrets, plumbSecretToEnvFile } from "../secrets.js";
 import { callConnector, listProjectConnectors } from "../connectors/index.js";
@@ -148,7 +148,7 @@ Conventions:
 5. Use longer timeout_ms (120000–300000) for npm/yarn/pnpm install, builds, and Docker pulls.
 6. After a non-zero exit, read the error and fix the root cause before retrying. Do not retry blindly — if the same command fails twice, change your approach.
 7. Use list_dir or grep to verify state when you're unsure (e.g., after a scaffold) instead of guessing paths.
-8. When the task is complete, briefly summarize what you built, include the public URL if you started a server, and describe how to use it inside Uniqus Code. Do not end by telling the user to run local terminal commands.
+8. When the task is complete, briefly summarize what you built, include the public URL if you started a server, and describe how to use it inside Uniqus Code. Do not end by telling the user to run local terminal commands. End that summary with a short \`## What changed\` section: a plain-English bulleted list, one line per file you created or edited this turn, written for a NON-technical reader (e.g. "Added the expenses table and the running-total bar" rather than "edited src/App.tsx"). Keep it to the files you actually touched — do not list files you only read. (This is a human-readable gloss; an exact, machine-generated file list is shown separately, so don't pad it.)
 9. File size: write_file content is part of your output token budget (~16k tokens). For files larger than ~500 lines, write a smaller version first then grow it with edit_file or additional write_file calls — do NOT try to dump 1000+ lines in a single tool call, the response will be truncated and the tool input will arrive without the content field. If that happens you'll see "write_file requires 'content' as a string" — split the work and retry.
 10. Currency of facts: when the task names specific products, models, versions, or prices — ESPECIALLY anything about AI/LLM models (benchmark dashboards, model pickers, "compare the latest models" apps) — do NOT trust your training data for the current lineup; it lags reality by months. ${currencyGuidance} Naming a stale model (an old version when a newer one has shipped, or omitting a current flagship) is a failure the user will immediately notice. The same applies to "latest" library versions, framework releases, and API endpoints.${formatAccountPromptForPrompt(accountPrompt)}${formatDesignSystemForPrompt(designTokens)}${formatSkillsForPrompt(skillsBody)}`;
 }
@@ -326,6 +326,12 @@ export interface LoopResult {
   model: string;
   /** The provider that served the turn. */
   provider: "anthropic" | "openai" | "google";
+  /**
+   * Deterministic, tool-derived list of files this turn created/edited (C6
+   * Tier-1). Accumulated from write_file/edit_file editStats — git/tool truth,
+   * not model prose. Drives the "What changed" list on the complete marker.
+   */
+  changedFiles: ChangedFile[];
 }
 
 export async function runAgentLoop(
@@ -353,6 +359,9 @@ export async function runAgentLoop(
   // doesn't silently drop that call's billed tokens from the turn's record.
   // Cleared to null the instant a call commits, so it's never double-counted.
   let inflight: TokenUsage | null = null;
+  // Per-turn changeset (C6 Tier-1), keyed by path. Populated from each
+  // successful write_file/edit_file editStats below; emitted on finish().
+  const changed = new Map<string, { action: "created" | "edited"; added: number; removed: number }>();
   const finish = (aborted: boolean): LoopResult => {
     if (aborted && inflight) {
       usageIn += inflight.inputTokens;
@@ -371,6 +380,12 @@ export async function runAgentLoop(
       },
       model: resolved.model,
       provider: resolved.provider,
+      changedFiles: Array.from(changed.entries()).map(([path, v]) => ({
+        path,
+        action: v.action,
+        lines_added: v.added,
+        lines_removed: v.removed,
+      })),
     };
   };
   const skillsBody =
@@ -560,6 +575,27 @@ export async function runAgentLoop(
           // iteration. Not every tool truncates at the source (run_command
           // does, grep/read_file historically didn't), so enforce it here too.
           const text = truncateToolResultText(raw);
+          // Record the deterministic changeset (C6 Tier-1). write_file with no
+          // removed lines overwrote nothing → a new file; otherwise it replaced
+          // existing content. edit_file is always an edit. The first action seen
+          // for a path wins (created-then-edited stays "created" for the turn).
+          if ((call.name === "write_file" || call.name === "edit_file") && editStats) {
+            const p =
+              typeof (call.input as { path?: unknown })?.path === "string"
+                ? ((call.input as { path: string }).path)
+                : null;
+            if (p) {
+              const prev = changed.get(p);
+              const action =
+                prev?.action ??
+                (call.name === "edit_file" || editStats.linesRemoved > 0 ? "edited" : "created");
+              changed.set(p, {
+                action,
+                added: (prev?.added ?? 0) + editStats.linesAdded,
+                removed: (prev?.removed ?? 0) + editStats.linesRemoved,
+              });
+            }
+          }
           opts.onToolResult?.(call.id, call.name, call.input, text, false, editStats);
           toolResults.push({
             type: "tool_result",

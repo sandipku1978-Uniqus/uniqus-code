@@ -7,6 +7,38 @@ export interface PlanStep {
 export interface Plan {
   summary: string;
   steps: PlanStep[];
+  /**
+   * One plain-English sentence a non-technical user can understand, e.g.
+   * "I'll build a simple expense tracker where you can add expenses and watch a
+   * running total." Rendered as the prominent top line of the plan card; the
+   * technical `summary` becomes the secondary/collapsible detail (B2). Optional
+   * for backward-compat with plans emitted before the planner learned to write
+   * it.
+   */
+  plain_summary?: string;
+  /**
+   * Optional low-fidelity ASCII wireframe of the intended primary screen (boxes
+   * + labels for header / nav / main regions). Deliberately ASCII rather than
+   * SVG/HTML so it can be rendered inside a <pre> with ZERO markup-injection
+   * surface from model output (B4). A real rendered screenshot is impossible in
+   * plan mode — nothing is running yet.
+   */
+  wireframe?: string;
+}
+
+/**
+ * One file mutated during a turn, derived deterministically from the agent's
+ * write_file/edit_file tool calls (NOT from model prose) — the trustworthy
+ * "what changed" source consumed by the complete marker's changed-files list
+ * (C6-Tier1) and the per-tool diff-on-expand (B5). A brand-new file is recorded
+ * as all-additions. Because it's git/tool-derived it cannot hallucinate a file
+ * the agent never wrote, which matters for a finance/audit product.
+ */
+export interface ChangedFile {
+  path: string;
+  action: "created" | "edited" | "deleted";
+  lines_added: number;
+  lines_removed: number;
 }
 
 export type RunMode = "plan-then-execute" | "execute-only";
@@ -133,6 +165,11 @@ export const MODEL_CATALOG: ReadonlyArray<ModelOption> = [
  * fall back to DEFAULT_PRICE.
  */
 export const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+  // source: provider published list prices as of 2026-06-09. Keep this dated
+  // and keep every MODEL_CATALOG id below explicitly priced — the
+  // `MODEL_CATALOG ⊆ MODEL_PRICING` invariant is asserted in pricing.test.ts so
+  // a new catalogued model can never silently fall through to DEFAULT_PRICE
+  // (which can be 5–40× off and corrupts the per-run/account cost estimate).
   // Anthropic
   "claude-opus-4-8": { input: 5, output: 25 },
   "claude-sonnet-4-6": { input: 3, output: 15 },
@@ -571,6 +608,35 @@ export type ServerEvent =
       /** Final cumulative token usage for the turn (absent on replayed turns). */
       input_tokens?: number;
       output_tokens?: number;
+      /** Prompt tokens served from cache this turn (billed ~0.1×). */
+      cache_read_tokens?: number;
+      /** Tokens written to the cache this turn (Anthropic, billed ~1.25×). */
+      cache_creation_tokens?: number;
+      /**
+       * Provider-native model id that served this turn (e.g. "claude-opus-4-8"),
+       * so the client can price the single run via estimateCostUsd. Absent on
+       * replayed turns. (C5)
+       */
+      model?: string;
+      /**
+       * Best-effort estimated USD cost for THIS run (see estimateCostUsd — an
+       * estimate, NOT a billed amount). Computed server-side from the token
+       * split + model so the client doesn't need the pricing table at emit
+       * time. (C5)
+       */
+      cost_usd?: number;
+      /**
+       * Deterministic, tool-derived list of files this turn created / edited /
+       * deleted (C6-Tier1). Drives the "What changed" list on the complete
+       * marker and cannot hallucinate, unlike the model's prose summary.
+       */
+      changed_files?: ChangedFile[];
+      /**
+       * Up to ~3 context-aware follow-up prompts to offer as chips after the run
+       * (C2). Suggestions only — clicking one drops it into the composer, never
+       * auto-sends.
+       */
+      suggestions?: string[];
     }
   | { type: "storage_synced"; at: number }
   | { type: "client_write_ack"; path: string; ok: boolean; error?: string }
@@ -616,7 +682,45 @@ export type ServerEvent =
       message: string;
       created_at: string;
     }
-  | { type: "error"; message: string };
+  | {
+      /**
+       * Emitted on (re)connect when an agent run for this session is STILL alive
+       * on the server — i.e. the turn kept running while the socket was gone
+       * (A1). The client re-binds the live run to the new socket, keeps the busy
+       * state, and shows a "Build still running — reconnecting…" banner (A2)
+       * instead of treating the replayed history as a finished turn. Buffered
+       * events emitted while no socket was attached are flushed right after.
+       */
+      type: "run_active";
+      session_id?: string;
+      /** Best-effort: the in-flight user prompt, to caption the banner. */
+      prompt?: string;
+    }
+  | {
+      /**
+       * A package install the AGENT kicked off via run_command is starting /
+       * finishing (A4). Lets the client raise a prominent "Installing
+       * dependencies — don't refresh" banner (distinct from the agent's own
+       * streamed text) and clear it on completion.
+       */
+      type: "install_state";
+      phase: "start" | "end";
+      /** The install command, e.g. "npm install" — for the banner caption. */
+      command?: string;
+    }
+  | {
+      type: "error";
+      message: string;
+      /**
+       * Machine-readable error class so the client can show friendly copy +
+       * choose a retry policy (C7): e.g. "rate_limit", "provider_auth",
+       * "provider_5xx", "overloaded", "boot_timeout", "max_iterations",
+       * "missing_key". Absent ⇒ render the generic error card.
+       */
+      code?: string;
+      /** True for transient classes the run may auto-retry / the user may retry. */
+      retryable?: boolean;
+    };
 
 export interface TodoItem {
   content: string;

@@ -6,6 +6,7 @@ import BrandLockup from "./BrandLockup";
 import ModelPicker from "./ModelPicker";
 import AppearanceCard from "./AppearanceCard";
 import CustomPromptsCard from "./CustomPromptsCard";
+import ProviderKeysCard from "./ProviderKeysCard";
 import Modal from "./Modal";
 import { toast } from "@/lib/toast";
 import {
@@ -367,6 +368,9 @@ export default function SettingsView({
 
         {/* Custom prompts & default skills — functional (account-wide, persisted) */}
         <CustomPromptsCard />
+
+        {/* Bring-your-own provider keys (F7) — standard accounts only */}
+        {!isGuest && <ProviderKeysCard />}
       </div>
 
       {confirmingDisconnect && (

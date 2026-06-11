@@ -30,6 +30,14 @@ export interface VmHandle {
   /** MAC address handed to the guest interface. Stable per-project. */
   guestMac: string;
   /**
+   * Per-VM bearer token (F1). Injected on the kernel cmdline at boot and
+   * required by the in-VM agent on every request once enforcement is enabled
+   * (FIRECRACKER_AGENT_AUTH=1) — closing the unauth RCE where a peer VM on the
+   * shared bridge could drive another project's agent. agentRpc attaches it as
+   * `Authorization: Bearer <token>`.
+   */
+  authToken?: string;
+  /**
    * VM state. Lifecycle:
    *   running   ─(idle FIRECRACKER_IDLE_PAUSE_MS)→        paused
    *   paused    ─(idle FIRECRACKER_IDLE_SNAPSHOT_MS)→     snapshotted

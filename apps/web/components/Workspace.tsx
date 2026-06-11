@@ -26,6 +26,7 @@ import SkillsModal from "./SkillsModal";
 import SecretsModal from "./SecretsModal";
 import CheckpointsModal from "./CheckpointsModal";
 import { ErrorBoundary } from "./ErrorBoundary";
+import Coachmark from "./Coachmark";
 
 export default function Workspace({
   projectId,
@@ -241,6 +242,21 @@ export default function Workspace({
     }
     if (briefFiredRef.current === briefParam) return;
     briefFiredRef.current = briefParam;
+    // Derive the first-turn mode SYNCHRONOUSLY from the URL's ?plan= flag
+    // instead of reading the store's `mode` (B1 race fix). The decision effect
+    // above writes `mode` asynchronously; gating the fire on a *separate*
+    // `firstTurnModeReady` boolean while reading `mode` from a different state
+    // source opened a window where the brief could fire with the stale
+    // execute-only default before the plan-then-execute write propagated — the
+    // intermittent "a new project sometimes skips plan mode" bug. The ?plan=
+    // flag already encodes the user's landing-page choice (default plan), so we
+    // never need the round-tripped store value here. An explicit in-workspace
+    // toggle (modeTouched) still wins.
+    const firstTurnMode = modeTouched
+      ? mode
+      : planParam === "0"
+        ? "execute-only"
+        : "plan-then-execute";
     // Send first, echo only on success (mirrors ChatPanel.handleSubmit). A
     // failed send used to leave the echoed user bubble behind, which flipped
     // hasHistory true and made the retry path strip ?brief= — so the new
@@ -248,7 +264,7 @@ export default function Workspace({
     const ok = send({
       type: "user_message",
       content: briefParam,
-      mode,
+      mode: firstTurnMode,
       model: model !== "auto" ? model : undefined,
       thinking: thinking !== "medium" ? thinking : undefined,
     });
@@ -267,6 +283,8 @@ export default function Workspace({
     hasHistory,
     firstTurnModeReady,
     mode,
+    modeTouched,
+    planParam,
     model,
     thinking,
     addUserMessage,
@@ -446,6 +464,12 @@ export default function Workspace({
           {/* Builder ⇄ Code switch (desktop only; mobile uses the bottom tab
               bar to move between Chat / Preview / Code). */}
           {!isMobile && (
+            <Coachmark
+              id="builder-code-toggle"
+              title="Two ways to see your app"
+              body="Preview shows your app running live. Switch to Code anytime to open the files, editor, and logs."
+              placement="bottom"
+            >
             <div className="view-toggle" role="group" aria-label="Workspace view">
               <button
                 type="button"
@@ -477,6 +501,7 @@ export default function Workspace({
                 <span>Code</span>
               </button>
             </div>
+            </Coachmark>
           )}
 
           <RunButton projectId={projectId} />

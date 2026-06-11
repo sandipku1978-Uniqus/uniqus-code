@@ -9,7 +9,9 @@ import GuestBanner from "./GuestBanner";
 import DatabasesView from "./DatabasesView";
 import DesignSystemsView from "./DesignSystemsView";
 import Modal from "./Modal";
+import FirstRunWizard from "./FirstRunWizard";
 import { Skeleton } from "./Skeleton";
+import { useStore } from "@/lib/store";
 import { PENDING_BRIEF_KEY } from "./LandingPrompt";
 import {
   fetchProjects,
@@ -37,10 +39,10 @@ const ICON_CHOICES = [
 
 /** Short example prompts shown as chips under the hero composer. */
 const EXAMPLE_PROMPTS = [
-  "A dashboard comparing the latest AI models",
-  "A booking page with available time slots",
-  "An invoice tracker with due-date reminders",
-  "A landing page for my bakery with a menu",
+  "An expense approval workflow with a status trail",
+  "A SOX control register with owners and test status",
+  "A budget vs. actuals dashboard by department",
+  "An audit evidence log with sign-off status",
 ];
 
 /** Starter templates shown in the empty state. Each seeds the describe box. */
@@ -65,18 +67,18 @@ const STARTERS: ReadonlyArray<{
       "Build a Slack bot that responds to slash commands and posts a daily summary message to a channel.",
   },
   {
-    icon: "🧾",
-    title: "CRUD app",
-    blurb: "Create, edit, search and manage records.",
+    icon: "✅",
+    title: "Approval workflow",
+    blurb: "Submit, route, and approve with a clear status trail.",
     prompt:
-      "Build a CRUD app to manage records with create/edit/delete, search, and a clean list and detail view.",
+      "Build an expense approval workflow where staff submit expenses and managers approve or reject them, with policy checks over a configurable limit and an immutable activity log of who did what and when.",
   },
   {
-    icon: "🌐",
-    title: "Landing page",
-    blurb: "Hero, features, pricing and a contact form.",
+    icon: "📋",
+    title: "Control register",
+    blurb: "Controls, owners, test status, and audit evidence.",
     prompt:
-      "Build a modern marketing landing page with a hero, features, pricing, and a contact form.",
+      "Build a SOX control register: a table of internal controls with owner, frequency, last test date, pass/fail/overdue status, and an evidence note, plus filtering and a summary of how many passed, failed, or are overdue.",
   },
 ];
 
@@ -222,6 +224,10 @@ export default function ProjectPicker({
   // Distinct state so the user can flip tabs without losing their brief.
   const [describeText, setDescribeText] = useState("");
   const [refining, setRefining] = useState(false);
+  // First-run wizard (B6): the brief awaiting enrichment, or null.
+  const [wizardBrief, setWizardBrief] = useState<string | null>(null);
+  const onboarded = useStore((s) => s.seenHints["onboarded"]);
+  const markHintSeen = useStore((s) => s.markHintSeen);
 
   // Per-project menu state. Tracks which tile's dropdown is open so
   // clicking elsewhere closes it; rename/icon dialogs are inline modals.
@@ -378,6 +384,27 @@ export default function ProjectPicker({
     setDescribeText(prompt);
   }
 
+  // Turn a brief into a project + open the workspace (shared by the direct path
+  // and the first-run wizard).
+  async function proceedCreate(brief: string): Promise<void> {
+    setRefining(true);
+    setError(null);
+    try {
+      const { project, first_message } = await createProjectFromBriefApi(
+        brief,
+        designSystemId || null,
+      );
+      router.push(`/projects/${project.id}?brief=${encodeURIComponent(first_message)}`);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("createProjectFromBrief failed", err);
+      setError(
+        "Something went wrong turning your idea into a project. Try rephrasing, or simplify the description.",
+      );
+      setRefining(false);
+    }
+  }
+
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     if (creating) return;
@@ -395,27 +422,16 @@ export default function ProjectPicker({
         setError("Tell us a little more — even one sentence about what it should do helps.");
         return;
       }
-      setRefining(true);
-      setError(null);
-      try {
-        const { project, first_message } = await createProjectFromBriefApi(
-          trimmed,
-          designSystemId || null,
-        );
-        router.push(
-          `/projects/${project.id}?brief=${encodeURIComponent(first_message)}`,
-        );
-        return;
-      } catch (err) {
-        // Keep the raw message for debugging, but show a friendly one (§A).
-        // eslint-disable-next-line no-console
-        console.error("createProjectFromBrief failed", err);
-        setError(
-          "Something went wrong turning your idea into a project. Try rephrasing, or simplify the description.",
-        );
-        setRefining(false);
+      // First-run wizard (B6): the first time someone submits a fairly short
+      // brief, sharpen it with who/what-data before building. Skippable, and
+      // only ever shown once. A clearly-detailed brief (longer) skips it.
+      if (!onboarded && trimmed.length < 140) {
+        setError(null);
+        setWizardBrief(trimmed);
         return;
       }
+      await proceedCreate(trimmed);
+      return;
     }
 
     // Import flows still require a manual project name.
@@ -540,6 +556,23 @@ export default function ProjectPicker({
 
   return (
     <>
+      {wizardBrief !== null && (
+        <FirstRunWizard
+          initialBrief={wizardBrief}
+          onClose={() => {
+            // X / backdrop = cancel: close without building (the brief stays in
+            // the box so they can edit + resubmit), and mark onboarded so the
+            // wizard is genuinely once-only.
+            setWizardBrief(null);
+            markHintSeen("onboarded");
+          }}
+          onComplete={(refined) => {
+            setWizardBrief(null);
+            markHintSeen("onboarded");
+            void proceedCreate(refined);
+          }}
+        />
+      )}
       <nav className="topnav">
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
           <Link href="/" style={{ textDecoration: "none" }}>

@@ -117,6 +117,9 @@ function openSocket(projectId: string, sessionId: string | null): void {
     // switch). Without this, this stale handler nulls the freshly-opened
     // `socket` and schedules a reconnect → orphaned socket + duplicate connection.
     if (socket !== ws) return;
+    // Any half-buffered streaming text belongs to a turn whose socket just
+    // dropped — discard it; session_started replays authoritative history.
+    discardStreamBuffers();
     useStore.getState().setConnected(false);
     socket = null;
     if (reconnectTimer) clearTimeout(reconnectTimer);
@@ -150,6 +153,7 @@ function openSocket(projectId: string, sessionId: string | null): void {
 export function disconnect(): void {
   activeProjectId = null;
   reconnectAttempts = 0;
+  discardStreamBuffers();
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -184,7 +188,78 @@ export function send(event: ClientEvent): boolean {
   return false;
 }
 
+// ── Coalesced streaming (A3) ────────────────────────────────────────────────
+// The hot path that froze the tab was one Zustand `set()` (→ full ChatPanel
+// re-render) per streamed token. We accumulate `text`/`thinking` deltas in
+// module-level buffers and flush them to the store once per animation frame —
+// one re-render per paint instead of per token. Any NON-streaming event flushes
+// the buffer first (see handleEvent) so chat ORDER stays exact: a tool_call that
+// arrives between two text deltas must land between them, not after a late blob.
+let pendingText = "";
+let pendingThinking = "";
+let flushRaf: number | null = null;
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushStreamBuffers(): void {
+  if (flushRaf !== null) {
+    if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(flushRaf);
+    flushRaf = null;
+  }
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  if (pendingText) {
+    const t = pendingText;
+    pendingText = "";
+    useStore.getState().appendText(t);
+  }
+  if (pendingThinking) {
+    const t = pendingThinking;
+    pendingThinking = "";
+    useStore.getState().appendThinking(t);
+  }
+}
+
+function scheduleStreamFlush(): void {
+  if (flushRaf !== null || flushTimer !== null) return;
+  // rAF aligns the flush with paint while the tab is foregrounded. A
+  // backgrounded tab parks rAF, but the periodic `usage` event (and every tool
+  // event) flushes the buffer via handleEvent's top guard, so text never sits
+  // long. The setTimeout fallback covers SSR/test/no-rAF environments.
+  if (typeof requestAnimationFrame === "function") {
+    flushRaf = requestAnimationFrame(() => {
+      flushRaf = null;
+      flushStreamBuffers();
+    });
+  } else {
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      flushStreamBuffers();
+    }, 50);
+  }
+}
+
+/** Drop any buffered streaming text without applying it (session switch / close). */
+function discardStreamBuffers(): void {
+  pendingText = "";
+  pendingThinking = "";
+  if (flushRaf !== null) {
+    if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(flushRaf);
+    flushRaf = null;
+  }
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+}
+
 function handleEvent(event: ServerEvent): void {
+  // Keep chat order exact: flush any buffered streaming text before applying a
+  // non-streaming event (tool_call, complete, error, …).
+  if (event.type !== "text" && event.type !== "thinking") {
+    flushStreamBuffers();
+  }
   const s = useStore.getState();
   switch (event.type) {
     case "session_started":
@@ -200,6 +275,10 @@ function handleEvent(event: ServerEvent): void {
       // server when the socket dropped, so the user has to re-prompt
       // either way. Better a clean replay than a dirty merge.
       s.resetChat();
+      // A fresh session view — clear transient run banners; a following
+      // run_active will re-raise the reattach banner if a run is still live.
+      s.setRunReattaching(false);
+      s.setInstallInProgress(null);
       s.setUser(event.user);
       s.setProject(event.project);
       s.addSystem(
@@ -228,7 +307,9 @@ function handleEvent(event: ServerEvent): void {
     case "iteration":
       break;
     case "text":
-      s.appendText(event.content);
+      // Buffer + flush once per frame (A3); see scheduleStreamFlush.
+      pendingText += event.content;
+      scheduleStreamFlush();
       break;
     case "replay_user_message":
       // Persisted user prompt being replayed on load — render it as the user's
@@ -237,12 +318,31 @@ function handleEvent(event: ServerEvent): void {
       s.addUserMessage(event.content);
       break;
     case "thinking":
-      s.appendThinking(event.content);
+      // Buffer + flush once per frame (A3); see scheduleStreamFlush.
+      pendingThinking += event.content;
+      scheduleStreamFlush();
       break;
     case "system":
       // Non-agent infra messages — VM lifecycle, storage notices, etc. Render
       // muted so the user doesn't read them as agent output.
       s.addSystem(event.content);
+      break;
+    case "install_state":
+      // A4: the agent started/finished a dependency install → raise/clear the
+      // "Installing — don't refresh" banner.
+      s.setInstallInProgress(
+        event.phase === "start" ? { command: event.command ?? "dependencies" } : null,
+      );
+      break;
+    case "run_active":
+      // A1/A2: reconnected to a build that kept running while the socket was
+      // gone. session_started already reset the chat + replayed prior turns;
+      // re-add the in-flight prompt as the user bubble, mark busy, and show the
+      // "kept running" banner. The server flushes this turn's buffered events
+      // right after, reconstructing the rest of the turn.
+      if (event.prompt) s.addUserMessage(event.prompt);
+      s.setBusy(true);
+      s.setRunReattaching(true);
       break;
     case "tool_call":
       s.addToolCall(event.call_id, event.name, event.input);
@@ -312,8 +412,19 @@ function handleEvent(event: ServerEvent): void {
         event.aborted === true,
         event.input_tokens,
         event.output_tokens,
+        {
+          cache_read_tokens: event.cache_read_tokens,
+          cache_creation_tokens: event.cache_creation_tokens,
+          model: event.model,
+          cost_usd: event.cost_usd,
+          changed_files: event.changed_files,
+          suggestions: event.suggestions,
+        },
       );
       s.setBusy(false);
+      // Defensive: a turn can't still be installing or reattaching once done.
+      s.setInstallInProgress(null);
+      s.setRunReattaching(false);
       send({ type: "request_tree" });
       // Agent just went idle — drain any user edits that were deferred while
       // it was running. Without this, edits made during the agent's turn
@@ -372,8 +483,11 @@ function handleEvent(event: ServerEvent): void {
       );
       break;
     case "error":
-      s.addSystem(`error: ${event.message}`);
+      // Friendly error card (C7) instead of a bare muted `error: <raw>` line.
+      s.addErrorItem(event.message, event.code, event.retryable);
       s.setBusy(false);
+      s.setInstallInProgress(null);
+      s.setRunReattaching(false);
       break;
   }
 }

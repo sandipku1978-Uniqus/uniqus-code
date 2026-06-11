@@ -21,10 +21,12 @@
       "WebFetch(domain:blog.google)",
       "WebFetch(domain:thenewstack.io)",
       "WebFetch(domain:www.mindstudio.ai)",
-      "WebFetch(domain:developers.figma.com)"
+      "WebFetch(domain:developers.figma.com)",
+      "WebFetch(domain:supabase.com)"
     ],
     "additionalDirectories": [
-      "c:\\Users\\thech\\AppData\\Local\\Temp\\uniqus-shot"
+      "c:\\Users\\thech\\AppData\\Local\\Temp\\uniqus-shot",
+      "C:\\Users\\thech\\AppData\\Local\\Temp"
     ]
   }
 }

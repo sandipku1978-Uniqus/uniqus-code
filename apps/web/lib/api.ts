@@ -66,6 +66,31 @@ export const updateAccountSettingsApi = (
     body: JSON.stringify(patch),
   });
 
+// ── Bring-your-own provider keys (F7) ─────────────────────────────────────────
+
+export type ByokProvider = "anthropic" | "openai" | "google";
+
+/** Which providers this account has a key for (names only — values never leave the server). */
+export const fetchAccountProviderKeysApi = (): Promise<{ providers: ByokProvider[] }> =>
+  api("/api/account/provider-keys");
+
+export const setAccountProviderKeyApi = (
+  provider: ByokProvider,
+  key: string,
+): Promise<{ ok: true; providers: ByokProvider[] }> =>
+  api("/api/account/provider-keys", {
+    method: "PUT",
+    body: JSON.stringify({ provider, key }),
+  });
+
+export const deleteAccountProviderKeyApi = (
+  provider: ByokProvider,
+): Promise<{ ok: true; providers: ByokProvider[] }> =>
+  api("/api/account/provider-keys", {
+    method: "DELETE",
+    body: JSON.stringify({ provider }),
+  });
+
 export const fetchProjects = (): Promise<{ projects: ProjectSummary[] }> =>
   api("/api/projects");
 
@@ -596,6 +621,55 @@ export const flyDeployApi = (
     body: JSON.stringify(body),
   });
 
+// ── Preview share (C3) ─────────────────────────────────────────────────────────
+
+/** Mint a revocable, expiring share link for a running preview server. */
+export const createPreviewShareApi = (
+  projectId: string,
+  serverId: string,
+): Promise<{ token: string; path: string; expires_at: string }> =>
+  api(`/api/projects/${projectId}/preview/${serverId}/share`, { method: "POST" });
+
+/** Revoke a share token (or all tokens for the server if `token` omitted). */
+export const revokePreviewShareApi = (
+  projectId: string,
+  serverId: string,
+  token?: string,
+): Promise<{ ok: true }> =>
+  api(`/api/projects/${projectId}/preview/${serverId}/share`, {
+    method: "DELETE",
+    body: JSON.stringify({ token: token ?? null }),
+  });
+
+// ── Export ────────────────────────────────────────────────────────────────────
+
+/**
+ * Download the project's source as a .zip (E2). Uses a credentialed fetch (the
+ * API is cookie-authed and may be cross-origin, so a bare <a download> wouldn't
+ * carry auth) → blob → object-URL → click.
+ */
+export async function downloadProjectZipApi(
+  projectId: string,
+  fileName: string,
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/projects/${projectId}/export.zip`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`API ${res.status}: ${body || res.statusText}`);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${fileName || "project"}.zip`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 // ── Checkpoints ───────────────────────────────────────────────────────────────
 
 export interface CheckpointMeta {
@@ -615,6 +689,18 @@ export const restoreCheckpointApi = (
   sha: string,
 ): Promise<{ ok: true; restored_to: string }> =>
   api(`/api/projects/${projectId}/checkpoints/${sha}/restore`, { method: "POST" });
+
+export interface CheckpointFileDelta {
+  path: string;
+  added: number;
+  removed: number;
+}
+
+export const fetchCheckpointDiffApi = (
+  projectId: string,
+  sha: string,
+): Promise<{ ok: true; diff: string; truncated: boolean; files: CheckpointFileDelta[] }> =>
+  api(`/api/projects/${projectId}/checkpoints/${sha}/diff`);
 
 // ── Secrets ───────────────────────────────────────────────────────────────────
 

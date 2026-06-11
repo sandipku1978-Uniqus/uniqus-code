@@ -13,6 +13,7 @@ import { useIsMobile } from "@/lib/use-is-mobile";
 import { useStore, type SelectedElement } from "@/lib/store";
 import { toast } from "@/lib/toast";
 import PreviewAnnotator from "./PreviewAnnotator";
+import Modal from "./Modal";
 
 // Match the page's TLS state for the dev fallback so the iframe doesn't get
 // mixed-content blocked when the app is loaded over HTTPS. Production should
@@ -246,6 +247,52 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
   const [justAttached, setJustAttached] = useState(false);
   const setPendingSelectedElement = useStore((s) => s.setPendingSelectedElement);
   const setPendingComposerText = useStore((s) => s.setPendingComposerText);
+  const projectId = useStore((s) => s.project?.id ?? null);
+
+  // Share this preview (C3/C4): a revocable, expiring link distinct from the
+  // bare serverId, so the running dev server isn't exposed by a long-lived URL.
+  const [shareOpen, setShareOpen] = useState(false);
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [shareExpires, setShareExpires] = useState<string | null>(null);
+  const [shareToken, setShareToken] = useState<string | null>(null);
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shareCopied, setShareCopied] = useState(false);
+
+  const openShare = async () => {
+    setShareOpen(true);
+    if (shareUrl || !projectId) return;
+    setShareBusy(true);
+    try {
+      const { createPreviewShareApi } = await import("@/lib/api");
+      const r = await createPreviewShareApi(projectId, server.id);
+      setShareUrl(`${ORCHESTRATOR_URL}${r.path}`);
+      setShareExpires(r.expires_at);
+      setShareToken(r.token);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't create share link");
+      setShareOpen(false);
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
+  const revokeShare = async () => {
+    if (!projectId || !shareToken) {
+      setShareOpen(false);
+      return;
+    }
+    try {
+      const { revokePreviewShareApi } = await import("@/lib/api");
+      await revokePreviewShareApi(projectId, server.id, shareToken);
+      toast.success("Share link revoked");
+    } catch {
+      /* best-effort — it also expires on its own */
+    }
+    setShareUrl(null);
+    setShareToken(null);
+    setShareExpires(null);
+    setShareOpen(false);
+  };
 
   // Runtime errors captured from inside the preview iframe (see RuntimeError).
   // The ref mirrors state so the toast action — invoked long after it's created
@@ -707,6 +754,23 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
           </svg>
         </button>
 
+        {/* Share this preview (C3) — revocable, expiring link. */}
+        <button
+          type="button"
+          onClick={() => void openShare()}
+          className="icon-btn-sm"
+          title="Share a temporary link to this live preview"
+          aria-label="Share preview"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="18" cy="5" r="3" />
+            <circle cx="6" cy="12" r="3" />
+            <circle cx="18" cy="19" r="3" />
+            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+            <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+          </svg>
+        </button>
+
         {/* Device-breakpoint picker (generalizes the old phone toggle). */}
         {!isMobile && (
           <div className="device-picker" ref={deviceMenuRef}>
@@ -1031,6 +1095,90 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
           previewUrl={displayedUrl}
           onClose={() => setAnnotateOpen(false)}
         />
+      )}
+
+      {shareOpen && (
+        <Modal
+          title="Share this preview"
+          width={520}
+          onClose={() => setShareOpen(false)}
+          footer={
+            <>
+              <button type="button" className="btn-ghost" onClick={() => void revokeShare()}>
+                Revoke link
+              </button>
+              <div className="modal-actions">
+                <button type="button" className="btn-secondary" onClick={() => setShareOpen(false)}>
+                  Close
+                </button>
+              </div>
+            </>
+          }
+        >
+          {shareBusy && !shareUrl ? (
+            <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Creating link…</div>
+          ) : shareUrl ? (
+            <div style={{ display: "grid", gap: 10 }}>
+              <div style={{ display: "flex", gap: 8 }}>
+                <code
+                  style={{
+                    flex: 1,
+                    fontSize: 11.5,
+                    padding: "8px 10px",
+                    background: "var(--bg-code)",
+                    borderRadius: 4,
+                    overflowX: "auto",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {shareUrl}
+                </code>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  style={{ flex: "0 0 auto" }}
+                  onClick={() => {
+                    navigator.clipboard
+                      ?.writeText(shareUrl)
+                      .then(() => {
+                        setShareCopied(true);
+                        window.setTimeout(() => setShareCopied(false), 1500);
+                      })
+                      .catch(() => toast.error("Couldn't copy"));
+                  }}
+                >
+                  {shareCopied ? "Copied ✓" : "Copy"}
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  style={{ flex: "0 0 auto" }}
+                  onClick={() => {
+                    const subject = encodeURIComponent("Take a look at this preview");
+                    const body = encodeURIComponent(
+                      `Here's a live preview of what I'm building:\n\n${shareUrl}\n\n(This is a temporary link — it expires automatically.)`,
+                    );
+                    window.location.href = `mailto:?subject=${subject}&body=${body}`;
+                  }}
+                >
+                  Send to teammate
+                </button>
+              </div>
+              <p style={{ margin: 0, fontSize: 12, color: "var(--conf-medium, #d98a3d)" }}>
+                ⚠ Anyone with this link can view your running preview — no sign-in needed.
+              </p>
+              <p style={{ margin: 0, fontSize: 11.5, color: "var(--text-dim)" }}>
+                The link expires automatically
+                {shareExpires ? ` (${new Date(shareExpires).toLocaleString()})` : " in ~2 hours"} and
+                stops working when the preview server stops. Revoke it anytime with the button below.
+              </p>
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+              Couldn&apos;t create a link. Make sure the preview is running.
+            </div>
+          )}
+        </Modal>
       )}
     </div>
   );

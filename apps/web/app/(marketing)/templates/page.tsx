@@ -1,9 +1,10 @@
 import Link from "next/link";
+import TemplateCta from "./TemplateCta";
 
 export const metadata = {
   title: "Templates — Uniqus Code",
   description:
-    "Start from a proven template. Open any starting point in its own private workspace, then describe what to change and watch the AI build it live.",
+    "Start from a governed template for finance, GRC, audit, and internal operations. Open any starting point in its own private, isolated workspace, then describe what to change and watch the AI build it live — with plan-approval and rewind built in.",
 };
 
 type Thumb = "t1" | "t2" | "t3" | "t4" | "t5";
@@ -127,6 +128,12 @@ type Template = {
   tags: string[];
   thumb: Thumb;
   art: Art;
+  /**
+   * Seed prompt this template starts from. When present, the CTA stashes it for
+   * the dashboard to pick up after sign-in (so a logged-out visitor's choice
+   * survives the auth round-trip) instead of dropping them on an empty composer.
+   */
+  prompt?: string;
 };
 
 const CATEGORIES: {
@@ -135,6 +142,50 @@ const CATEGORIES: {
   blurb: string;
   templates: Template[];
 }[] = [
+  {
+    eyebrow: "Finance, GRC & audit",
+    heading: "Governed tools finance & risk teams actually run on.",
+    blurb:
+      "Control registers, approval workflows, and evidence trails — built in a private, isolated workspace with plan-approval and rewind, so the boring-but-critical internal tooling ships fast without leaving your governance behind.",
+    templates: [
+      {
+        title: "SOX control register",
+        desc: "Track key controls, owners, test status, and exceptions with an audit-ready trail.",
+        tags: ["Controls", "SOX", "Evidence"],
+        thumb: "t1",
+        art: "admin",
+        prompt:
+          "Build a SOX control register: a table of internal controls with columns for control ID, process area, owner, frequency, last test date, test result (pass/fail/overdue), and an evidence note. Add filtering by process and status, an 'add control' form, and a summary bar showing how many controls passed, failed, or are overdue.",
+      },
+      {
+        title: "Expense approval workflow",
+        desc: "Submit, route, and approve expenses with policy checks and a clear status trail.",
+        tags: ["Approvals", "Policy", "Audit log"],
+        thumb: "t2",
+        art: "billing",
+        prompt:
+          "Build an expense approval workflow: employees submit an expense (amount, category, date, receipt note, justification); each gets a status (submitted → approved/rejected) and an approver. Show an approver queue with approve/reject + comment, automatically flag expenses over a configurable limit for extra review, and keep an immutable activity log of who did what and when.",
+      },
+      {
+        title: "Audit evidence log",
+        desc: "A searchable register of audit requests, evidence collected, and sign-off status.",
+        tags: ["Audit", "Evidence", "Sign-off"],
+        thumb: "t4",
+        art: "wiki",
+        prompt:
+          "Build an audit evidence log: a register of audit requests (control reference, requested-by, due date, status) where each request can attach evidence notes/links, be marked 'provided', then 'accepted' by the auditor. Add search, filter by status and owner, an overdue highlight, and a per-request timeline of activity.",
+      },
+      {
+        title: "Budget vs. actuals dashboard",
+        desc: "Compare planned vs. actual spend by department with variance highlights.",
+        tags: ["Budget", "Variance", "Charts"],
+        thumb: "t3",
+        art: "dashboard",
+        prompt:
+          "Build a budget vs. actuals dashboard: enter budget and actual amounts per department per month, then show a table and a bar chart of planned vs actual with the variance and variance % per row, highlight overspend in red, and show a total roll-up across departments with a month filter.",
+      },
+    ],
+  },
   {
     eyebrow: "Apps & internal tools",
     heading: "Tools your team actually uses.",
@@ -254,12 +305,14 @@ export default function TemplatesPage() {
             <span className="dot" /> Templates
           </span>
           <h1>
-            Start from a <span className="grad">proven template</span>.
+            Start from a <span className="grad">governed template</span>.
           </h1>
           <p className="mk-lede">
-            Pick a starting point and open it in its own private workspace. Then
-            describe what to change — the AI you trust rebuilds it live, so you
-            skip the blank page and go straight to making it yours.
+            Control registers, approval workflows, audit evidence logs — the
+            finance, GRC, and internal tools your team actually runs on. Each one
+            opens in its own private, isolated workspace with plan-approval and
+            rewind built in. Pick a starting point and describe what to change;
+            the AI you trust rebuilds it live.
           </p>
           <div className="mk-hero-cta">
             <Link href="/login" className="btn-primary btn-lg">
@@ -295,13 +348,13 @@ export default function TemplatesPage() {
                       </span>
                     ))}
                   </div>
-                  <Link
-                    href="/login"
+                  <TemplateCta
+                    prompt={t.prompt}
                     className="btn-ghost"
                     style={{ marginTop: 16, alignSelf: "flex-start" }}
                   >
                     Use this template →
-                  </Link>
+                  </TemplateCta>
                 </div>
               </article>
             ))}

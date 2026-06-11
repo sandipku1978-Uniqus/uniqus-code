@@ -30,6 +30,7 @@ import type {
   DesignComponentTokens,
   DesignFindings,
   DesignSystemDraft,
+  ChangedFile,
 } from "@uniqus/api-types";
 import { MODEL_CATALOG, estimateCostUsd, DEFAULT_DESIGN_TOKENS } from "@uniqus/api-types";
 import { runAgentLoop } from "./agent/loop.js";
@@ -57,6 +58,7 @@ import {
   commitCheckpoint,
   listCheckpoints,
   restoreCheckpoint,
+  getCheckpointDiff,
 } from "./agent/checkpoints.js";
 import { detectShape, flyDeploy } from "./flyDeploy.js";
 import {
@@ -75,11 +77,17 @@ import { startGuestSweeper, stopGuestSweeper } from "./guest/sweeper.js";
 import {
   shellInfo,
   listServers,
+  getServer,
   sandboxEvents,
   startServer as sandboxStartServer,
   stopServer as sandboxStopServer,
   writeFile as sandboxWriteFile,
 } from "./agent/sandbox.js";
+import {
+  createShareToken,
+  revokeShareToken,
+  revokeSharesForServer,
+} from "./previewShare.js";
 import { readRunConfig, writeRunConfig, detectRunConfig } from "./runConfig.js";
 import { ensureProjectDeps } from "./ensureDeps.js";
 import {
@@ -170,6 +178,14 @@ import {
   extractFigmaDesignContext,
 } from "./figma.js";
 import { startDeploy, pollUntilTerminal } from "./deploy.js";
+import { buildProjectZip } from "./export.js";
+import {
+  resolveProviderKeysForUser,
+  listAccountProviderKeys,
+  setAccountProviderKey,
+  deleteAccountProviderKey,
+  isProviderName,
+} from "./db/providerKeys.js";
 import {
   getLatestDeployment,
   listDeployments,
@@ -220,6 +236,105 @@ interface SessionCtx {
   sessionId: string;
 }
 const sessions = new Set<SessionCtx>();
+
+// ── Run registry (A1: build survives a browser refresh) ──────────────────────
+// A single in-flight agent turn, keyed by `${projectId}:${sessionId}`, hoisted
+// OUT of the per-socket connection closure so the run isn't tied to the socket
+// that started it. The run's events go through a routed send that follows
+// whichever socket is currently bound and buffers a coalesced replay log while
+// none is. On reconnect we rebind, flush the log, and emit `run_active`. On a
+// transient close we DON'T abort — we detach and start a grace timer, so a
+// refresh no longer kills the build (the explicit Stop / the grace timeout are
+// the only intentional cancels). Interactive resolvers (plan approval,
+// ask_user) live here too so a reconnected socket can answer a run that began
+// on a previous one.
+interface RunHandle {
+  abort: AbortController;
+  /** Coalesced replay log of this turn's ServerEvents (text/thinking merged). */
+  buffer: ServerEvent[];
+  /** Raw send for the currently-bound socket, or null while detached. */
+  socketSend: Sender | null;
+  /** The in-flight user prompt, to caption the reconnect banner + rebuild the bubble. */
+  prompt: string;
+  graceTimer: ReturnType<typeof setTimeout> | null;
+  /** Wake any plan/ask_user wait so an abort from any socket unwinds the loop. */
+  wake: () => void;
+  /** Resolve a pending plan (set while the run waits for approval). */
+  resolvePlan: ((plan: Plan) => void) | null;
+  /** Resolve/reject pending ask_user questions, keyed by tool call_id. */
+  answerResolvers: Map<string, { resolve: (a: string) => void; reject: (e: Error) => void }>;
+}
+const runs = new Map<string, RunHandle>();
+const runKey = (projectId: string, sessionId: string): string => `${projectId}:${sessionId}`;
+
+// Cap the coalesced replay log (entries, not tokens — text/thinking deltas are
+// merged on push, so a normal turn stays well under this).
+const MAX_RUN_BUFFER = 4000;
+// Abort an orphaned run if no socket re-attaches within this window (preserves
+// the original "don't burn tokens against a dead socket" intent, just deferred).
+const RUN_GRACE_MS = 90_000;
+
+function registerRun(
+  key: string,
+  abort: AbortController,
+  prompt: string,
+  socketSend: Sender,
+): RunHandle {
+  const handle: RunHandle = {
+    abort,
+    buffer: [],
+    socketSend,
+    prompt,
+    graceTimer: null,
+    wake: () => {},
+    resolvePlan: null,
+    answerResolvers: new Map(),
+  };
+  runs.set(key, handle);
+  return handle;
+}
+
+function unregisterRun(key: string): void {
+  const run = runs.get(key);
+  if (run?.graceTimer) clearTimeout(run.graceTimer);
+  runs.delete(key);
+}
+
+/** Routed send for a run: live to the bound socket (if any) + coalesced buffer. */
+function routedSendFor(key: string): Sender {
+  return (event) => {
+    const run = runs.get(key);
+    if (!run) return;
+    if (run.socketSend) run.socketSend(event);
+    // Always append to the replay log so the NEXT reconnect can rebuild the
+    // whole turn (the client resets its chat on session_started).
+    const last = run.buffer[run.buffer.length - 1];
+    if (event.type === "text" && last?.type === "text") {
+      run.buffer[run.buffer.length - 1] = { type: "text", content: last.content + event.content };
+    } else if (event.type === "thinking" && last?.type === "thinking") {
+      run.buffer[run.buffer.length - 1] = { type: "thinking", content: last.content + event.content };
+    } else {
+      run.buffer.push(event);
+      if (run.buffer.length > MAX_RUN_BUFFER) run.buffer.shift();
+    }
+  };
+}
+
+/** Socket dropped mid-run: detach + start the grace timer (don't abort). */
+function detachRun(key: string): void {
+  const run = runs.get(key);
+  if (!run) return;
+  run.socketSend = null;
+  if (run.graceTimer) clearTimeout(run.graceTimer);
+  run.graceTimer = setTimeout(() => {
+    const r = runs.get(key);
+    if (r && !r.socketSend && !r.abort.signal.aborted) {
+      console.log(`[run ${key}] orphaned ${RUN_GRACE_MS}ms — aborting`);
+      r.abort.abort();
+      r.wake();
+    }
+  }, RUN_GRACE_MS);
+}
 
 function broadcastToProject(projectId: string, event: ServerEvent): void {
   for (const s of sessions) if (s.projectId === projectId) s.send(event);
@@ -704,6 +819,36 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (req.url === "/api/account/usage-stats" && req.method === "GET") {
     return json(res, 200, { stats: await accountUsageStats(user.id) });
   }
+
+  // BYOK (F7): which providers this account has a key for (names only — the key
+  // value is never returned).
+  if (req.url === "/api/account/provider-keys" && req.method === "GET") {
+    return json(res, 200, { providers: await listAccountProviderKeys(user.id) });
+  }
+  // Set or replace an account provider key. The value is write-only.
+  if (req.url === "/api/account/provider-keys" && req.method === "PUT") {
+    const body = await readJsonBody<{ provider?: string; key?: string }>(req);
+    const provider = String(body.provider ?? "");
+    const key = String(body.key ?? "").trim();
+    if (!isProviderName(provider)) {
+      return json(res, 400, { error: "provider must be anthropic, openai, or google" });
+    }
+    if (!key || key.length > 1024) {
+      return json(res, 400, { error: "key is required (≤1024 chars)" });
+    }
+    await setAccountProviderKey(user.id, provider, key);
+    return json(res, 200, { ok: true, providers: await listAccountProviderKeys(user.id) });
+  }
+  // Remove an account provider key (falls back to the platform key thereafter).
+  if (req.url === "/api/account/provider-keys" && req.method === "DELETE") {
+    const body = await readJsonBody<{ provider?: string }>(req);
+    const provider = String(body.provider ?? "");
+    if (!isProviderName(provider)) {
+      return json(res, 400, { error: "provider must be anthropic, openai, or google" });
+    }
+    await deleteAccountProviderKey(user.id, provider);
+    return json(res, 200, { ok: true, providers: await listAccountProviderKeys(user.id) });
+  }
   if (req.url === "/api/account/settings" && req.method === "PUT") {
     const body = await readJsonBody<{ custom_prompt?: string; default_skills?: string }>(req);
     const patch: { custom_prompt?: string; default_skills?: string } = {};
@@ -1045,6 +1190,65 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     }
   }
 
+  // GET /api/projects/:id/export.zip — download the project's source as a zip
+  // (E2). Reuses the deploy exclusion set (no node_modules/.next/.git/.env*).
+  const exportZipMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/export\.zip$/,
+  );
+  if (exportZipMatch && req.method === "GET") {
+    const projectId = exportZipMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    try {
+      const buf = await buildProjectZip(sandboxDirFor(projectId));
+      const safeName = (project.name || "project")
+        .replace(/[^a-z0-9-_]+/gi, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 60) || "project";
+      res.writeHead(200, {
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="${safeName}.zip"`,
+        "Content-Length": String(buf.length),
+        "Cache-Control": "no-store",
+      });
+      res.end(buf);
+      return;
+    } catch (err) {
+      return json(res, 500, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // POST/DELETE /api/projects/:id/preview/:serverId/share — mint or revoke a
+  // revocable, expiring share token for a running preview (C3). The recipient
+  // reaches the preview via /preview/share/<token>/ — never the bare serverId.
+  const previewShareMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/preview\/(srv_[0-9a-fA-F]+)\/share$/,
+  );
+  if (previewShareMatch && (req.method === "POST" || req.method === "DELETE")) {
+    const projectId = previewShareMatch[1];
+    const serverId = previewShareMatch[2];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const srv = getServer(serverId);
+    if (!srv || srv.project_id !== projectId) {
+      return json(res, 404, { error: "preview not found" });
+    }
+    if (req.method === "DELETE") {
+      const body = await readJsonBody<{ token?: string }>(req);
+      if (body.token) revokeShareToken(body.token);
+      else revokeSharesForServer(serverId);
+      return json(res, 200, { ok: true });
+    }
+    const { token, expiresAt } = createShareToken(serverId, projectId);
+    return json(res, 200, {
+      token,
+      path: `/preview/share/${token}/`,
+      expires_at: new Date(expiresAt).toISOString(),
+    });
+  }
+
   // ── Checkpoints (Plan §3.5) ────────────────────────────────────────────
   const checkpointsListMatch = req.url?.match(
     /^\/api\/projects\/([0-9a-fA-F-]{8,})\/checkpoints$/,
@@ -1056,6 +1260,20 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const sandbox = sandboxDirFor(projectId);
     const checkpoints = await listCheckpoints(sandbox, projectId, 100);
     return json(res, 200, { checkpoints });
+  }
+  // GET /api/projects/:id/checkpoints/:sha/diff — the change a checkpoint
+  // introduced (C6-Tier2). Read-only.
+  const checkpointDiffMatch = req.url?.match(
+    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/checkpoints\/([0-9a-f]{6,40})\/diff$/,
+  );
+  if (checkpointDiffMatch && req.method === "GET") {
+    const projectId = checkpointDiffMatch[1];
+    const sha = checkpointDiffMatch[2];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const result = await getCheckpointDiff(sandboxDirFor(projectId), projectId, sha);
+    if (!result.ok) return json(res, 400, { error: result.error });
+    return json(res, 200, result);
   }
   const checkpointRestoreMatch = req.url?.match(
     /^\/api\/projects\/([0-9a-fA-F-]{8,})\/checkpoints\/([0-9a-f]{6,40})\/restore$/,
@@ -2879,16 +3097,10 @@ async function handleConnection(
   // Mutable history; populated after async hydrate below. Mutating in place
   // keeps the reference stable for runAgentLoop across many turns.
   const history: Anthropic.MessageParam[] = [];
-  let pendingPlanResolve: ((plan: Plan) => void) | null = null;
-  /**
-   * Resolves for the agent's `ask_user` tool calls. Keyed by tool call_id
-   * so multiple in-flight questions never cross-talk (the loop is
-   * single-threaded today, but cheap to keep correct).
-   */
-  const pendingUserAnswerResolves = new Map<
-    string,
-    { resolve: (answer: string) => void; reject: (err: Error) => void }
-  >();
+  // The pending-plan resolver and ask_user resolvers now live on the run
+  // registry's RunHandle (A1), not in this per-socket closure, so a reconnected
+  // socket can approve a plan / answer a question for a run that began on a
+  // previous socket.
   let busy = false;
   let ready = false;
   // Per-session abort controller. Replaced for each user_message turn; the
@@ -2903,13 +3115,14 @@ async function handleConnection(
   // Otherwise messages that arrive during hydration (especially the
   // client's initial request_tree on WS open) get silently dropped.
   ws.on("close", () => {
-    // If the socket drops mid-turn, abort the in-flight agent loop. Otherwise
-    // the turn runs to completion against a dead socket — burning LLM tokens,
-    // keeping the VM busy, and spawning child procs nobody is listening to
-    // (B-9). The turn's `finally` still persists whatever it produced.
-    if (busy && currentAbort && !currentAbort.signal.aborted) {
-      currentAbort.abort();
-    }
+    // A1: a transient disconnect (refresh, network blip) must NOT kill the
+    // build. If a run is live for this session, DETACH it and start a grace
+    // timer — a reconnect within RUN_GRACE_MS rebinds the live run and flushes
+    // what it streamed while we were gone. Only an explicit Stop, or the grace
+    // timeout, cancels (preserving the original B-9 token-saving intent). The
+    // turn's `finally` still persists whatever it produced.
+    const key = runKey(project.id, sessionId);
+    if (runs.has(key)) detachRun(key);
     sessions.delete(ctx);
   });
 
@@ -2931,18 +3144,22 @@ async function handleConnection(
 
     try {
       if (event.type === "plan_approved") {
-        if (pendingPlanResolve) {
-          const r = pendingPlanResolve;
-          pendingPlanResolve = null;
+        // Resolve via the run registry so a reconnected socket can approve a
+        // plan whose run started on a previous socket (A1).
+        const run = runs.get(runKey(project.id, sessionId));
+        if (run?.resolvePlan) {
+          const r = run.resolvePlan;
+          run.resolvePlan = null;
           r(event.plan);
         }
         return;
       }
 
       if (event.type === "user_question_answered") {
-        const pending = pendingUserAnswerResolves.get(event.call_id);
+        const run = runs.get(runKey(project.id, sessionId));
+        const pending = run?.answerResolvers.get(event.call_id);
         if (pending) {
-          pendingUserAnswerResolves.delete(event.call_id);
+          run!.answerResolvers.delete(event.call_id);
           pending.resolve(typeof event.answer === "string" ? event.answer : "");
         }
         return;
@@ -2972,29 +3189,19 @@ async function handleConnection(
       }
 
       if (event.type === "abort") {
-        // User clicked Stop. Cancel the in-flight Anthropic stream and any
-        // running tool. The loop returns with aborted=true and we record
-        // the partial turn to history (handled in runSession).
-        if (currentAbort && !currentAbort.signal.aborted) {
-          currentAbort.abort();
+        // User clicked Stop. Cancel via the run registry so it works even from a
+        // socket that reconnected to a run started on a previous one (A1). The
+        // loop returns aborted=true and runSession records the partial turn.
+        // `wake()` resolves a pending plan / rejects ask_user waits — aborting
+        // the AbortController alone only sets the flag, it doesn't wake those
+        // Promises (Stop during plan review used to freeze until Approve).
+        const run = runs.get(runKey(project.id, sessionId));
+        if (run) {
+          if (!run.abort.signal.aborted) run.abort.abort();
+          run.wake();
         }
-        // If a plan is awaiting approval, abort the AbortController alone
-        // does NOT wake the Promise — it just sets the flag. Resolve the
-        // pending Promise here so runSession can see signal.aborted and
-        // unwind. Without this, hitting Stop during plan review used to
-        // freeze the turn until the user clicked Approve anyway.
-        if (pendingPlanResolve) {
-          const resolver = pendingPlanResolve;
-          pendingPlanResolve = null;
-          resolver({ summary: "(aborted by user)", steps: [] });
-        }
-        // Likewise wake any in-flight ask_user prompt so the loop can
-        // unwind cleanly. Reject (not resolve) so the agent loop sees
-        // it as a tool error and synthesizes the abort tool_result.
-        for (const [, pending] of pendingUserAnswerResolves) {
-          pending.reject(new Error("ask_user aborted by user"));
-        }
-        pendingUserAnswerResolves.clear();
+        // Same-closure fallback for the brief pre-registration window (VM boot).
+        if (currentAbort && !currentAbort.signal.aborted) currentAbort.abort();
         return;
       }
 
@@ -3034,7 +3241,11 @@ async function handleConnection(
           send({ type: "error", message: "session is still loading, try again in a moment" });
           return;
         }
-        if (busy) {
+        // "Already running" is now a cross-socket fact (A1): the registry, not
+        // this socket's local flag, is the source of truth, so a reconnected
+        // socket can't start a second turn over a run that began on another.
+        const runK = runKey(project.id, sessionId);
+        if (busy || runs.has(runK)) {
           console.log(`[ws ${project.id}] rejected: already busy`);
           send({ type: "error", message: "agent is already running" });
           return;
@@ -3042,6 +3253,23 @@ async function handleConnection(
         busy = true;
         startedTurn = true;
         currentAbort = new AbortController();
+        // Register the run BEFORE booting so a disconnect during boot detaches
+        // (not orphans) it, and so every event routes through the registry —
+        // following whichever socket is bound and buffering a replay log while
+        // none is (A1).
+        const runHandle = registerRun(runK, currentAbort, event.content, send);
+        const runSend = routedSendFor(runK);
+        runHandle.wake = () => {
+          if (runHandle.resolvePlan) {
+            const r = runHandle.resolvePlan;
+            runHandle.resolvePlan = null;
+            r({ summary: "(aborted by user)", steps: [] });
+          }
+          for (const [, p] of runHandle.answerResolvers) {
+            p.reject(new Error("ask_user aborted by user"));
+          }
+          runHandle.answerResolvers.clear();
+        };
         // Lazy VM boot. ensureVm is idempotent — same project id returns
         // the same VM (and resumes if it was paused).
         if (isFirecrackerEnabled() && !vmHandle) {
@@ -3049,31 +3277,48 @@ async function handleConnection(
           // Surface the cold boot/restore as a progress notice so the busy pill
           // shows what's actually happening during the multi-second wait. Only
           // fires when the VM isn't already running for this session.
-          send({ type: "system", content: "Starting sandbox…" });
+          runSend({ type: "system", content: "Starting sandbox…" });
           const t0 = Date.now();
-          try {
-            vmHandle = await ensureVm({
-              projectId: project.id,
-              hostSandboxDir: sandboxDir,
-            });
-            const bootMs = Date.now() - t0;
-            console.log(`[ws ${project.id}] VM ${vmHandle.id} ready in ${bootMs}ms (ip=${vmHandle.ip})`);
-            // Render as a muted system message — don't disguise infra noise as
-            // agent output. "Fresh VM started" reads as a status notice; the
-            // ms timing tells the user whether they hit cold boot or a fast
-            // snapshot-restore path.
-            send({
-              type: "system",
-              content: `Fresh VM started · ${bootMs} ms`,
-            });
-          } catch (err) {
-            console.error(`[ws ${project.id}] VM boot failed after ${Date.now() - t0}ms:`, err);
-            send({
+          // Bounded auto-retry for the cold boot (C7): a cold Firecracker start
+          // is occasionally transient, and this runs BEFORE any output streams,
+          // so re-running it is safe (unlike retrying a mid-stream provider
+          // error). One automatic retry with a short backoff.
+          let bootErr: unknown = null;
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+              vmHandle = await ensureVm({
+                projectId: project.id,
+                hostSandboxDir: sandboxDir,
+              });
+              bootErr = null;
+              const bootMs = Date.now() - t0;
+              console.log(`[ws ${project.id}] VM ${vmHandle.id} ready in ${bootMs}ms (ip=${vmHandle.ip})`);
+              // Render as a muted system message — don't disguise infra noise as
+              // agent output. "Fresh VM started" reads as a status notice; the
+              // ms timing tells the user whether they hit cold boot or a fast
+              // snapshot-restore path.
+              runSend({ type: "system", content: `Fresh VM started · ${bootMs} ms` });
+              break;
+            } catch (err) {
+              bootErr = err;
+              console.error(`[ws ${project.id}] VM boot attempt ${attempt + 1} failed after ${Date.now() - t0}ms:`, err);
+              if (attempt === 0) {
+                runSend({ type: "system", content: "Sandbox didn't start — retrying automatically…" });
+                await new Promise((r) => setTimeout(r, 1500));
+              }
+            }
+          }
+          if (bootErr) {
+            const { code, retryable } = classifyError(bootErr);
+            runSend({
               type: "error",
-              message: `Firecracker boot failed: ${err instanceof Error ? err.message : String(err)}`,
+              message: `Couldn't start the sandbox: ${bootErr instanceof Error ? bootErr.message : String(bootErr)}`,
+              code: code === "unknown" ? "boot_timeout" : code,
+              retryable,
             });
             busy = false;
             currentAbort = null;
+            unregisterRun(runK);
             return;
           }
         }
@@ -3094,7 +3339,7 @@ async function handleConnection(
             event.model,
             event.thinking,
             selectedElement,
-            send,
+            runSend,
             apiKey,
             history,
             project.id,
@@ -3104,12 +3349,12 @@ async function handleConnection(
             user.id,
             () =>
               new Promise<Plan>((resolve) => {
-                pendingPlanResolve = resolve;
+                runHandle.resolvePlan = resolve;
               }),
             (callId, payload) =>
               new Promise<string>((resolve, reject) => {
-                pendingUserAnswerResolves.set(callId, { resolve, reject });
-                send({
+                runHandle.answerResolvers.set(callId, { resolve, reject });
+                runSend({
                   type: "user_question_asked",
                   call_id: callId,
                   question: payload.question,
@@ -3123,20 +3368,22 @@ async function handleConnection(
         } finally {
           busy = false;
           currentAbort = null;
-          // Drop any orphaned ask_user promises so a subsequent turn
-          // doesn't accidentally satisfy a stale call_id.
-          pendingUserAnswerResolves.clear();
+          // unregisterRun also drops this run's ask_user resolvers so a
+          // subsequent turn can't satisfy a stale call_id.
+          unregisterRun(runK);
         }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      send({ type: "error", message });
+      const { code, retryable } = classifyError(err);
+      send({ type: "error", message, code, retryable });
       // Only the turn-owning invocation may clear these (its own finally already
       // did on the normal error path); a bystander handler that threw must leave
       // an in-flight turn's flags untouched (B-13).
       if (startedTurn) {
         busy = false;
         currentAbort = null;
+        unregisterRun(runKey(project.id, sessionId));
       }
     }
   });
@@ -3183,6 +3430,25 @@ async function handleConnection(
   });
 
   replayHistory(send, history);
+
+  // A1: if a run for this session is STILL alive (this is the reconnect after a
+  // mid-turn disconnect), rebind it to THIS socket, tell the client the build
+  // kept running (so it doesn't treat the replayed history as finished), then
+  // flush the coalesced replay log to reconstruct the in-flight turn. Ordering:
+  // run_active first (client re-adds the user bubble + sets busy), then the
+  // buffered assistant text / tool events.
+  {
+    const liveRun = runs.get(runKey(project.id, sessionId));
+    if (liveRun) {
+      if (liveRun.graceTimer) {
+        clearTimeout(liveRun.graceTimer);
+        liveRun.graceTimer = null;
+      }
+      liveRun.socketSend = send;
+      send({ type: "run_active", session_id: sessionId, prompt: liveRun.prompt });
+      for (const ev of liveRun.buffer) send(ev);
+    }
+  }
 
   for (const s of listServers(project.id)) {
     send({ type: "server_started", id: s.id, command: s.command, port: s.port });
@@ -3518,6 +3784,11 @@ async function runSession(
 ): Promise<void> {
   const start = Date.now();
   let toolCalls = 0;
+  // BYOK (F7): resolve this account's provider keys (account key preferred, else
+  // the platform env key) once per turn. `anthropicKey` flows to planning AND
+  // compaction so a BYOK account never silently bills the platform for those.
+  const resolvedKeys = await resolveProviderKeysForUser(userId);
+  const anthropicKey = resolvedKeys.anthropic ?? apiKey;
   // Default reasoning effort when the composer didn't specify one.
   const effort: ThinkingEffort = thinkingEffort ?? "medium";
   const slashed = await expandSlashCommand(sandboxDir, userMessage);
@@ -3585,7 +3856,8 @@ async function runSession(
 
   if (mode === "plan-then-execute") {
     const plan = await proposePlan(`${messageWithRefs}${selectedBlock}`, {
-      apiKey,
+      apiKey: anthropicKey,
+      providerKeys: resolvedKeys,
       sandbox: planSandbox,
       history,
       skills: skillsBody,
@@ -3623,7 +3895,8 @@ async function runSession(
           // assistant's enter_plan_mode tool_use, which would need a paired
           // tool_result; the reason + original message carry the context.
           const plan = await proposePlan(planPrompt, {
-            apiKey,
+            apiKey: anthropicKey,
+            providerKeys: resolvedKeys,
             sandbox: planSandbox,
             history: [],
             skills: skillsBody,
@@ -3680,11 +3953,38 @@ async function runSession(
     }, 300);
   };
 
+  // Pre-run checkpoint (A5): a clean rollback point capturing sandbox state
+  // BEFORE this turn runs, labeled "pre-run:" so the Rewind UI can tell it apart
+  // from the per-tool checkpoints. Best-effort + background — never blocks the
+  // loop; no-ops when nothing changed since the last checkpoint. This is a
+  // rollback point, not a work-loss preventer: an aborted run's not-yet-written
+  // files are still gone (that's A1's job, not this).
+  commitCheckpoint(sandboxDir, projectId, `pre-run: ${finalMessage.slice(0, 80)}`)
+    .then((meta) => {
+      if (!meta) return;
+      void audit({
+        project_id: projectId,
+        user_id: userId,
+        kind: "checkpoint_create",
+        target: meta.sha,
+        metadata: { kind: "pre-run" },
+      });
+      broadcastToProject(projectId, {
+        type: "checkpoint_created",
+        sha: meta.sha,
+        short_sha: meta.short_sha,
+        message: meta.message,
+        created_at: meta.created_at,
+      });
+    })
+    .catch((err) => console.error("pre-run commitCheckpoint failed:", err));
+
   let result: Awaited<ReturnType<typeof runAgentLoop>>;
   try {
     result = await runAgentLoop(finalMessage, {
     sandbox: { rootDir: sandboxDir, vm: vmHandle ?? undefined },
-    apiKey,
+    apiKey: anthropicKey,
+    providerKeys: resolvedKeys,
     modelChoice,
     projectId,
     sessionId,
@@ -3727,6 +4027,16 @@ async function runSession(
       // Re-emit with the full input now that streaming finished. The UI
       // dedupes on call_id and updates the existing row in place.
       send({ type: "tool_call", call_id: callId, name, input });
+      // A4: the agent is about to run a dependency install — raise the
+      // "Installing… don't refresh" banner across this project's sessions.
+      const installCmd = installCommandLabel(name, input);
+      if (installCmd) {
+        broadcastToProject(projectId, {
+          type: "install_state",
+          phase: "start",
+          command: installCmd,
+        });
+      }
     },
     onToolResult: (callId, name, input, toolResult, isError, editStats) => {
       send({
@@ -3737,6 +4047,16 @@ async function runSession(
         lines_added: editStats?.linesAdded,
         lines_removed: editStats?.linesRemoved,
       });
+      // A4: clear the install banner whether the install succeeded or failed —
+      // before the isError early-return below.
+      const installCmd = installCommandLabel(name, input);
+      if (installCmd) {
+        broadcastToProject(projectId, {
+          type: "install_state",
+          phase: "end",
+          command: installCmd,
+        });
+      }
       if (isError) return;
       // Broadcast file_changed for write/edit so the file explorer updates
       // in real-time (not just at turn end). Also triggers Storage sync.
@@ -3895,6 +4215,17 @@ async function runSession(
     }).catch((err) => console.error("recordUsageEvent failed:", err));
   }
 
+  // Per-run cost estimate (C5): price the honest fresh/cache split with the same
+  // engine the dashboard uses, so the chat can show "≈ $0.40 est." for THIS run.
+  // Not a billed amount — there's no credit system; keep the "est." hedge in UI.
+  const costUsd = estimateCostUsd(
+    result.model,
+    result.usage.inputTokens,
+    result.usage.outputTokens,
+    result.usage.cacheReadTokens,
+    result.usage.cacheCreationTokens,
+  );
+
   send({
     type: "complete",
     tool_calls: toolCalls,
@@ -3907,7 +4238,91 @@ async function runSession(
       result.usage.cacheReadTokens +
       result.usage.cacheCreationTokens,
     output_tokens: result.usage.outputTokens,
+    cache_read_tokens: result.usage.cacheReadTokens,
+    cache_creation_tokens: result.usage.cacheCreationTokens,
+    model: result.model,
+    cost_usd: costUsd,
+    // Deterministic, git/tool-derived changeset (C6 Tier-1) — the trustworthy
+    // "what changed" counterpart to the model's prose summary.
+    changed_files: result.changedFiles.length ? result.changedFiles : undefined,
+    // Context-aware follow-up chips (C2). Suggestions only; the client drops one
+    // into the composer, never auto-sends.
+    suggestions: result.aborted ? undefined : suggestFollowups(result.changedFiles),
   });
+}
+
+/**
+ * Map a thrown run/boot error to a machine-readable class + retry policy (C7).
+ * Transient classes (rate_limit/overloaded/provider_5xx/boot_timeout) are
+ * retryable; deterministic ones (missing_key/provider_auth/max_iterations) are
+ * not. The client maps `code` → friendly copy (errorCopy.ts).
+ */
+function classifyError(err: unknown): { code: string; retryable: boolean } {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  const status = (err as { status?: number; statusCode?: number })?.status ??
+    (err as { statusCode?: number })?.statusCode;
+  if (/missing.*(api )?key|set (the )?\w*_?api_key|missingproviderkey|no .*api key/.test(msg))
+    return { code: "missing_key", retryable: false };
+  if (status === 401 || status === 403 || /invalid.*api key|unauthorized|forbidden|authentication fail/.test(msg))
+    return { code: "provider_auth", retryable: false };
+  if (status === 429 || /rate.?limit|too many requests/.test(msg))
+    return { code: "rate_limit", retryable: true };
+  if (status === 503 || /overloaded|at capacity|service unavailable/.test(msg))
+    return { code: "overloaded", retryable: true };
+  if ((typeof status === "number" && status >= 500) || /\b5\d\d\b|internal server error|bad gateway|gateway timeout/.test(msg))
+    return { code: "provider_5xx", retryable: true };
+  if (/firecracker|boot failed|did not open port|vm .*(fail|timeout)|start the sandbox|ensurevm/.test(msg))
+    return { code: "boot_timeout", retryable: true };
+  if (/max iterations|exceeded max iterations/.test(msg))
+    return { code: "max_iterations", retryable: false };
+  return { code: "unknown", retryable: false };
+}
+
+/**
+ * If a run_command is a dependency install (the review's "tab froze during npm
+ * install" scenario), return a short label for the install banner (A4); else
+ * null. Covers the common JS/Python/Go/Ruby/PHP installers, including chained
+ * commands like `cd app && npm install`.
+ */
+function installCommandLabel(name: string, input: unknown): string | null {
+  if (name !== "run_command") return null;
+  const cmd =
+    typeof (input as { command?: unknown })?.command === "string"
+      ? (input as { command: string }).command
+      : "";
+  const installRe =
+    /(?:^|&&|\|\||;|\s)(npm (?:i|install|ci)|pnpm (?:i|install|add)|yarn(?: (?:install|add))?|bun (?:i|install|add)|pip3? install|python3? -m pip install|poetry (?:install|add)|cargo (?:build|fetch)|go (?:mod (?:download|tidy)|get)|bundle install|composer install)\b/;
+  if (!installRe.test(cmd)) return null;
+  return cmd.length > 60 ? `${cmd.slice(0, 57)}…` : cmd;
+}
+
+/**
+ * Up to three context-aware follow-up prompts to offer as chips after a run
+ * (C2). Deterministic and zero-cost — derived from the deterministic changeset's
+ * file paths. (A future upgrade could replace this with a cheap capped model
+ * call for sharper, brief-aware suggestions; kept heuristic here so the complete
+ * event stays synchronous and adds no per-turn latency or token spend.)
+ */
+function suggestFollowups(changed: ChangedFile[]): string[] | undefined {
+  if (changed.length === 0) return undefined;
+  const paths = changed.map((c) => c.path.toLowerCase());
+  const has = (re: RegExp) => paths.some((p) => re.test(p));
+  const out: string[] = [];
+  const push = (s: string) => {
+    if (out.length < 3 && !out.includes(s)) out.push(s);
+  };
+
+  const hasUi = has(/\.(tsx|jsx|html|css|scss|svelte|vue)$/);
+  const hasData = has(/(table|list|grid|data|expense|transaction|invoice|budget|ledger|report|record)/);
+  const hasApi = has(/(api|route|server|endpoint|\bdb\b|database|schema|\.sql)/);
+
+  if (hasData) push("Add a way to export this data as CSV or Excel.");
+  if (hasData) push("Add a chart or summary to visualize the totals.");
+  if (hasUi) push("Tweak the look — colors, spacing, or layout.");
+  if (hasApi) push("Add a simple login so only my team can access it.");
+  push("Make it look good on mobile.");
+  push("Walk me through what you built and how to use it.");
+  return out.slice(0, 3);
 }
 
 // ── Filesystem helpers ────────────────────────────────────────────────────────

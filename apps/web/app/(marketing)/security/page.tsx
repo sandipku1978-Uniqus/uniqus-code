@@ -1,4 +1,5 @@
 import Link from "next/link";
+import ArchitectureDiagram from "./ArchitectureDiagram";
 
 export const metadata = {
   title: "Security — Uniqus Code",
@@ -129,6 +130,30 @@ const FAQ = [
     q: "What happens to a workspace when I close a project?",
     a: "Workspaces pause when idle and resume exactly where you left off. You can delete a project at any time, which removes its sandbox and associated data.",
   },
+  {
+    q: "Who are your sub-processors?",
+    a: "Anthropic, OpenAI, and Google process model requests; Vercel hosts the web app and Hetzner runs the orchestrator and isolated VMs; Supabase is our database; and WorkOS handles authentication and SSO. We only use a provider when the feature you've turned on requires it — for example, your turn only reaches OpenAI or Google if you select one of their models.",
+  },
+  {
+    q: "How is my data encrypted?",
+    a: "In transit, everything is TLS 1.3. At rest, project secrets and stored OAuth tokens (GitHub, Vercel, and the like) are encrypted with AES-256-GCM before they ever touch the database — the database never sees plaintext.",
+  },
+  {
+    q: "How long do you keep my data?",
+    a: "Your data lives for the life of the project and account so you can reopen work across sessions and devices. When you delete a project or account, its sandbox, secrets, audit events, and messages are hard-deleted via database cascade. To be candid: there is no time-based auto-purge today — data persists until you delete it.",
+  },
+  {
+    q: "How does the agent use a secret without seeing it?",
+    a: "Provider and connector secrets are decrypted only server-side, inside the orchestrator, and written directly into your sandbox's .env file. The AI agent receives just the env-var name and a confirmation — never the plaintext value. Your code reads it from process.env at runtime, so the secret never enters the model's context.",
+  },
+  {
+    q: "Is there an audit trail?",
+    a: "Yes. We record an audit event for secret reads and writes, connector invocations, and checkpoint create/restore — each scoped to a project. You can review the trail per project today. An organization-wide audit view and a dedicated UI viewer are on the roadmap.",
+  },
+  {
+    q: "Are you SOC 2 or ISO 27001 certified?",
+    a: "Not yet — these certifications are on our roadmap, and we won't claim them until they're complete. In the meantime we're happy to walk enterprise teams through our architecture, isolation model, and controls, and to complete a security questionnaire and DPA.",
+  },
 ];
 
 export default function SecurityPage() {
@@ -220,6 +245,18 @@ export default function SecurityPage() {
             before any public disclosure.
           </p>
         </div>
+      </section>
+
+      <section className="mk-page narrow">
+        <div className="mk-section-head center">
+          <span className="label-eyebrow">How it works</span>
+          <h2>What happens to a request.</h2>
+          <p>
+            From your browser to the model and back, here&rsquo;s the path your
+            code and secrets take — and where the boundaries sit.
+          </p>
+        </div>
+        <ArchitectureDiagram />
       </section>
 
       <section className="mk-page narrow">

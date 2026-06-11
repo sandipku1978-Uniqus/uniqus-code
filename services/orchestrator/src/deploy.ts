@@ -25,7 +25,9 @@ import {
 import { setVercelProject } from "./db/projects.js";
 
 // Files we never push. Re-derived on every deploy from the live sandbox.
-const SKIP_DIR_NAMES = new Set([
+// Exported so the .zip export (export.ts) reuses the exact same exclusions —
+// build artifacts and secret .env files stay out of both paths.
+export const SKIP_DIR_NAMES = new Set([
   "node_modules",
   ".next",
   ".git",
@@ -39,7 +41,7 @@ const SKIP_DIR_NAMES = new Set([
   ".DS_Store",
 ]);
 
-const SKIP_FILE_BASENAMES = new Set([
+export const SKIP_FILE_BASENAMES = new Set([
   ".env",
   ".env.local",
   ".env.development.local",

@@ -269,6 +269,22 @@ create table if not exists project_secrets (
 create index if not exists project_secrets_project_idx
   on project_secrets (project_id, name);
 
+-- Bring-Your-Own-Key (F7): per-account provider API keys, AES-256-GCM encrypted
+-- with the same master key as project_secrets. One row per (account, provider).
+-- Plaintext is never stored or returned; the key never enters the agent/VM.
+create table if not exists account_provider_keys (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  provider text not null check (provider in ('anthropic', 'openai', 'google')),
+  encrypted_value text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, provider)
+);
+
+create index if not exists account_provider_keys_user_idx
+  on account_provider_keys (user_id);
+
 -- Per-environment scoping (Phase 2.x). Same name can exist in multiple envs
 -- with different values (e.g. STRIPE_API_KEY in 'production' vs 'development').
 -- Backfilled to 'default' for existing rows; the API treats 'default' as the

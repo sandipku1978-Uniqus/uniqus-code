@@ -91,6 +91,11 @@ fn main() {
 
     let servers: ServerTable = Arc::new(Mutex::new(HashMap::new()));
     let server = Arc::new(server);
+    // F1: the bearer token required on every request (None ⇒ not enforced).
+    let auth: Arc<Option<String>> = Arc::new(read_required_token());
+    if auth.is_some() {
+        eprintln!("[uniqus-agent] request auth ENFORCED (per-VM bearer token)");
+    }
     // Thread-per-request keeps the implementation small. The only client is
     // the orchestrator and concurrency stays in single digits.
     loop {
@@ -102,8 +107,9 @@ fn main() {
             }
         };
         let servers = Arc::clone(&servers);
+        let auth = Arc::clone(&auth);
         thread::spawn(move || {
-            if let Err(e) = handle(req, servers) {
+            if let Err(e) = handle(req, servers, auth) {
                 eprintln!("[uniqus-agent] handler error: {}", e);
             }
         });
@@ -145,6 +151,22 @@ fn configure_network() {
     // keep it (pass None) and just bring the link up with the cmdline address.
     apply_network(&ip, &gw, None);
     eprintln!("[uniqus-agent] eth0 configured from cmdline: ip={} gw={}", ip, gw);
+}
+
+/// F1: the per-VM bearer token the orchestrator must present on every request,
+/// or None to NOT enforce. We enforce ONLY when `uniqus_auth=1` AND
+/// `uniqus_token=<t>` are both on the cmdline — so the token can ship dark
+/// (provisioned + sent but not enforced) until it's validated on the host.
+fn read_required_token() -> Option<String> {
+    let cmdline = fs::read_to_string("/proc/cmdline").ok()?;
+    let enforced = cmdline.split_ascii_whitespace().any(|t| t == "uniqus_auth=1");
+    if !enforced {
+        return None;
+    }
+    cmdline
+        .split_ascii_whitespace()
+        .find(|tok| tok.starts_with("uniqus_token="))
+        .map(|tok| tok["uniqus_token=".len()..].to_string())
 }
 
 /// Run a host command, logging the outcome. Returns whether it succeeded.
@@ -233,10 +255,26 @@ fn mount_sandbox() {
     run_cmd("mount", &["-t", "ext4", "/dev/vdb", &*dir]);
 }
 
-fn handle(mut req: Request, servers: ServerTable) -> std::io::Result<()> {
+fn handle(mut req: Request, servers: ServerTable, auth: Arc<Option<String>>) -> std::io::Result<()> {
     let url = req.url().to_string();
     let method = req.method().clone();
     let (path, query) = split_url(&url);
+
+    // F1: require the per-VM bearer token on every endpoint except /health (an
+    // unauthenticated readiness probe the orchestrator pings before attaching
+    // the token). `auth` is None when enforcement is off (dark launch).
+    if path != "/health" {
+        if let Some(required) = auth.as_ref() {
+            let expected = format!("Bearer {}", required);
+            let ok = req
+                .headers()
+                .iter()
+                .any(|h| h.field.equiv("Authorization") && h.value.as_str() == expected);
+            if !ok {
+                return req.respond(json_response(401, &json!({ "error": "unauthorized" })));
+            }
+        }
+    }
 
     let result: Result<Response<std::io::Cursor<Vec<u8>>>, AgentError> = (|| {
         match (&method, path.as_str()) {

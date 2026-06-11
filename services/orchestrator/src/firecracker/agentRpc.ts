@@ -291,6 +291,10 @@ function rpc<T = void>(
         Accept: "application/json",
         "Content-Type": "application/json",
         ...(payload ? { "Content-Length": String(payload.length) } : {}),
+        // F1: authenticate to the in-VM agent so a peer VM on the shared bridge
+        // can't drive it. Always sent when provisioned; the agent only ENFORCES
+        // once FIRECRACKER_AGENT_AUTH=1 (dark-launch safe).
+        ...(vm.authToken ? { Authorization: `Bearer ${vm.authToken}` } : {}),
       },
       timeout: readTimeout,
     });

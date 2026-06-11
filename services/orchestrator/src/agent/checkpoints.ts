@@ -278,6 +278,66 @@ export async function restoreCheckpoint(
   return { ok: true, restored_to: sha };
 }
 
+// Well-known git empty-tree object — the "parent" for the very first commit.
+const EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+export interface CheckpointFileDelta {
+  path: string;
+  added: number;
+  removed: number;
+}
+
+/**
+ * The diff a single checkpoint introduced (C6-Tier2): `git diff <sha>~1 <sha>`
+ * against the shadow repo, or against the empty tree for the first commit.
+ * Returns the unified diff text (capped) plus a per-file numstat. Read-only.
+ */
+export async function getCheckpointDiff(
+  sandboxDir: string,
+  projectId: string,
+  sha: string,
+): Promise<
+  | { ok: true; diff: string; truncated: boolean; files: CheckpointFileDelta[] }
+  | { ok: false; error: string }
+> {
+  if (!/^[0-9a-f]{6,40}$/.test(sha)) return { ok: false, error: "invalid sha" };
+  const ctx = await ensureShadow(sandboxDir, projectId);
+  if (!ctx) return { ok: false, error: "checkpoints unavailable (git not installed?)" };
+  const gitArgs = (...rest: string[]) => [
+    "--git-dir",
+    ctx.gitDir,
+    "--work-tree",
+    sandboxDir,
+    ...rest,
+  ];
+  // First commit has no parent → diff against the empty tree.
+  const parent = await exec("git", gitArgs("rev-parse", "--verify", `${sha}^`), sandboxDir);
+  const base = parent.ok ? `${sha}^` : EMPTY_TREE_SHA;
+  const diff = await exec("git", gitArgs("diff", "--no-color", base, sha), sandboxDir);
+  if (!diff.ok) return { ok: false, error: diff.stderr || "diff failed" };
+  const numstat = await exec("git", gitArgs("diff", "--numstat", base, sha), sandboxDir);
+  const files: CheckpointFileDelta[] = numstat.ok
+    ? numstat.stdout
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => {
+          const [added, removed, ...p] = l.split("\t");
+          return {
+            path: p.join("\t"),
+            added: Number(added) || 0, // "-" for binary → 0
+            removed: Number(removed) || 0,
+          };
+        })
+    : [];
+  // Cap the unified diff so one huge checkpoint can't blow the response.
+  const MAX = 256 * 1024;
+  const truncated = diff.stdout.length > MAX;
+  const text = truncated
+    ? `${diff.stdout.slice(0, MAX)}\n\n[... diff truncated — open the files in the editor for the full change ...]`
+    : diff.stdout;
+  return { ok: true, diff: text, truncated, files };
+}
+
 export async function clearCheckpoints(sandboxDir: string, projectId: string): Promise<void> {
   const shadow = shadowDir(sandboxDir, projectId);
   await fs.rm(shadow, { recursive: true, force: true }).catch(() => {});

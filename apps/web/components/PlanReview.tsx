@@ -1,11 +1,15 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Plan } from "@uniqus/api-types";
 import { send } from "@/lib/ws-client";
 import { useStore, type ChatItem } from "@/lib/store";
 
 type PlanItem = Extract<ChatItem, { kind: "plan_proposal" }>;
+
+// One-time "why did a plan appear?" explainer (B1). Set once, globally, after
+// the first plan the user sees.
+const SEEN_PLAN_INTRO_KEY = "uniqus.seenPlanIntro";
 
 export default function PlanReview({ item }: { item: PlanItem }) {
   const approvePendingPlan = useStore((s) => s.approvePendingPlan);
@@ -13,8 +17,41 @@ export default function PlanReview({ item }: { item: PlanItem }) {
   const setPendingComposerText = useStore((s) => s.setPendingComposerText);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Plan>(item.plan);
+  // B3: pure-client "Simplify" — show only the plain summary + safety line,
+  // hide the steps / success criteria / technical summary. Zero model cost.
+  const [simplified, setSimplified] = useState(false);
+  // B2: the technical one-paragraph summary is secondary; collapsed by default.
+  const [techOpen, setTechOpen] = useState(false);
   const isPending = item.status === "pending";
   const isRejected = item.status === "rejected";
+
+  // B1 explainer banner — only until the user has seen one plan, and only on a
+  // still-pending plan (no point explaining an already-decided one).
+  const [showIntro, setShowIntro] = useState(false);
+  useEffect(() => {
+    if (!isPending) return;
+    try {
+      if (!localStorage.getItem(SEEN_PLAN_INTRO_KEY)) setShowIntro(true);
+    } catch {
+      /* private mode — just don't show it */
+    }
+  }, [isPending]);
+  const dismissIntro = () => {
+    setShowIntro(false);
+    try {
+      localStorage.setItem(SEEN_PLAN_INTRO_KEY, "1");
+    } catch {
+      /* non-fatal */
+    }
+  };
+
+  // B2: prefer the plain-English sentence; fall back to the technical summary
+  // for plans drafted before the planner learned to write one.
+  const plain = (draft.plain_summary ?? "").trim() || draft.summary;
+  const hasTech =
+    !!draft.plain_summary?.trim() &&
+    !!draft.summary?.trim() &&
+    draft.summary.trim() !== draft.plain_summary.trim();
 
   const approve = (plan: Plan) => {
     send({ type: "plan_approved", plan });
@@ -62,22 +99,76 @@ export default function PlanReview({ item }: { item: PlanItem }) {
     : "var(--text-dim)";
 
   return (
-    <div className={`plan-card ${isPending ? "pending" : ""}`} style={{ marginLeft: 30 }}>
-      <div className="label-micro" style={{ color: labelColor }}>
-        Plan {label}
-      </div>
-      {editing ? (
-        <textarea
-          value={draft.summary}
-          onChange={(e) => setDraft({ ...draft, summary: e.target.value })}
-          className="step-input"
-          style={{ marginBottom: 10, minHeight: 50 }}
-          rows={3}
-          aria-label="Plan summary"
-        />
-      ) : (
-        <p className="summary">{draft.summary}</p>
+    <div style={{ marginLeft: 30 }}>
+      {showIntro && (
+        <div className="plan-intro" role="note">
+          <span style={{ flex: 1 }}>
+            Uniqus drafted a <strong>plan</strong> first. Nothing runs until you click
+            <strong> Approve &amp; run</strong>. You can turn this off anytime with the Plan
+            toggle in the composer.
+          </span>
+          <button type="button" className="msg-action-btn" onClick={dismissIntro}>
+            Got it
+          </button>
+        </div>
       )}
+      <div className={`plan-card ${isPending ? "pending" : ""}`}>
+        <div className="label-micro" style={{ color: labelColor }}>
+          Plan {label}
+        </div>
+        {editing ? (
+          <>
+            <label className="plan-edit-label">Plain-English summary</label>
+            <textarea
+              value={draft.plain_summary ?? ""}
+              onChange={(e) => setDraft({ ...draft, plain_summary: e.target.value })}
+              className="step-input"
+              style={{ marginBottom: 8, minHeight: 40 }}
+              rows={2}
+              placeholder="One plain sentence a non-technical user understands…"
+              aria-label="Plain-English plan summary"
+            />
+            <label className="plan-edit-label">Technical summary</label>
+            <textarea
+              value={draft.summary}
+              onChange={(e) => setDraft({ ...draft, summary: e.target.value })}
+              className="step-input"
+              style={{ marginBottom: 10, minHeight: 50 }}
+              rows={3}
+              aria-label="Plan summary"
+            />
+          </>
+        ) : (
+          <>
+            <p className="plan-plain">{plain}</p>
+            {/* Hard-coded, model-independent safety line (B2). */}
+            <p className="plan-safety">
+              🔒 Nothing runs until you click <strong>Approve &amp; run</strong> — your files
+              won&apos;t change before then.
+            </p>
+            {!simplified && draft.wireframe?.trim() && (
+              // ASCII only — rendered as text in a <pre>, never as markup, so
+              // there's no injection surface from model output (B4).
+              <pre className="plan-wireframe" aria-label="Wireframe sketch">
+                {draft.wireframe}
+              </pre>
+            )}
+            {!simplified && hasTech && (
+              <>
+                <button
+                  type="button"
+                  className="plan-tech-toggle"
+                  onClick={() => setTechOpen((v) => !v)}
+                  aria-expanded={techOpen}
+                >
+                  {techOpen ? "▾" : "▸"} Technical summary
+                </button>
+                {techOpen && <p className="summary">{draft.summary}</p>}
+              </>
+            )}
+          </>
+        )}
+        {!simplified && (
       <ol>
         {draft.steps.map((step, i) => (
           <li key={i}>
@@ -134,45 +225,63 @@ export default function PlanReview({ item }: { item: PlanItem }) {
           </li>
         ))}
       </ol>
-      {editing && (
-        <button
-          type="button"
-          onClick={addStep}
-          className="btn-secondary"
-          style={{ fontSize: 12, padding: "4px 10px", marginBottom: 8 }}
-        >
-          + Add step
-        </button>
-      )}
-      {isPending && (
-        <div className="actions">
-          <button type="button" onClick={() => approve(draft)} className="btn-primary" style={{ fontSize: 12, padding: "6px 12px" }}>
-            Approve & run
-          </button>
+        )}
+        {!simplified && editing && (
           <button
             type="button"
-            onClick={() => setEditing((v) => !v)}
+            onClick={addStep}
             className="btn-secondary"
-            style={{ fontSize: 12, padding: "6px 12px" }}
+            style={{ fontSize: 12, padding: "4px 10px", marginBottom: 8 }}
           >
-            {editing ? "Done editing" : "Edit"}
+            + Add step
           </button>
-          <button
-            type="button"
-            onClick={rejectAndRevise}
-            className="btn-ghost"
-            style={{ fontSize: 12, padding: "6px 12px" }}
-            title="Discard this plan and tell Uniqus what to do differently"
-          >
-            Reject &amp; revise
-          </button>
-        </div>
-      )}
-      {isRejected && (
-        <div className="step-criteria" style={{ marginTop: 4 }}>
-          Plan rejected — describe your changes in the composer below.
-        </div>
-      )}
+        )}
+        {isPending && (
+          <div className="actions">
+            <button type="button" onClick={() => approve(draft)} className="btn-primary" style={{ fontSize: 12, padding: "6px 12px" }}>
+              Approve & run
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditing((v) => !v)}
+              className="btn-secondary"
+              style={{ fontSize: 12, padding: "6px 12px" }}
+            >
+              {editing ? "Done editing" : "Edit"}
+            </button>
+            {/* B3: pure-client simplify toggle — no model round-trip. */}
+            {!editing && (
+              <button
+                type="button"
+                onClick={() => setSimplified((v) => !v)}
+                className="btn-ghost"
+                style={{ fontSize: 12, padding: "6px 12px" }}
+                title={
+                  simplified
+                    ? "Show the full plan with steps"
+                    : "Show just the plain-English summary"
+                }
+              >
+                {simplified ? "Show details" : "Simplify"}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={rejectAndRevise}
+              className="btn-ghost"
+              style={{ fontSize: 12, padding: "6px 12px" }}
+              title="Discard this plan and tell Uniqus what to do differently"
+            >
+              Reject &amp; revise
+            </button>
+          </div>
+        )}
+        {isRejected && (
+          <div className="step-criteria" style={{ marginTop: 4 }}>
+            Plan rejected — describe your changes in the composer below.
+          </div>
+        )}
+      </div>
     </div>
   );
 }

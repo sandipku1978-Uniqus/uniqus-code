@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useSearchParams } from "next/navigation";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ClientEvent, UploadedFileSummary } from "@uniqus/api-types";
 import {
@@ -11,6 +11,7 @@ import {
   type SlashCommandSummary,
 } from "@/lib/api";
 import { useStore, type ChatItem, type SelectedElement } from "@/lib/store";
+import { errorCopyFor } from "@/lib/errorCopy";
 import { connect, send } from "@/lib/ws-client";
 import PlanReview from "./PlanReview";
 import ChatSessionDropdown from "./ChatSessionDropdown";
@@ -26,14 +27,18 @@ import { ErrorBoundary } from "./ErrorBoundary";
  * running. Kept local to this file — the picker has its own copy.
  */
 const EXAMPLE_PROMPTS = [
-  "Build a landing page for a coffee subscription with a hero, pricing, and signup form.",
-  "Make a Markdown note-taking app with a sidebar list and live preview.",
-  "Create a REST API for a todo list with SQLite and a few example endpoints.",
+  "Build an expense approval workflow where staff submit expenses and managers approve or reject them, with a status trail.",
+  "Make a SOX control register: a table of controls with owner, test status, and an audit-ready evidence note.",
+  "Create a budget vs. actuals dashboard by department with variance highlights and a month filter.",
 ];
 
 export default function ChatPanel() {
   const chat = useStore((s) => s.chat);
   const busy = useStore((s) => s.busy);
+  const installInProgress = useStore((s) => s.installInProgress);
+  const runReattaching = useStore((s) => s.runReattaching);
+  const postRunDismissed = useStore((s) => s.postRunDismissed);
+  const dismissPostRun = useStore((s) => s.dismissPostRun);
   const mode = useStore((s) => s.mode);
   const setModeManual = useStore((s) => s.setModeManual);
   const model = useStore((s) => s.model);
@@ -321,6 +326,31 @@ export default function ChatPanel() {
   }, [chat]);
 
   const turns = useMemo(() => buildTurns(chat), [chat]);
+  // Bound the rendered conversation for very long sessions (A3 item 4). The
+  // per-row/per-turn memoization above is the real freeze cure; this caps the
+  // initial mount + live DOM size so a many-hundred-turn history doesn't render
+  // all at once. The in-flight turn is always in the tail slice, so streaming is
+  // never affected.
+  const TURN_WINDOW = 60;
+  const [showAllTurns, setShowAllTurns] = useState(false);
+  const hiddenTurnCount =
+    !showAllTurns && turns.length > TURN_WINDOW ? turns.length - TURN_WINDOW : 0;
+  const visibleTurns = hiddenTurnCount > 0 ? turns.slice(hiddenTurnCount) : turns;
+
+  // beforeunload guard (A4): warn before a refresh/close while the agent is
+  // working or installing deps — the instinctive refresh is what loses the
+  // not-yet-written tail of a run. (Once the run-registry lands the run also
+  // survives the refresh, but the warning still spares users the scare.)
+  useEffect(() => {
+    if (!busy && !installInProgress) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [busy, installInProgress]);
+
   const tree = useStore((s) => s.tree);
   const validFilePaths = useMemo(() => {
     const set = new Set<string>();
@@ -430,6 +460,13 @@ export default function ChatPanel() {
   // Re-send a previous user message verbatim (or regenerate a turn's answer).
   const handleResend = useCallback((text: string) => void sendText(text), [sendText]);
 
+  // Retry the run after a failure (C7): resend the most recent user message.
+  // Reads the live store so it isn't tied to a stale closure of `chat`.
+  const handleRetryRun = useCallback(() => {
+    const last = [...useStore.getState().chat].reverse().find((i) => i.kind === "user");
+    if (last && last.kind === "user") void sendText(last.content);
+  }, [sendText]);
+
   // Hand a failed tool's error back to the agent with a "fix it" framing (§C
   // error→fix loop; the frontend slice — no terminal needed).
   const handleFixError = useCallback(
@@ -447,9 +484,10 @@ export default function ChatPanel() {
       onEdit: handleEditMessage,
       onResend: handleResend,
       onFixError: handleFixError,
+      onRetryRun: handleRetryRun,
       canAct: connected && !busy,
     }),
-    [handleEditMessage, handleResend, handleFixError, connected, busy],
+    [handleEditMessage, handleResend, handleFixError, handleRetryRun, connected, busy],
   );
 
   const handleSubmit = async (e?: React.FormEvent) => {
@@ -687,8 +725,27 @@ export default function ChatPanel() {
             </div>
           </div>
         )}
-        {turns.map((turn, idx) => {
-          const isLast = idx === turns.length - 1;
+        {hiddenTurnCount > 0 && (
+          <button
+            type="button"
+            className="msg-system"
+            onClick={() => setShowAllTurns(true)}
+            style={{
+              cursor: "pointer",
+              width: "100%",
+              textAlign: "center",
+              background: "transparent",
+              border: "1px dashed var(--border-default)",
+              borderRadius: 6,
+              padding: "6px 10px",
+            }}
+            title="Render the full conversation"
+          >
+            ↑ Show {hiddenTurnCount} earlier message{hiddenTurnCount === 1 ? "" : "s"}
+          </button>
+        )}
+        {visibleTurns.map((turn, idx) => {
+          const isLast = idx === visibleTurns.length - 1;
           // Past turns (those ending in a `complete` marker) collapse by default;
           // the current in-flight turn (no complete yet) always stays expanded.
           const completeId = turn.complete?.id;
@@ -717,6 +774,61 @@ export default function ChatPanel() {
             </ErrorBoundary>
           );
         })}
+        {/* Post-build "Does this look right?" confirmation (C1). Only after a
+            live, file-mutating turn that finished cleanly — scoped to file
+            mutations so tiny/read-only/question turns don't nag. */}
+        {(() => {
+          const last = visibleTurns[visibleTurns.length - 1];
+          const c = last?.complete;
+          if (
+            !c ||
+            c.aborted ||
+            !(c.changed_files && c.changed_files.length > 0) ||
+            postRunDismissed[c.id] ||
+            !connected ||
+            busy
+          ) {
+            return null;
+          }
+          return (
+            <div className="post-run-confirm" role="group" aria-label="Does this look right?">
+              <span className="prc-q">Does this look right?</span>
+              <div className="prc-actions">
+                <button
+                  type="button"
+                  className="btn-primary"
+                  style={{ fontSize: 12, padding: "5px 11px" }}
+                  onClick={() => dismissPostRun(c.id)}
+                >
+                  Yes, keep going
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  style={{ fontSize: 12, padding: "5px 11px" }}
+                  onClick={() => {
+                    dismissPostRun(c.id);
+                    requestAnimationFrame(() => textareaRef.current?.focus());
+                  }}
+                >
+                  No, change something
+                </button>
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  style={{ fontSize: 12, padding: "5px 11px" }}
+                  onClick={() => {
+                    dismissPostRun(c.id);
+                    setConfirmReset(true);
+                  }}
+                  title="Clears the chat history — your project files are kept"
+                >
+                  Clear chat &amp; restart
+                </button>
+              </div>
+            </div>
+          );
+        })()}
         {busy && (() => {
           // Show a thinking indicator when the agent is working but no tool
           // calls or text have streamed yet (e.g. planning, booting VM).
@@ -876,6 +988,35 @@ export default function ChatPanel() {
           >
             Retry
           </button>
+        </div>
+      )}
+
+      {runReattaching && (
+        <div className="install-banner" role="status" aria-live="polite" style={{
+          background: "color-mix(in srgb, var(--conf-high, #3ea76a) 13%, transparent)",
+          borderColor: "var(--conf-high, #3ea76a)",
+        }}>
+          <span className="install-spinner" aria-hidden="true" style={{
+            borderTopColor: "var(--conf-high, #3ea76a)",
+            borderColor: "color-mix(in srgb, var(--conf-high, #3ea76a) 35%, transparent)",
+            borderTopWidth: 2, borderStyle: "solid",
+          }} />
+          <span style={{ flex: 1 }}>
+            Reconnected — your build kept running while you were away.
+          </span>
+        </div>
+      )}
+
+      {installInProgress && (
+        <div className="install-banner" role="status" aria-live="polite">
+          <span className="install-spinner" aria-hidden="true" />
+          <span style={{ flex: 1 }}>
+            Installing dependencies — this can take a minute.{" "}
+            <strong>Don&apos;t refresh.</strong>
+          </span>
+          <code className="install-cmd" title={installInProgress.command}>
+            {installInProgress.command}
+          </code>
         </div>
       )}
 
@@ -1221,6 +1362,8 @@ interface ChatHandlers {
   onResend: (text: string) => void;
   /** Hand a failed tool's error back to the agent with a "fix it" prompt. */
   onFixError: (name: string, result: string) => void;
+  /** Retry the last run after a failure (C7). */
+  onRetryRun: () => void;
   /** Whether send-style actions are currently possible (connected + idle). */
   canAct: boolean;
 }
@@ -1275,7 +1418,52 @@ function buildTurns(chat: ChatItem[]): Turn[] {
   return turns;
 }
 
-function Turn({
+// A cheap, content-aware signature for one chat item — captures everything
+// that affects how the item renders, and crucially the GROWING fields (text
+// length, tool result/diff state) so a live turn re-renders while a finished
+// one does not. Used by the Turn memo comparator (A3).
+function itemSig(it: ChatItem): string {
+  switch (it.kind) {
+    case "assistant_text":
+    case "reasoning":
+    case "system":
+      return `${it.id}:${it.content.length}`;
+    case "tool":
+      return `${it.id}:${it.result === undefined ? "p" : it.is_error ? "e" : "r"}:${it.lines_added ?? ""}/${it.lines_removed ?? ""}`;
+    case "user_question":
+      return `${it.id}:${it.answer ?? ""}`;
+    case "plan_proposal":
+      return `${it.id}:${it.status}`;
+    case "user":
+      return `${it.id}:${it.attachments?.length ?? 0}`;
+    default:
+      return it.id;
+  }
+}
+function turnSig(t: Turn): string {
+  let sig = `${t.key}|${t.complete?.id ?? ""}|`;
+  for (const it of t.head) sig += itemSig(it) + ",";
+  sig += "#";
+  for (const it of t.body) sig += itemSig(it) + ",";
+  return sig;
+}
+function areTurnPropsEqual(
+  a: { turn: Turn; expanded: boolean; handlers: ChatHandlers; isLastTurn: boolean },
+  b: { turn: Turn; expanded: boolean; handlers: ChatHandlers; isLastTurn: boolean },
+): boolean {
+  // `onToggle` identity is intentionally ignored: its behavior is fully
+  // determined by the turn's complete-marker id, which is in turnSig. `handlers`
+  // is a stable useMemo. So a finished turn whose content didn't change is a
+  // guaranteed skip even though buildTurns hands us a fresh Turn object.
+  return (
+    a.expanded === b.expanded &&
+    a.isLastTurn === b.isLastTurn &&
+    a.handlers === b.handlers &&
+    turnSig(a.turn) === turnSig(b.turn)
+  );
+}
+
+const Turn = memo(function Turn({
   turn,
   expanded,
   onToggle,
@@ -1355,11 +1543,13 @@ function Turn({
               ? () => handlers.onResend(userContent)
               : undefined
           }
+          onSuggestion={handlers.onEdit}
+          showSuggestions={isLastTurn && handlers.canAct}
         />
       )}
     </>
   );
-}
+}, areTurnPropsEqual);
 
 function formatFileSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "";
@@ -1445,6 +1635,26 @@ function CodeBlock({ children }: { children?: ReactNode }) {
   );
 }
 
+// Memoized markdown subtree (A3). ReactMarkdown re-parses its whole input on
+// every render; memoizing on `content` means a row that re-renders for a
+// non-content reason never reparses, and the growing live block reparses at
+// most once per animation frame (WS deltas are coalesced in ws-client). The
+// `components` map must be defined once (module scope) so it isn't a new object
+// each render — that alone would defeat ReactMarkdown's internal memo.
+const MARKDOWN_COMPONENTS: Components = {
+  a: ({ ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+  pre: CodeBlock,
+};
+const Markdown = memo(function Markdown({ content }: { content: string }) {
+  return (
+    <div className="md">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+});
+
 /** Compact token count: 980 → "980", 10800 → "10.8k", 1_250_000 → "1.25M". */
 function formatTokens(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "0";
@@ -1479,7 +1689,12 @@ function extractFileRefs(content: string, validPaths: Set<string>): string[] {
   return Array.from(found);
 }
 
-function ChatItemView({
+// Memoized (A3). `chat` is rebuilt on every streamed token, so without this
+// every row re-rendered per token — the freeze. Only the ONE growing
+// assistant_text block gets a new object reference from the store; all other
+// items keep their reference, and `handlers` is a stable useMemo, so memo skips
+// re-rendering (and re-parsing markdown for) every unchanged row.
+const ChatItemView = memo(function ChatItemView({
   item,
   handlers,
   isLiveReasoning = false,
@@ -1570,17 +1785,7 @@ function ChatItemView({
           </span>
         </div>
         <div className="msg-body" style={{ paddingLeft: 30 }}>
-          <div className="md">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              components={{
-                a: ({ ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
-                pre: CodeBlock,
-              }}
-            >
-              {item.content}
-            </ReactMarkdown>
-          </div>
+          <Markdown content={item.content} />
         </div>
       </div>
     );
@@ -1600,7 +1805,80 @@ function ChatItemView({
   if (item.kind === "system") {
     return <div className="msg-system">{item.content}</div>;
   }
+  if (item.kind === "error") {
+    return (
+      <ErrorCard
+        item={item}
+        onRetry={handlers.onRetryRun}
+        onSimplify={() =>
+          handlers.onEdit("Try that again, but take a simpler, more reliable approach.")
+        }
+        canAct={handlers.canAct}
+      />
+    );
+  }
   return null;
+});
+
+function ErrorCard({
+  item,
+  onRetry,
+  onSimplify,
+  canAct,
+}: {
+  item: Extract<ChatItem, { kind: "error" }>;
+  onRetry: () => void;
+  onSimplify: () => void;
+  canAct: boolean;
+}) {
+  const [showRaw, setShowRaw] = useState(false);
+  const copy = errorCopyFor(item.code, item.message);
+  return (
+    <div className="error-card" role="alert">
+      <div className="error-card-head">
+        <span className="error-card-icon" aria-hidden="true">
+          ⚠
+        </span>
+        <span className="error-card-title">{copy.title}</span>
+      </div>
+      <p className="error-card-plain">{copy.plain}</p>
+      {copy.suggestions.length > 0 && (
+        <ul className="error-card-suggestions">
+          {copy.suggestions.map((s) => (
+            <li key={s}>{s}</li>
+          ))}
+        </ul>
+      )}
+      <div className="error-card-actions">
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={onRetry}
+          disabled={!canAct}
+          title={canAct ? "Run the last request again" : "Available once the agent is idle and connected"}
+        >
+          ↻ Retry run
+        </button>
+        <button
+          type="button"
+          className="msg-action-btn"
+          onClick={onSimplify}
+          title="Put a 'try a simpler approach' prompt in the composer"
+        >
+          Simplify request
+        </button>
+        <button
+          type="button"
+          className="msg-action-btn"
+          onClick={() => setShowRaw((v) => !v)}
+          aria-expanded={showRaw}
+        >
+          {showRaw ? "Hide details" : "Technical details"}
+        </button>
+      </div>
+      {showRaw && <pre className="error-card-raw">{item.message}</pre>}
+    </div>
+  );
 }
 
 function UserQuestionCard({
@@ -1709,17 +1987,31 @@ function UserQuestionCard({
   );
 }
 
+/** "$0.40", "<$0.01" for sub-cent, "$1.20" — never implies a charged amount. */
+function formatCost(usd: number): string {
+  if (!Number.isFinite(usd) || usd <= 0) return "$0.00";
+  if (usd < 0.01) return "<$0.01";
+  return `$${usd.toFixed(2)}`;
+}
+
 function CompleteRow({
   item,
   expanded,
   onToggle,
   onRegenerate,
+  onSuggestion,
+  showSuggestions,
 }: {
   item: Extract<ChatItem, { kind: "complete" }>;
   expanded: boolean;
   onToggle?: () => void;
   onRegenerate?: () => void;
+  /** Drop a suggested follow-up into the composer (C2). */
+  onSuggestion?: (text: string) => void;
+  /** Only the last, actionable turn shows suggestion chips. */
+  showSuggestions?: boolean;
 }) {
+  const [changesOpen, setChangesOpen] = useState(false);
   const parts = [
     item.aborted ? "aborted" : "done",
     `${item.tool_calls} tool calls`,
@@ -1732,38 +2024,103 @@ function CompleteRow({
       `${formatTokens(item.input_tokens ?? 0)} in · ${formatTokens(item.output_tokens ?? 0)} out`,
     );
   }
+  // Per-run cost estimate (C5). "est." kept deliberately — there's no billing
+  // system; this is a best-effort number, not a charge.
+  if (item.cost_usd !== undefined && item.cost_usd > 0) {
+    parts.push(`≈ ${formatCost(item.cost_usd)} est.`);
+  }
   const summary = parts.join(" · ");
+  const changed = item.changed_files ?? [];
+  const suggestions = item.suggestions ?? [];
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      <button
-        type="button"
-        onClick={onToggle}
-        className="msg-system"
-        style={{
-          cursor: onToggle ? "pointer" : "default",
-          flex: 1,
-          textAlign: "left",
-          background: "transparent",
-          border: "none",
-          padding: "4px 0",
-          opacity: 0.75,
-        }}
-        title={onToggle ? (expanded ? "Collapse this turn" : "Expand this turn") : undefined}
-      >
-        {onToggle ? (expanded ? "▾ " : "▸ ") : ""}
-        {summary}
-      </button>
-      {onRegenerate && (
+    <div className="complete-row">
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <button
           type="button"
-          className="msg-action-btn"
-          onClick={onRegenerate}
-          title="Run this turn again from the same prompt"
-          aria-label="Regenerate this response"
-          style={{ flex: "0 0 auto" }}
+          onClick={onToggle}
+          className="msg-system"
+          style={{
+            cursor: onToggle ? "pointer" : "default",
+            flex: 1,
+            textAlign: "left",
+            background: "transparent",
+            border: "none",
+            padding: "4px 0",
+            opacity: 0.75,
+          }}
+          title={
+            onToggle
+              ? expanded
+                ? "Collapse this turn"
+                : "Expand this turn"
+              : item.model
+                ? `Ran on ${item.model}`
+                : undefined
+          }
         >
-          ↻ Regenerate
+          {onToggle ? (expanded ? "▾ " : "▸ ") : ""}
+          {summary}
         </button>
+        {onRegenerate && (
+          <button
+            type="button"
+            className="msg-action-btn"
+            onClick={onRegenerate}
+            title="Run this turn again from the same prompt"
+            aria-label="Regenerate this response"
+            style={{ flex: "0 0 auto" }}
+          >
+            ↻ Regenerate
+          </button>
+        )}
+      </div>
+
+      {/* What changed — deterministic, tool-derived file list (C6 Tier-1). */}
+      {changed.length > 0 && (
+        <div className="changed-files">
+          <button
+            type="button"
+            className="changed-toggle"
+            onClick={() => setChangesOpen((v) => !v)}
+            aria-expanded={changesOpen}
+          >
+            {changesOpen ? "▾" : "▸"} What changed · {changed.length} file
+            {changed.length === 1 ? "" : "s"}
+          </button>
+          {changesOpen && (
+            <ul className="changed-list">
+              {changed.map((f) => (
+                <li key={f.path}>
+                  <span className={`changed-action ${f.action}`}>
+                    {f.action === "created" ? "New" : f.action === "deleted" ? "Removed" : "Edited"}
+                  </span>
+                  <code className="changed-path">{f.path}</code>
+                  <span className="changed-diff">
+                    <span className="add">+{f.lines_added}</span>{" "}
+                    <span className="rem">−{f.lines_removed}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {/* Suggested next prompts (C2) — drop into composer, never auto-send. */}
+      {showSuggestions && suggestions.length > 0 && onSuggestion && (
+        <div className="followups">
+          {suggestions.map((s) => (
+            <button
+              key={s}
+              type="button"
+              className="followup-chip"
+              onClick={() => onSuggestion(s)}
+              title="Put this in the composer"
+            >
+              {s}
+            </button>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -1816,6 +2173,67 @@ function ReasoningCard({
   );
 }
 
+/**
+ * Codex-style one-line activity phrase for a tool call (B5): a natural-language
+ * verb + object so the chat reads as a sentence ("Wrote `index.html`", "Ran
+ * `npm install`", "Searched the web for …") instead of a raw `write_file` name.
+ * `mono` styles the object as code (paths, commands, patterns). The raw tool
+ * name is still surfaced via the card's `data-tool`/`title` for power users.
+ */
+function describeTool(
+  name: string,
+  input: unknown,
+): { verb: string; object?: string; mono?: boolean } {
+  const a = (input ?? {}) as Record<string, unknown>;
+  const str = (v: unknown): string => (typeof v === "string" ? v : "");
+  const path = str(a.path);
+  switch (name) {
+    case "write_file":
+      return { verb: "Wrote", object: path, mono: true };
+    case "edit_file":
+      return { verb: "Edited", object: path, mono: true };
+    case "read_file":
+      return { verb: "Read", object: path, mono: true };
+    case "list_dir":
+      return { verb: "Listed", object: path || "the project", mono: !!path };
+    case "grep":
+      return { verb: "Searched for", object: str(a.pattern), mono: true };
+    case "run_command":
+      return { verb: "Ran", object: str(a.command), mono: true };
+    case "web_search":
+      return { verb: "Searched the web for", object: str(a.query) ? `"${str(a.query)}"` : "" };
+    case "start_server":
+      return { verb: "Started the app", object: a.port ? `on :${a.port}` : "" };
+    case "stop_server":
+      return { verb: "Stopped the app" };
+    case "list_servers":
+      return { verb: "Checked running servers" };
+    case "read_server_log":
+      return { verb: "Read the server log" };
+    case "wait_for_port":
+      return { verb: "Waited for", object: a.port ? `port ${a.port}` : "the server" };
+    case "screenshot_preview":
+      return { verb: "Checked the UI" };
+    case "read_asset":
+      return { verb: "Viewed", object: path || "an asset", mono: !!path };
+    case "list_assets":
+      return { verb: "Listed assets" };
+    case "todo_write":
+      return { verb: "Updated the task list" };
+    case "ask_user":
+      return { verb: "Asked you", object: str(a.question) };
+    default: {
+      // snake_case → "Verbed object" fallback so a new/unknown tool still reads
+      // as a phrase: "run_migration" → "Run migration".
+      const verb = name.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+      const first = a.path ?? a.url ?? a.query ?? a.command ?? a.name ?? a.pattern ?? a.id ?? a.server_id;
+      const object =
+        typeof first === "string" || typeof first === "number" ? String(first) : undefined;
+      return { verb, object, mono: object !== undefined };
+    }
+  }
+}
+
 function ToolCard({
   item,
   onFixError,
@@ -1828,7 +2246,7 @@ function ToolCard({
   const isError = item.is_error === true;
   // Auto-expand errors so the reason is visible without a click (§C).
   const [expanded, setExpanded] = useState(isError);
-  const summary = summarizeInput(item.name, item.input);
+  const desc = describeTool(item.name, item.input);
   const hasResult = item.result !== undefined;
   // First non-empty line of the error, shown inline in the collapsed card so a
   // failure isn't just a bare red badge.
@@ -1839,10 +2257,16 @@ function ToolCard({
 
   return (
     <>
-      <button type="button" onClick={() => setExpanded((v) => !v)} className="tool-card">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="tool-card"
+        data-tool={item.name}
+        title={`${item.name}${hasResult ? "" : " (running)"} — click to ${expanded ? "hide" : "show"} details`}
+      >
         <div className="row">
-          <span className={`name ${isError ? "error" : ""}`}>{item.name}</span>
-          <span className="summary">{summary}</span>
+          <span className={`name ${isError ? "error" : ""}`}>{desc.verb}</span>
+          {desc.object && <span className="summary">{desc.object}</span>}
           {(item.lines_added !== undefined || item.lines_removed !== undefined) && (
             <span
               className="tool-diff"
@@ -1881,49 +2305,3 @@ function ToolCard({
   );
 }
 
-function summarizeInput(name: string, input: unknown): string {
-  const a = (input ?? {}) as Record<string, unknown>;
-  switch (name) {
-    case "read_file":
-    case "list_dir":
-      return String(a.path ?? "");
-    case "write_file":
-      return `${a.path ?? ""}${a.content ? ` (${(a.content as string).length}b)` : ""}`;
-    case "edit_file":
-      return String(a.path ?? "");
-    case "run_command":
-      return a.command ? `\`${a.command}\`` : "";
-    case "grep":
-      return `/${a.pattern ?? ""}/${a.path ? ` in ${a.path}` : ""}`;
-    case "wait_for_port":
-      return a.port ? `port ${a.port}` : "";
-    case "start_server":
-      return `${a.command ?? ""}${a.port ? ` :${a.port}` : ""}`;
-    case "stop_server":
-      return String(a.server_id ?? "");
-    case "list_servers":
-      return "";
-    case "read_server_log":
-      return String(a.server_id ?? "");
-    case "web_search":
-      return String(a.query ?? "");
-    case "todo_write":
-      return Array.isArray(a.todos) ? `${a.todos.length} tasks` : "";
-    case "ask_user":
-      return String(a.question ?? "");
-    default: {
-      // Generic fallback so unknown/new tools don't render a bare name with no
-      // context (§C). Pick the first meaningful scalar, else a short JSON peek.
-      const first =
-        a.path ?? a.url ?? a.query ?? a.command ?? a.name ?? a.pattern ?? a.id ?? a.server_id;
-      if (typeof first === "string" || typeof first === "number") return String(first);
-      try {
-        const s = JSON.stringify(a);
-        if (!s || s === "{}" || s === "null") return "";
-        return s.length > 60 ? `${s.slice(0, 57)}…` : s;
-      } catch {
-        return "";
-      }
-    }
-  }
-}

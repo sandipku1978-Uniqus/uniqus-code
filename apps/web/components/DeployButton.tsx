@@ -6,11 +6,15 @@ import { useStore } from "@/lib/store";
 import {
   deployProjectApi,
   disconnectVercelApi,
+  downloadProjectZipApi,
+  fetchDeployTargetApi,
   fetchSecretsApi,
   fetchVercelStatus,
+  flyDeployApi,
   listDeploymentsApi,
   vercelOauthStartUrl,
   type DeploymentSummary,
+  type DeployTargetSummary,
   type VercelStatus,
 } from "@/lib/api";
 import type { DeploymentState } from "@uniqus/api-types";
@@ -143,6 +147,82 @@ function DeployModal({
   const [confirmProd, setConfirmProd] = useState(false);
   // Names of the project's existing secrets, for the "Add from Secrets" picker.
   const [secretNames, setSecretNames] = useState<string[]>([]);
+  // "Take your code with you" handoff (E2/E3).
+  const [downloading, setDownloading] = useState(false);
+  const [embedCopied, setEmbedCopied] = useState(false);
+  // Project shape → which deploy target fits (E1). When the shape needs a
+  // long-running container (python/go/node-server), surface the Fly.io path
+  // (the adapter + API already exist; only this UI was missing).
+  const [deployTarget, setDeployTarget] = useState<DeployTargetSummary | null>(null);
+  const [flyAppName, setFlyAppName] = useState("");
+  const [flyRegion, setFlyRegion] = useState("");
+  const [flyBusy, setFlyBusy] = useState(false);
+
+  useEffect(() => {
+    fetchDeployTargetApi(projectId)
+      .then(setDeployTarget)
+      .catch(() => setDeployTarget(null));
+  }, [projectId]);
+
+  async function deployFly(): Promise<void> {
+    const name = flyAppName.trim();
+    if (!/^[a-z0-9-]{2,30}$/.test(name)) {
+      setError("App name must be 2–30 chars: lowercase letters, numbers, dashes.");
+      return;
+    }
+    setError(null);
+    const env: Record<string, string> = {};
+    for (const r of envRows) {
+      const k = r.key.trim();
+      if (!k && !r.value) continue;
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
+        setError(`env key "${k || "(empty)"}" is invalid — must match [A-Za-z_][A-Za-z0-9_]*`);
+        return;
+      }
+      env[k] = r.value;
+    }
+    setFlyBusy(true);
+    try {
+      const r = await flyDeployApi(projectId, {
+        app_name: name,
+        region: flyRegion.trim() || undefined,
+        env_vars: env,
+      });
+      if (r.ok) toast.success(`Deployed to ${r.url}`);
+      else toast.error("Fly deploy did not complete");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      toast.error(`Fly deploy failed: ${msg}`);
+    } finally {
+      setFlyBusy(false);
+    }
+  }
+
+  const downloadZip = async () => {
+    setDownloading(true);
+    try {
+      await downloadProjectZipApi(projectId, project?.name ?? "project");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Download failed");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const deployedUrl = live?.state === "READY" && live.vercel_url ? `https://${live.vercel_url}` : null;
+  const embedSnippet = deployedUrl
+    ? `<iframe src="${deployedUrl}" width="100%" height="600" style="border:0" loading="lazy" title="${(project?.name ?? "app").replace(/"/g, "")}"></iframe>`
+    : "";
+  const copyEmbed = () => {
+    navigator.clipboard
+      ?.writeText(embedSnippet)
+      .then(() => {
+        setEmbedCopied(true);
+        window.setTimeout(() => setEmbedCopied(false), 1500);
+      })
+      .catch(() => toast.error("Couldn't copy"));
+  };
 
   // Keep the resting button's status in sync with whatever the modal learns.
   function setVercel(status: VercelStatus): void {
@@ -294,6 +374,57 @@ function DeployModal({
         </div>
       }
     >
+      {/* Fly.io branch (E1): the project shape needs a long-running container,
+          which Vercel's serverless model can't host. The adapter already
+          exists server-side — this surfaces it. */}
+      {deployTarget?.recommended === "fly" && (
+        <div
+          style={{
+            padding: "10px 12px",
+            border: "1px solid var(--brand-magenta, #c026d3)",
+            borderRadius: 6,
+            marginBottom: 12,
+            background: "color-mix(in srgb, var(--brand-magenta, #c026d3) 6%, transparent)",
+          }}
+        >
+          <div style={{ fontSize: 12, marginBottom: 8 }}>
+            This is a <strong>{deployTarget.shape}</strong> app — it needs a long-running
+            container, which Vercel can&apos;t host. Deploy it to <strong>Fly.io</strong> instead.
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+            <input
+              type="text"
+              value={flyAppName}
+              onChange={(e) => setFlyAppName(e.target.value)}
+              placeholder="app-name (a–z, 0–9, -)"
+              aria-label="Fly app name"
+              style={{ flex: "1 1 180px", fontSize: 12, padding: "6px 8px" }}
+            />
+            <input
+              type="text"
+              value={flyRegion}
+              onChange={(e) => setFlyRegion(e.target.value)}
+              placeholder="region (optional, e.g. iad)"
+              aria-label="Fly region"
+              style={{ flex: "0 1 160px", fontSize: 12, padding: "6px 8px" }}
+            />
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => void deployFly()}
+              disabled={flyBusy}
+              style={{ fontSize: 12, padding: "6px 12px" }}
+            >
+              {flyBusy ? "Deploying…" : "Deploy to Fly"}
+            </button>
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
+            Set a <code>FLY_API_TOKEN</code> in this project&apos;s Secrets first. Build logs
+            stream into the chat. Env vars added below are passed through.
+          </div>
+        </div>
+      )}
+
       {/* Vercel connection */}
       {vercel === null ? (
         <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
@@ -613,6 +744,68 @@ function DeployModal({
           </div>
         </div>
       )}
+
+      {/* Take your code with you (E2 zip · E3 embed). A handoff path that
+          doesn't depend on Vercel — useful for private-cloud / intranet. */}
+      <div style={{ marginTop: 18, borderTop: "1px solid var(--border-default)", paddingTop: 14 }}>
+        <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>
+          Take your code with you
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+          <button
+            type="button"
+            className="btn-secondary"
+            style={{ fontSize: 12, padding: "6px 12px" }}
+            onClick={() => void downloadZip()}
+            disabled={downloading}
+            title="Download this project's source as a .zip (no node_modules or secrets)"
+          >
+            {downloading ? "Preparing…" : "⬇ Download .zip"}
+          </button>
+          <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+            Source only — excludes <code>node_modules</code>, build output, and <code>.env</code> files.
+          </span>
+        </div>
+
+        {deployedUrl ? (
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
+              Embed (paste into a page, wiki, or intranet that allow-lists this origin)
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
+              <code
+                style={{
+                  flex: 1,
+                  fontSize: 11,
+                  padding: "8px 10px",
+                  background: "var(--bg-code)",
+                  borderRadius: 4,
+                  overflowX: "auto",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {embedSnippet}
+              </code>
+              <button
+                type="button"
+                className="btn-secondary"
+                style={{ fontSize: 12, padding: "6px 12px", flex: "0 0 auto" }}
+                onClick={copyEmbed}
+              >
+                {embedCopied ? "Copied ✓" : "Copy"}
+              </button>
+            </div>
+            <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 4 }}>
+              The destination site must allow this origin in its frame policy
+              (<code>Content-Security-Policy: frame-ancestors</code>).
+            </div>
+          </div>
+        ) : (
+          <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 8 }}>
+            Deploy first to get an embeddable <code>&lt;iframe&gt;</code> snippet.
+          </div>
+        )}
+      </div>
     </Modal>
 
     {confirmDisconnect && (

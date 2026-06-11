@@ -99,3 +99,56 @@ VMs pause after `FIRECRACKER_IDLE_PAUSE_MS` (5 min), snapshot after
 the sandbox disk at `FIRECRACKER_FS_REAP_MAX_IDLE_MS` (14 days). Full detail in
 [`infra/firecracker/README.md`](../infra/firecracker/README.md) and
 [`infra/firecracker/SECURITY.md`](../infra/firecracker/SECURITY.md).
+
+## Taking your app off Uniqus-hosted infrastructure (private cloud / self-host)
+
+Some buyers — finance, GRC, regulated, or air-gapped environments — can't run
+production on public Vercel or Fly.io and need to run the **app Uniqus built**
+on **their own** infrastructure (their CI/CD, their container registry, their
+Kubernetes/VMs). That is fully supported: your generated app is portable code,
+not a Uniqus-locked artifact. The full how-to with copy-pasteable commands lives
+in [`docs/private-cloud-deploy.md`](./private-cloud-deploy.md); the summary
+below is the honest scope.
+
+### What you can take with you (three paths)
+
+1. **GitHub publish → your own CI/CD.** Uniqus can create a (private) repo on
+   your GitHub account and push the project's full source
+   (`createUserRepo` / initial push in
+   [`services/orchestrator/src/github.ts`](../services/orchestrator/src/github.ts)).
+   From there it is ordinary source in your control — point your existing
+   pipeline at it and deploy however you already deploy.
+
+2. **Download the code + a deploy bundle → `docker build` → your registry →
+   your k8s/VMs.** The simplest "get my code out" path is a `.zip` of the
+   project. On top of that, Uniqus generates a portable, per-shape
+   **`Dockerfile` + `.dockerignore`** (and can emit a `docker-compose.yml`) so
+   your platform team can build an image, push it to *your* registry, and run
+   it on *your* orchestrator — no Uniqus or Fly account in the loop. The
+   Dockerfile generation is real and shared with the Fly path
+   (`renderDockerfile` / `ensureFlyManifests` in
+   [`services/orchestrator/src/flyDeploy.ts`](../services/orchestrator/src/flyDeploy.ts)):
+   `node:20-slim`, `python:3.11-slim`, `golang:1.22-alpine` (multi-stage), or
+   `nginx:alpine` for static, listening on `PORT` (default `8080`; `80` for
+   static).
+
+3. **Fly.io deploy is *public* cloud — not private-cloud by itself.** The
+   built-in Fly adapter is a managed convenience; it ships your container to
+   Fly's public infrastructure. It does **not** satisfy a "must run on our own
+   infra" requirement. Use paths 1 or 2 for that. (Fly is useful, though, as a
+   working example of the exact Dockerfile your team will reuse — see
+   `renderDockerfile`.)
+
+### What is explicitly out of scope (be honest)
+
+Self-hosting / air-gapping the **Uniqus Code control plane itself** — the
+orchestrator, the Firecracker microVM fleet, and the web app — is **not offered
+today**. Only the **generated app** is portable. So a customer can run *their
+app* on their own infrastructure, but the *builder* still runs on
+Uniqus-hosted infrastructure.
+
+This is a **packaging-and-documentation gap, not a fundamental inability to
+leave Vercel**: the generated app is already plain code plus a standard
+Dockerfile, with no runtime dependency on Uniqus services. If full
+control-plane self-hosting is a hard requirement, say so during evaluation —
+it's a roadmap conversation, not something to pretend is shipped.

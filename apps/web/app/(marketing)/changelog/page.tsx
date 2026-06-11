@@ -3,7 +3,7 @@ type Tag = "new" | "improved" | "fixed";
 export const metadata = {
   title: "Changelog — Uniqus Code",
   description:
-    "Product updates, big and small. See what's new in Uniqus Code — from multi-provider models and built-in web search to faster cold starts and a more resilient workspace.",
+    "Product updates, big and small. See what's new in Uniqus Code — from multi-provider models and built-in web search to refresh-proof builds, plain-English plans, per-run costs, and bring-your-own model keys.",
 };
 
 const ENTRIES: {
@@ -12,6 +12,79 @@ const ENTRIES: {
   title: string;
   changes: { tag: Tag; text: string }[];
 }[] = [
+  {
+    date: "Jun 2026",
+    ver: "v1.9",
+    title: "Bring your keys, take your code",
+    changes: [
+      {
+        tag: "new",
+        text: "Bring your own model keys — connect your Anthropic, OpenAI, or Google account in Settings and route your builds through it, so usage (including planning) bills to you. Leave it blank and we use ours.",
+      },
+      {
+        tag: "new",
+        text: "Take your code anywhere: download your whole project as a zip, deploy long-running apps to Fly.io, or drop your live app into any page with a ready-made embed snippet.",
+      },
+      {
+        tag: "new",
+        text: "Share a live preview with a teammate over a link that expires and that you can revoke at any time — no sign-in required to view.",
+      },
+      {
+        tag: "improved",
+        text: "A clearer Security page: a new request-flow diagram, plus straight answers on sub-processors, encryption, data handling, and exactly where we stand on certifications.",
+      },
+    ],
+  },
+  {
+    date: "Jun 2026",
+    ver: "v1.8",
+    title: "Plans, changes, and costs you can read",
+    changes: [
+      {
+        tag: "new",
+        text: "Plain-English plans: every plan opens with a one-sentence summary of what you'll get and a quick wireframe of the main screen, with the technical detail one click away — and a Simplify toggle that strips it to the essentials.",
+      },
+      {
+        tag: "new",
+        text: "An exact, file-by-file \"what changed\" list after every build, drawn from the agent's real edits with line counts — so you never have to take its word for what it touched.",
+      },
+      {
+        tag: "new",
+        text: "Preview a checkpoint's diff before you rewind, so you can see precisely what a restore point introduced instead of restoring blind.",
+      },
+      {
+        tag: "new",
+        text: "A per-run cost estimate, so you can see roughly what each turn cost.",
+      },
+      {
+        tag: "improved",
+        text: "The activity timeline now reads in plain language — \"Wrote index.html\", \"Ran npm install\", \"Searched the web\" — instead of raw tool names, plus a guided first run, one-time tips for non-obvious controls, follow-up suggestions, and a \"Does this look right?\" check after each build.",
+      },
+    ],
+  },
+  {
+    date: "Jun 2026",
+    ver: "v1.7",
+    title: "Your build survives a refresh",
+    changes: [
+      {
+        tag: "improved",
+        text: "Refresh or close the tab mid-build and the build keeps running — reconnect and you're back on the live run instead of staring at a cancelled one.",
+      },
+      {
+        tag: "improved",
+        text: "Smoother streaming: long agent responses no longer freeze the chat while they're being written.",
+      },
+      {
+        tag: "new",
+        text: "An \"Installing dependencies — don't refresh\" banner, so you always know when a package install is in flight.",
+      },
+      {
+        tag: "improved",
+        text: "Friendlier errors: when something fails you get a plain-English explanation with one-click Retry or Simplify, not a raw stack trace.",
+      },
+    ],
+  },
   {
     date: "Jun 2026",
     ver: "v1.6",

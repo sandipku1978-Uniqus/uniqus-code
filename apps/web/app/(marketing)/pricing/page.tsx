@@ -33,7 +33,7 @@ const TIERS = [
     features: [
       { label: "Everything in Free", on: true },
       { label: "Concurrent private workspaces", on: true },
-      { label: "Bring your own model API keys", on: true },
+      { label: "Bring your own model API keys (coming soon)", on: true },
       { label: "GitHub sync + one-click deploys", on: true },
       { label: "Skills, secrets & design packs", on: true },
       { label: "Checkpoints & rewind history", on: true },
@@ -48,9 +48,9 @@ const TIERS = [
     cta: { label: "Contact sales", href: "/enterprise", primary: false },
     features: [
       { label: "Everything in Team", on: true },
-      { label: "SSO / SAML & SCIM provisioning", on: true },
+      { label: "SSO / SAML & SCIM — set up in onboarding", on: true },
       { label: "Dedicated VM capacity & SLAs", on: true },
-      { label: "Audit logs & role-based access", on: true },
+      { label: "Org audit views & roles — set up in onboarding", on: true },
       { label: "DPA, security review & invoicing", on: true },
       { label: "Dedicated success manager", on: true },
     ],
@@ -63,7 +63,7 @@ const COMPARE: { group: string; rows: { label: string; free: string; team: strin
     rows: [
       { label: "Private workspaces", free: "1", team: "Unlimited", ent: "Unlimited" },
       { label: "Auto model routing", free: "yes", team: "yes", ent: "yes" },
-      { label: "Bring your own API keys", free: "no", team: "yes", ent: "yes" },
+      { label: "Bring your own API keys", free: "no", team: "Soon", ent: "Soon" },
       { label: "Built-in web search", free: "yes", team: "yes", ent: "yes" },
     ],
   },
@@ -78,8 +78,9 @@ const COMPARE: { group: string; rows: { label: string; free: string; team: strin
   {
     group: "Team & security",
     rows: [
-      { label: "SSO / SAML", free: "no", team: "no", ent: "yes" },
-      { label: "Audit logs", free: "no", team: "no", ent: "yes" },
+      { label: "SSO / SAML & SCIM", free: "no", team: "no", ent: "Onboarding" },
+      { label: "Org audit views & roles", free: "no", team: "no", ent: "Onboarding" },
+      { label: "Audit trail (secrets, connectors, checkpoints)", free: "yes", team: "yes", ent: "yes" },
       { label: "Encrypted secrets", free: "yes", team: "yes", ent: "yes" },
       { label: "Support", free: "Community", team: "Priority email", ent: "Dedicated" },
     ],
@@ -97,7 +98,7 @@ const FAQ = [
   },
   {
     q: "Can I use my own model API keys?",
-    a: "On Team and Enterprise you can add your own Anthropic, OpenAI, or Google keys in Settings. Usage is then billed by those providers directly, and your keys stay encrypted.",
+    a: "Bring-your-own keys are coming to Team and Enterprise: you'll add your own Anthropic, OpenAI, or Google keys in Settings, usage will be billed by those providers directly, and your keys will stay encrypted. Want early access? Reach out through the Enterprise page.",
   },
   {
     q: "What happens to my guest work if I sign up?",

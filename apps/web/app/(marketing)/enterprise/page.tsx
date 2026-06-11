@@ -124,13 +124,13 @@ const VALUES: { icon: Icon; iconClass: string; title: string; body: string }[] =
     icon: "sso",
     iconClass: "grad",
     title: "SSO / SAML & SCIM",
-    body: "Connect your identity provider for single sign-on, and provision or deprovision members automatically with SCIM. Onboarding and offboarding stay in lockstep with your directory.",
+    body: "Set up during Enterprise onboarding: connect your identity provider for single sign-on, and provision or deprovision members with SCIM so onboarding and offboarding stay in lockstep with your directory. Talk to us about your rollout.",
   },
   {
     icon: "audit",
     iconClass: "purple",
     title: "Audit logs & role-based access",
-    body: "Every plan, deploy, and risky action is recorded with who did what and when. Roles let you decide who can build, who can ship, and who can manage billing and secrets.",
+    body: "Secret, connector, and checkpoint actions are already recorded with who did what and when. Org-wide audit views and roles — deciding who can build, who can ship, and who can manage billing and secrets — are configured during Enterprise onboarding.",
   },
   {
     icon: "vm",
@@ -161,7 +161,7 @@ const VALUES: { icon: Icon; iconClass: string; title: string; body: string }[] =
 const STATS = [
   { num: "1 VM", lbl: "per project — fully isolated, no shared tenancy" },
   { num: "3", lbl: "model providers: Claude, GPT & Gemini" },
-  { num: "SSO", lbl: "SAML + SCIM with role-based access" },
+  { num: "SSO", lbl: "SAML + SCIM and roles, set up in Enterprise onboarding" },
   { num: "Plan-first", lbl: "the agent proposes before it changes anything" },
 ];
 
@@ -204,9 +204,9 @@ const ROWS: {
     iconClass: "cyan",
     eyebrow: "Your providers",
     title: "Bring your own model keys",
-    body: "Add your organization’s Anthropic, OpenAI, or Google API keys and route usage through your own accounts and contracts. Auto mode still picks the right model for each step — now on the providers you already trust.",
+    body: "On our enterprise roadmap: route usage through your organization’s own Anthropic, OpenAI, or Google accounts and contracts, while Auto mode still picks the right model for each step. Talk to us if per-org keys are a requirement for your rollout.",
     checks: [
-      "Per-org keys for Claude, GPT & Gemini",
+      "Per-org keys for Claude, GPT & Gemini — coming soon",
       "Built-in web search across all three providers",
       "Set an account-wide default model and thinking effort",
     ],
