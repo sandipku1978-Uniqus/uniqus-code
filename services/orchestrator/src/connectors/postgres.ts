@@ -43,8 +43,14 @@ export const postgresConnector: ConnectorDefinition = {
         // success/timeout is a blind internal port-scan oracle from the
         // orchestrator's network position (M-5).
         try {
-          const dbHost = new URL(connStr).hostname;
-          if (dbHost) await assertPublicHost(dbHost);
+          const parsedDsn = new URL(connStr);
+          // An empty hostname is NOT safe to skip: pg then defaults to
+          // localhost, and a `?host=` query param (e.g.
+          // `postgresql:///db?host=169.254.169.254`) overrides it entirely
+          // while keeping url.hostname === "". Validate whichever pg will use.
+          const queryHost = parsedDsn.searchParams.get("host");
+          const dbHost = queryHost || parsedDsn.hostname || "localhost";
+          await assertPublicHost(dbHost);
         } catch (err) {
           throw new Error(
             `refusing to connect: ${err instanceof Error ? err.message : "invalid connection string"}`,
@@ -55,7 +61,14 @@ export const postgresConnector: ConnectorDefinition = {
         const params = Array.isArray(args.params) ? args.params : [];
         const limit = typeof args.row_limit === "number" ? Math.min(args.row_limit, 5000) : 200;
 
-        const client = new Client({ connectionString: connStr });
+        // Bound connect + per-statement time so a reachable-but-unresponsive
+        // (firewalled/slow) host can't hang the agent turn indefinitely (C-93).
+        const client = new Client({
+          connectionString: connStr,
+          connectionTimeoutMillis: 10_000,
+          statement_timeout: 30_000,
+          query_timeout: 30_000,
+        });
         await client.connect();
         try {
           const result = await client.query(sql, params);

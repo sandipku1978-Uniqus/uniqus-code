@@ -589,6 +589,8 @@ interface State {
   approvePendingPlan(plan: Plan): void;
   /** Mark the pending plan rejected (user chose "Reject & revise"). */
   rejectPendingPlan(): void;
+  /** Resolve a still-pending plan card when its run is aborted (C-27). */
+  cancelPendingPlan(): void;
   addSystem(content: string): void;
   /** Add a run-level error card (C7). */
   addErrorItem(message: string, code?: string, retryable?: boolean): void;
@@ -924,6 +926,23 @@ export const useStore = create<State>((set, get) => ({
       pendingPlanItemId: null,
     })),
 
+  // Resolve a still-pending plan card when its run is aborted (C-27). Otherwise
+  // the card keeps its live Approve button, and since approvePendingPlan keys on
+  // pendingPlanItemId (not the clicked card), clicking the stale card during a
+  // LATER pending plan would resolve the NEW run's wait with the OLD plan.
+  cancelPendingPlan: () =>
+    set((s) => {
+      if (!s.pendingPlanItemId) return {};
+      return {
+        chat: s.chat.map((item) =>
+          item.kind === "plan_proposal" && item.id === s.pendingPlanItemId
+            ? { ...item, status: "rejected" as const }
+            : item,
+        ),
+        pendingPlanItemId: null,
+      };
+    }),
+
   addSystem: (content) =>
     set((s) => ({ chat: [...s.chat, { kind: "system", id: id(), content }] })),
   addErrorItem: (message, code, retryable) =>
@@ -1069,15 +1088,31 @@ export const useStore = create<State>((set, get) => ({
       },
     })),
   setDeployment: (d) =>
-    set(() => {
+    set((s) => {
+      // deploy_state_changed WS events carry no inspector_url (and the object is
+      // fully replaced), so every state transition wiped the field set by the
+      // initial deploy POST — killing the "View build logs" link exactly when an
+      // ERROR state arrives (C-31/U-4). Carry inspector_url (and vercel_url if
+      // the event omits it) forward when updating the SAME deployment.
+      const prev = s.deployment;
+      const merged =
+        d !== null && prev !== null && prev.id === d.id
+          ? {
+              ...d,
+              inspector_url: d.inspector_url ?? prev.inspector_url,
+              vercel_url: d.vercel_url ?? prev.vercel_url,
+            }
+          : d;
       // A new deploy starting (QUEUED/BUILDING) or succeeding (READY) means the
       // live deploy now reflects the current files — clear the stale-files
       // nudge. A failed/canceled deploy leaves it as-is (files are still
       // un-deployed, so keep nudging if we already were).
       const clears =
-        d !== null &&
-        (d.state === "QUEUED" || d.state === "BUILDING" || d.state === "READY");
-      return clears ? { deployment: d, redeploySuggested: false } : { deployment: d };
+        merged !== null &&
+        (merged.state === "QUEUED" || merged.state === "BUILDING" || merged.state === "READY");
+      return clears
+        ? { deployment: merged, redeploySuggested: false }
+        : { deployment: merged };
     }),
   setRedeploySuggested: (value) => set({ redeploySuggested: value }),
   markProjectFilesChanged: () =>
@@ -1140,6 +1175,15 @@ export const useStore = create<State>((set, get) => ({
       liveUsage: null,
       pendingSelectedElement: null,
       queuedComposerFiles: [],
+      // Clear run state on a project/session switch (C-28/C-30). The old project's
+      // run streamed against its own socket; carrying busy=true into a fresh,
+      // empty session (which replays no `complete` and emits no `run_active`)
+      // left the composer disabled with "Uniqus is running…" forever, recoverable
+      // only via the obscure force-stop. installInProgress/runReattaching are the
+      // same kind of stale run state.
+      busy: false,
+      installInProgress: null,
+      runReattaching: false,
     });
   },
 }));
@@ -1154,7 +1198,7 @@ export const useStore = create<State>((set, get) => ({
  * creating a circular dep through the store module.
  */
 export async function flushSave(path: string): Promise<void> {
-  const { pendingEdits, busy, connected, setSaveStatus, clearPendingEdit } =
+  const { pendingEdits, busy, connected, setSaveStatus } =
     useStore.getState();
   const content = pendingEdits[path];
   if (content === undefined) return;
@@ -1184,7 +1228,10 @@ export async function flushSave(path: string): Promise<void> {
     });
     return;
   }
-  clearPendingEdit(path);
+  // Do NOT clear the pending edit here — wait for client_write_ack (C-29). The
+  // ack handler clears it on ok:true (and only if no newer keystroke re-dirtied
+  // the path); on ok:false the edit stays buffered so the Save retry button can
+  // resend it. Clearing pre-ack lost the edit on any write failure.
 }
 
 /**

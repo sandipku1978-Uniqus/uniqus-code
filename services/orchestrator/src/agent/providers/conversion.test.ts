@@ -324,8 +324,11 @@ describe("google · toGeminiContents", () => {
         role: "user",
         parts: [
           {
+            // The call id is echoed on the response when it pairs with a real
+            // (non-synthetic) functionCall in this history (C-89).
             functionResponse: {
               name: "read_file",
+              id: "call_1",
               response: { result: "file contents" },
             },
           },
@@ -363,9 +366,39 @@ describe("google · toGeminiContents", () => {
     ];
     const contents = toGeminiContents(messages);
     const part = (contents[0].parts as Array<Record<string, unknown>>)[0];
+    // No matching call ⇒ no id echoed (C-89: only real, matched ids are echoed).
     expect(part.functionResponse).toEqual({
       name: "unknown_tool",
       response: { result: "result" },
+    });
+  });
+
+  it("does NOT echo a synthetic (gem_) tool id on the functionResponse (C-89)", () => {
+    const messages: Anthropic.MessageParam[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "gem_ab12cd34_0",
+            name: "read_file",
+            input: { path: "a.txt" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "gem_ab12cd34_0", content: "x" },
+        ],
+      },
+    ];
+    const contents = toGeminiContents(messages);
+    const part = (contents[1].parts as Array<Record<string, unknown>>)[0];
+    // Matched, but synthetic ⇒ omit id; Gemini pairs by name/order instead.
+    expect(part.functionResponse).toEqual({
+      name: "read_file",
+      response: { result: "x" },
     });
   });
 

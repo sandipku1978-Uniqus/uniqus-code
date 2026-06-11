@@ -42,6 +42,20 @@ interface ManagedJob {
 
 const jobs = new Map<string, ManagedJob>();
 
+// Finished jobs were never removed from the map (only killAllJobs at process
+// exit cleared it), so each run_in_background left an entry holding up to
+// MAX_LOG of captured log forever — a slow unbounded leak on the long-lived
+// orchestrator (C-85/C-86). Evict jobs that finished more than this long ago;
+// callers poll status/log within seconds of completion, so a few minutes is
+// ample retention. Swept lazily on each new job start (no extra timer).
+const FINISHED_JOB_TTL_MS = 5 * 60 * 1000;
+function evictFinishedJobs(): void {
+  const cutoff = Date.now() - FINISHED_JOB_TTL_MS;
+  for (const [id, j] of jobs) {
+    if (j.finished_at !== null && j.finished_at < cutoff) jobs.delete(id);
+  }
+}
+
 interface ShellChoice {
   shell: string;
   prefix: string[];
@@ -75,6 +89,7 @@ export function startBackgroundJob(
   command: string,
   projectId: string | null = null,
 ): BackgroundJobInfo {
+  evictFinishedJobs();
   const id = `job_${randomUUID().slice(0, 8)}`;
   const log = { value: "" };
   const job: ManagedJob = {

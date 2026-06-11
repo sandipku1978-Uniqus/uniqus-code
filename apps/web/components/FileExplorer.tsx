@@ -5,6 +5,7 @@ import type { TreeEntry } from "@uniqus/api-types";
 import { useStore } from "@/lib/store";
 import { send } from "@/lib/ws-client";
 import { fileOpApi } from "@/lib/api";
+import { toast } from "@/lib/toast";
 
 interface TreeNode {
   name: string;
@@ -361,6 +362,16 @@ export default function FileExplorer({
       return;
     }
     const target = creating.parent ? `${creating.parent}/${trimmed}` : trimmed;
+    // Creating a file writes empty content, which would silently truncate an
+    // existing file (the server write is unconditional). The full tree is in
+    // memory, so refuse any collision up front.
+    const existing = tree.find((e) => e.path === target);
+    if (existing) {
+      toast.error(
+        `${existing.is_dir ? "A folder" : "A file"} named "${target}" already exists`,
+      );
+      return;
+    }
     await wrapAction(async () => {
       if (creating.type === "dir") {
         await fileOpApi(project.id, { op: "create_dir", path: target });

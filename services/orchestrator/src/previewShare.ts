@@ -51,3 +51,21 @@ export function revokeShareToken(token: string): boolean {
 export function revokeSharesForServer(serverId: string): void {
   for (const [t, e] of shares) if (e.serverId === serverId) shares.delete(t);
 }
+
+/**
+ * Periodically evict expired tokens. resolveShareToken only prunes a token when
+ * it is looked up again after expiry, so tokens that simply expire (or whose
+ * server stopped without a revoke) lingered in the Map for the process lifetime,
+ * an unbounded slow leak on a long-lived orchestrator (C-99). Idempotent; call
+ * once at startup.
+ */
+let sweeper: ReturnType<typeof setInterval> | null = null;
+export function startShareTokenSweeper(intervalMs = 10 * 60 * 1000): void {
+  if (sweeper) return;
+  sweeper = setInterval(() => {
+    const now = Date.now();
+    for (const [t, e] of shares) if (e.expiresAt <= now) shares.delete(t);
+  }, intervalMs);
+  // Don't keep the event loop alive just for the sweep.
+  sweeper.unref?.();
+}

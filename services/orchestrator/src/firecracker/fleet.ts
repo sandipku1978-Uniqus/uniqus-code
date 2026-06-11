@@ -91,6 +91,24 @@ const BRIDGE_NETMASK = process.env.FIRECRACKER_NETMASK ?? "255.255.0.0";
 // per-sandbox cwd" clone pattern). On ANY failure we fall back to bootNew(), so
 // the flag is safe to ship dark and flip on after validating on the host.
 const BASE_SNAPSHOT_ENABLED = process.env.FIRECRACKER_BASE_SNAPSHOT === "1";
+
+/**
+ * Per-VM agent bearer token (F1). Derived DETERMINISTICALLY from the projectId
+ * and a server secret, so any restore path (cross-process rehydrate, snapshot
+ * restore) can reconstruct the exact token the agent baked into its cmdline at
+ * the original boot — a random-per-boot token was unrecoverable after a restart,
+ * 401-bricking every RPC when FIRECRACKER_AGENT_AUTH=1 (C-45/C-47). If no secret
+ * is configured we fall back to a process-stable random key: still deterministic
+ * within a single orchestrator lifetime (so in-process snapshot restore works),
+ * just not across restarts — acceptable since auth ships dark by default.
+ */
+const AGENT_TOKEN_SECRET =
+  process.env.FIRECRACKER_AGENT_TOKEN_SECRET ||
+  process.env.WORKOS_COOKIE_PASSWORD ||
+  randomBytes(32).toString("hex");
+function deriveAgentToken(projectId: string): string {
+  return createHash("sha256").update(`fc-agent:${AGENT_TOKEN_SECRET}:${projectId}`).digest("hex").slice(0, 48);
+}
 // Identity the golden image is frozen with — IDENTICAL on every clone until the
 // orchestrator re-stamps it (agent /net/configure). Reserved out of the project
 // IP range (allocateNetwork skips it) and the project MAC range (02:fc:<hash>).
@@ -124,6 +142,13 @@ const vms = new Map<string, ManagedVm>();
  * entry is deleted on settle (success AND failure) so a later open re-boots.
  */
 const bootInFlight = new Map<string, Promise<VmHandle>>();
+// Single-flight the resume/restore-of-EXISTING-entry transitions too (C-43/
+// C-48/U-5). bootInFlight only covers the no-entry first boot; two concurrent
+// ensureVm calls for a snapshotted/paused VM (two tabs, abort+reconnect, a
+// Run-button POST racing a user_message) would otherwise both pass the state
+// check and both spawnFirecracker on the SAME api socket / double-PATCH resume,
+// orphaning a process or 400ing the loser. Keyed per project; cleared on settle.
+const transitionInFlight = new Map<string, Promise<void>>();
 let cidSeq = 100; // guest CIDs 0/1/2 are reserved by the kernel; pick a non-overlapping range
 
 export interface BootOpts {
@@ -135,10 +160,25 @@ export interface BootOpts {
 export async function ensureVm(opts: BootOpts): Promise<VmHandle> {
   const existing = vms.get(opts.projectId);
   if (existing) {
-    if (existing.handle.state === "snapshotted") {
-      await restoreFromSnapshot(opts.projectId);
-    } else if (existing.handle.state === "paused") {
-      await resume(opts.projectId);
+    // Serialize the paused→running / snapshotted→running transition so two
+    // concurrent callers can't both spawn firecracker on the same socket or
+    // double-resume (C-43/C-48/U-5). Re-check state INSIDE the single-flight.
+    if (existing.handle.state === "snapshotted" || existing.handle.state === "paused") {
+      const pending = transitionInFlight.get(opts.projectId);
+      if (pending) {
+        await pending;
+      } else {
+        const t = (async () => {
+          // The handle's state may have changed while we awaited the lock.
+          if (existing.handle.state === "snapshotted") {
+            await restoreFromSnapshot(opts.projectId);
+          } else if (existing.handle.state === "paused") {
+            await resume(opts.projectId);
+          }
+        })().finally(() => transitionInFlight.delete(opts.projectId));
+        transitionInFlight.set(opts.projectId, t);
+        await t;
+      }
     }
     existing.handle.lastUsedAt = Date.now();
     return existing.handle;
@@ -259,7 +299,7 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
   // could drive another project's agent. `uniqus_auth=1` is only added when
   // FIRECRACKER_AGENT_AUTH=1, so the token ships dark (provisioned + sent, but
   // not enforced) until it's validated on the host.
-  const authToken = randomBytes(24).toString("hex");
+  const authToken = deriveAgentToken(opts.projectId);
   const authEnforced = process.env.FIRECRACKER_AGENT_AUTH === "1";
 
   try {
@@ -585,6 +625,14 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
     ip,
     gatewayIp,
     guestMac: mac,
+    // Stamp the deterministic token so RPCs carry a Bearer consistent with the
+    // cold/rehydrate paths. NOTE (C-13): the golden snapshot's frozen cmdline
+    // omits uniqus_auth, so the agent on a golden clone does NOT enforce a token
+    // — these clones remain unauthenticated even when FIRECRACKER_AGENT_AUTH=1.
+    // Closing that fully requires the agent to (re)provision + enforce this token
+    // via POST /net/configure during finalizeRestore; tracked as a follow-up.
+    // Both golden + agent-auth are default-off, so this ships safely.
+    authToken: deriveAgentToken(opts.projectId),
     state: "running",
     lastUsedAt: Date.now(),
   };
@@ -784,6 +832,16 @@ async function snapshotPaused(projectId: string): Promise<void> {
     );
     return;
   }
+  // createSnapshot took seconds of I/O. If a user's ensureVm→resume() landed in
+  // that window, the VM is now 'running' and a turn is about to RPC against it —
+  // killing the process here would fail every tool call (C-48). Bail; the freshly
+  // resumed VM stays alive and the sweeper will retry once it's idle again.
+  if (vm.handle.state !== "paused") {
+    console.log(
+      `[fleet ${vm.handle.id}] resume raced snapshot; discarding snapshot, keeping live VM`,
+    );
+    return;
+  }
   vm.fcClose();
   // Drop the per-process artifacts. Drives + tap survive — the tap is reused
   // when we spawn a fresh firecracker for the restore.
@@ -811,11 +869,18 @@ async function restoreFromSnapshot(projectId: string): Promise<void> {
   await ensureBridge();
   await ensureTapDevice(vm.handle.tapDevice);
   // Fresh API socket — the old one was unlinked when we snapshotted.
+  // Spawn with cwd=runDir so a RELATIVE sandbox drive path (golden clones use
+  // "sandbox.ext4") resolves against the per-VM run dir, not the orchestrator's
+  // cwd — otherwise /dev/vdb is missing on restore and loadSnapshot ENOENTs for
+  // every golden-origin project (C-44). runDir is the api socket's directory.
   // Wrap spawn + loadSnapshot so a corrupt/incompatible snapshot can't leak the
   // firecracker process and wedge the VM in 'snapshotted' (re-spawning a fresh
   // leaked process on every retry). Mirror tryRehydrateSnapshot's cleanup:
   // discard the bad snapshot so the next ensureVm cold-boots instead of looping.
-  const fc = await spawnFirecracker({ socketPath: vm.handle.apiSocket });
+  const fc = await spawnFirecracker({
+    socketPath: vm.handle.apiSocket,
+    cwd: path.dirname(vm.handle.apiSocket),
+  });
   const client = new FirecrackerClient(vm.handle.apiSocket);
   try {
     await client.loadSnapshot({
@@ -866,10 +931,26 @@ async function tryRehydrateSnapshot(opts: BootOpts): Promise<VmHandle | null> {
     return null;
   }
   const id = `vm_${opts.projectId.slice(0, 8)}_rehyd`;
-  const apiSocket = path.join(STATE_DIR, `${id}.api.sock`);
-  const vsockUds = path.join(STATE_DIR, `${id}.vsock`);
+  // Spawn from a per-project run dir that contains the relative "sandbox.ext4"
+  // the snapshot froze (golden clones use a RELATIVE drive path). After an
+  // orchestrator restart the original golden runDir — with its random suffix —
+  // is gone, so without re-materializing the relative drive here loadSnapshot
+  // ENOENTs on /dev/vdb for golden-origin projects (C-44). The symlink target
+  // is the deterministic per-project sandbox image.
+  const runDir = path.join(RUN_DIR, id);
+  await fs.mkdir(runDir, { recursive: true });
+  const apiSocket = path.join(runDir, "api.sock");
+  const vsockUds = path.join(runDir, "vsock");
   const { ip, gatewayIp, mac, tapName } = allocateNetwork(opts.projectId);
   const rootImagePath = projectRootImagePath(opts.projectId);
+  try {
+    const sandboxImage = await ensureSandboxImage(opts.projectId, opts.hostSandboxDir);
+    const linkPath = path.join(runDir, "sandbox.ext4");
+    await fs.rm(linkPath, { force: true }).catch(() => {});
+    await fs.symlink(path.resolve(sandboxImage), linkPath);
+  } catch (err) {
+    console.error(`[fleet ${id}] could not stage sandbox.ext4 for rehydrate:`, err);
+  }
 
   console.log(`[fleet ${id}] rehydrating from on-disk snapshot for ${opts.projectId.slice(0, 8)}`);
   const t0 = Date.now();
@@ -882,7 +963,7 @@ async function tryRehydrateSnapshot(opts: BootOpts): Promise<VmHandle | null> {
   try {
     await ensureBridge();
     await ensureTapDevice(tapName);
-    fc = await spawnFirecracker({ socketPath: apiSocket });
+    fc = await spawnFirecracker({ socketPath: apiSocket, cwd: runDir });
     const client = new FirecrackerClient(apiSocket);
     await client.loadSnapshot({
       snapshot_path: paths.snapshot,
@@ -901,6 +982,10 @@ async function tryRehydrateSnapshot(opts: BootOpts): Promise<VmHandle | null> {
       ip,
       gatewayIp,
       guestMac: mac,
+      // Re-derive the deterministic token the agent froze into its cmdline at
+      // the original boot, so RPCs authenticate after a cross-process restart
+      // instead of 401-bricking the VM (C-45/C-47).
+      authToken: deriveAgentToken(opts.projectId),
       state: "running",
       lastUsedAt: Date.now(),
     };

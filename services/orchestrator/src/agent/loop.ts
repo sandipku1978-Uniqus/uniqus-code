@@ -11,6 +11,7 @@ import { maybeCompact, type CompactionResult } from "./compact.js";
 import {
   formatAccountPromptForPrompt,
   formatDesignSystemForPrompt,
+  formatLibrarySkillsForPrompt,
   formatSkillsForPrompt,
   readSkills,
 } from "./skills.js";
@@ -23,7 +24,7 @@ import {
 } from "./background.js";
 import { takeScreenshot } from "./screenshot.js";
 import { resolveModel } from "./router.js";
-import { getProvider, providerKeysFromEnv, type ProviderKeys, type TokenUsage } from "./providers/index.js";
+import { getProvider, providerKeysFromEnv, type ProviderKeys, type StreamTurnResult, type TokenUsage } from "./providers/index.js";
 import type { ChangedFile, DesignTokens, ModelChoice, ThinkingEffort } from "@uniqus/api-types";
 import { setTodos, type TodoItem } from "./todos.js";
 import { listProjectSecrets, plumbSecretToEnvFile } from "../secrets.js";
@@ -36,6 +37,10 @@ import { DESIGN_GUIDANCE } from "./designGuidance.js";
 
 const MAX_ITERATIONS = 125;
 const MAX_TOKENS = 16384*2;
+// Cap on consecutive `pause_turn` continuations (Anthropic server-side
+// web_search). Each pause resubmits the partial assistant turn to continue;
+// the cap stops a pathological pause loop from spinning forever (C-34).
+const MAX_PAUSE_TURN_RETRIES = 6;
 
 function buildSystemPrompt(
   skillsBody: string | null,
@@ -43,6 +48,7 @@ function buildSystemPrompt(
   hasWebSearch: boolean,
   repo: { fullName: string; url: string } | null,
   designTokens: DesignTokens | null,
+  librarySkills: { name: string; body: string }[],
 ): string {
   const { name: shellName, isUnixLike } = sb.shellInfo();
   const platform = process.platform;
@@ -151,7 +157,7 @@ Conventions:
 7. Use list_dir or grep to verify state when you're unsure (e.g., after a scaffold) instead of guessing paths.
 8. When the task is complete, briefly summarize what you built, include the public URL if you started a server, and describe how to use it inside Uniqus Code. Do not end by telling the user to run local terminal commands. End that summary with a short \`## What changed\` section: a plain-English bulleted list, one line per file you created or edited this turn, written for a NON-technical reader (e.g. "Added the expenses table and the running-total bar" rather than "edited src/App.tsx"). Keep it to the files you actually touched — do not list files you only read. (This is a human-readable gloss; an exact, machine-generated file list is shown separately, so don't pad it.)
 9. File size: write_file content is part of your output token budget (~16k tokens). For files larger than ~500 lines, write a smaller version first then grow it with edit_file or additional write_file calls — do NOT try to dump 1000+ lines in a single tool call, the response will be truncated and the tool input will arrive without the content field. If that happens you'll see "write_file requires 'content' as a string" — split the work and retry.
-10. Currency of facts: when the task names specific products, models, versions, or prices — ESPECIALLY anything about AI/LLM models (benchmark dashboards, model pickers, "compare the latest models" apps) — do NOT trust your training data for the current lineup; it lags reality by months. ${currencyGuidance} Naming a stale model (an old version when a newer one has shipped, or omitting a current flagship) is a failure the user will immediately notice. The same applies to "latest" library versions, framework releases, and API endpoints.${formatAccountPromptForPrompt(accountPrompt)}${formatDesignSystemForPrompt(designTokens)}${formatSkillsForPrompt(skillsBody)}`;
+10. Currency of facts: when the task names specific products, models, versions, or prices — ESPECIALLY anything about AI/LLM models (benchmark dashboards, model pickers, "compare the latest models" apps) — do NOT trust your training data for the current lineup; it lags reality by months. ${currencyGuidance} Naming a stale model (an old version when a newer one has shipped, or omitting a current flagship) is a failure the user will immediately notice. The same applies to "latest" library versions, framework releases, and API endpoints.${formatAccountPromptForPrompt(accountPrompt)}${formatDesignSystemForPrompt(designTokens)}${formatLibrarySkillsForPrompt(librarySkills)}${formatSkillsForPrompt(skillsBody)}`;
 }
 
 export interface LoopHooks {
@@ -256,6 +262,13 @@ export interface LoopOptions extends LoopHooks {
    */
   skills?: string | null;
   /**
+   * Reusable account-level Skills the project has ATTACHED from the user's Skills
+   * library (projects.skill_library_ids → bodies). Injected ahead of the
+   * project's own skills.md so the per-project file stays the override layer.
+   * Resolved by the caller once per turn; empty ⇒ omitted.
+   */
+  librarySkills?: { name: string; body: string }[];
+  /**
    * Account-wide custom prompt (Settings → Custom prompts). Appended to the
    * system prompt ahead of project Skills. Resolved by the caller from the
    * user's account settings once per turn; null/undefined ⇒ omitted.
@@ -333,6 +346,13 @@ export interface LoopResult {
    * not model prose. Drives the "What changed" list on the complete marker.
    */
   changedFiles: ChangedFile[];
+  /**
+   * Why the final iteration ended, when known (e.g. "max_tokens" on a truncated
+   * answer, "refusal"). Lets the server surface truncation/refusal on the
+   * `complete` marker instead of reporting every finish as clean. Undefined on
+   * the abort path.
+   */
+  stopReason?: StreamTurnResult["stopReason"];
 }
 
 export async function runAgentLoop(
@@ -363,7 +383,19 @@ export async function runAgentLoop(
   // Per-turn changeset (C6 Tier-1), keyed by path. Populated from each
   // successful write_file/edit_file editStats below; emitted on finish().
   const changed = new Map<string, { action: "created" | "edited"; added: number; removed: number }>();
-  const finish = (aborted: boolean): LoopResult => {
+  // Snapshot the accumulated usage in the canonical LoopResult shape. Shared by
+  // finish() and the error path (attached to the thrown error so the server's
+  // catch can still record usage when the loop throws — C-33).
+  const usageSnapshot = (): LoopResult["usage"] => ({
+    inputTokens: usageIn,
+    outputTokens: usageOut,
+    cacheReadTokens: usageCacheRead,
+    cacheCreationTokens: usageCacheCreate,
+  });
+  const finish = (
+    aborted: boolean,
+    stopReason?: StreamTurnResult["stopReason"],
+  ): LoopResult => {
     if (aborted && inflight) {
       usageIn += inflight.inputTokens;
       usageOut += inflight.outputTokens;
@@ -373,12 +405,7 @@ export async function runAgentLoop(
     }
     return {
       aborted,
-      usage: {
-        inputTokens: usageIn,
-        outputTokens: usageOut,
-        cacheReadTokens: usageCacheRead,
-        cacheCreationTokens: usageCacheCreate,
-      },
+      usage: usageSnapshot(),
       model: resolved.model,
       provider: resolved.provider,
       changedFiles: Array.from(changed.entries()).map(([path, v]) => ({
@@ -387,8 +414,31 @@ export async function runAgentLoop(
         lines_added: v.added,
         lines_removed: v.removed,
       })),
+      stopReason,
     };
   };
+  // Annotate a thrown error with the usage accrued so far (and the turn's
+  // model/provider) so the server's catch can record it even though the loop
+  // never returns a LoopResult on the throw paths (C-33). Then rethrow. Banks
+  // any uncommitted in-flight usage first (a provider call that streamed token
+  // counts via onUsage but threw before committing), mirroring finish()'s abort
+  // path, so a failed call's billed tokens aren't dropped from the record.
+  const throwWithUsage = (err: unknown): never => {
+    if (inflight) {
+      usageIn += inflight.inputTokens;
+      usageOut += inflight.outputTokens;
+      usageCacheRead += inflight.cacheReadTokens ?? 0;
+      usageCacheCreate += inflight.cacheCreationTokens ?? 0;
+      inflight = null;
+    }
+    const e = err instanceof Error ? err : new Error(String(err));
+    (e as Error & { usageTotals?: LoopResult["usage"] }).usageTotals = usageSnapshot();
+    (e as Error & { usageModel?: string }).usageModel = resolved.model;
+    (e as Error & { usageProvider?: string }).usageProvider = resolved.provider;
+    throw e;
+  };
+  // Consecutive pause_turn continuations so far (see MAX_PAUSE_TURN_RETRIES).
+  let pauseTurnRetries = 0;
   const skillsBody =
     opts.skills !== undefined ? opts.skills : await readSkills(opts.sandbox.rootDir);
   // Web search is wired on Anthropic, OpenAI (Responses built-in), and Gemini
@@ -403,6 +453,7 @@ export async function runAgentLoop(
     hasWebSearch,
     opts.repo ?? null,
     opts.designSystem ?? null,
+    opts.librarySkills ?? [],
   );
   const messages = opts.messages ?? [];
   // Append every message this turn produces to both the live history AND the
@@ -488,11 +539,15 @@ export async function runAgentLoop(
         },
       });
     } catch (err) {
-      // Treat any error as "aborted" if the user has actually pressed Stop.
-      // The SDK's abort error class isn't always named the way our matcher
-      // expects, so checking the signal directly is more reliable.
-      if (opts.signal?.aborted || isAbortError(err)) return finish(true);
-      throw err;
+      // Treat as "aborted" only when the user actually pressed Stop: either the
+      // signal is aborted, or the error is a genuine AbortError. We no longer
+      // match on the message text (C-88) — a provider/network error merely
+      // WORDED with "aborted" (e.g. socket "request aborted") would otherwise be
+      // misreported as a clean user-Stop instead of a classified failure.
+      if (opts.signal?.aborted || isAbortError(err, opts.signal)) return finish(true);
+      // Real failure: attach the usage accrued so far so the server can still
+      // record it, then rethrow (C-33).
+      return throwWithUsage(err);
     }
 
     // Commit this iteration's usage into the running totals, then emit the
@@ -510,10 +565,40 @@ export async function runAgentLoop(
     });
 
     const toolCalls = turn.toolCalls;
-    record({ role: "assistant", content: turn.content });
+    // Guard against an empty-content assistant turn with no tool calls
+    // (OpenAI/Gemini can return content:[] on a refusal, all-thinking, or
+    // blocked turn). Recording content:[] verbatim permanently bricks the
+    // session: Anthropic 400s on a non-final empty-content assistant message,
+    // so every later turn on the Auto/Claude default would fail. Substitute a
+    // minimal placeholder so the persisted history stays replayable (C-9).
+    const assistantContent: Anthropic.MessageParam["content"] =
+      Array.isArray(turn.content) && turn.content.length === 0 && toolCalls.length === 0
+        ? [{ type: "text", text: "(no response)" }]
+        : turn.content;
+    record({ role: "assistant", content: assistantContent });
 
-    if (turn.stopReason === "end_turn" || toolCalls.length === 0) {
-      return finish(false);
+    // A server-side tool (Anthropic web_search) paused a long-running turn:
+    // there are no client tool calls to run, but the turn is NOT done — per the
+    // Anthropic docs we resubmit the partial assistant content as-is to let the
+    // model continue. Re-loop (the assistant turn is already recorded above)
+    // with a small retry cap so a stuck pause loop can't spin forever (C-34).
+    if (turn.stopReason === "pause_turn") {
+      if (pauseTurnRetries < MAX_PAUSE_TURN_RETRIES) {
+        pauseTurnRetries++;
+        continue;
+      }
+      // Exhausted the cap — fall through and finish so we don't loop forever.
+    }
+
+    if (turn.stopReason === "end_turn" || turn.stopReason === "refusal" || toolCalls.length === 0) {
+      // Truncation with no tool calls is otherwise reported as a clean finish,
+      // leaving the user with a mid-sentence or empty answer and no signal.
+      // Surface a short notice through the same text channel as model output so
+      // the UI shows it inline before the turn completes (C-32).
+      if (turn.stopReason === "max_tokens" && toolCalls.length === 0) {
+        opts.onText?.("\n\n[Response truncated — output limit reached]");
+      }
+      return finish(false, turn.stopReason);
     }
 
     // NOTE: do NOT short-circuit here on signal.aborted. The assistant
@@ -619,8 +704,13 @@ export async function runAgentLoop(
     record({ role: "user", content: toolResults });
   }
 
-  throw new Error(
-    `Loop exceeded max iterations (${MAX_ITERATIONS}). Send a follow-up message to continue — the sandbox state is preserved.`,
+  // Attach the usage accrued across all iterations so the server can record it
+  // even though we never return a LoopResult here — a 125-iteration mega-turn
+  // bills the provider for the whole run (C-33).
+  return throwWithUsage(
+    new Error(
+      `Loop exceeded max iterations (${MAX_ITERATIONS}). Send a follow-up message to continue — the sandbox state is preserved.`,
+    ),
   );
 }
 
@@ -643,11 +733,15 @@ export function truncateToolResultText(s: string): string {
   return `${s.slice(0, half)}\n\n[... truncated ${dropped} characters — narrow your read/grep, or read the file in ranges ...]\n\n${s.slice(-half)}`;
 }
 
-function isAbortError(err: unknown): boolean {
-  if (err instanceof Error) {
-    return err.name === "AbortError" || /aborted/i.test(err.message);
-  }
-  return false;
+/**
+ * True only for a genuine user-Stop: the abort signal fired, or the thrown
+ * error is a real AbortError (by name). We deliberately do NOT match on the
+ * message text — provider/network errors worded with "aborted" were being
+ * misclassified as a clean user-Stop, swallowing real failures (C-88).
+ */
+function isAbortError(err: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  return err instanceof Error && err.name === "AbortError";
 }
 
 /**

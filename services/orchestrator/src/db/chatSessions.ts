@@ -127,15 +127,32 @@ export async function getSession(
   return (data as ChatSessionRecord | null) ?? null;
 }
 
+/**
+ * "Default" is the auto-managed session title and has a partial unique index
+ * (one per project). A user naming/renaming a session "Default" would hit that
+ * index and surface as a raw 500 (C-94). Reject it up front with a clear,
+ * user-facing message instead. Postgres unique-violation code is also handled
+ * defensively in case of a race.
+ */
+function guardReservedTitle(title: string | null): void {
+  if (title?.trim() === "Default") {
+    throw new Error('"Default" is reserved — choose a different chat name.');
+  }
+}
+
 export async function createSession(
   projectId: string,
   title: string | null,
 ): Promise<ChatSessionRecord> {
+  guardReservedTitle(title);
   const { data, error } = await db()
     .from("chat_sessions")
     .insert({ project_id: projectId, title: title?.trim() || null })
     .select("id, project_id, title, created_at, updated_at")
     .single();
+  if (isUniqueViolation(error)) {
+    throw new Error('A chat with that name already exists — choose a different name.');
+  }
   if (error || !data) throw new Error(`createSession failed: ${error?.message}`);
   return data as ChatSessionRecord;
 }
@@ -145,6 +162,7 @@ export async function renameSession(
   sessionId: string,
   title: string,
 ): Promise<ChatSessionRecord> {
+  guardReservedTitle(title);
   const { data, error } = await db()
     .from("chat_sessions")
     .update({ title: title.trim() })
@@ -152,6 +170,9 @@ export async function renameSession(
     .eq("id", sessionId)
     .select("id, project_id, title, created_at, updated_at")
     .single();
+  if (isUniqueViolation(error)) {
+    throw new Error('A chat with that name already exists — choose a different name.');
+  }
   if (error || !data) throw new Error(`renameSession failed: ${error?.message}`);
   return data as ChatSessionRecord;
 }

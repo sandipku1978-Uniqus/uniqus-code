@@ -107,6 +107,12 @@ export default function ChatPanel() {
   const [cursor, setCursor] = useState(0);
   const [paletteDismissed, setPaletteDismissed] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Auto-follow state (C-24). atBottomRef is updated by onScroll BEFORE new
+  // content reflows, so a single update taller than the old slack (a streaming
+  // flush, a tool card, a history burst) can't make a bottom-parked reader look
+  // "scrolled up" and silently kill follow — the bug from measuring post-reflow.
+  const atBottomRef = useRef(true);
+  const didInitialScrollRef = useRef(false);
 
   useEffect(() => {
     setStopping(false);
@@ -326,16 +332,36 @@ export default function ChatPanel() {
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    // Only follow new messages when the user is already parked near the bottom.
-    // Otherwise a smooth scroll on every update yanks them down while they're
-    // reading older history. Measured BEFORE the new content reflows height —
-    // by the time this effect runs `scrollHeight` includes the new rows, but
-    // `scrollTop` hasn't moved, so a user who was at the bottom still reads as
-    // near-bottom while one who scrolled up does not.
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
-    if (!nearBottom) return;
+    // Session/project switch clears chat — re-arm the initial jump so the next
+    // session's replayed history lands at the bottom, not wherever this one was.
+    if (chat.length === 0) {
+      didInitialScrollRef.current = false;
+      atBottomRef.current = true;
+      return;
+    }
+    // First paint (a reopened session replays its whole history at once): jump
+    // straight to the latest message instead of stranding the view at the top.
+    if (!didInitialScrollRef.current) {
+      didInitialScrollRef.current = true;
+      el.scrollTo({ top: el.scrollHeight });
+      atBottomRef.current = true;
+      return;
+    }
+    // Follow new content only if the user was parked at the bottom BEFORE this
+    // update (captured by onScroll), not by re-measuring after the new rows have
+    // already grown scrollHeight — that post-reflow measure killed follow on any
+    // single update taller than the 100px slack (C-24).
+    if (!atBottomRef.current) return;
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [chat]);
+
+  // Track bottom-parked state on every scroll, so the follow effect above reads
+  // the user's intent as of BEFORE the new content arrived.
+  const onChatScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+  }, []);
 
   const turns = useMemo(() => buildTurns(chat), [chat]);
   // Bound the rendered conversation for very long sessions (A3 item 4). The
@@ -672,7 +698,7 @@ export default function ChatPanel() {
         </div>
       </div>
 
-      <div ref={scrollRef} className="chat-scroll">
+      <div ref={scrollRef} className="chat-scroll" onScroll={onChatScroll}>
         {chat.length === 0 && (
           <div style={{ color: "var(--text-dim)", fontSize: 12 }}>
             <div style={{ fontStyle: "italic" }}>

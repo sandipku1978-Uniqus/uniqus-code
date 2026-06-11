@@ -27,6 +27,22 @@ function recoveryResult(id: string): Anthropic.ToolResultBlockParam {
   };
 }
 
+/**
+ * True for an assistant message Anthropic would reject as empty content: an
+ * empty content array or an empty/whitespace string. The OpenAI/Gemini adapters
+ * can produce content:[] on a refusal / all-thinking / blocked turn (C-9). The
+ * loop now guards new turns, but older sessions persisted before that fix still
+ * carry the poison block; repairing it here lets those bricked sessions replay.
+ */
+function isEmptyAssistantContent(content: Anthropic.MessageParam["content"]): boolean {
+  if (Array.isArray(content)) return content.length === 0;
+  return typeof content === "string" && content.trim().length === 0;
+}
+
+const EMPTY_ASSISTANT_PLACEHOLDER: Anthropic.MessageParam["content"] = [
+  { type: "text", text: "(no response)" },
+];
+
 function toolUseIds(content: Anthropic.MessageParam["content"]): string[] {
   if (!Array.isArray(content)) return [];
   return content.filter(isToolUseBlock).map((block) => block.id);
@@ -48,6 +64,14 @@ export function normalizeMessageHistory(
       if (pending.length > 0) {
         out.push({ role: "user", content: pending.map(recoveryResult) });
         pending = [];
+      }
+      // Repair an empty-content assistant message (C-9). Anthropic 400s on a
+      // non-final empty-content assistant turn, so one persisted by an older
+      // session would brick every subsequent replay; substitute a placeholder.
+      if (isEmptyAssistantContent(msg.content)) {
+        out.push({ ...msg, content: EMPTY_ASSISTANT_PLACEHOLDER });
+        pending = [];
+        continue;
       }
       out.push(msg);
       pending = toolUseIds(msg.content);

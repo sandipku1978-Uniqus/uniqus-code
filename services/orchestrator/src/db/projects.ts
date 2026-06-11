@@ -21,6 +21,8 @@ export interface ProjectRecord {
   latest_deploy_at?: string | null;
   /** Attached global design system (null = none). */
   design_system_id?: string | null;
+  /** Attached reusable library skills (uuid[]; empty = none). */
+  skill_library_ids?: string[] | null;
   /** Supabase project ref linked to this project, if provisioned. */
   supabase_project_ref?: string | null;
 }
@@ -73,6 +75,7 @@ export async function createProject(input: {
   name: string;
   description?: string | null;
   design_system_id?: string | null;
+  skill_library_ids?: string[] | null;
 }): Promise<ProjectRecord> {
   const { data, error } = await db()
     .from("projects")
@@ -81,6 +84,7 @@ export async function createProject(input: {
       name: input.name,
       description: input.description ?? null,
       design_system_id: input.design_system_id ?? null,
+      skill_library_ids: input.skill_library_ids ?? [],
     })
     .select("*")
     .single();
@@ -100,6 +104,20 @@ export async function setProjectDesignSystem(
     .eq("id", id)
     .eq("owner_id", ownerId);
   if (error) throw new Error(`setProjectDesignSystem failed: ${error.message}`);
+}
+
+/** Set the project's attached library skills (uuid[]). Owner-scoped. */
+export async function setProjectSkillLibraries(
+  id: string,
+  ownerId: string,
+  skillIds: string[],
+): Promise<void> {
+  const { error } = await db()
+    .from("projects")
+    .update({ skill_library_ids: skillIds })
+    .eq("id", id)
+    .eq("owner_id", ownerId);
+  if (error) throw new Error(`setProjectSkillLibraries failed: ${error.message}`);
 }
 
 export async function getProject(

@@ -654,6 +654,11 @@ export async function readServerLogAsync(id: string, maxBytes = 8000): Promise<s
 
 export function stopAllServers(): void {
   for (const s of servers.values()) {
+    // C-90: for VM-backed servers s.pid is the IN-GUEST pid (a low number on
+    // the host's pid namespace). treeKilling it as root would target an
+    // unrelated host process. The VM teardown (fleet shutdownAll → ctrlAltDel)
+    // reaps in-guest processes; only kill host process-backed servers here.
+    if (s.vm) continue;
     try {
       treeKill(s.pid, "SIGKILL");
     } catch {}
@@ -661,12 +666,12 @@ export function stopAllServers(): void {
   servers.clear();
 }
 
+// Clean up process-backed dev servers on exit. NOTE (C-36): we deliberately do
+// NOT call process.exit() from the signal handlers — doing so preempted the
+// fleet's graceful shutdown (shutdownAllVms → ctrlAltDel, tap teardown) that
+// server.ts registers later, orphaning firecracker children across every
+// deploy/restart. We only release our own resources and let server.ts's signal
+// handlers (or the default behavior) drive the actual exit.
 process.on("exit", stopAllServers);
-process.on("SIGINT", () => {
-  stopAllServers();
-  process.exit(0);
-});
-process.on("SIGTERM", () => {
-  stopAllServers();
-  process.exit(0);
-});
+process.on("SIGINT", stopAllServers);
+process.on("SIGTERM", stopAllServers);

@@ -259,6 +259,13 @@ function mapStopReason(reason: string | null): StreamTurnResult["stopReason"] {
   if (reason === "end_turn" || reason === "stop_sequence") return "end_turn";
   if (reason === "tool_use") return "tool_use";
   if (reason === "max_tokens") return "max_tokens";
+  // A server-side tool (web_search) paused a long-running turn; per the SDK
+  // (0.100.1) we resubmit the partial assistant content as-is to continue, so
+  // the loop must re-loop rather than treat this as a finish.
+  if (reason === "pause_turn") return "pause_turn";
+  // The model refused to respond — end the turn, but surface it distinctly so
+  // the loop doesn't present a silent empty completion.
+  if (reason === "refusal") return "refusal";
   return "other";
 }
 

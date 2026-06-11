@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
@@ -266,10 +266,14 @@ fn handle(mut req: Request, servers: ServerTable, auth: Arc<Option<String>>) -> 
     if path != "/health" {
         if let Some(required) = auth.as_ref() {
             let expected = format!("Bearer {}", required);
-            let ok = req
-                .headers()
-                .iter()
-                .any(|h| h.field.equiv("Authorization") && h.value.as_str() == expected);
+            // C-115: constant-time comparison of the presented token against the
+            // expected value so a bridge-local attacker can't recover it byte by
+            // byte from response timing. `any` short-circuits on the header match,
+            // but the value compare itself (constant_time_eq) must not.
+            let ok = req.headers().iter().any(|h| {
+                h.field.equiv("Authorization")
+                    && constant_time_eq(h.value.as_str().as_bytes(), expected.as_bytes())
+            });
             if !ok {
                 return req.respond(json_response(401, &json!({ "error": "unauthorized" })));
             }
@@ -429,11 +433,11 @@ fn handle(mut req: Request, servers: ServerTable, auth: Arc<Option<String>>) -> 
                     .get(&id)
                     .ok_or_else(|| AgentError::NotFound(format!("no server {}", id)))?;
                 let log = s.log.lock().unwrap();
-                let tail = if log.len() > max {
-                    log[log.len() - max..].to_string()
-                } else {
-                    log.clone()
-                };
+                // Char-boundary-safe: a raw byte slice here would panic on a
+                // non-boundary offset, and we hold BOTH the servers table lock
+                // and the per-server log lock — under panic=abort that aborts
+                // the whole agent (no poisoning, but the VM's RPC dies).
+                let tail = tail_str(&log, max).to_string();
                 Ok(json_response(200, &json!({ "log": tail })))
             }
             _ => Err(AgentError::NotFound("not found".into())),
@@ -468,6 +472,29 @@ impl AgentError {
             AgentError::Bad(m) | AgentError::NotFound(m) | AgentError::Io(m) => m,
         }
     }
+}
+
+/// Constant-time byte comparison (C-115). Always folds over the full expected
+/// length so the loop count doesn't reveal where a mismatch is; the length
+/// check is combined into the accumulator rather than short-circuiting. Not for
+/// cryptographic secrets at scale, but enough to deny a timing oracle on the
+/// per-VM bearer token.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    // Differing length is itself a mismatch, but we still want to do the same
+    // amount of work regardless: walk `b` (the fixed-length expected value) and
+    // index `a` modulo its length so the iteration count never depends on `a`.
+    let mut diff: u8 = (a.len() != b.len()) as u8;
+    if !a.is_empty() {
+        for (i, &bb) in b.iter().enumerate() {
+            diff |= a[i % a.len()] ^ bb;
+        }
+    } else {
+        // `a` empty: still touch every byte of `b` to keep timing flat.
+        for &bb in b {
+            diff |= bb;
+        }
+    }
+    diff == 0
 }
 
 fn error_response(err: &AgentError) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -585,13 +612,49 @@ fn resolve_sandbox(rel: &str) -> Result<PathBuf, AgentError> {
     Ok(normalized)
 }
 
+/// Largest char boundary <= `i` (i clamped to s.len()). Walks down at most 3
+/// bytes — a UTF-8 char is at most 4 bytes — so this is O(1). Implemented by
+/// hand because `str::floor_char_boundary` is still unstable on stable Rust;
+/// slicing a `String` at a non-boundary byte index panics, which under
+/// `panic = "abort"` (Cargo.toml) would abort the whole agent and brick the VM.
+fn floor_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Smallest char boundary >= `i` (i clamped to s.len()). Counterpart to
+/// `floor_boundary`, used for the tail offset of a truncation.
+fn ceil_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+/// Char-boundary-safe tail: the suffix of `s` no longer than `max` bytes,
+/// snapped up to the nearest char boundary so the slice never splits a
+/// multibyte char (which would panic → abort under `panic = "abort"`).
+fn tail_str(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let start = ceil_boundary(s, s.len() - max);
+    &s[start..]
+}
+
 fn truncate_for_response(s: &str) -> String {
     if s.len() <= HALF_MAX * 2 {
         return s.to_string();
     }
-    let head = &s[..HALF_MAX];
-    let tail = &s[s.len() - HALF_MAX..];
-    let dropped = s.len() - HALF_MAX * 2;
+    let head_end = floor_boundary(s, HALF_MAX);
+    let tail_start = ceil_boundary(s, s.len() - HALF_MAX);
+    let head = &s[..head_end];
+    let tail = &s[tail_start..];
+    let dropped = s.len() - head.len() - tail.len();
     format!(
         "{}\n\n[... truncated {} bytes ...]\n\n{}",
         head, dropped, tail
@@ -653,6 +716,13 @@ fn walk(dir: &Path, root: &Path, re: &Regex, out: &mut Vec<String>) {
     }
 }
 
+/// Per-stream byte cap for /exec/run. We keep draining the pipe past this so
+/// the child never blocks on a full pipe, but stop *storing* bytes — otherwise
+/// `cat /dev/zero` (or a chatty build) grows the buffer without bound and OOMs
+/// the 1 GiB VM before the timeout fires. truncate_for_response shrinks it
+/// further for the wire; this just bounds peak memory.
+const RUN_OUTPUT_CAP: usize = 4 * 1024 * 1024;
+
 fn run_command(command: &str, timeout_ms: u64) -> Value {
     let mut child = match Command::new("/bin/sh")
         .arg("-c")
@@ -661,6 +731,11 @@ fn run_command(command: &str, timeout_ms: u64) -> Value {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // C-60: own process group (PGID == child PID) so a timeout can SIGKILL
+        // the whole tree, not just /bin/sh. Otherwise a daemonized grandchild
+        // survives, keeps the inherited stdout/stderr write-ends open, and the
+        // reader threads never see EOF — hanging their joins forever.
+        .process_group(0)
         .spawn()
     {
         Ok(c) => c,
@@ -673,46 +748,44 @@ fn run_command(command: &str, timeout_ms: u64) -> Value {
         }
     };
 
+    let pid = child.id();
     let stdout_handle = child.stdout.take();
     let stderr_handle = child.stderr.take();
     let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
     let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
     let so = Arc::clone(&stdout_buf);
     let se = Arc::clone(&stderr_buf);
-    let stdout_thread = stdout_handle.map(|mut h| {
-        thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            while let Ok(n) = h.read(&mut buf) {
-                if n == 0 {
-                    break;
-                }
-                so.lock().unwrap().extend_from_slice(&buf[..n]);
-            }
-        })
-    });
-    let stderr_thread = stderr_handle.map(|mut h| {
-        thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            while let Ok(n) = h.read(&mut buf) {
-                if n == 0 {
-                    break;
-                }
-                se.lock().unwrap().extend_from_slice(&buf[..n]);
-            }
-        })
-    });
+    let stdout_thread = stdout_handle.map(|h| spawn_capped_reader(h, so));
+    let stderr_thread = stderr_handle.map(|h| spawn_capped_reader(h, se));
 
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let exit_status = wait_with_timeout(&mut child, deadline);
     let killed_by_timeout = exit_status.is_none();
     if killed_by_timeout {
+        // Kill the entire process group, not just sh: -pid targets PGID `pid`.
+        // SIGKILL closes every write-end of the pipes so the readers hit EOF.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+        // Belt and braces in case the group somehow doesn't cover sh itself.
         let _ = child.kill();
     }
-    if let Some(t) = stdout_thread {
-        let _ = t.join();
-    }
-    if let Some(t) = stderr_thread {
-        let _ = t.join();
+    // On a timeout we must NOT block on the reader joins: if some grandchild
+    // still (briefly) holds a write-end, join() would hang the handler. The
+    // group-kill closes the pipes essentially immediately, so a short grace is
+    // enough; past that we read whatever was buffered and let the (now near-
+    // dead) reader threads finish detached. On the normal exit path we join
+    // fully so all output is captured.
+    if killed_by_timeout {
+        join_or_detach(stdout_thread, Duration::from_millis(500));
+        join_or_detach(stderr_thread, Duration::from_millis(500));
+    } else {
+        if let Some(t) = stdout_thread {
+            let _ = t.join();
+        }
+        if let Some(t) = stderr_thread {
+            let _ = t.join();
+        }
     }
     let status = exit_status.unwrap_or_else(|| {
         // Reap the killed child to avoid a zombie.
@@ -732,6 +805,55 @@ fn run_command(command: &str, timeout_ms: u64) -> Value {
         "stderr": stderr_str,
         "exitCode": exit_code,
     })
+}
+
+/// Drain a child pipe into `sink`, but stop *storing* once `sink` reaches
+/// RUN_OUTPUT_CAP bytes (C-61). We keep calling read() so the child doesn't
+/// block on a full pipe; we just drop the bytes past the cap.
+fn spawn_capped_reader(
+    mut h: impl Read + Send + 'static,
+    sink: Arc<Mutex<Vec<u8>>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        let mut capped = false;
+        while let Ok(n) = h.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            if capped {
+                continue; // keep draining, drop the bytes
+            }
+            let mut g = sink.lock().unwrap();
+            let room = RUN_OUTPUT_CAP.saturating_sub(g.len());
+            if room == 0 {
+                capped = true;
+                continue;
+            }
+            let take = n.min(room);
+            g.extend_from_slice(&buf[..take]);
+            if g.len() >= RUN_OUTPUT_CAP {
+                capped = true;
+            }
+        }
+    })
+}
+
+/// Try to join `thread` within `grace`; if it hasn't finished, detach it so the
+/// caller never blocks. Used only on the timeout path after a group-kill, where
+/// a lingering write-end could otherwise wedge the join indefinitely.
+fn join_or_detach(thread: Option<thread::JoinHandle<()>>, grace: Duration) {
+    let Some(t) = thread else { return };
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline {
+        if t.is_finished() {
+            let _ = t.join();
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Still running: leave it detached. Its sink is an Arc we still hold, so
+    // reading the buffered output below stays memory-safe.
 }
 
 /// Poll-wait for a child up to `deadline`. Returns Some(status) if the child
@@ -812,11 +934,7 @@ fn start_server(
         if let Some(mut entry) = servers.lock().unwrap().remove(&id) {
             let _ = entry.child.kill();
         }
-        let tail = if log_tail.len() > 1500 {
-            log_tail[log_tail.len() - 1500..].to_string()
-        } else {
-            log_tail
-        };
+        let tail = tail_str(&log_tail, 1500).to_string();
         return Err(AgentError::Bad(format!(
             "server did not open port {} within {}ms\nrecent log:\n{}",
             port, ready_timeout_ms, tail
@@ -837,7 +955,9 @@ fn spawn_log_pump(reader: Option<impl Read + Send + 'static>, sink: Arc<Mutex<St
             let mut log = sink.lock().unwrap();
             log.push_str(&chunk);
             if log.len() > MAX_LOG {
-                let drop = log.len() - MAX_LOG;
+                // Snap the cut up to a char boundary: replace_range on a
+                // non-boundary index panics → abort under panic=abort.
+                let drop = ceil_boundary(&log, log.len() - MAX_LOG);
                 log.replace_range(..drop, "");
             }
         }
@@ -944,5 +1064,55 @@ mod tests {
             base64_decode("aGVsbG8gd29ybGQh").unwrap(),
             b"hello world!"
         );
+    }
+
+    // C-20/21/22: truncation must never panic on a multibyte char straddling
+    // the cut. "→" is 3 bytes (E2 86 92); build inputs that put a boundary
+    // mid-char and assert no panic + valid UTF-8 out.
+    #[test]
+    fn truncate_never_splits_multibyte() {
+        // Each "a→" is 4 bytes; 5000 reps = 20_000 bytes > HALF_MAX*2 (16384),
+        // and the 8192/len-8192 offsets land inside a "→".
+        let s = "a→".repeat(5000);
+        let out = truncate_for_response(&s);
+        assert!(out.contains("truncated"));
+        // String is valid UTF-8 by construction; the point is no panic above.
+        assert!(out.len() < s.len());
+    }
+
+    #[test]
+    fn truncate_short_passthrough() {
+        let s = "→→→"; // 9 bytes, well under the cap
+        assert_eq!(truncate_for_response(s), s);
+    }
+
+    #[test]
+    fn tail_str_is_char_safe() {
+        let s = "→".repeat(100); // 300 bytes
+        // 100 is not a multiple of 3, so a raw byte slice at len-100 would split
+        // a "→". tail_str must snap to a boundary and stay valid.
+        let t = tail_str(&s, 100);
+        assert!(t.len() <= 100);
+        assert!(s.ends_with(t));
+        // Whole-string request returns the whole string.
+        assert_eq!(tail_str(&s, 10_000), &s);
+    }
+
+    #[test]
+    fn char_boundary_helpers() {
+        let s = "a→b"; // bytes: 0='a',1..=3='→',4='b'
+        assert_eq!(floor_boundary(s, 2), 1);
+        assert_eq!(ceil_boundary(s, 2), 4);
+        assert_eq!(floor_boundary(s, 99), s.len());
+        assert_eq!(ceil_boundary(s, 99), s.len());
+    }
+
+    #[test]
+    fn constant_time_eq_matches_equality() {
+        assert!(constant_time_eq(b"Bearer abc", b"Bearer abc"));
+        assert!(!constant_time_eq(b"Bearer abc", b"Bearer abd"));
+        assert!(!constant_time_eq(b"short", b"longer value"));
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(constant_time_eq(b"", b""));
     }
 }

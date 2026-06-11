@@ -8,6 +8,7 @@ import BrandLockup from "./BrandLockup";
 import GuestBanner from "./GuestBanner";
 import DatabasesView from "./DatabasesView";
 import DesignSystemsView from "./DesignSystemsView";
+import SkillsView from "./SkillsView";
 import Modal from "./Modal";
 import FirstRunWizard from "./FirstRunWizard";
 import { Skeleton } from "./Skeleton";
@@ -256,7 +257,7 @@ export default function ProjectPicker({
   // recent tiles). "all" shows every project as a richer card with URL +
   // repo + status; "recent" shows the same data sorted by activity with
   // more verbose timestamps.
-  type View = "home" | "all" | "recent" | "databases" | "design-systems";
+  type View = "home" | "all" | "recent" | "databases" | "design-systems" | "skills";
   const [view, setView] = useState<View>("home");
 
   const [editing, setEditing] = useState<{
@@ -751,6 +752,27 @@ export default function ProjectPicker({
               </span>
               Design Systems
             </button>
+            <button
+              type="button"
+              onClick={() => setView("skills")}
+              className={`nav-item${view === "skills" ? " active" : ""}`}
+            >
+              <span className="ic">
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M12 2l2.4 6.9H21l-5.3 4.1 2 6.9L12 16.9 6.3 19.9l2-6.9L3 8.9h6.6z" />
+                </svg>
+              </span>
+              Skills
+            </button>
           </div>
 
 
@@ -811,6 +833,8 @@ export default function ProjectPicker({
             <DatabasesView isGuest={isGuest} />
           ) : view === "design-systems" ? (
             <DesignSystemsView isGuest={isGuest} />
+          ) : view === "skills" ? (
+            <SkillsView isGuest={isGuest} />
           ) : view === "all" || view === "recent" ? (
             <ProjectListView
               view={view}
@@ -1244,6 +1268,14 @@ export default function ProjectPicker({
             </div>
           )}
 
+            </>
+          )}
+
+          {/* Edit dialogs live OUTSIDE the view ternary so Rename/Icon/Delete
+              work in All/Recent (ProjectListView) too — not just Home (C-4).
+              `editing` is set by onEdit from every view; rendering them only in
+              the home branch meant clicking them elsewhere set state but showed
+              nothing, then popped a stale dialog on returning Home. */}
           {editing && editing.field === "rename" && (
             <RenameDialog
               project={editing.project}
@@ -1266,8 +1298,6 @@ export default function ProjectPicker({
               onCancel={() => setEditing(null)}
               onConfirm={() => handleDelete(editing.project)}
             />
-          )}
-            </>
           )}
 
           {linkPrompt && (

@@ -21,6 +21,11 @@ serde_json = "1"
 # Used by /fs/grep — matches the Node agent's RegExp behavior closely enough
 # for our single-line pattern matching needs.
 regex = "1"
+# Process-group kill on /exec/run timeout: we spawn the child in its own
+# process group and SIGKILL the whole group (kill(-pid)) so daemonized
+# grandchildren can't survive and hold the stdout/stderr pipe write-ends open
+# (which would hang the reader-thread joins forever). Tiny, std-adjacent crate.
+libc = "0.2"
 
 [profile.release]
 # Smaller binary — this ships in every per-VM rootfs, so size matters.

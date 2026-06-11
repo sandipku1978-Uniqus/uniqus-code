@@ -275,8 +275,11 @@ function handleEvent(event: ServerEvent): void {
       // server when the socket dropped, so the user has to re-prompt
       // either way. Better a clean replay than a dirty merge.
       s.resetChat();
-      // A fresh session view — clear transient run banners; a following
-      // run_active will re-raise the reattach banner if a run is still live.
+      // A fresh session view — clear transient run state; a following run_active
+      // re-raises busy + the reattach banner if a run is still live (C-28/C-30).
+      // Clearing busy here un-wedges the composer when switching to an empty
+      // session/project mid-run (which replays no `complete` to clear it).
+      s.setBusy(false);
       s.setRunReattaching(false);
       s.setInstallInProgress(null);
       s.setUser(event.user);
@@ -425,6 +428,10 @@ function handleEvent(event: ServerEvent): void {
       // Defensive: a turn can't still be installing or reattaching once done.
       s.setInstallInProgress(null);
       s.setRunReattaching(false);
+      // If the run was aborted while a plan was still awaiting approval, resolve
+      // that stale plan card so its live Approve button can't later hijack a new
+      // run's plan wait (C-27). No-op when no plan is pending.
+      if (event.aborted === true) s.cancelPendingPlan();
       send({ type: "request_tree" });
       // Agent just went idle — drain any user edits that were deferred while
       // it was running. Without this, edits made during the agent's turn
@@ -475,12 +482,23 @@ function handleEvent(event: ServerEvent): void {
       );
       break;
     case "client_write_ack":
-      s.setSaveStatus(
-        event.path,
-        event.ok
-          ? { kind: "saved", at: Date.now() }
-          : { kind: "error", message: event.error ?? "save failed" },
-      );
+      if (event.ok) {
+        // Only clear the buffered edit + mark "saved" if no NEWER keystroke has
+        // re-dirtied the path since we sent (C-29/C-83). flushSave no longer
+        // clears pendingEdits on send, so:
+        //  - status still "saving" → this ack matches the latest send: clear + saved.
+        //  - status back to "dirty" → newer edit buffered: leave it for the next
+        //    flush so the dirty indicator stays honest and the edit isn't lost.
+        if (s.saveStatus[event.path]?.kind === "saving") {
+          s.clearPendingEdit(event.path);
+          s.setSaveStatus(event.path, { kind: "saved", at: Date.now() });
+        }
+      } else {
+        // Write failed — keep the pending edit so the Save retry button can
+        // resend it (previously flushSave had already cleared it, making retry
+        // a no-op and losing the edit on the next request_file).
+        s.setSaveStatus(event.path, { kind: "error", message: event.error ?? "save failed" });
+      }
       break;
     case "error":
       // Friendly error card (C7) instead of a bare muted `error: <raw>` line.

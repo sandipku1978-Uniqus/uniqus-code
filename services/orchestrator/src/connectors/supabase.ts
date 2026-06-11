@@ -44,6 +44,21 @@ async function linkedRef(projectId: string): Promise<string | null> {
   return (data?.supabase_project_ref as string | null) ?? null;
 }
 
+/**
+ * A Supabase project ref is a 20-char lowercase alphanumeric id. Validate it
+ * before it gets interpolated raw into `/projects/${ref}/...` Management-API
+ * paths — otherwise an agent-supplied (or prompt-injected) ref could smuggle
+ * `/` / `..` segments to traverse to other Management-API endpoints, or target
+ * an arbitrary user-owned project (cross-project SQL / key exfil). Mirrors the
+ * github connector's validatePathComponent guard.
+ */
+function assertValidRef(ref: string): string {
+  if (!/^[a-z0-9]{20}$/.test(ref)) {
+    throw new Error(`invalid Supabase project_ref: ${ref}`);
+  }
+  return ref;
+}
+
 /** Resolve the project ref from an explicit arg or the linked project. */
 async function resolveRef(ctx: ConnectorCtx, args: Record<string, unknown>): Promise<string> {
   const explicit = typeof args.project_ref === "string" && args.project_ref.trim();
@@ -53,7 +68,7 @@ async function resolveRef(ctx: ConnectorCtx, args: Record<string, unknown>): Pro
       "No Supabase project linked. Call supabase.provision_database first, or pass project_ref.",
     );
   }
-  return ref;
+  return assertValidRef(ref);
 }
 
 interface ProjectStatus {

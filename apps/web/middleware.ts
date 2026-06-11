@@ -1,4 +1,8 @@
-import { authkitMiddleware } from "@workos-inc/authkit-nextjs";
+import {
+  authkit,
+  authkitMiddleware,
+  handleAuthkitHeaders,
+} from "@workos-inc/authkit-nextjs";
 import {
   NextResponse,
   type NextRequest,
@@ -51,9 +55,13 @@ const workosMiddleware = authkitMiddleware({
  *     cookie yet), convert + signout read the guest cookie themselves. The
  *     WorkOS middleware must never intercept them, or it redirects the
  *     would-be guest to the WorkOS sign-in page.
- *  2. A request carrying a valid `uniqus-guest` cookie is let through
- *     untouched. A just-converted guest still has wos-session, so that case
- *     flows through WorkOS normally.
+ *  2. A request carrying a valid `uniqus-guest` cookie skips the
+ *     middlewareAuth sign-in redirect, but still runs AuthKit's session step
+ *     (`authkit()`): withAuth() THROWS on any route the AuthKit middleware
+ *     didn't stamp with the `x-workos-middleware` request header, and /,
+ *     /login, and the marketing layout all call it. Running the session step
+ *     also resolves the wos-session when BOTH cookies are present (the
+ *     ?convert=failed retry state), so those pages see the real user.
  *
  * Everything else falls back to the WorkOS middleware exactly as before.
  */
@@ -68,7 +76,12 @@ export default async function middleware(
   const guest = await unsealGuestCookie(
     req.cookies.get(GUEST_COOKIE_NAME)?.value,
   );
-  if (guest) return NextResponse.next();
+  if (guest) {
+    // Same as authkitMiddleware minus the unauthenticated-paths redirect:
+    // guests must reach /projects etc. without being bounced to sign-in.
+    const { headers } = await authkit(req);
+    return handleAuthkitHeaders(req, headers);
+  }
   return workosMiddleware(req, event);
 }
 

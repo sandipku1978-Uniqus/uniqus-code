@@ -459,3 +459,35 @@ alter table design_systems enable row level security;
 -- deleting a design system detaches it from projects rather than deleting them.
 alter table projects add column if not exists design_system_id uuid
   references design_systems(id) on delete set null;
+
+-- Global, per-user Skill libraries (Skills tab on the projects page). Reusable
+-- markdown rule-sets the user authors once and ATTACHES to many projects. The
+-- attached bodies are injected into the agent system prompt before the project's
+-- own .uniqus/skills.md (which stays the override layer). `body` = SkillLibrary
+-- in @uniqus/api-types. Distinct from the code-defined curated SKILL_PACKS.
+create table if not exists skill_libraries (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  name text not null,
+  description text,
+  body text not null default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists skill_libraries_user_idx
+  on skill_libraries (user_id, updated_at desc);
+
+drop trigger if exists skill_libraries_updated_at on skill_libraries;
+create trigger skill_libraries_updated_at
+  before update on skill_libraries
+  for each row execute function touch_project_updated_at();
+
+alter table skill_libraries enable row level security;
+
+-- Which library skills a project has attached (additive — a project can attach
+-- several). Stored as a uuid[] rather than a junction table to keep attach/detach
+-- a single-row update; dangling ids (after a skill is deleted) are harmless
+-- because resolution re-checks ownership per turn and skips anything missing.
+alter table projects add column if not exists skill_library_ids uuid[]
+  not null default '{}'::uuid[];

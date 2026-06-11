@@ -97,6 +97,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
   const [selectedRepo, setSelectedRepo] = useState("");
 
   const [busy, setBusy] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeActivity, setAnalyzeActivity] = useState("");
   const [refining, setRefining] = useState(false);
@@ -217,6 +218,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
   }
 
   async function createBlank() {
+    if (busy || analyzing) return; // re-entry guard (C-26): keyboard paths bypass the disabled button
     const name = newName.trim();
     if (!name) return toast.error("Give the design system a name first.");
     setBusy(true);
@@ -234,6 +236,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
   }
 
   async function runCreate() {
+    if (busy || analyzing) return; // re-entry guard (C-26): Cmd/Ctrl+Enter bypasses the disabled button
     if (createMode === "blank") return void createBlank();
 
     const fd = new FormData();
@@ -788,9 +791,32 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
                   <button type="button" className="btn-primary" style={smallBtn} onClick={save} disabled={busy}>
                     {busy ? "Saving…" : "Save"}
                   </button>
-                  <button type="button" className="btn-ghost" style={{ ...smallBtn, color: "var(--conf-medium, #d98a3d)" }} onClick={() => remove(d.id)} disabled={busy}>
-                    Delete
-                  </button>
+                  {/* Two-step confirm (C-25): the Delete API is permanent with no
+                      undo and sits next to Save — a single misclick destroyed the
+                      design system. First click arms; second click confirms. */}
+                  {confirmDeleteId === d.id ? (
+                    <>
+                      <button
+                        type="button"
+                        className="btn-ghost"
+                        style={{ ...smallBtn, color: "var(--conf-high, #e5484d)" }}
+                        onClick={() => {
+                          setConfirmDeleteId(null);
+                          void remove(d.id);
+                        }}
+                        disabled={busy}
+                      >
+                        Confirm delete
+                      </button>
+                      <button type="button" className="btn-ghost" style={smallBtn} onClick={() => setConfirmDeleteId(null)} disabled={busy}>
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <button type="button" className="btn-ghost" style={{ ...smallBtn, color: "var(--conf-medium, #d98a3d)" }} onClick={() => setConfirmDeleteId(d.id)} disabled={busy}>
+                      Delete
+                    </button>
+                  )}
                 </>
               )}
             </div>

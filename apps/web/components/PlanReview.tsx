@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import type { Plan } from "@uniqus/api-types";
 import { send } from "@/lib/ws-client";
+import { toast } from "@/lib/toast";
 import { useStore, type ChatItem } from "@/lib/store";
 
 type PlanItem = Extract<ChatItem, { kind: "plan_proposal" }>;
@@ -54,7 +55,13 @@ export default function PlanReview({ item }: { item: PlanItem }) {
     draft.summary.trim() !== draft.plain_summary.trim();
 
   const approve = (plan: Plan) => {
-    send({ type: "plan_approved", plan });
+    // Check send()'s result (C-27): on a dropped socket the server never hears
+    // the approval, so marking it "approved" locally would show the plan running
+    // when nothing is. Surface the failure and leave the card actionable.
+    if (!send({ type: "plan_approved", plan })) {
+      toast.error("Couldn't reach the server — reconnecting. Try approving again in a moment.");
+      return;
+    }
     approvePendingPlan(plan);
     setEditing(false);
   };
@@ -63,7 +70,10 @@ export default function PlanReview({ item }: { item: PlanItem }) {
   // scaffold, instead of forcing the user to abort and retype everything (§C).
   const rejectAndRevise = () => {
     // Unwind the loop's wait-for-plan (server resolves it as aborted).
-    send({ type: "abort" });
+    if (!send({ type: "abort" })) {
+      toast.error("Couldn't reach the server — reconnecting. Try again in a moment.");
+      return;
+    }
     rejectPendingPlan();
     setPendingComposerText("Revise the plan: ");
   };

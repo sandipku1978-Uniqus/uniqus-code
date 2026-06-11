@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import AdmZip from "adm-zip";
-import { SKIP_DIR_NAMES, SKIP_FILE_BASENAMES } from "./deploy.js";
+import { SKIP_DIR_NAMES, SKIP_FILE_BASENAMES, isSecretEnvFile } from "./deploy.js";
 
 // Total uncompressed cap so a runaway sandbox can't produce a gigabyte zip.
 // Matches the import + deploy caps (200 MB).
@@ -26,6 +26,7 @@ export async function buildProjectZip(rootDir: string): Promise<Buffer> {
     }
     for (const e of entries) {
       // Skip secret .env family + known junk files.
+      if (isSecretEnvFile(e.name)) continue;
       if (SKIP_FILE_BASENAMES.has(e.name)) continue;
       if (e.isDirectory()) {
         if (SKIP_DIR_NAMES.has(e.name)) continue;

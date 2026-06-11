@@ -328,6 +328,8 @@ export interface ProjectSummary {
   latest_deploy_at?: string | null;
   /** Attached global design system (null = none). The agent generates against its tokens. */
   design_system_id?: string | null;
+  /** Attached reusable library skills (ids; empty/undefined = none). */
+  skill_library_ids?: string[] | null;
 }
 
 // ── Design systems ──────────────────────────────────────────────────────────
@@ -433,6 +435,32 @@ export interface DesignSystem {
   name: string;
   tokens: DesignTokens;
   created_at: string;
+  updated_at: string;
+}
+
+/**
+ * A reusable, account-level Skill: a named markdown rule-set the user authors
+ * once and ATTACHES to any number of projects. Distinct from the per-project
+ * `.uniqus/skills.md` file (which stays the project-specific override layer) and
+ * from the code-defined curated `SKILL_PACKS`. At each turn, every attached
+ * library skill's `body` is injected into the agent system prompt BEFORE the
+ * project's own skills.md, so the project file can still override/extend it.
+ */
+export interface SkillLibrary {
+  id: string;
+  name: string;
+  description: string | null;
+  /** The skill instructions, markdown. Capped at 64 KB by the API. */
+  body: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Lightweight row for list views (no body). */
+export interface SkillLibrarySummary {
+  id: string;
+  name: string;
+  description: string | null;
   updated_at: string;
 }
 

@@ -42,7 +42,7 @@ import {
 } from "./agent/selectedElement.js";
 import { proposePlan, formatPlanForExecution } from "./agent/plan.js";
 import { getTodos, clearTodos } from "./agent/todos.js";
-import { assertPublicHost } from "./connectors/ssrfGuard.js";
+import { assertPublicHost, safeFetch } from "./connectors/ssrfGuard.js";
 import {
   readSkills,
   writeSkills,
@@ -88,6 +88,7 @@ import {
   createShareToken,
   revokeShareToken,
   revokeSharesForServer,
+  startShareTokenSweeper,
 } from "./previewShare.js";
 import { readRunConfig, writeRunConfig, detectRunConfig } from "./runConfig.js";
 import { ensureProjectDeps } from "./ensureDeps.js";
@@ -109,6 +110,7 @@ import {
   setGithubRepo,
   clearGithubRepo,
   setProjectDesignSystem,
+  setProjectSkillLibraries,
 } from "./db/projects.js";
 import {
   listDesignSystems,
@@ -118,6 +120,15 @@ import {
   updateDesignSystem,
   deleteDesignSystem,
 } from "./db/designSystems.js";
+import {
+  listSkillLibraries,
+  getSkillLibrary,
+  createSkillLibrary,
+  updateSkillLibrary,
+  deleteSkillLibrary,
+  getAttachedSkillBodies,
+  resolveOwnedSkillIds,
+} from "./db/skillLibraries.js";
 import { loadHistory, appendMessage, clearHistory } from "./db/messages.js";
 import {
   recordUsageEvent,
@@ -358,6 +369,11 @@ function broadcastToSession(
 
 sandboxEvents.on("server_exit", (id: string, projectId: string | null) => {
   if (projectId) broadcastToProject(projectId, { type: "server_stopped", id });
+  // Drop any share tokens for the now-dead server. revokeSharesForServer was
+  // only wired to the manual DELETE before, so tokens for stopped/destroyed
+  // servers lingered in memory until process exit (C-100). This is the single
+  // choke point every stop path emits through (stopServer, removeServersForProject).
+  revokeSharesForServer(id);
 });
 
 // Last-resort safety net: a stray async error somewhere in the agent loop or
@@ -395,17 +411,6 @@ async function main(): Promise<void> {
 
   if (isFirecrackerEnabled()) {
     startIdleSweeper();
-    const onSignal = (sig: NodeJS.Signals): void => {
-      // Stop the 30s sweeper first so it doesn't hold the loop open while
-      // shutdownAll is waiting on the VMs. Without this, a Railway/Hetzner
-      // SIGTERM can wait up to a full tick before clean exit.
-      stopIdleSweeper();
-      void shutdownAllVms().catch((err) =>
-        console.error(`Firecracker shutdownAll failed (${sig}):`, err),
-      );
-    };
-    process.once("SIGTERM", () => onSignal("SIGTERM"));
-    process.once("SIGINT", () => onSignal("SIGINT"));
     console.log("[firecracker] enabled — VMs boot lazily on first user_message");
   }
 
@@ -413,8 +418,7 @@ async function main(): Promise<void> {
   // Storage + DB teardown matters either way, and destroyVm is a no-op when
   // Firecracker is off.
   startGuestSweeper(sandboxDirFor);
-  process.once("SIGTERM", stopGuestSweeper);
-  process.once("SIGINT", stopGuestSweeper);
+  startShareTokenSweeper();
 
   const httpServer = createServer((req, res) => {
     handleHttp(req, res).catch((err) => {
@@ -446,6 +450,29 @@ async function main(): Promise<void> {
     console.log(`orchestrator: ws://localhost:${PORT} (LAN: ws://<your-ip>:${PORT})`);
     console.log(`sandbox root: ${SANDBOX_ROOT}`);
   });
+
+  // Single graceful-shutdown driver (C-36). sandbox.ts's signal handlers no
+  // longer force-exit, so this is the one place that runs all cleanup —
+  // sweepers, VM teardown (the fleet's ctrlAltDel + tap teardown that orphaned
+  // firecracker children when it was preempted) — and THEN drives the exit. The
+  // listening HTTP server would otherwise keep the loop alive forever on SIGTERM.
+  let shuttingDown = false;
+  const onSignal = (sig: NodeJS.Signals): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    stopGuestSweeper();
+    if (isFirecrackerEnabled()) stopIdleSweeper();
+    const vmShutdown = isFirecrackerEnabled()
+      ? shutdownAllVms().catch((err) => console.error(`Firecracker shutdownAll failed (${sig}):`, err))
+      : Promise.resolve();
+    void vmShutdown.finally(() => {
+      httpServer.close(() => process.exit(0));
+      // Hard backstop: if connections linger past the grace window, exit anyway.
+      setTimeout(() => process.exit(0), 5_000).unref();
+    });
+  };
+  process.once("SIGTERM", () => onSignal("SIGTERM"));
+  process.once("SIGINT", () => onSignal("SIGINT"));
 }
 
 // ── HTTP ──────────────────────────────────────────────────────────────────────
@@ -498,8 +525,14 @@ function shouldProxy(url: string, headers: IncomingHttpHeaders): boolean {
       return false;
     }
   })();
+  // Match BOTH the owner preview cookie (uniqus_preview=) AND the share-recipient
+  // cookie (uniqus_preview_share=). The old `includes("uniqus_preview=")` test
+  // can't match "uniqus_preview_share=" (the "_" follows "preview"), so after an
+  // SPA soft-nav stripped the share path from URL+Referer, share recipients'
+  // fetches/HMR fell through to API routing and broke the shared preview (C-15).
   const cookieHasPreview =
-    typeof headers.cookie === "string" && headers.cookie.includes("uniqus_preview=");
+    typeof headers.cookie === "string" &&
+    /(?:^|;\s*)uniqus_preview(?:_share)?=/.test(headers.cookie);
   if (!refererPointsAtPreview && !cookieHasPreview) return false;
   if (url.startsWith("/api/") || url === "/health") return false;
   // The orchestrator WS upgrade lives at `/` with `?project=...`. Anything
@@ -783,6 +816,12 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return await handleGuestCreate(res);
   }
   if (req.url === "/api/guest/restore" && req.method === "POST") {
+    // Throttle unauthenticated recovery-code guesses from a single source
+    // (C-107). The code space is ~79 bits so brute force is already infeasible,
+    // but this caps free guesses + unthrottled DB hits, matching /api/guest.
+    if (!rateLimitOk(`guest-restore:${clientIp(req)}`, 30, 5 * 60 * 1000)) {
+      return json(res, 429, { error: "too many requests — please wait a moment and try again" });
+    }
     const body = await readJsonBody<{ recovery_code?: string }>(req).catch(
       () => ({}) as { recovery_code?: string },
     );
@@ -895,7 +934,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   }
 
   if (req.url === "/api/projects" && req.method === "POST") {
-    const body = await readJsonBody<{ name?: string; description?: string; design_system_id?: string | null }>(req);
+    const body = await readJsonBody<{ name?: string; description?: string; design_system_id?: string | null; skill_library_ids?: string[] }>(req);
     const name = (body.name ?? "").trim();
     if (!name) return json(res, 400, { error: "name is required" });
     const project = await createProject({
@@ -903,6 +942,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       name,
       description: body.description ?? null,
       design_system_id: await resolveDesignSystemId(user.id, body.design_system_id),
+      skill_library_ids: await resolveOwnedSkillIds(user.id, body.skill_library_ids),
     });
     const sandboxDir = sandboxDirFor(project.id);
     await fs.mkdir(sandboxDir, { recursive: true });
@@ -915,7 +955,14 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // name and the brief is forwarded to the agent verbatim. Cheaper than making
   // the user pick a name; refineBrief never throws (falls back to a slug).
   if (req.url === "/api/projects/from-brief" && req.method === "POST") {
-    const body = await readJsonBody<{ brief?: string; description?: string; design_system_id?: string | null }>(req);
+    // Every call makes a platform-billed Haiku call (refineBrief uses our
+    // ANTHROPIC_API_KEY, not BYOK) and creates a project row + sandbox dir.
+    // Cap per account+IP so a throwaway guest can't loop it to burn the API
+    // budget / exhaust disk+DB (C-55). Generous enough for real bursts.
+    if (!rateLimitOk(`from-brief:${user.id}:${clientIp(req)}`, 20, 5 * 60 * 1000)) {
+      return json(res, 429, { error: "too many projects created — please wait a moment and try again" });
+    }
+    const body = await readJsonBody<{ brief?: string; description?: string; design_system_id?: string | null; skill_library_ids?: string[] }>(req);
     const brief = (body.brief ?? "").trim();
     if (!brief) return json(res, 400, { error: "brief is required" });
     if (brief.length > 4000) {
@@ -934,6 +981,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       name: refined.name,
       description: body.description ?? brief.slice(0, 200),
       design_system_id: await resolveDesignSystemId(user.id, body.design_system_id),
+      skill_library_ids: await resolveOwnedSkillIds(user.id, body.skill_library_ids),
     });
     const sandboxDir = sandboxDirFor(project.id);
     await fs.mkdir(sandboxDir, { recursive: true });
@@ -1056,7 +1104,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const relPath = decodeURIComponent(rawFileMatch[2]);
     const dest = sandboxDirFor(projectId);
     try {
-      const full = resolveSandboxChild(dest, relPath);
+      const full = await resolveSandboxChildReal(dest, relPath);
       const buf = await fs.readFile(full);
       const ext = path.extname(relPath).toLowerCase();
       const mimeMap: Record<string, string> = {
@@ -1515,6 +1563,18 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return json(res, 200, { packs });
   }
 
+  // Preview a pack's body WITHOUT writing it (C-5). The client applies the pack
+  // into its local editor buffer and only persists on Save, so "Apply" no longer
+  // silently overwrites the project's skills.md server-side (which contradicted
+  // the "nothing is saved until you click Save" promise and made Undo a no-op
+  // against the server). Read-only.
+  const packBodyMatch = req.url?.match(/^\/api\/skill-packs\/([a-z0-9-]+)$/);
+  if (packBodyMatch && req.method === "GET") {
+    const pack = findPackById(packBodyMatch[1]);
+    if (!pack) return json(res, 404, { error: "skill pack not found" });
+    return json(res, 200, { id: pack.id, name: pack.name, body: pack.body });
+  }
+
   // Apply a curated pack: writes the body to <sandbox>/.uniqus/skills.md
   // (mode=replace, default) or appends below existing skills (mode=append).
   const applyPackMatch = req.url?.match(
@@ -1767,6 +1827,74 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       return json(res, 200, { ok: true });
     }
   }
+
+  // ── Skill libraries (reusable account-level Skills) ──────────────────────────
+  // Mirrors the design-systems CRUD above: user-scoped, no AI. The UI guest-gates
+  // these (like Design Systems); the API stays owner-scoped.
+  const MAX_SKILL_BODY = 64 * 1024;
+  const MAX_SKILL_NAME = 120;
+  const MAX_SKILL_DESC = 280;
+  if (req.url === "/api/skill-libraries" && req.method === "GET") {
+    return json(res, 200, { skills: await listSkillLibraries(user.id) });
+  }
+  if (req.url === "/api/skill-libraries" && req.method === "POST") {
+    const body = await readJsonBody<{ name?: string; description?: string | null; body?: string }>(req);
+    const name = (body.name ?? "").trim().slice(0, MAX_SKILL_NAME);
+    if (!name) return json(res, 400, { error: "name is required" });
+    if (typeof body.body === "string" && body.body.length > MAX_SKILL_BODY) {
+      return json(res, 400, { error: "skill body exceeds 64 KB cap" });
+    }
+    const skill = await createSkillLibrary(user.id, {
+      name,
+      description: typeof body.description === "string" ? body.description.trim().slice(0, MAX_SKILL_DESC) : null,
+      body: typeof body.body === "string" ? body.body : "",
+    });
+    return json(res, 201, { skill });
+  }
+  const skillMatch = req.url?.match(/^\/api\/skill-libraries\/([0-9a-fA-F-]{8,})$/);
+  if (skillMatch) {
+    const id = skillMatch[1];
+    if (req.method === "GET") {
+      const skill = await getSkillLibrary(user.id, id);
+      if (!skill) return json(res, 404, { error: "skill not found" });
+      return json(res, 200, { skill });
+    }
+    if (req.method === "PUT") {
+      const body = await readJsonBody<{ name?: string; description?: string | null; body?: string }>(req);
+      const patch: { name?: string; description?: string | null; body?: string } = {};
+      if (typeof body.name === "string" && body.name.trim()) patch.name = body.name.trim().slice(0, MAX_SKILL_NAME);
+      if (body.description !== undefined) {
+        patch.description = typeof body.description === "string" ? body.description.trim().slice(0, MAX_SKILL_DESC) : null;
+      }
+      if (typeof body.body === "string") {
+        if (body.body.length > MAX_SKILL_BODY) return json(res, 400, { error: "skill body exceeds 64 KB cap" });
+        patch.body = body.body;
+      }
+      const skill = await updateSkillLibrary(user.id, id, patch);
+      if (!skill) return json(res, 404, { error: "skill not found" });
+      return json(res, 200, { skill });
+    }
+    if (req.method === "DELETE") {
+      await deleteSkillLibrary(user.id, id);
+      return json(res, 200, { ok: true });
+    }
+  }
+  // Set a project's attached library skills (additive list). Owner-scoped; only
+  // ids the user actually owns are persisted.
+  const projSkillsMatch = req.url?.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/skill-libraries$/);
+  if (projSkillsMatch && req.method === "POST") {
+    const projectId = projSkillsMatch[1];
+    const project = await getProject(projectId, user.id);
+    if (!project) return json(res, 404, { error: "project not found" });
+    const body = await readJsonBody<{ skill_library_ids?: unknown }>(req);
+    const ids = Array.isArray(body.skill_library_ids)
+      ? body.skill_library_ids.filter((x): x is string => typeof x === "string")
+      : [];
+    const owned = await resolveOwnedSkillIds(user.id, ids);
+    await setProjectSkillLibraries(projectId, user.id, owned);
+    return json(res, 200, { ok: true, skill_library_ids: owned });
+  }
+
   // Infer a design system from a GitHub repo: clone → extract tokens → save.
   if (req.url === "/api/design-systems/infer-github" && req.method === "POST") {
     if (guestForbidden(res, user)) return;
@@ -2361,6 +2489,48 @@ function resolveSandboxChild(rootDir: string, relPath: string): string {
     throw new Error(`Path escapes sandbox: ${relPath}`);
   }
   return full;
+}
+
+/**
+ * Like resolveSandboxChild, but additionally resolves symlinks before the
+ * containment check. The lexical check alone is not enough: a GitHub import
+ * (or zip) can place a symlink like `link -> /proc/self` inside the sandbox,
+ * and fs.readFile/writeFile follow it — letting a tenant read or clobber
+ * arbitrary host files (env/secret theft). We realpath the deepest EXISTING
+ * ancestor (a not-yet-existing tail can't contain symlinks) and require the
+ * resolved path to stay inside the realpath'd root. Symlinks that resolve
+ * within the sandbox (e.g. node_modules/.bin) keep working.
+ */
+async function resolveSandboxChildReal(rootDir: string, relPath: string): Promise<string> {
+  const lexical = resolveSandboxChild(rootDir, relPath);
+  let root: string;
+  try {
+    root = await fs.realpath(path.resolve(rootDir));
+  } catch {
+    // Sandbox dir doesn't exist yet — nothing can be read/written through a
+    // symlink either; the lexical path is safe to hand back.
+    return lexical;
+  }
+  let existing = lexical;
+  const tail: string[] = [];
+  let real: string;
+  for (;;) {
+    try {
+      real = await fs.realpath(existing);
+      break;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      const parent = path.dirname(existing);
+      if (code !== "ENOENT" || parent === existing) throw err;
+      tail.unshift(path.basename(existing));
+      existing = parent;
+    }
+  }
+  const resolved = tail.length > 0 ? path.join(real, ...tail) : real;
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+    throw new Error(`Path escapes sandbox: ${relPath}`);
+  }
+  return resolved;
 }
 
 const MAX_PROJECT_NAME = 80;
@@ -2981,6 +3151,7 @@ function toProjectSummary(p: {
   latest_deploy_state?: DeploymentState | null;
   latest_deploy_at?: string | null;
   design_system_id?: string | null;
+  skill_library_ids?: string[] | null;
 }): ProjectSummary {
   return {
     id: p.id,
@@ -2996,6 +3167,7 @@ function toProjectSummary(p: {
     latest_deploy_state: p.latest_deploy_state ?? null,
     latest_deploy_at: p.latest_deploy_at ?? null,
     design_system_id: p.design_system_id ?? null,
+    skill_library_ids: p.skill_library_ids ?? [],
   };
 }
 
@@ -3095,6 +3267,30 @@ async function handleConnection(
   const ctx: SessionCtx = { send, user, projectId: project.id, sessionId };
   sessions.add(ctx);
 
+  // WS heartbeat (C-58). Without ping/pong, a half-open TCP drop (NAT/idle
+  // timeout, abrupt client loss) never fires ws.on("close"), so the run is never
+  // detached or grace-aborted — it streams into a void burning provider tokens,
+  // and the dead SessionCtx lingers in `sessions` (iterated by every broadcast).
+  // We ping every 30s and terminate a socket that missed the previous pong;
+  // terminate() synthesizes the "close" event, which runs the detach/grace path.
+  let isAlive = true;
+  ws.on("pong", () => {
+    isAlive = true;
+  });
+  const heartbeat = setInterval(() => {
+    if (!isAlive) {
+      try {
+        ws.terminate();
+      } catch {}
+      return;
+    }
+    isAlive = false;
+    try {
+      ws.ping();
+    } catch {}
+  }, 30_000);
+  ws.on("close", () => clearInterval(heartbeat));
+
   // Mutable history; populated after async hydrate below. Mutating in place
   // keeps the reference stable for runAgentLoop across many turns.
   const history: Anthropic.MessageParam[] = [];
@@ -3122,8 +3318,13 @@ async function handleConnection(
     // what it streamed while we were gone. Only an explicit Stop, or the grace
     // timeout, cancels (preserving the original B-9 token-saving intent). The
     // turn's `finally` still persists whatever it produced.
+    //
+    // C-19: only detach if THIS socket is the one currently bound to the run.
+    // With two tabs on one session, tab B closing must not detach (and then
+    // grace-abort) the run tab A is still bound to and watching.
     const key = runKey(project.id, sessionId);
-    if (runs.has(key)) detachRun(key);
+    const run = runs.get(key);
+    if (run && run.socketSend === send) detachRun(key);
     sessions.delete(ctx);
   });
 
@@ -3191,6 +3392,16 @@ async function handleConnection(
       }
 
       if (event.type === "reset_session") {
+        // Refuse to wipe history while a run is in flight for this session
+        // (C-108/C-111). ws message handlers run concurrently per frame, so a
+        // crafted/racing reset mid-turn would truncate the same `history` array
+        // runAgentLoop is iterating (next provider call begins mid tool-exchange
+        // → 400), and the turn's finally re-appends the cleared messages to the
+        // DB. The UI gates this client-side, but the server must enforce it too.
+        if (busy || runs.has(runKey(project.id, sessionId))) {
+          send({ type: "error", message: "can't clear chat while the agent is running — stop it first" });
+          return;
+        }
         // Wipe just THIS chat session's history — other sessions for the
         // same project (and the sandbox files / VM / secrets) are untouched.
         await clearHistory(project.id, sessionId);
@@ -3222,6 +3433,19 @@ async function handleConnection(
         // User edited a file in the IDE. Persist + sync to Storage. Always ack
         // back so the editor can show "saved" / "save failed" state.
         try {
+          // C-57: vmHandle is per-socket and stays null until THIS socket's
+          // first user_message — but the project's VM may already be running
+          // (e.g. right after a refresh, or because another tab booted it). If
+          // we only write the host mirror, the agent + live preview keep serving
+          // the pre-edit file (no host→VM sync exists outside boot). Resolve the
+          // running VM so the save reaches it. ensureVm is cheap when running.
+          if (isFirecrackerEnabled() && !vmHandle) {
+            try {
+              vmHandle = await ensureVm({ projectId: project.id, hostSandboxDir: sandboxDir });
+            } catch (err) {
+              console.error(`[ws ${project.id}] client_write_file: VM resolve failed, writing host-only:`, err);
+            }
+          }
           await sandboxWriteFile({ rootDir: sandboxDir, vm: vmHandle ?? undefined }, event.path, event.content);
           send({ type: "client_write_ack", path: event.path, ok: true });
           // Tell other sessions on this project that the file changed (their
@@ -3328,6 +3552,30 @@ async function handleConnection(
               message: `Couldn't start the sandbox: ${bootErr instanceof Error ? bootErr.message : String(bootErr)}`,
               code: code === "unknown" ? "boot_timeout" : code,
               retryable,
+            });
+            busy = false;
+            currentAbort = null;
+            unregisterRun(runK);
+            return;
+          }
+        } else if (isFirecrackerEnabled() && vmHandle) {
+          // The handle is cached from an earlier message on this long-lived
+          // socket, so the boot path above was skipped — but the idle sweeper
+          // pauses a VM after ~5 min, and ensureVm is the ONLY place that
+          // resumes it. Without this, the next message after an idle gap RPCs
+          // into a frozen VM and every tool call times out until the user
+          // refreshes (C-16). ensureVm is idempotent and cheap when already
+          // running; it resumes/restores a paused/snapshotted VM. Re-fetch the
+          // (possibly rebuilt) handle so later RPCs target the live process.
+          try {
+            vmHandle = await ensureVm({ projectId: project.id, hostSandboxDir: sandboxDir });
+          } catch (err) {
+            console.error(`[ws ${project.id}] resume of cached VM failed:`, err);
+            runSend({
+              type: "error",
+              message: `Couldn't resume the sandbox: ${err instanceof Error ? err.message : String(err)}`,
+              code: "boot_timeout",
+              retryable: true,
             });
             busy = false;
             currentAbort = null;
@@ -3730,11 +3978,12 @@ async function inlineFileRefs(
 
     let full: string;
     try {
-      full = path.resolve(root, ref);
+      // Resolve symlinks before reading so an @file ref can't escape the
+      // sandbox through a planted symlink (host env/secret theft).
+      full = await resolveSandboxChildReal(root, ref);
     } catch {
       continue;
     }
-    if (full !== root && !full.startsWith(root + path.sep)) continue;
 
     let content: string;
     let truncated = false;
@@ -3838,6 +4087,11 @@ async function runSession(
   const designSystem = projectRow?.design_system_id
     ? await getDesignSystemTokens(userId, projectRow.design_system_id).catch(() => null)
     : null;
+  // The project's attached reusable library skills (per-turn read, owner-scoped;
+  // injected ahead of the project's own skills.md). Non-fatal on lookup error.
+  const librarySkills = projectRow?.skill_library_ids?.length
+    ? await getAttachedSkillBodies(userId, projectRow.skill_library_ids).catch(() => [])
+    : [];
   let finalMessage = messageWithRefs;
   // The selected-element block, rendered once. The execute loop appends its own
   // copy from `selectedElement` (LoopOptions); the planner — which runs before
@@ -4011,6 +4265,7 @@ async function runSession(
     userId,
     repo,
     designSystem,
+    librarySkills,
     selectedElement,
     // Per-session so a sibling chat session in the same project doesn't see this
     // turn's todos pop into its Tasks pane (B-11).
@@ -4071,17 +4326,9 @@ async function runSession(
         });
       }
       if (isError) return;
-      // Broadcast file_changed for write/edit so the file explorer updates
-      // in real-time (not just at turn end). Also triggers Storage sync.
-      if (name === "write_file" || name === "edit_file") {
-        const filePath = String((input as { path?: unknown })?.path ?? "");
-        if (filePath) {
-          broadcastToProject(projectId, { type: "file_changed", path: filePath });
-          getTracker(projectId, sandboxDir)
-            .syncFile(filePath)
-            .catch((err) => console.error(`syncFile ${filePath} after ${name} failed:`, err));
-        }
-      }
+      // (file_changed broadcast + Storage sync for write/edit happens once,
+      // below — see C-109/C-110. A duplicate block here previously fired a
+      // second concurrent syncFile + a second file_changed to the origin.)
       // Per-tool-call checkpoint (Plan §3.5). Fires for tools that modified
       // sandbox state. Background — never blocks the loop.
       if (name === "write_file" || name === "edit_file" || name === "run_command") {
@@ -4112,7 +4359,9 @@ async function runSession(
       if (name === "write_file" || name === "edit_file") {
         const p = (input as { path?: unknown })?.path;
         if (typeof p === "string") {
-          send({ type: "file_changed", path: p });
+          // Single broadcast (reaches every session on the project, incl. the
+          // originating one) + single Storage sync per write (C-109/C-110).
+          broadcastToProject(projectId, { type: "file_changed", path: p });
           getTracker(projectId, sandboxDir)
             .syncFile(p)
             .then(() => emitSynced())
@@ -4164,6 +4413,38 @@ async function runSession(
       }
     },
   });
+  } catch (err) {
+    // C-33: the loop rethrows on a provider error or MAX_ITERATIONS without ever
+    // returning `result`, so the success-path recordUsageEvent below is skipped —
+    // a 125-iteration mega-turn that dies on the last call bills the provider but
+    // records zero usage. The loop now attaches the accumulated totals to the
+    // thrown error; bank them here before re-throwing to the WS error handler.
+    const u = (
+      err as {
+        usageTotals?: {
+          inputTokens: number;
+          outputTokens: number;
+          cacheReadTokens: number;
+          cacheCreationTokens: number;
+        };
+        usageModel?: string;
+        usageProvider?: "anthropic" | "openai" | "google";
+      }
+    ).usageTotals;
+    if (u && (u.inputTokens || u.outputTokens || u.cacheReadTokens || u.cacheCreationTokens)) {
+      void recordUsageEvent({
+        projectId,
+        userId,
+        provider: (err as { usageProvider?: "anthropic" | "openai" | "google" }).usageProvider ?? "anthropic",
+        model: (err as { usageModel?: string }).usageModel ?? "unknown",
+        inputTokens: u.inputTokens,
+        outputTokens: u.outputTokens,
+        cacheReadTokens: u.cacheReadTokens,
+        cacheCreationTokens: u.cacheCreationTokens,
+        elapsedMs: Date.now() - start,
+      }).catch((e) => console.error("recordUsageEvent (error path) failed:", e));
+    }
+    throw err;
   } finally {
     // Persist exactly the messages this turn appended (collected by reference) —
     // even if aborted OR if the loop threw (B-12), so the DB never diverges from
@@ -4362,11 +4643,10 @@ async function walkSandbox(rootDir: string): Promise<TreeEntry[]> {
 
 async function readSandboxFile(rootDir: string, p: string): Promise<string | null> {
   try {
-    const root = path.resolve(rootDir);
-    const full = path.resolve(root, p);
-    // `startsWith(root)` alone is bypassable: `/foo/bar-evil` startsWith `/foo/bar`.
-    // Require an exact match or a path-separator boundary so siblings can't sneak in.
-    if (full !== root && !full.startsWith(root + path.sep)) return null;
+    // resolveSandboxChildReal resolves symlinks before the containment check,
+    // so a symlink planted in the sandbox (e.g. via GitHub import) can't read
+    // arbitrary host files. The lexical-only check here was bypassable that way.
+    const full = await resolveSandboxChildReal(rootDir, p);
     return await fs.readFile(full, "utf-8");
   } catch {
     return null;
@@ -5018,10 +5298,13 @@ async function fetchLiveSiteContext(rawUrl: string): Promise<string> {
   if (url.protocol !== "https:" && url.protocol !== "http:") {
     throw new Error("URL must be http(s).");
   }
-  await assertPublicHost(url.hostname);
-  const pageRes = await fetch(url.toString(), {
+  // safeFetch re-validates every redirect hop — native fetch with
+  // redirect:"follow" only checked the initial host, so a public page could
+  // 30x-bounce us to 169.254.169.254 / 127.0.0.1 / a peer VM (SSRF). The
+  // timeout stops a slow-loris target from hanging the SSE handler forever.
+  const pageRes = await safeFetch(url.toString(), {
     headers: { "User-Agent": "uniqus-code design-system bot" },
-    redirect: "follow",
+    signal: AbortSignal.timeout(15_000),
   });
   if (!pageRes.ok) throw new Error(`couldn't fetch the page (${pageRes.status})`);
   const html = (await pageRes.text()).slice(0, 400_000);
@@ -5042,8 +5325,10 @@ async function fetchLiveSiteContext(rawUrl: string): Promise<string> {
     try {
       const cssUrl = new URL(href, url);
       if (cssUrl.protocol !== "https:" && cssUrl.protocol !== "http:") continue;
-      await assertPublicHost(cssUrl.hostname);
-      const cssRes = await fetch(cssUrl.toString(), { headers: { "User-Agent": "uniqus-code" } });
+      const cssRes = await safeFetch(cssUrl.toString(), {
+        headers: { "User-Agent": "uniqus-code" },
+        signal: AbortSignal.timeout(10_000),
+      });
       if (cssRes.ok) cssText += `\n/* ${cssUrl.pathname} */\n${(await cssRes.text()).slice(0, 20_000)}`;
       if (cssText.length > 60_000) break;
     } catch {
@@ -5101,14 +5386,28 @@ async function handleDesignSystemAnalyze(
   const fields: Record<string, string> = {};
   const files: { field: string; filename: string; mime: string; buf: Buffer }[] = [];
   let parseError: string | null = null;
+  // Per-file AND aggregate caps: eight 100 MB parts buffered fully in memory
+  // (~800 MB, base64-amplified for image blocks) could OOM the single shared
+  // orchestrator process for all tenants. Bound both (C-53).
+  const PER_FILE_BYTES = 25 * 1024 * 1024;
+  const TOTAL_FILE_BYTES = 60 * 1024 * 1024;
+  let totalBytes = 0;
   try {
     await new Promise<void>((resolve, reject) => {
-      const bb = Busboy({ headers: req.headers, limits: { fileSize: 100 * 1024 * 1024, files: 8 } });
+      const bb = Busboy({ headers: req.headers, limits: { fileSize: PER_FILE_BYTES, files: 8 } });
       bb.on("file", (field, file, info) => {
         const chunks: Buffer[] = [];
-        file.on("data", (d: Buffer) => chunks.push(d));
+        file.on("data", (d: Buffer) => {
+          totalBytes += d.length;
+          if (totalBytes > TOTAL_FILE_BYTES) {
+            parseError = `total upload exceeds the ${TOTAL_FILE_BYTES / (1024 * 1024)} MB limit`;
+            file.resume(); // drain without buffering further
+            return;
+          }
+          chunks.push(d);
+        });
         file.on("limit", () => {
-          parseError = "a file exceeds the 100 MB limit";
+          parseError = `a file exceeds the ${PER_FILE_BYTES / (1024 * 1024)} MB limit`;
         });
         file.on("end", () => {
           if (!parseError && info.filename) {

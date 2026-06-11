@@ -4,12 +4,16 @@ import { useEffect, useRef, useState } from "react";
 import Modal from "./Modal";
 import { toast } from "@/lib/toast";
 import {
-  applySkillPackApi,
+  fetchSkillPackBodyApi,
   fetchSkillPacksApi,
   fetchSkillsApi,
   writeSkillsApi,
+  listSkillLibrariesApi,
+  setProjectSkillLibrariesApi,
   type SkillPackSummary,
+  type SkillLibrary,
 } from "@/lib/api";
+import { useStore } from "@/lib/store";
 
 /**
  * Per-project Skills editor (Plan §3.8). The .uniqus/skills.md file in the
@@ -37,6 +41,13 @@ export default function SkillsModal({
   const [confirmPack, setConfirmPack] = useState<string | null>(null);
   // Buffer of the editor content before a pack replaced it, for one-step undo.
   const [undoBuffer, setUndoBuffer] = useState<string | null>(null);
+  // Reusable library skills + this project's attachments (the "library + per-project
+  // override" model — attached library skills inject BEFORE this skills.md file).
+  const project = useStore((s) => s.project);
+  const setProject = useStore((s) => s.setProject);
+  const [library, setLibrary] = useState<SkillLibrary[] | null>(null);
+  const [attachBusy, setAttachBusy] = useState(false);
+  const attachedIds = new Set(project?.skill_library_ids ?? []);
 
   const dirty = content !== pristineRef.current;
 
@@ -44,14 +55,16 @@ export default function SkillsModal({
     let abort = false;
     (async () => {
       try {
-        const [s, p] = await Promise.all([
+        const [s, p, lib] = await Promise.all([
           fetchSkillsApi(projectId),
           fetchSkillPacksApi(),
+          listSkillLibrariesApi().catch(() => ({ skills: [] as SkillLibrary[] })),
         ]);
         if (abort) return;
         setContent(s.content);
         pristineRef.current = s.content;
         setPacks(p.packs);
+        setLibrary(lib.skills);
       } catch (err) {
         if (abort) return;
         setError(err instanceof Error ? err.message : String(err));
@@ -63,6 +76,26 @@ export default function SkillsModal({
       abort = true;
     };
   }, [projectId]);
+
+  // Attach/detach a library skill to this project. Persists immediately (this is
+  // a project↔library link, not editor content) and updates the store project so
+  // the attachment survives a reopen without a refetch.
+  const toggleAttached = async (id: string) => {
+    if (attachBusy) return;
+    const next = new Set(attachedIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    const ids = [...next];
+    setAttachBusy(true);
+    try {
+      const r = await setProjectSkillLibrariesApi(projectId, ids);
+      if (project) setProject({ ...project, skill_library_ids: r.skill_library_ids });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAttachBusy(false);
+    }
+  };
 
   const onSave = async () => {
     setSaving(true);
@@ -107,9 +140,13 @@ export default function SkillsModal({
     setError(null);
     try {
       const previous = content;
-      const r = await applySkillPackApi(projectId, id, "replace");
+      // Fetch the pack body and apply it into the LOCAL editor buffer only.
+      // Nothing is persisted until the user clicks Save (C-5) — so Undo (which
+      // restores `previous`) and Discard actually undo the change, and the
+      // dialog's "nothing is saved until you click Save" promise holds.
+      const { body } = await fetchSkillPackBodyApi(id);
       setUndoBuffer(previous);
-      setContent(r.content);
+      setContent(body); // "replace" semantics, matching the old default
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -224,6 +261,55 @@ export default function SkillsModal({
           background: "rgba(255,255,255,0.02)",
         }}
       >
+        {library && library.length > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 8, color: "var(--text-primary)" }}>
+              Attach reusable skills
+            </div>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10 }}>
+              From your Skills library. Attached skills steer the agent on top of
+              this file. Manage them in the Skills tab.
+            </div>
+            <div style={{ display: "grid", gap: 6 }}>
+              {library.map((sk) => {
+                const on = attachedIds.has(sk.id);
+                return (
+                  <label
+                    key={sk.id}
+                    style={{
+                      display: "flex",
+                      gap: 8,
+                      alignItems: "flex-start",
+                      border: on ? "1px solid var(--accent)" : "1px solid var(--border-default)",
+                      borderRadius: 6,
+                      padding: "8px 10px",
+                      cursor: attachBusy ? "default" : "pointer",
+                      background: on ? "rgba(178,30,125,0.08)" : undefined,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      disabled={attachBusy}
+                      onChange={() => void toggleAttached(sk.id)}
+                      style={{ marginTop: 2 }}
+                    />
+                    <span style={{ minWidth: 0 }}>
+                      <span style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>
+                        {sk.name}
+                      </span>
+                      {sk.description ? (
+                        <span style={{ display: "block", fontSize: 11, color: "var(--text-muted)" }}>
+                          {sk.description}
+                        </span>
+                      ) : null}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        )}
         <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 8, color: "var(--text-primary)" }}>
           Curated design packs
         </div>

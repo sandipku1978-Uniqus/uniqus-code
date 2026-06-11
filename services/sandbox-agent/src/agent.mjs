@@ -35,7 +35,7 @@ import { promises as fs } from "node:fs";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 
 const SANDBOX_DIR = process.env.UNIQUS_SANDBOX_DIR ?? "/sandbox";
 const VSOCK_PORT = Number(process.env.UNIQUS_AGENT_PORT ?? 51000);
@@ -171,9 +171,10 @@ async function handleRequest(req, res) {
     const method = req.method ?? "GET";
 
     // F1: enforce the per-VM bearer token on every endpoint except /health.
+    // C-115: constant-time compare so response timing can't leak the token.
     if (url.pathname !== "/health" && REQUIRED_TOKEN) {
       const authz = req.headers["authorization"];
-      if (authz !== `Bearer ${REQUIRED_TOKEN}`) {
+      if (!constantTimeEqual(authz, `Bearer ${REQUIRED_TOKEN}`)) {
         return json(res, 401, { error: "unauthorized" });
       }
     }
@@ -181,6 +182,19 @@ async function handleRequest(req, res) {
     if (method === "GET" && url.pathname === "/health") return json(res, 200, { ok: true, kind: "node" });
     if (method === "POST" && url.pathname === "/net/configure") {
       const body = await readBody(req);
+      // C-113: validate ip+gw FIRST and 400 before any side effects, mirroring
+      // main.rs require_str (present + a string). Otherwise mountSandbox/reseed/
+      // setClock would run and then applyNetwork("","",…) would down eth0, flush
+      // its address, and re-up it with NO IP — bricking the VM until reboot.
+      if (typeof body.ip !== "string") {
+        return json(res, 400, { error: "'ip' is required and must be a string" });
+      }
+      if (typeof body.gw !== "string") {
+        return json(res, 400, { error: "'gw' is required and must be a string" });
+      }
+      const ip = body.ip;
+      const gw = body.gw;
+      const mac = body.mac ? String(body.mac) : null;
       // Base-snapshot restore. Safe-now steps: mount this project's sandbox drive
       // (golden left it unmounted) and de-correlate clock + RNG. Mirrors main.rs.
       if (body.mount_sandbox) mountSandbox();
@@ -188,9 +202,6 @@ async function handleRequest(req, res) {
       if (typeof body.time_ms === "number") setClock(body.time_ms);
       // Re-stamp eth0 only AFTER this reply is flushed — applyNetwork drops the
       // link + changes the MAC, killing the bootstrap connection we answer over.
-      const ip = String(body.ip ?? "");
-      const gw = String(body.gw ?? "");
-      const mac = body.mac ? String(body.mac) : null;
       setTimeout(() => applyNetwork(ip, gw, mac), 250);
       return json(res, 200, { ok: true, restamp: "scheduled" });
     }
@@ -212,6 +223,13 @@ async function handleRequest(req, res) {
     if (method === "POST" && url.pathname === "/fs/edit") {
       const body = await readBody(req);
       const p = resolveSandbox(body.path ?? "");
+      // C-114: reject an empty old_string, matching main.rs. With "" Node's
+      // split("") yields occ === content.length-1 (1 for a 2-char file), which
+      // slips past both guards and replace("", …) inserts at index 0 — mutating
+      // the file where Rust's matches("").count() (len+1) 400s as "not unique".
+      if (typeof body.old_string !== "string" || body.old_string === "") {
+        return json(res, 400, { error: "'old_string' is required and must be a string" });
+      }
       const content = await fs.readFile(p, "utf-8");
       const occ = content.split(body.old_string).length - 1;
       if (occ === 0) return json(res, 400, { error: `old_string not found in ${body.path}` });
@@ -279,6 +297,25 @@ function json(res, status, body) {
   res.end(text);
 }
 
+/**
+ * C-115: constant-time string compare via crypto.timingSafeEqual. It throws on
+ * unequal-length buffers, so we length-guard first — and when lengths differ we
+ * still run a timingSafeEqual against a same-length dummy so a wrong-length token
+ * isn't trivially distinguishable by an early return. `presented` may be
+ * undefined/non-string (missing header) → treated as a mismatch.
+ */
+function constantTimeEqual(presented, expected) {
+  const exp = Buffer.from(String(expected), "utf-8");
+  const got = Buffer.from(typeof presented === "string" ? presented : "", "utf-8");
+  if (got.length !== exp.length) {
+    // Compare expected against itself to keep the work (and timing) similar
+    // without leaking via an early return; the result is forced to false.
+    timingSafeEqual(exp, exp);
+    return false;
+  }
+  return timingSafeEqual(got, exp);
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -337,21 +374,55 @@ async function grep(pattern, sub) {
   return out.length ? out.join("\n") : "(no matches)";
 }
 
+// Per-stream byte cap for /exec/run (C-61). Keep consuming the stream past
+// this so the child doesn't block on a full pipe, but stop storing bytes —
+// otherwise `cat /dev/zero` grows the string without bound and OOMs the 1 GiB
+// VM. Mirrors RUN_OUTPUT_CAP in main.rs.
+const RUN_OUTPUT_CAP = 4 * 1024 * 1024;
+
 async function runCommand(command, timeoutMs) {
   return await new Promise((resolve) => {
+    // C-60: detached → the child leads its own process group, so a timeout can
+    // SIGKILL the whole group (kill(-pid)) instead of just /bin/sh. Otherwise a
+    // daemonized grandchild survives and keeps the stdout/stderr pipes open.
     const child = spawn("/bin/sh", ["-c", command], {
       cwd: SANDBOX_DIR,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     });
     let stdout = "";
     let stderr = "";
+    let stdoutCapped = false;
+    let stderrCapped = false;
     let killed = false;
     const t = setTimeout(() => {
       killed = true;
-      child.kill("SIGKILL");
+      // Negative pid → signal the whole process group. Fall back to the bare
+      // child if the group send fails (e.g. it already exited).
+      try {
+        if (child.pid) process.kill(-child.pid, "SIGKILL");
+      } catch {
+        try {
+          child.kill("SIGKILL");
+        } catch {}
+      }
     }, timeoutMs);
-    child.stdout?.on("data", (d) => (stdout += d.toString()));
-    child.stderr?.on("data", (d) => (stderr += d.toString()));
+    child.stdout?.on("data", (d) => {
+      if (stdoutCapped) return; // keep draining, drop the bytes
+      stdout += d.toString();
+      if (stdout.length >= RUN_OUTPUT_CAP) {
+        stdout = stdout.slice(0, RUN_OUTPUT_CAP);
+        stdoutCapped = true;
+      }
+    });
+    child.stderr?.on("data", (d) => {
+      if (stderrCapped) return;
+      stderr += d.toString();
+      if (stderr.length >= RUN_OUTPUT_CAP) {
+        stderr = stderr.slice(0, RUN_OUTPUT_CAP);
+        stderrCapped = true;
+      }
+    });
     child.on("close", (code) => {
       clearTimeout(t);
       if (killed) stderr += `\n[killed: timeout after ${timeoutMs}ms]`;

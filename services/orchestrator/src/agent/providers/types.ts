@@ -103,7 +103,14 @@ export interface StreamTurnResult {
    * Anthropic-shaped so history stays uniform across providers.
    */
   content: Anthropic.ContentBlockParam[];
-  stopReason: "end_turn" | "tool_use" | "max_tokens" | "other";
+  /**
+   * Why the provider ended the turn. `pause_turn` is Anthropic-specific: a
+   * server-side tool (web_search) paused a long turn and expects the partial
+   * assistant content resubmitted to continue (the loop re-loops). `refusal`
+   * means the model declined — the loop ends the turn but surfaces it rather
+   * than dropping it silently.
+   */
+  stopReason: "end_turn" | "tool_use" | "max_tokens" | "pause_turn" | "refusal" | "other";
   /** Client tool calls the loop must execute. Excludes provider-side tools. */
   toolCalls: AgentToolCall[];
   /** Final token usage for this call, if the provider reported it. */

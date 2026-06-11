@@ -11,10 +11,20 @@ import { resolveShareToken } from "./previewShare.js";
 // Match `/preview/{serverId}` optionally followed by `/...` rest.
 // The serverId starts with `srv_` (see startServer in sandbox.ts) and is followed
 // by 8 hex chars. Keep this loose so future id formats work without code changes.
-const PREVIEW_PREFIX = /^\/preview\/([^/?#]+)(\/.*)?$/;
+// The rest after the id may be absent, a `/path...`, OR start directly with a
+// query/fragment (`/preview/srv_x?foo=1`). The old `(\/.*)?$` rejected the
+// no-slash-but-has-query form, 404ing it (C-105). innerPath is normalized to a
+// leading "/" by normalizeInnerPath below.
+const PREVIEW_PREFIX = /^\/preview\/([^/?#]+)([/?#].*)?$/;
 // A shared preview URL: /preview/share/<token>/... — resolved to a serverId via
 // a revocable, expiring token (C3) rather than exposing the bare serverId.
-const PREVIEW_SHARE_PREFIX = /^\/preview\/share\/([A-Za-z0-9_-]+)(\/.*)?$/;
+const PREVIEW_SHARE_PREFIX = /^\/preview\/share\/([A-Za-z0-9_-]+)([/?#].*)?$/;
+
+/** Normalize a regex "rest" group into an upstream path with a leading "/". */
+function normalizeInnerPath(rest: string | undefined): string {
+  if (!rest) return "/";
+  return rest.startsWith("/") ? rest : `/${rest}`;
+}
 const PREVIEW_SHARE_COOKIE = "uniqus_preview_share";
 
 /**
@@ -121,13 +131,13 @@ export function resolveTarget(
     const srv = getServer(serverId);
     if (!srv) return null;
     keepAlive(srv);
-    return { serverId, host: srv.host, port: srv.port, innerPath: shareDirect[2] ?? "/", shareToken: token };
+    return { serverId, host: srv.host, port: srv.port, innerPath: normalizeInnerPath(shareDirect[2]), shareToken: token };
   }
 
   const direct = url.match(PREVIEW_PREFIX);
   if (direct) {
     const serverId = direct[1];
-    const innerPath = direct[2] ?? "/";
+    const innerPath = normalizeInnerPath(direct[2]);
     const srv = getServer(serverId);
     if (!srv) return null;
     keepAlive(srv);
@@ -226,6 +236,11 @@ export function proxyHttp(
       method: req.method,
       path: target.innerPath,
       headers,
+      // Bound the upstream. During a VM restart/migration the TAP IP can
+      // black-hole packets (SYN dropped or accepted with no response), and
+      // without a timeout the client + upstream sockets stay open indefinitely;
+      // HMR reconnect storms then leak FDs on the orchestrator (C-103).
+      timeout: 30_000,
     },
     (upRes) => {
       const outHeaders: Record<string, string | string[]> = {};
@@ -259,10 +274,42 @@ export function proxyHttp(
       // Buffer + inject. Strip Content-Length (we'll let chunked-encoding handle it).
       delete outHeaders["content-length"];
       const chunks: Buffer[] = [];
-      upRes.on("data", (c: Buffer) => chunks.push(c));
+      let bufferedBytes = 0;
+      let htmlTooBig = false;
+      // Cap the buffered HTML (untrusted in-sandbox dev server output). Without
+      // this, a very large HTML doc — or many concurrent ones — buffers fully in
+      // the single shared orchestrator process and can OOM it (C-52). 8 MB is far
+      // above any real HTML document; past it we stop injecting and stream raw.
+      const MAX_HTML_BYTES = 8 * 1024 * 1024;
+      upRes.on("data", (c: Buffer) => {
+        if (htmlTooBig) {
+          res.write(c);
+          return;
+        }
+        bufferedBytes += c.length;
+        if (bufferedBytes > MAX_HTML_BYTES) {
+          htmlTooBig = true;
+          // Flush what we have un-injected and switch to streaming the rest.
+          res.writeHead(upRes.statusCode ?? 502, outHeaders);
+          for (const ch of chunks) res.write(ch);
+          chunks.length = 0;
+          res.write(c);
+          return;
+        }
+        chunks.push(c);
+      });
       upRes.on("end", () => {
+        if (htmlTooBig) {
+          res.end();
+          return;
+        }
         const original = Buffer.concat(chunks).toString("utf-8");
-        const injected = injectPreviewScripts(original, target.serverId);
+        // For a share-token request, inject the TOKEN (not the real serverId) as
+        // the page's postMessage discriminator. The injected id is only used to
+        // tag uniqus:* messages to the parent window; embedding the real serverId
+        // let a recipient read it from page source and hit the unauthenticated
+        // bare /preview/<serverId>/ tier, surviving share DELETE/expiry (C-14).
+        const injected = injectPreviewScripts(original, target.shareToken ?? target.serverId);
         res.writeHead(upRes.statusCode ?? 502, outHeaders);
         res.end(injected);
       });
@@ -278,9 +325,20 @@ export function proxyHttp(
     },
   );
 
+  upstream.on("timeout", () => {
+    // Tear down a black-holed upstream (no response within the timeout) so the
+    // sockets don't leak; this fires the "error" handler via destroy (C-103).
+    upstream.destroy(new Error("upstream timed out"));
+  });
   upstream.on("error", (err) => {
     if (!res.headersSent) {
-      const html = previewErrorPage(502, "Oh no! The server seems to be down", `Could not connect to the dev server: ${err.message}. It may have crashed or timed out. Ask the Uniqus agent to check the server logs and restart.`);
+      // Don't leak the upstream error text (Node connect errors embed the VM's
+      // internal IP:port) to a SHARE recipient — an untrusted party by design
+      // (C-102). Owners (no shareToken) still get the detailed message.
+      const detail = target.shareToken
+        ? "It may be offline. Please try again later."
+        : `Could not connect to the dev server: ${err.message}. It may have crashed or timed out. Ask the Uniqus agent to check the server logs and restart.`;
+      const html = previewErrorPage(502, "Oh no! The server seems to be down", detail);
       res.writeHead(502, { "Content-Type": "text/html" });
       res.end(html);
     } else {

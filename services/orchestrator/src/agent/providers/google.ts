@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { FunctionCallingConfigMode, GoogleGenAI } from "@google/genai";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { ThinkingEffort } from "@uniqus/api-types";
@@ -61,13 +62,29 @@ function thinkingConfigFor(
   return { ...base, thinkingBudget: GEMINI_2_5_BUDGET[effort] };
 }
 
+// Module-level monotonic counter for synthetic Gemini tool ids. A fresh
+// GoogleAdapter is constructed every turn (loop.ts builds the adapter per
+// turn), so a per-instance counter resets to 0 each turn and re-issues
+// gem_0, gem_1… The web store dedupes tool rows on call_id chat-wide, so a
+// reused id hijacks a prior turn's rendered row; duplicates also corrupt
+// cross-provider replay. Pairing this counter with a per-instance random
+// prefix makes every id globally unique across turns AND adapter instances.
+let geminiIdCounter = 0;
+
 export class GoogleAdapter implements ModelProviderAdapter {
   readonly provider = "google" as const;
   private ai: GoogleGenAI;
-  private idSeq = 0;
+  // Random per-instance (per-turn) prefix; combined with the module counter so
+  // synthetic ids never repeat across turns or instances (see geminiIdCounter).
+  private idPrefix = randomBytes(4).toString("hex");
 
   constructor(apiKey: string) {
     this.ai = new GoogleGenAI({ apiKey });
+  }
+
+  /** Mint a globally-unique synthetic id for a call Gemini left id-less. */
+  private nextSyntheticId(kind: "fn" | "search"): string {
+    return `gem_${kind === "search" ? "search_" : ""}${this.idPrefix}_${geminiIdCounter++}`;
   }
 
   async streamAgentTurn(p: StreamTurnParams): Promise<StreamTurnResult> {
@@ -113,7 +130,7 @@ export class GoogleAdapter implements ModelProviderAdapter {
     const surfaceSearch = (detail: unknown, result: string): void => {
       if (searchSurfaced) return;
       searchSurfaced = true;
-      const sid = `gem_search_${this.idSeq++}`;
+      const sid = this.nextSyntheticId("search");
       p.onToolCallStarted?.(sid, "web_search");
       p.onToolCall?.(sid, "web_search", detail);
       p.onToolResult?.(sid, "web_search", detail, result, false);
@@ -148,7 +165,7 @@ export class GoogleAdapter implements ModelProviderAdapter {
             surfaceSearch({ name }, "Searched the web.");
             continue;
           }
-          const id = fc.id ?? `gem_${this.idSeq++}`;
+          const id = fc.id ?? this.nextSyntheticId("fn");
           if (!announced.has(id)) {
             announced.add(id);
             p.onToolCallStarted?.(id, name);
@@ -306,9 +323,23 @@ export function toGeminiContents(messages: Anthropic.MessageParam[]): Array<Reco
     const parts: Array<Record<string, unknown>> = [];
     for (const b of msg.content) {
       if (b.type === "tool_result") {
-        const name = idToName.get(b.tool_use_id) ?? "unknown_tool";
+        const matchedName = idToName.get(b.tool_use_id);
+        const name = matchedName ?? "unknown_tool";
         const { text, images } = splitToolResult(b);
-        parts.push({ functionResponse: { name, response: { result: text } } });
+        // Echo the call id on the response only when it pairs with a REAL Gemini
+        // functionCall id: the id must match an assistant tool_use in THIS
+        // history (matchedName) AND not be one of the synthetic ids we minted
+        // for id-less calls (gem_… prefix), which were never sent to Gemini.
+        // Gemini 3.x parallel calling populates fc.id and the docs want it
+        // echoed back; omitting it elsewhere keeps name/order pairing intact.
+        const functionResponse: Record<string, unknown> = {
+          name,
+          response: { result: text },
+        };
+        if (matchedName !== undefined && !b.tool_use_id.startsWith("gem_")) {
+          functionResponse.id = b.tool_use_id;
+        }
+        parts.push({ functionResponse });
         // Forward image outputs (e.g. screenshots) so the model sees them.
         for (const img of images) {
           parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });

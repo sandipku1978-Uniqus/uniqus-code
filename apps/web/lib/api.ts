@@ -8,6 +8,7 @@ import type {
   DesignSystem,
   DesignTokens,
   ProjectSummary,
+  SkillLibrary,
   UploadedFileSummary,
 } from "@uniqus/api-types";
 
@@ -132,6 +133,7 @@ export type {
   DesignFindings,
   DesignSystemDraft,
   DiscoveredComponent,
+  SkillLibrary,
 } from "@uniqus/api-types";
 import type { DesignSystemDraft as _DesignSystemDraft } from "@uniqus/api-types";
 
@@ -163,6 +165,38 @@ export const setProjectDesignSystemApi = (
   api(`/api/projects/${projectId}/design-system`, {
     method: "POST",
     body: JSON.stringify({ design_system_id: designSystemId }),
+  });
+
+// ── Skill libraries (reusable account-level Skills) ──────────────────────────
+export const listSkillLibrariesApi = (): Promise<{ skills: SkillLibrary[] }> =>
+  api("/api/skill-libraries");
+
+export const getSkillLibraryApi = (id: string): Promise<{ skill: SkillLibrary }> =>
+  api(`/api/skill-libraries/${id}`);
+
+export const createSkillLibraryApi = (input: {
+  name: string;
+  description?: string | null;
+  body?: string;
+}): Promise<{ skill: SkillLibrary }> =>
+  api("/api/skill-libraries", { method: "POST", body: JSON.stringify(input) });
+
+export const updateSkillLibraryApi = (
+  id: string,
+  patch: { name?: string; description?: string | null; body?: string },
+): Promise<{ skill: SkillLibrary }> =>
+  api(`/api/skill-libraries/${id}`, { method: "PUT", body: JSON.stringify(patch) });
+
+export const deleteSkillLibraryApi = (id: string): Promise<{ ok: true }> =>
+  api(`/api/skill-libraries/${id}`, { method: "DELETE" });
+
+export const setProjectSkillLibrariesApi = (
+  projectId: string,
+  skillLibraryIds: string[],
+): Promise<{ ok: true; skill_library_ids: string[] }> =>
+  api(`/api/projects/${projectId}/skill-libraries`, {
+    method: "POST",
+    body: JSON.stringify({ skill_library_ids: skillLibraryIds }),
   });
 
 /**
@@ -784,6 +818,16 @@ export interface SkillPackSummary {
 
 export const fetchSkillPacksApi = (): Promise<{ packs: SkillPackSummary[] }> =>
   api(`/api/skill-packs`);
+
+// Fetch a pack's body WITHOUT applying it, so the editor can apply it into its
+// local buffer and only persist on Save (C-5). This replaces the old flow where
+// "Apply" POSTed and the server overwrote skills.md immediately — contradicting
+// the "nothing is saved until you click Save" promise and making Undo a no-op
+// against the server.
+export const fetchSkillPackBodyApi = (
+  packId: string,
+): Promise<{ id: string; name: string; body: string }> =>
+  api(`/api/skill-packs/${packId}`);
 
 export const applySkillPackApi = (
   projectId: string,

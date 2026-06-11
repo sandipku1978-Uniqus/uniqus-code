@@ -42,14 +42,23 @@ export const SKIP_DIR_NAMES = new Set([
 ]);
 
 export const SKIP_FILE_BASENAMES = new Set([
-  ".env",
-  ".env.local",
-  ".env.development.local",
-  ".env.production.local",
-  ".env.test.local",
   ".DS_Store",
   "Thumbs.db",
 ]);
+
+/**
+ * True for a `.env*` file that carries real secrets and must never be uploaded
+ * to Vercel or bundled into an export zip. The old exact-match Set missed
+ * `.env.production` / `.env.development` / `.env.staging` / `.env.test` (loaded
+ * by Next.js/Vite), leaking credentials despite the "secrets stay out" contract
+ * (C-41/C-42). This excludes the whole `.env` family EXCEPT non-secret template
+ * variants (`.env.example`, `.env.sample`, `.env.template`, `.env.dist`) which
+ * are meant to be committed/shared.
+ */
+export function isSecretEnvFile(name: string): boolean {
+  if (name !== ".env" && !name.startsWith(".env.")) return false;
+  return !/\.(example|sample|template|dist)$/i.test(name);
+}
 
 // Vercel inline-file limit. Files larger than this can't go through the
 // standard Files API path; we'll fail the deploy with a clear error rather
@@ -89,12 +98,7 @@ async function gatherFiles(rootDir: string): Promise<{
       return;
     }
     for (const e of entries) {
-      if (e.name.startsWith(".env")) {
-        // Match `.env`, `.env.local`, `.env.production.local`, etc. as a
-        // family; project-template `.env.example` is fine to keep, so the
-        // exclusion is by exact-prefix-match on the leading-dot variants.
-        if (SKIP_FILE_BASENAMES.has(e.name)) continue;
-      }
+      if (isSecretEnvFile(e.name)) continue;
       if (SKIP_FILE_BASENAMES.has(e.name)) continue;
       if (e.isDirectory()) {
         if (SKIP_DIR_NAMES.has(e.name)) continue;

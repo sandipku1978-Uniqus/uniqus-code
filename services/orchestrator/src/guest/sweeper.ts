@@ -16,6 +16,7 @@ import {
   markStaleGuestsForGrace,
   listGuestsToDelete,
   deleteUser,
+  getUserById,
 } from "../db/users.js";
 import { listProjects } from "../db/projects.js";
 import {
@@ -80,13 +81,44 @@ async function runSweep(
     return;
   }
 
+  // listGuestsToDelete is a single up-front snapshot, but teardown below is slow
+  // (per-project Storage listing/removal + VM destroy). A guest who returns
+  // (touchUserActivity nulls grace_started_at) or converts via merge during that
+  // window must NOT be torn down — destroying their files while the projects'
+  // rows survive under a new owner is permanent data loss (C-49). Re-check
+  // eligibility immediately before the irreversible teardown.
+  const graceCutoff = Date.now() - GUEST_GRACE_DAYS * 86_400_000;
+  const stillDeletable = async (guestId: string): Promise<boolean> => {
+    const u = await getUserById(guestId);
+    if (!u) return false; // already gone
+    const rec = u as unknown as {
+      account_type?: string;
+      converted_at?: string | null;
+      grace_started_at?: string | null;
+    };
+    if (rec.account_type !== "guest") return false;
+    if (rec.converted_at) return false; // converted mid-sweep
+    if (!rec.grace_started_at) return false; // returned (grace cleared)
+    return new Date(rec.grace_started_at).getTime() < graceCutoff;
+  };
+
   for (const guestId of toDelete) {
     try {
+      if (!(await stillDeletable(guestId))) {
+        console.log(`[guest-sweeper] skipping ${guestId} — no longer eligible (returned/converted)`);
+        continue;
+      }
       // Enumerate the projects BEFORE deleting the user — once the user row
       // is gone the projects cascade away and can't be listed.
       const projects = await listProjects(guestId);
       for (const project of projects) {
         await teardownGuestProject(project.id, sandboxDirFor(project.id));
+      }
+      // Final re-check after the slow teardown, right before the irreversible
+      // row delete, to shrink the race window as far as possible.
+      if (!(await stillDeletable(guestId))) {
+        console.log(`[guest-sweeper] ${guestId} became active during teardown — keeping row`);
+        continue;
       }
       // CASCADE clears projects, messages, chat sessions, deployments, audit.
       await deleteUser(guestId);

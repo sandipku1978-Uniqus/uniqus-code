@@ -43,10 +43,27 @@ export async function importZip(
   const zip = new AdmZip(zipBuffer);
   const entries = zip.getEntries();
 
+  const stripPrefix = detectSingleRoot(entries.map((e) => e.entryName));
+
+  // True for an entry that extraction below will actually write — i.e. NOT a
+  // skipped top dir (.git/node_modules/dist/…) and NOT a traversal escape.
+  // The size pre-check must use the same filter, otherwise a normal project
+  // zip that bundles node_modules/.git (which we silently skip) is wrongly
+  // rejected as "too large" even though only the small source tree is written
+  // (C-50). The real-bytes guard during extraction still enforces the cap.
+  const willExtract = (e: AdmZip.IZipEntry): boolean => {
+    if (e.isDirectory) return false;
+    let rel = e.entryName.replaceAll("\\", "/");
+    if (stripPrefix && rel.startsWith(stripPrefix)) rel = rel.slice(stripPrefix.length);
+    if (!rel) return false;
+    if (SKIP_TOP_DIRS.has(rel.split("/")[0])) return false;
+    return true;
+  };
+
   // Total size pre-check (uncompressed sizes from headers; cheap to read).
   let total = 0;
   for (const e of entries) {
-    if (e.isDirectory) continue;
+    if (!willExtract(e)) continue;
     total += e.header.size;
     if (e.header.size > MAX_FILE_SIZE) {
       throw new Error(`zip entry too large: ${e.entryName} (${e.header.size} bytes)`);
@@ -56,7 +73,6 @@ export async function importZip(
     throw new Error(`zip too large: ${total} bytes uncompressed (max ${MAX_TOTAL_SIZE})`);
   }
 
-  const stripPrefix = detectSingleRoot(entries.map((e) => e.entryName));
   const root = path.resolve(destDir);
   let count = 0;
   // Running total of bytes actually written. The header-based pre-check above
@@ -160,7 +176,13 @@ export async function importGithub(
   await ensureEmpty(destDir);
 
   const cloneUrl = buildCloneUrl(input.repo_url, input.pat);
-  const args = ["clone", "--depth", "1"];
+  // `-c core.symlinks=false` makes git materialize any symlink in the repo as a
+  // plain text file containing its target, instead of a real symlink. This is
+  // defense-in-depth against symlink-following file reads: an attacker repo
+  // can't plant `link -> /proc/self/environ` (or any host path) into the
+  // sandbox to later exfiltrate orchestrator env/secrets. The read sinks also
+  // realpath-guard, but stopping the symlink at the source is cheaper and total.
+  const args = ["clone", "--depth", "1", "-c", "core.symlinks=false"];
   if (input.branch) args.push("--branch", input.branch);
   args.push(cloneUrl, destDir);
 

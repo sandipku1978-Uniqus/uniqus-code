@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { chromium } from "playwright";
 import { getServer } from "./sandbox.js";
+import { assertPublicHost } from "../connectors/ssrfGuard.js";
 
 /**
  * `screenshot_preview` (Plan §3.2 — "closes the perception loop").
@@ -37,7 +38,7 @@ export interface ShotResult {
 }
 
 export async function takeScreenshot(opts: ShotOpts): Promise<ShotResult> {
-  const targetUrl = resolveUrl(opts);
+  const targetUrl = await resolveUrl(opts);
   if (!targetUrl) {
     throw new Error(
       "screenshot_preview requires either server_id (a running start_server id) or url",
@@ -101,7 +102,7 @@ export async function takeScreenshot(opts: ShotOpts): Promise<ShotResult> {
   }
 }
 
-function resolveUrl(opts: ShotOpts): string | null {
+async function resolveUrl(opts: ShotOpts): Promise<string | null> {
   if (opts.url) {
     let parsed: URL;
     try {
@@ -112,6 +113,13 @@ function resolveUrl(opts: ShotOpts): string | null {
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       throw new Error("url must be http(s)://");
     }
+    // A free-form url runs Playwright on the orchestrator host, so an agent
+    // (or prompt injection) could otherwise navigate to cloud metadata
+    // (169.254.169.254), loopback admin panels, or a peer VM and exfil the
+    // rendered/error body. Reject private/loopback/metadata/fleet-bridge
+    // targets. The serverId path below is exempt — it intentionally targets
+    // the per-VM internal IP for a server the user already started.
+    await assertPublicHost(parsed.hostname);
     return parsed.toString();
   }
   if (opts.serverId) {

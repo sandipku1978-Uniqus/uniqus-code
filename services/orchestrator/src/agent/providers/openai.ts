@@ -134,6 +134,27 @@ export class OpenAIAdapter implements ModelProviderAdapter {
             p.onUsage?.(usage);
           }
           break;
+        case "response.failed": {
+          // A mid-stream provider failure (server error, content-policy block).
+          // The SDK does NOT throw for this (the error nests under `response`,
+          // not the top-level `data.error` the raw stream watches), so without
+          // this case the stream just ends and the turn looks like a silent
+          // empty success. Throw so the loop's existing catch path surfaces it.
+          const err = event.response.error;
+          throw new Error(
+            `OpenAI response failed${err?.code ? ` (${err.code})` : ""}: ${
+              err?.message ?? "the provider failed the response mid-stream"
+            }`,
+          );
+        }
+        case "error":
+          // Top-level stream error event (Responses `error` type). Same rationale
+          // as response.failed — surface it instead of finishing empty.
+          throw new Error(
+            `OpenAI stream error${event.code ? ` (${event.code})` : ""}: ${
+              event.message ?? "the provider emitted a stream error"
+            }`,
+          );
         case "response.reasoning_summary_text.delta":
           p.onThinking?.(event.delta);
           break;
@@ -298,8 +319,9 @@ export function safeParseJson(s: string, toolName?: string): unknown {
     // Non-empty but unparseable almost always means the arguments JSON was
     // truncated at the output-token limit. Returning {} lets the tool's own
     // input validation surface a clear error to the model (which then retries
-    // with a smaller response) instead of crashing the turn. The turn's
-    // stopReason is also set to "max_tokens" so the truncation is visible.
+    // with a smaller response) instead of crashing the turn. NOTE: the turn's
+    // stopReason stays "tool_use" here (a call exists), NOT "max_tokens" — the
+    // tool's validation error is what tells the model the args were truncated.
     console.warn(
       `openai: unparseable arguments for ${toolName ?? "tool"} — likely truncated at max_output_tokens`,
     );
