@@ -84,6 +84,32 @@ export async function remove(projectId: string, relPaths: string[]): Promise<voi
   if (error) throw new Error(`remove: ${error.message}`);
 }
 
+// ── Account-scoped objects (not tied to a project) ───────────────────────────
+// Used by the account-level Knowledge library, whose raw files live outside any
+// single project sandbox. `key` is a full bucket-relative path (each segment is
+// URL-encoded the same way as project files), e.g. "knowledge/<userId>/<id>-x.pdf".
+
+export async function uploadObject(key: string, content: Buffer): Promise<void> {
+  const { error } = await storage()
+    .storage.from(BUCKET)
+    .upload(encodePath(key), content, { upsert: true });
+  if (error) throw new Error(`uploadObject ${key}: ${error.message}`);
+}
+
+export async function downloadObject(key: string): Promise<Buffer | null> {
+  const { data, error } = await storage().storage.from(BUCKET).download(encodePath(key));
+  if (error || !data) return null;
+  return Buffer.from(await data.arrayBuffer());
+}
+
+export async function removeObjects(keys: string[]): Promise<void> {
+  if (keys.length === 0) return;
+  const { error } = await storage()
+    .storage.from(BUCKET)
+    .remove(keys.map((k) => encodePath(k)));
+  if (error) throw new Error(`removeObjects: ${error.message}`);
+}
+
 /**
  * Recursively list every file under projectId/. Returns paths relative to the
  * project (no leading projectId/).

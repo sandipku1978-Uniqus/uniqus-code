@@ -103,6 +103,22 @@ export async function takeScreenshot(opts: ShotOpts): Promise<ShotResult> {
 }
 
 async function resolveUrl(opts: ShotOpts): Promise<string | null> {
+  return resolvePreviewUrl(opts);
+}
+
+/**
+ * Resolve a preview target to a concrete URL, shared by `screenshot_preview` and
+ * `interact_preview`. A free-form `url` is validated against the SSRF guard (an
+ * agent could otherwise drive Playwright to cloud metadata, a loopback admin
+ * panel, or a peer VM and exfil the rendered body). The `serverId` path is
+ * exempt — it intentionally targets the per-VM internal IP of a server the user
+ * already started, via the same host field proxy.ts uses to route the iframe.
+ */
+export async function resolvePreviewUrl(opts: {
+  url?: string;
+  serverId?: string;
+  pathSuffix?: string;
+}): Promise<string | null> {
   if (opts.url) {
     let parsed: URL;
     try {
@@ -113,12 +129,6 @@ async function resolveUrl(opts: ShotOpts): Promise<string | null> {
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       throw new Error("url must be http(s)://");
     }
-    // A free-form url runs Playwright on the orchestrator host, so an agent
-    // (or prompt injection) could otherwise navigate to cloud metadata
-    // (169.254.169.254), loopback admin panels, or a peer VM and exfil the
-    // rendered/error body. Reject private/loopback/metadata/fleet-bridge
-    // targets. The serverId path below is exempt — it intentionally targets
-    // the per-VM internal IP for a server the user already started.
     await assertPublicHost(parsed.hostname);
     return parsed.toString();
   }
@@ -127,11 +137,6 @@ async function resolveUrl(opts: ShotOpts): Promise<string | null> {
     if (!s) {
       throw new Error(`No running server with id ${opts.serverId}`);
     }
-    // Use the server's host — "127.0.0.1" for process-backed, the per-VM
-    // IP (e.g. 172.16.x.y) for Firecracker-backed. proxy.ts uses the
-    // same field to route preview iframes; without this, Playwright hits
-    // the orchestrator's loopback and finds nothing because the dev
-    // server lives inside the VM.
     const base = `http://${s.host}:${s.port}`;
     return opts.pathSuffix ? `${base}${opts.pathSuffix.startsWith("/") ? "" : "/"}${opts.pathSuffix}` : base;
   }

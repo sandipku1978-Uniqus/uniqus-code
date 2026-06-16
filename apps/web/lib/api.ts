@@ -3,11 +3,19 @@
 import type {
   AccountSettings,
   AccountUsageStats,
+  AgentTask,
+  AuditEvent,
+  Comment,
   CurrentUser,
   DeploymentState,
   DesignSystem,
   DesignTokens,
+  KnowledgeDocument,
+  OrgMember,
+  Organization,
+  ProjectMember,
   ProjectSummary,
+  Role,
   SkillLibrary,
   UploadedFileSummary,
 } from "@uniqus/api-types";
@@ -204,6 +212,73 @@ export const setProjectSkillLibrariesApi = (
     method: "POST",
     body: JSON.stringify({ skill_library_ids: skillLibraryIds }),
   });
+
+// ── Knowledge library (account-level documents the agent can search) ──────────
+
+export type { KnowledgeDocument } from "@uniqus/api-types";
+
+export const listKnowledgeDocumentsApi = (): Promise<{ documents: KnowledgeDocument[] }> =>
+  api("/api/knowledge-documents");
+
+/** Fetch one document incl. its extracted plain text (for the preview pane). */
+export const getKnowledgeDocumentApi = (
+  id: string,
+): Promise<{ document: KnowledgeDocument; content: string }> =>
+  api(`/api/knowledge-documents/${id}`);
+
+export const updateKnowledgeDocumentApi = (
+  id: string,
+  patch: { title?: string; description?: string | null },
+): Promise<{ document: KnowledgeDocument }> =>
+  api(`/api/knowledge-documents/${id}`, { method: "PUT", body: JSON.stringify(patch) });
+
+export const deleteKnowledgeDocumentApi = (id: string): Promise<{ ok: true }> =>
+  api(`/api/knowledge-documents/${id}`, { method: "DELETE" });
+
+/**
+ * Upload one or more documents to the account Knowledge library. Multipart (no
+ * JSON Content-Type — the browser writes the boundary). The server stores the
+ * raw bytes and extracts searchable text per file.
+ */
+export async function uploadKnowledgeDocumentsApi(
+  files: File[],
+): Promise<{ documents: KnowledgeDocument[] }> {
+  const fd = new FormData();
+  files.forEach((file) => fd.append("files", file));
+  const res = await fetch(`${API_BASE}/api/knowledge-documents`, {
+    method: "POST",
+    credentials: "include",
+    body: fd,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`API ${res.status}: ${body || res.statusText}`);
+  }
+  return (await res.json()) as { documents: KnowledgeDocument[] };
+}
+
+/** Download the original file bytes (credentialed fetch → blob → click). */
+export async function downloadKnowledgeDocumentApi(
+  id: string,
+  fileName: string,
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/knowledge-documents/${id}/raw`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`API ${res.status}: ${body || res.statusText}`);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fileName || "document";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
 
 /**
  * Agent-driven analysis → an UNSAVED draft (tokens + findings) from any source.
@@ -953,3 +1028,78 @@ export const restoreGuestApi = async (
 export const fetchGuestRecoveryCodeApi = (): Promise<{
   recovery_code: string | null;
 }> => api("/api/guest/recovery-code");
+
+// ── Collaboration: project members, orgs, comments, tasks, audit (P3/P8/P10) ──
+
+export const fetchProjectMembersApi = (projectId: string): Promise<{ members: ProjectMember[] }> =>
+  api(`/api/projects/${projectId}/members`);
+
+export const addProjectMemberApi = (
+  projectId: string,
+  email: string,
+  role: Role,
+): Promise<{ member: ProjectMember }> =>
+  api(`/api/projects/${projectId}/members`, { method: "POST", body: JSON.stringify({ email, role }) });
+
+export const setProjectMemberRoleApi = (
+  projectId: string,
+  userId: string,
+  role: Role,
+): Promise<{ ok: true }> =>
+  api(`/api/projects/${projectId}/members/${userId}`, { method: "PATCH", body: JSON.stringify({ role }) });
+
+export const removeProjectMemberApi = (projectId: string, userId: string): Promise<{ ok: true }> =>
+  api(`/api/projects/${projectId}/members/${userId}`, { method: "DELETE" });
+
+export const fetchOrgsApi = (): Promise<{ orgs: Organization[] }> => api("/api/orgs");
+
+export const createOrgApi = (name: string): Promise<{ org: Organization }> =>
+  api("/api/orgs", { method: "POST", body: JSON.stringify({ name }) });
+
+export const fetchOrgMembersApi = (orgId: string): Promise<{ members: OrgMember[] }> =>
+  api(`/api/orgs/${orgId}/members`);
+
+export const addOrgMemberApi = (orgId: string, email: string, role: Role): Promise<{ ok: true }> =>
+  api(`/api/orgs/${orgId}/members`, { method: "POST", body: JSON.stringify({ email, role }) });
+
+export const setOrgBudgetApi = (orgId: string, monthlyBudgetUsd: number | null): Promise<{ ok: true }> =>
+  api(`/api/orgs/${orgId}/budget`, { method: "PATCH", body: JSON.stringify({ monthly_budget_usd: monthlyBudgetUsd }) });
+
+export const fetchCommentsApi = (projectId: string): Promise<{ comments: Comment[] }> =>
+  api(`/api/projects/${projectId}/comments`);
+
+export const addCommentApi = (
+  projectId: string,
+  input: { target_kind: Comment["target_kind"]; target_ref?: string | null; body: string },
+): Promise<{ comment: Comment }> =>
+  api(`/api/projects/${projectId}/comments`, { method: "POST", body: JSON.stringify(input) });
+
+export const resolveCommentApi = (
+  projectId: string,
+  commentId: string,
+  resolved: boolean,
+): Promise<{ ok: true }> =>
+  api(`/api/projects/${projectId}/comments/${commentId}`, { method: "PATCH", body: JSON.stringify({ resolved }) });
+
+export const fetchAgentTasksApi = (projectId: string): Promise<{ tasks: AgentTask[] }> =>
+  api(`/api/projects/${projectId}/tasks`);
+
+export const createAgentTaskApi = (
+  projectId: string,
+  input: { title: string; prompt: string; branch?: string; acceptance_criteria?: string },
+): Promise<{ task: AgentTask }> =>
+  api(`/api/projects/${projectId}/tasks`, { method: "POST", body: JSON.stringify(input) });
+
+export const cancelAgentTaskApi = (projectId: string, taskId: string): Promise<{ ok: true }> =>
+  api(`/api/projects/${projectId}/tasks/${taskId}`, { method: "PATCH", body: JSON.stringify({ status: "canceled" }) });
+
+/** Project audit log (now covers the expanded P10.3 kinds). */
+export const fetchProjectAuditApi = (projectId: string): Promise<{ events: AuditEvent[] }> =>
+  api(`/api/projects/${projectId}/audit`);
+
+/** Switch the project's tracked branch (P1.2). */
+export const switchProjectBranchApi = (
+  projectId: string,
+  branch: string,
+): Promise<{ ok: true; linked_branch: string }> =>
+  api(`/api/projects/${projectId}/branch`, { method: "POST", body: JSON.stringify({ branch }) });

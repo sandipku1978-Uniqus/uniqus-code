@@ -141,6 +141,10 @@ alter table projects add column if not exists icon text;
 -- UI falls back to 'main'. Populated by the import / repo-link flow.
 alter table projects add column if not exists linked_branch text;
 
+-- Origin remote URL captured when a GitHub import preserves git metadata (P1.1).
+-- PAT-free (any injected token is scrubbed before storing). Null = not tracked.
+alter table projects add column if not exists github_remote_url text;
+
 -- Deploys: one row per attempted deployment. Lets the UI show history and
 -- lets the orchestrator poll status without re-asking Vercel for everything.
 create table if not exists deployments (
@@ -366,6 +370,11 @@ create table if not exists usage_events (
   output_tokens integer not null default 0,
   cache_read_tokens integer not null default 0,
   cache_creation_tokens integer not null default 0,
+  -- Estimated USD cost SNAPSHOT for this turn, priced at record time with the
+  -- turn's exact split + long-context band (api-types estimateTurnCostUsd). NULL
+  -- for rows written before this shipped — the dashboard prices those at read
+  -- time from the token columns instead (see account_usage_stats / usage.ts).
+  cost_usd numeric,
   elapsed_ms integer not null default 0,
   created_at timestamptz not null default now()
 );
@@ -373,6 +382,8 @@ create table if not exists usage_events (
 -- Idempotent migration for tables created before the cache split shipped.
 alter table usage_events add column if not exists cache_read_tokens integer not null default 0;
 alter table usage_events add column if not exists cache_creation_tokens integer not null default 0;
+-- Idempotent migration for the per-turn cost snapshot (left NULL on old rows).
+alter table usage_events add column if not exists cost_usd numeric;
 
 create index if not exists usage_events_user_idx
   on usage_events (user_id, created_at desc);
@@ -386,7 +397,7 @@ create or replace function account_usage_stats(uid uuid)
 returns jsonb language sql stable as $$
   with rows as (
     select provider, model, input_tokens, output_tokens,
-           cache_read_tokens, cache_creation_tokens, elapsed_ms
+           cache_read_tokens, cache_creation_tokens, cost_usd, elapsed_ms
     from usage_events where user_id = uid
   ),
   totals as (
@@ -406,6 +417,14 @@ returns jsonb language sql stable as $$
       sum(output_tokens)::bigint          as output_tokens,
       sum(cache_read_tokens)::bigint      as cache_read_tokens,
       sum(cache_creation_tokens)::bigint  as cache_creation_tokens,
+      -- Snapshotted per-turn cost for rows that have it; the API layer adds a
+      -- read-time estimate for the legacy (NULL-cost) rows using the uncosted_*
+      -- token sums below, so the dashboard total never under-counts old turns.
+      coalesce(sum(cost_usd), 0)::double precision      as cost_usd,
+      coalesce(sum(input_tokens)          filter (where cost_usd is null), 0)::bigint as uncosted_input_tokens,
+      coalesce(sum(output_tokens)         filter (where cost_usd is null), 0)::bigint as uncosted_output_tokens,
+      coalesce(sum(cache_read_tokens)     filter (where cost_usd is null), 0)::bigint as uncosted_cache_read_tokens,
+      coalesce(sum(cache_creation_tokens) filter (where cost_usd is null), 0)::bigint as uncosted_cache_creation_tokens,
       count(*)::bigint                    as turns
     from rows
     group by provider, model
@@ -424,6 +443,11 @@ returns jsonb language sql stable as $$
         'input_tokens', input_tokens, 'output_tokens', output_tokens,
         'cache_read_tokens', cache_read_tokens,
         'cache_creation_tokens', cache_creation_tokens,
+        'cost_usd', cost_usd,
+        'uncosted_input_tokens', uncosted_input_tokens,
+        'uncosted_output_tokens', uncosted_output_tokens,
+        'uncosted_cache_read_tokens', uncosted_cache_read_tokens,
+        'uncosted_cache_creation_tokens', uncosted_cache_creation_tokens,
         'turns', turns
       )) from per_model),
       '[]'::jsonb
@@ -485,9 +509,182 @@ create trigger skill_libraries_updated_at
 
 alter table skill_libraries enable row level security;
 
+-- Account-level Knowledge library: documents the user uploads once (regulations,
+-- research papers, datasets, specs, …) and the agent can reference across ALL of
+-- their projects via the `knowledge_search` tool. The raw file lives in object
+-- storage (storage_path); `content` holds the extracted plain text that powers
+-- search. `content` is intentionally a separate column so list queries can skip
+-- it. Row = KnowledgeDocument in @uniqus/api-types.
+create table if not exists knowledge_documents (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  title text not null,
+  description text,
+  file_name text not null,
+  mime_type text not null default 'application/octet-stream',
+  size_bytes bigint not null default 0,
+  storage_path text not null,
+  content text not null default '',
+  char_count integer not null default 0,
+  extracted boolean not null default false,
+  -- Server-side full-text search vector over title + note + extracted text, so
+  -- knowledge_search filters/stems in Postgres and only matching rows' bodies
+  -- ever leave the DB (never the whole library). Stored + GIN-indexed.
+  content_fts tsvector generated always as (
+    to_tsvector(
+      'english',
+      coalesce(title, '') || ' ' || coalesce(description, '') || ' ' || coalesce(content, '')
+    )
+  ) stored,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists knowledge_documents_user_idx
+  on knowledge_documents (user_id, updated_at desc);
+
+create index if not exists knowledge_documents_fts_idx
+  on knowledge_documents using gin (content_fts);
+
+drop trigger if exists knowledge_documents_updated_at on knowledge_documents;
+create trigger knowledge_documents_updated_at
+  before update on knowledge_documents
+  for each row execute function touch_project_updated_at();
+
+alter table knowledge_documents enable row level security;
+
 -- Which library skills a project has attached (additive — a project can attach
 -- several). Stored as a uuid[] rather than a junction table to keep attach/detach
 -- a single-row update; dangling ids (after a skill is deleted) are harmless
 -- because resolution re-checks ownership per turn and skips anything missing.
 alter table projects add column if not exists skill_library_ids uuid[]
   not null default '{}'::uuid[];
+
+-- ── Teams / organizations + RBAC (P3.1) ───────────────────────────────────────
+-- The collaboration model is task-intake + review + branch/session isolation
+-- with membership-scoped access, NOT many people prompting one tree. owner_id on
+-- projects stays the creator; org_id + the *_members tables layer shared access
+-- on top. Roles are owner|admin|editor|viewer (shared enum in @uniqus/api-types).
+create table if not exists organizations (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  owner_id uuid not null references users(id) on delete cascade,
+  -- Org-wide monthly spend cap in USD (P3.5). NULL = no cap.
+  monthly_budget_usd numeric,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists organizations_owner_idx on organizations (owner_id);
+drop trigger if exists organizations_updated_at on organizations;
+create trigger organizations_updated_at before update on organizations
+  for each row execute function touch_project_updated_at();
+alter table organizations enable row level security;
+
+create table if not exists org_members (
+  id uuid primary key default gen_random_uuid(),
+  org_id uuid not null references organizations(id) on delete cascade,
+  user_id uuid not null references users(id) on delete cascade,
+  role text not null default 'editor' check (role in ('owner', 'admin', 'editor', 'viewer')),
+  created_at timestamptz not null default now(),
+  unique (org_id, user_id)
+);
+create index if not exists org_members_org_idx on org_members (org_id);
+create index if not exists org_members_user_idx on org_members (user_id);
+alter table org_members enable row level security;
+
+create table if not exists project_members (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references projects(id) on delete cascade,
+  user_id uuid not null references users(id) on delete cascade,
+  role text not null default 'editor' check (role in ('owner', 'admin', 'editor', 'viewer')),
+  created_at timestamptz not null default now(),
+  unique (project_id, user_id)
+);
+create index if not exists project_members_project_idx on project_members (project_id);
+create index if not exists project_members_user_idx on project_members (user_id);
+alter table project_members enable row level security;
+
+-- Projects can belong to an org (P3.1). owner_id stays the creator.
+alter table projects add column if not exists org_id uuid references organizations(id) on delete set null;
+
+-- ── Comments (P3.4) ───────────────────────────────────────────────────────────
+-- A teammate can comment on a preview element (reusing selectedElement
+-- descriptors as target_ref), a file, a checkpoint, a PR, or the project at large.
+create table if not exists comments (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references projects(id) on delete cascade,
+  user_id uuid references users(id) on delete set null,
+  target_kind text not null check (target_kind in ('element', 'file', 'checkpoint', 'pr', 'general')),
+  target_ref text,
+  body text not null,
+  resolved boolean not null default false,
+  created_at timestamptz not null default now()
+);
+create index if not exists comments_project_idx on comments (project_id, created_at desc);
+alter table comments enable row level security;
+
+-- ── Checkpoint / interaction artifacts (P2.3) ────────────────────────────────
+-- Evidence captured during a turn (interact_preview runs, screenshots, console/
+-- network findings, a11y) tied to a checkpoint + session so it persists as proof
+-- of what the agent tried — feeds PR bundles (P1.3) and async review packets (P8.3).
+create table if not exists checkpoint_artifacts (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references projects(id) on delete cascade,
+  session_id uuid references chat_sessions(id) on delete cascade,
+  checkpoint_sha text,
+  kind text not null check (kind in ('interaction', 'screenshot', 'console', 'network', 'a11y', 'flow')),
+  summary text,
+  data jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+create index if not exists checkpoint_artifacts_project_idx on checkpoint_artifacts (project_id, created_at desc);
+create index if not exists checkpoint_artifacts_session_idx on checkpoint_artifacts (session_id, created_at desc);
+alter table checkpoint_artifacts enable row level security;
+
+-- ── Durable agent task queue (P8.1) ──────────────────────────────────────────
+-- Survives restarts (unlike the in-memory background-shell-job Map). One row per
+-- queued/running/done agent task, optionally on its own branch with a review packet.
+create table if not exists agent_tasks (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references projects(id) on delete cascade,
+  org_id uuid references organizations(id) on delete set null,
+  created_by uuid references users(id) on delete set null,
+  title text not null,
+  prompt text not null,
+  status text not null default 'queued' check (status in ('queued', 'running', 'done', 'failed', 'canceled')),
+  branch text,
+  acceptance_criteria text,
+  result_summary text,
+  error text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists agent_tasks_project_idx on agent_tasks (project_id, created_at desc);
+create index if not exists agent_tasks_status_idx on agent_tasks (status, created_at);
+drop trigger if exists agent_tasks_updated_at on agent_tasks;
+create trigger agent_tasks_updated_at before update on agent_tasks
+  for each row execute function touch_project_updated_at();
+alter table agent_tasks enable row level security;
+
+-- ── Expand audit kinds (P10.3) ───────────────────────────────────────────────
+-- Idempotently widen audit_events.kind to cover login, project CRUD, role
+-- changes, deploys, preview shares, GitHub actions, DB lifecycle, and org events.
+do $$
+declare c text;
+begin
+  select conname into c from pg_constraint
+   where conrelid = 'audit_events'::regclass and contype = 'c' and conname like '%kind%';
+  if c is not null then execute format('alter table audit_events drop constraint %I', c); end if;
+  alter table audit_events add constraint audit_events_kind_check check (
+    kind in (
+      'secret_read', 'secret_write', 'secret_delete',
+      'connector_invoke', 'connector_invoke_error',
+      'checkpoint_create', 'checkpoint_restore',
+      'login', 'logout',
+      'project_create', 'project_update', 'project_delete',
+      'member_invite', 'member_remove', 'role_change',
+      'deploy', 'preview_share', 'github_action', 'db_lifecycle',
+      'org_create', 'org_update'
+    )
+  );
+end$$;

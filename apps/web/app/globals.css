@@ -912,7 +912,6 @@ section.band .sub {
 /* Make every direct field/column inside the form span the row. Guards against
    a single flex child collapsing to its content width and leaving dead space
    to the right of the composer. */
-.newproj-form > .newproj-blank,
 .newproj-form > input,
 .newproj-form > textarea { flex: 1 1 auto; width: 100%; min-width: 0; }
 .newproj-form input {
@@ -953,6 +952,208 @@ section.band .sub {
 }
 @media (max-width: 1100px) { .proj-grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 700px)  { .proj-grid { grid-template-columns: 1fr; } }
+
+/* ==========================================================================
+   Collection sub-views (projects → All gallery / Recent timeline)
+   Two deliberately distinct silhouettes so adjacent tabs never share a
+   skeleton. Shared chrome: an editorial head with one gradient-accented word
+   and a hairline-divided metric strip (signature #9 + #13).
+   ========================================================================== */
+.coll-head { margin-bottom: 22px; animation: fadeInUp var(--dur-base) var(--ease-out) backwards; }
+.coll-head h1 {
+  font-size: clamp(28px, 3.2vw, 38px);
+  font-weight: 540;
+  letter-spacing: -0.025em;
+  line-height: 1.05;
+  margin: 0 0 10px;
+}
+.coll-head .grad {
+  background: var(--brand-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.coll-head .lede {
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 0;
+  max-width: 64ch;
+}
+
+/* Hairline-divided metric strip — mono tabular value over a mono label. The
+   1px grid gaps over a line-colored backing become the dividers. */
+.metric-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  background: var(--border-light);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  margin-bottom: 26px;
+  animation: fadeInUp var(--dur-base) var(--ease-out) backwards;
+}
+.metric-cell {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 60%),
+    var(--bg-surface);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.metric-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-family: var(--font-mono-stack);
+  font-variant-numeric: tabular-nums;
+  font-size: 26px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1;
+  color: var(--text-primary);
+}
+.metric-label {
+  font-family: var(--font-mono-stack);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+.metric-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.metric-dot.live {
+  background: var(--conf-high);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--conf-high) 18%, transparent);
+}
+.metric-dot.warn { background: var(--conf-medium); }
+.metric-dot.dim  { background: var(--text-dim); }
+@media (max-width: 760px) { .metric-strip { grid-template-columns: repeat(2, 1fr); } }
+
+/* All-projects filter toolbar. */
+.coll-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+.coll-search { position: relative; flex: 1; max-width: 380px; display: flex; align-items: center; }
+.coll-search svg { position: absolute; left: 12px; color: var(--text-dim); pointer-events: none; }
+.coll-search input {
+  width: 100%;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 12px 8px 34px;
+  transition: border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease;
+}
+.coll-search input::placeholder { color: var(--text-muted); }
+.coll-search input:focus {
+  outline: none;
+  border-color: var(--brand-magenta);
+  box-shadow: 0 0 0 3px rgba(178, 30, 125, 0.2);
+}
+.coll-count {
+  font-family: var(--font-mono-stack);
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Recent timeline — grouped, hairline-divided rows on a status-colored rail. */
+.timeline { animation: fadeInUp var(--dur-base) var(--ease-out) backwards; }
+.timeline-group { margin-bottom: 26px; }
+.timeline-group:last-child { margin-bottom: 0; }
+.timeline-group-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 10px 2px; }
+.timeline-group-head .t {
+  font-family: var(--font-mono-stack);
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+.timeline-group-head .n {
+  font-family: var(--font-mono-stack);
+  font-size: 11px; color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.timeline-rows {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 40%),
+    var(--bg-surface);
+}
+.timeline-row {
+  display: grid;
+  grid-template-columns: 76px 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 13px 16px;
+  border-top: 1px solid var(--border-light);
+  cursor: pointer;
+  transition: background var(--dur-fast) ease;
+}
+.timeline-row:first-child { border-top: 0; }
+.timeline-row:hover { background: var(--bg-surface-hover); }
+.timeline-row:focus-visible { outline: 2px solid var(--brand-magenta); outline-offset: -2px; }
+.timeline-time {
+  font-family: var(--font-mono-stack);
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* Status-colored node on a continuous connecting rail. The 999px line stubs are
+   clipped by .timeline-rows' overflow:hidden, so they read as one rail. */
+.timeline-node {
+  position: relative;
+  justify-self: center;
+  align-self: center;
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--text-dim);
+  box-shadow: 0 0 0 4px var(--bg-surface);
+  z-index: 1;
+}
+.timeline-node.live { background: var(--conf-high); }
+.timeline-node.building { background: var(--conf-medium); }
+.timeline-node.failed { background: var(--conf-low); }
+.timeline-node.none { background: var(--text-dim); }
+.timeline-node::before, .timeline-node::after {
+  content: ""; position: absolute; left: 50%; transform: translateX(-50%);
+  width: 1px; height: 999px; background: var(--border-default);
+}
+.timeline-node::before { bottom: 100%; }
+.timeline-node::after  { top: 100%; }
+.timeline-body { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.timeline-row-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.timeline-row-top .proj-avatar { width: 26px; height: 26px; border-radius: 7px; font-size: 12px; flex: none; }
+.timeline-name {
+  font-size: 13.5px; font-weight: 600;
+  color: var(--text-primary); text-decoration: none;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.timeline-name:hover { color: var(--brand-magenta); }
+.timeline-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding-left: 36px; }
+.timeline-desc {
+  font-size: 12px; color: var(--text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50ch;
+}
+.timeline-actions { position: relative; display: flex; align-items: center; gap: 6px; }
+.timeline-open {
+  font-size: 12px; padding: 5px 12px; text-decoration: none;
+  opacity: 0; transition: opacity var(--dur-fast) ease;
+}
+.timeline-row:hover .timeline-open,
+.timeline-row:focus-within .timeline-open { opacity: 1; }
+@media (max-width: 760px) {
+  .timeline-row { grid-template-columns: 16px minmax(0, 1fr) auto; }
+  .timeline-time { display: none; }
+  .timeline-meta { padding-left: 0; }
+  .timeline-open { opacity: 1; }
+}
 
 /* ── Dashboard usage widgets ─────────────────────────────────────────────── */
 .usage-widgets { margin-top: 8px; }
@@ -1078,6 +1279,17 @@ section.band .sub {
   background-size: 14px 14px;
   mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.9), transparent);
   -webkit-mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.9), transparent);
+}
+/* Generated app "screenshot": the gradient reads as the app header, a light
+   content panel (UiPreview) sits below. Above the dot-grid so the panel stays
+   clean; the gradient + texture only show through the preview's header zone. */
+.proj-cover svg.ui-preview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  display: block;
 }
 /* Overlap rules key off the cover sibling so the All/Recent LIST rows (which
    reuse .proj-tile without a cover) keep their plain inline avatar. */
@@ -1850,7 +2062,7 @@ section.band .sub {
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   box-shadow:
     0 10px 30px rgba(0, 0, 0, 0.28),
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
@@ -2087,39 +2299,35 @@ section.band .sub {
 }
 
 /* ── One-sentence project creation ───────────────────────────────────────── */
-.newproj-blank {
-  display: flex;
+/* Describe-mode dashboard composer — reuses the landing-hero composer classes
+   (.hp-input / .hp-bar / .hp-icon-btn / .hp-plan / .hp-send) so it's visually
+   identical to the hero box. Those classes are written against the marketing
+   --mk-* tokens, which only exist under .marketing-shell — so bridge them to the
+   app's equivalents here, and switch the form from its single-line flex row to a
+   stacked column. */
+.newproj-describe {
+  --mk-text: var(--text-primary);
+  --mk-muted: var(--text-muted);
+  --mk-dim: var(--text-dim);
+  --mk-line: var(--border-default);
+  --mk-line-strong: var(--border-strong);
+  --mk-panel-solid: var(--bg-surface);
   flex-direction: column;
-  gap: 8px;
-  /* `.newproj-form` is a flex row (built for the single-line input layout);
-     without this, the column collapses to its content width and leaves a
-     large empty gap to its right. Fill the row instead. */
-  flex: 1;
-  min-width: 0;
+  align-items: stretch;
+  gap: 10px;
 }
-.newproj-blank textarea {
-  width: 100%;
-  background: var(--bg-elev);
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  padding: 10px 12px;
-  color: var(--text-primary);
-  font-size: 14px;
-  font-family: inherit;
-  line-height: 1.4;
-  resize: vertical;
-  min-height: 64px;
+/* Shape the design-system <select> like the bar's other pills. */
+.hp-bar .hp-select {
+  width: auto;
+  height: 30px;
+  padding: 0 30px 0 12px;
+  font-size: 12px;
+  line-height: 28px;
+  border-radius: var(--radius-full);
+  border-color: var(--mk-line);
+  background-color: transparent;
 }
-.newproj-blank textarea:focus {
-  outline: none;
-  border-color: var(--brand-magenta);
-}
-.newproj-blank-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
+.hp-bar .hp-select:hover { border-color: var(--mk-line-strong); }
 .newproj-hint {
   font-size: 11px;
   color: var(--text-muted);
@@ -3660,8 +3868,6 @@ section.band .sub {
 }
 /* Slightly roomier composer to match the larger hero. */
 .dash-hero .newproj-form { padding: 18px 18px; }
-.dash-hero .newproj-blank textarea,
-.dash-hero .newproj-blank input { font-size: 15px; }
 
 /* Centered segmented tab control with a gradient-filled active pill. */
 .dash-tabs {
@@ -3704,20 +3910,6 @@ section.band .sub {
   border-color: var(--brand-magenta);
   box-shadow: 0 10px 44px rgba(0, 0, 0, 0.45), 0 0 0 3px rgba(178, 30, 125, 0.20);
 }
-.dash-hero .newproj-blank textarea,
-.dash-hero .newproj-blank input {
-  background: transparent;
-  border: 0;
-  width: 100%;
-  color: var(--text-primary);
-  font-size: 14px;
-  font-family: inherit;
-  padding: 8px 4px;
-}
-.dash-hero .newproj-blank textarea:focus,
-.dash-hero .newproj-blank input:focus { outline: none; }
-.dash-hero .newproj-blank textarea::placeholder,
-.dash-hero .newproj-blank input::placeholder { color: var(--text-muted); }
 .dash-hero .newproj-extra { text-align: left; max-width: 720px; margin-left: auto; margin-right: auto; }
 
 /* Example-prompt chips + starter-template cards */
@@ -4037,7 +4229,6 @@ section.band .sub {
   .dash-hero h1 { font-size: clamp(26px, 8vw, 38px); }
   .dash-hero .lede { font-size: 14px; margin-bottom: 24px; }
   .dash-tabs { max-width: 100%; overflow-x: auto; flex-wrap: nowrap; }
-  .newproj-blank-row { flex-wrap: wrap; }
   .starter-grid { grid-template-columns: 1fr; }
   .proj .desc { min-height: 0; }
 }
@@ -4664,7 +4855,44 @@ section.band .sub {
   padding: 2px 4px 10px;
 }
 .ds-list-head .ds-new { font-size: 11.5px; padding: 3px 8px; }
-.ds-list-items { display: flex; flex-direction: column; gap: 4px; }
+.ds-list-items { display: flex; flex-direction: column; gap: 8px; }
+
+/* Swatch-forward system row: a full-width palette ribbon over the name + a mono
+   meta line. Reads as a sample of the system, not a generic list item. */
+.ds-sys-row {
+  display: grid;
+  gap: 7px;
+  width: 100%;
+  text-align: left;
+  padding: 10px;
+  background: var(--bg-dark);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-family: inherit;
+  transition: border-color var(--dur-fast) ease, background var(--dur-fast) ease,
+    transform var(--dur-fast) ease;
+}
+.ds-sys-row:hover { background: var(--bg-surface-hover); transform: translateY(-1px); }
+.ds-sys-row.active { border-color: var(--brand-magenta); background: var(--bg-surface); }
+.ds-sys-ribbon {
+  display: flex;
+  height: 18px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+}
+.ds-sys-ribbon > span { flex: 1; }
+.ds-sys-ribbon > span + span { border-left: 1px solid rgba(0, 0, 0, 0.25); }
+.ds-sys-name {
+  font-size: 13px; font-weight: 600; color: var(--text-primary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ds-sys-meta {
+  font-family: var(--font-mono-stack);
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
 
 .ds-main-head { margin: 2px 2px 12px; }
 .ds-main-head h2 { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
@@ -4944,6 +5172,88 @@ section.band .sub {
 }
 
 /* ==========================================================================
+   Knowledge library tab
+   ========================================================================== */
+
+/* Small muted hint that rides next to the Upload button. */
+.kb-accept-hint {
+  align-self: center;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+/* Mono file-type badge in the tile cover band (PDF / XLSX / DOCX …). */
+.kb-filetype {
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  font-family: var(--font-mono-stack, monospace);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #fff;
+  background: rgba(7, 8, 13, 0.5);
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--radius-sm);
+  padding: 2px 7px;
+}
+
+/* "● Searchable" / "● Stored" status in a tile's meta row (dot + label). */
+.kb-meta-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.kb-meta-status .metric-dot {
+  width: 6px;
+  height: 6px;
+}
+
+/* Extracted-text preview pane in the detail modal. */
+.kb-content-preview {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  font-family: var(--font-mono-stack, monospace);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-primary);
+  background: var(--bg-dark);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+}
+
+/* Full-tab drag-and-drop overlay shown while dragging files in. */
+.kb-dropzone {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--bg-dark) 78%, transparent);
+  backdrop-filter: blur(2px);
+  border: 2px dashed var(--brand-magenta);
+  border-radius: var(--radius-lg);
+  pointer-events: none;
+}
+.kb-dropzone-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+}
+.kb-dropzone-inner svg {
+  color: var(--brand-magenta);
+}
+
+/* ==========================================================================
    Motion overhaul — consistent entrances, micro-interactions, reduced-motion.
    Everything here animates only opacity/transform (compositor-cheap) and uses
    the shared --dur-* / --ease-* tokens so motion feels of-a-piece. Entrances
@@ -5090,6 +5400,137 @@ select {
     border-color var(--dur-fast) var(--ease-out),
     box-shadow var(--dur-fast) var(--ease-out);
 }
+
+/* ==========================================================================
+   Native form controls — checkboxes, radios, selects
+   The browser defaults (light boxes, OS chevrons, blue ticks, white <option>
+   popups) read as foreign on the app's dark, brand-tinted surfaces. These give
+   the native controls the same language as the rest of the UI, in both themes.
+   `color-scheme` (set on :root with the theme) darkens the OS-rendered popups
+   and other native widgets so they stop flashing white. The select chevron is
+   shared via a token so .ui-select (app) and .field select (marketing) draw the
+   same mark.
+   ========================================================================== */
+:root {
+  color-scheme: dark;
+  --sel-chevron: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='12'%20height='12'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='%2393908a'%20stroke-width='2.5'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpolyline%20points='6%209%2012%2015%2018%209'/%3E%3C/svg%3E");
+}
+:root[data-theme="light"] { color-scheme: light; }
+
+/* Checkbox & radio — fully custom mark drawn from tokens (no OS chrome). */
+input[type="checkbox"],
+input[type="radio"] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  display: inline-grid;
+  place-content: center;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+input[type="checkbox"] { border-radius: 5px; }
+input[type="radio"] { border-radius: 50%; }
+input[type="checkbox"]:hover:not(:disabled),
+input[type="radio"]:hover:not(:disabled) { border-color: var(--accent); }
+input[type="checkbox"]:checked,
+input[type="radio"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+/* Checkmark: a rotated tick that scales in. */
+input[type="checkbox"]::after {
+  content: "";
+  width: 4px;
+  height: 8px;
+  margin-top: -1px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) scale(0);
+  transition: transform var(--dur-fast) var(--ease-spring);
+}
+input[type="checkbox"]:checked::after { transform: rotate(45deg) scale(1); }
+/* Radio: a dot that scales in. */
+input[type="radio"]::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #fff;
+  transform: scale(0);
+  transition: transform var(--dur-fast) var(--ease-spring);
+}
+input[type="radio"]:checked::after { transform: scale(1); }
+input[type="checkbox"]:disabled,
+input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Select — strip the OS chevron, draw our own, theme the control. Applied via
+   .ui-select so the closed control matches the app's inputs; background-color is
+   a longhand so it never clobbers the chevron background-image. */
+.ui-select {
+  appearance: none;
+  -webkit-appearance: none;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  padding: 7px 32px 7px 11px;
+  background-color: var(--bg-elev);
+  background-image: var(--sel-chevron);
+  background-repeat: no-repeat;
+  background-position: right 11px center;
+  background-size: 11px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+.ui-select:hover:not(:disabled) { border-color: var(--text-muted); }
+.ui-select:focus,
+.ui-select:focus-visible {
+  outline: none;
+  border-color: var(--brand-magenta);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand-magenta) 35%, transparent);
+}
+.ui-select:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* Text inputs & textareas — a base surface so fields that only set incidental
+   styles (font-size, flex, padding) stop falling back to the white OS box on
+   the dark UI (e.g. the BYOK key fields, Fly deploy inputs, first-run wizard).
+   Wrapped in :where() so its specificity is 0: every component class and the
+   deliberately seamless inputs (composer, landing prompt, new-project bar, the
+   preview URL bar) set their own background/border and override it — only
+   otherwise-unstyled fields pick up the theme. Checkbox/radio/color/file/range
+   and button-type inputs are excluded; they're styled above or are chromeless.
+   Focus is handled by the global :focus-visible ring. */
+:where(
+  input:not([type="checkbox"], [type="radio"], [type="color"], [type="file"], [type="range"], [type="submit"], [type="button"], [type="image"], [type="reset"]),
+  textarea
+) {
+  background-color: var(--bg-elev);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  font-family: inherit;
+  font-size: 13px;
+}
+:where(
+  input:not([type="checkbox"], [type="radio"], [type="color"], [type="file"], [type="range"], [type="submit"], [type="button"], [type="image"], [type="reset"]),
+  textarea
+)::placeholder { color: var(--text-muted); }
 
 /* ── Accessibility: honor reduced-motion everywhere ─────────────────────── */
 @media (prefers-reduced-motion: reduce) {
@@ -7452,7 +7893,9 @@ select {
   background: linear-gradient(135deg, var(--brand-purple), var(--brand-magenta));
   border-bottom: 1px solid var(--mk-line);
 }
-.template-thumb svg { width: 44px; height: 44px; opacity: 0.92; }
+/* The thumb now holds a generated app-window "screenshot" (UiPreview) that
+   floats on the gradient and fills the thumb edge-to-edge. */
+.template-thumb svg.ui-preview { width: 100%; height: 100%; display: block; opacity: 1; }
 .template-thumb.t1 { background: linear-gradient(135deg, #5b8bff, #b96bff); }
 .template-thumb.t2 { background: linear-gradient(135deg, #2dd4bf, #38bdf8); }
 .template-thumb.t3 { background: linear-gradient(135deg, #f6c86d, #ff4d97); }
@@ -7469,6 +7912,55 @@ select {
   font-size: 11px;
   color: var(--mk-dim);
   font-family: var(--font-mono-stack);
+}
+
+/* ── Templates tab (in-app gallery, reuses the marketing template card) ──── */
+.tmpl-page .tmpl-section {
+  margin-top: 34px;
+}
+/* "Use this template" — the card's single action. Quiet ghost CTA pinned to the
+   card's bottom edge; hover is a neutral lift, magenta is reserved for focus and
+   the active "Creating…" state so the accent stays a scalpel, not a paint roller. */
+.tmpl-use {
+  appearance: none;
+  margin-top: 16px;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  border: 1px solid var(--mk-line);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--mk-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+.tmpl-use:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--mk-line-strong);
+  background: color-mix(in srgb, #fff 4%, transparent);
+}
+.tmpl-use:focus-visible {
+  outline: 2px solid var(--brand-magenta);
+  outline-offset: 2px;
+}
+.tmpl-use:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+/* The creating button stays full-strength (it carries the spinner) and goes
+   magenta — the one active cue while its project is being built. */
+.tmpl-use[aria-busy="true"] {
+  opacity: 1;
+  color: var(--brand-magenta);
+  border-color: color-mix(in srgb, var(--brand-magenta) 40%, var(--mk-line));
 }
 
 /* ── Changelog timeline ────────────────────────────────────────────────── */
@@ -7669,6 +8161,19 @@ select {
   transition: border-color var(--dur-fast) ease;
 }
 .field textarea { resize: vertical; min-height: 130px; }
+/* Drop the OS chevron and draw our own so the marketing topic picker matches
+   the rest of the form. The explicit background-image comes after the shared
+   `background:` shorthand above, so it survives. */
+.field select {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  padding-right: 38px;
+  background-image: var(--sel-chevron);
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  background-size: 12px;
+}
 .field input::placeholder, .field textarea::placeholder { color: var(--mk-dim); }
 .field input:focus, .field textarea:focus, .field select:focus {
   outline: none;

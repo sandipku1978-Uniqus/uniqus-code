@@ -231,10 +231,12 @@ export default function SecurityPage() {
           </p>
           <h3>Isolation by design</h3>
           <p>
-            Each project gets a dedicated virtual machine with its own
-            filesystem and network boundary. A bug, a runaway script, or a risky
-            command in one project can&rsquo;t reach another. Mutable state is
-            scoped to the project that owns it.
+            Each project runs in its own Firecracker microVM with a dedicated
+            filesystem and sandbox. The in-VM agent requires a per-project token,
+            and VM-to-VM traffic across the shared egress bridge is dropped &mdash;
+            so a bug, a runaway script, or a risky command in one project
+            can&rsquo;t reach another project&rsquo;s machine. Mutable state is
+            scoped to the VM that owns it.
           </p>
           <h3>Responsible disclosure</h3>
           <p>

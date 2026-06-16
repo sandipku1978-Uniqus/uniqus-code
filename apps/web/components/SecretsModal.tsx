@@ -123,7 +123,7 @@ export default function SecretsModal({
       title="Project Secrets"
       subtitle={
         <>
-          Encrypted at rest · Agent reads via <code>get_secret</code>; values are NEVER returned to the chat
+          Encrypted at rest · auto-written to <code>.env</code> so your app reads them like Vercel env vars · values are NEVER returned to the chat
         </>
       }
       onClose={onClose}

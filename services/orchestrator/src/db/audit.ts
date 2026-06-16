@@ -15,7 +15,22 @@ export type AuditKind =
   | "connector_invoke"
   | "connector_invoke_error"
   | "checkpoint_create"
-  | "checkpoint_restore";
+  | "checkpoint_restore"
+  // Expanded admin/audit surface (P10.3).
+  | "login"
+  | "logout"
+  | "project_create"
+  | "project_update"
+  | "project_delete"
+  | "member_invite"
+  | "member_remove"
+  | "role_change"
+  | "deploy"
+  | "preview_share"
+  | "github_action"
+  | "db_lifecycle"
+  | "org_create"
+  | "org_update";
 
 export interface AuditEntryInput {
   project_id: string | null;

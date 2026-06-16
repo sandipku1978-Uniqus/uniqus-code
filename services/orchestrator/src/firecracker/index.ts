@@ -16,6 +16,7 @@ export {
   stopIdleSweeper,
   touch,
   shutdownAll,
+  AGENT_AUTH_ENFORCED,
 } from "./fleet.js";
 export { FirecrackerClient, spawnFirecracker } from "./client.js";
 export type { VmHandle } from "./types.js";

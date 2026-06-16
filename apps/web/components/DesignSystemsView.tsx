@@ -517,7 +517,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
           )}
 
           {createMode === "project" && (
-            <select className="ds-name" value={selectedProject} onChange={(e) => setSelectedProject(e.target.value)} style={{ colorScheme: "dark" }} aria-label="Project">
+            <select className="ui-select" value={selectedProject} onChange={(e) => setSelectedProject(e.target.value)} aria-label="Project">
               <option value="">{projects === null ? "Loading your projects…" : "— select a project —"}</option>
               {(projects ?? []).map((p) => (
                 <option key={p.id} value={p.id}>
@@ -529,7 +529,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
 
           {createMode === "github" &&
             (github?.connected ? (
-              <select className="ds-name" value={selectedRepo} onChange={(e) => setSelectedRepo(e.target.value)} style={{ colorScheme: "dark" }} aria-label="Repository">
+              <select className="ui-select" value={selectedRepo} onChange={(e) => setSelectedRepo(e.target.value)} aria-label="Repository">
                 <option value="">{repos === null ? "Loading your repos…" : "— select a repository —"}</option>
                 {(repos ?? []).map((r) => (
                   <option key={r.full_name} value={r.full_name}>
@@ -740,9 +740,9 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
           </Field>
           <Field label="Badge style">
             <select
+              className="ui-select"
               value={badge.variant ?? "soft"}
               onChange={(e) => setComp("badge", { ...badge, variant: e.target.value as NonNullable<DesignComponentTokens["badge"]>["variant"] })}
-              style={inputStyle}
             >
               <option value="soft">soft</option>
               <option value="solid">solid</option>
@@ -824,7 +824,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
             {renderRefine()}
 
             <Field label="Mode">
-              <select value={d.tokens.mode} onChange={(e) => patchTokens({ mode: e.target.value as DesignTokens["mode"] })} style={inputStyle}>
+              <select className="ui-select" value={d.tokens.mode} onChange={(e) => patchTokens({ mode: e.target.value as DesignTokens["mode"] })}>
                 <option value="light">light</option>
                 <option value="dark">dark</option>
                 <option value="system">system</option>
@@ -950,31 +950,45 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
         </button>
       </div>
       <div className="ds-list-items">
-        {(systems ?? []).map((s) => (
-          <button key={s.id} type="button" onClick={() => select(s.id)} className={`dash-listrow${draft?.id === s.id ? " active" : ""}`}>
-            <span style={{ display: "flex", gap: 3 }}>
-              {Object.values(s.tokens?.colors ?? {}).slice(0, 4).map((c, i) => (
-                <span key={`${i}-${c}`} style={{ width: 12, height: 12, borderRadius: 3, background: c, border: "1px solid var(--border-default)" }} />
-              ))}
-            </span>
-            <span style={{ fontSize: 13, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {s.name}
-            </span>
-          </button>
-        ))}
+        {(systems ?? []).map((s) => {
+          const swatches = Object.values(s.tokens?.colors ?? {});
+          const count = swatches.length;
+          return (
+            <button
+              key={s.id}
+              type="button"
+              onClick={() => select(s.id)}
+              className={`ds-sys-row${draft?.id === s.id ? " active" : ""}`}
+            >
+              <span className="ds-sys-ribbon" aria-hidden="true">
+                {(swatches.length ? swatches : ["var(--bg-surface-active)"]).slice(0, 6).map((c, i) => (
+                  <span key={`${i}-${c}`} style={{ background: c }} />
+                ))}
+              </span>
+              <span className="ds-sys-name">{s.name}</span>
+              <span className="ds-sys-meta">
+                {count} color{count === 1 ? "" : "s"} · {s.tokens?.mode ?? "light"}
+              </span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );
 
   return (
     <div className="dash-page ds-page">
-      <span className="page-eyebrow">Brand</span>
-      <h1>Design Systems</h1>
-      <p className="lede">
-        Reusable token sets — color, type, spacing AND components — the agent generates against. Describe a brand, point
-        it at a project / repo / live site / Figma file, review what it finds, then attach it to a project so every
-        screen stays on-system.
-      </p>
+      <header className="coll-head">
+        <span className="page-eyebrow">Brand</span>
+        <h1>
+          Design <span className="grad">systems</span>
+        </h1>
+        <p className="lede">
+          Reusable token sets — color, type, spacing AND components — the agent generates against. Describe a brand, point
+          it at a project / repo / live site / Figma file, review what it finds, then attach it to a project so every
+          screen stays on-system.
+        </p>
+      </header>
       {hiddenInputs}
 
       {systems === null ? (

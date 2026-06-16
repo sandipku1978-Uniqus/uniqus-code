@@ -171,6 +171,32 @@ function upsertEnvLine(existing: string, name: string, replacement: string): str
   return out.join("\n");
 }
 
+/**
+ * Remove a secret's line(s) from a sandbox env file (used when a secret is
+ * deleted from the Secrets pane so the auto-synced .env stays in lockstep).
+ * Best-effort + VM-aware; a missing file is a no-op.
+ */
+export async function removeEnvVarFromSandbox(args: {
+  sandbox: Sandbox;
+  name: string;
+  envFile?: string;
+}): Promise<void> {
+  if (!SECRET_NAME_RE.test(args.name)) return;
+  const envFile = (args.envFile && args.envFile.trim()) || ".env";
+  if (envFile.includes("..") || envFile.startsWith("/")) return;
+  let existing = "";
+  try {
+    existing = await sandboxReadFile(args.sandbox, envFile);
+  } catch {
+    return; // no env file → nothing to remove
+  }
+  const matcher = new RegExp(`^\\s*#?\\s*${escapeRegex(args.name)}\\s*=`);
+  const kept = existing.split("\n").filter((ln) => !matcher.test(ln));
+  if (kept.length !== existing.split("\n").length) {
+    await sandboxWriteFile(args.sandbox, envFile, kept.join("\n"));
+  }
+}
+
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

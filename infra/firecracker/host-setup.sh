@@ -7,7 +7,8 @@
 #   1. Verifies KVM is available.
 #   2. Installs firecracker, mkfs.ext4, jq, iptables, bridge-utils.
 #   3. Creates the bridge `fcbr0` and a /16 in 172.16.0.0/12 for VM private IPs.
-#   4. Sets up iptables MASQUERADE so VM traffic egresses via the host NIC.
+#   4. Sets up iptables MASQUERADE so VM traffic egresses via the host NIC, plus
+#      per-VM isolation so VMs on the shared bridge can't reach each other (P0.3).
 #   5. Drops the kernel + base rootfs in /var/lib/uniqus/firecracker/.
 #   6. Allows `uniqus` (or whichever uid runs the orchestrator) into /dev/kvm.
 #
@@ -96,6 +97,23 @@ iptables -C FORWARD -o fcbr0 -i "${EXT_IFACE}" -m state --state RELATED,ESTABLIS
 # Block VM → host private services. Adjust as needed.
 iptables -C FORWARD -i fcbr0 -d 169.254.169.254 -j DROP 2>/dev/null \
   || iptables -I FORWARD -i fcbr0 -d 169.254.169.254 -j DROP
+
+# Per-VM network isolation (P0.3). Every project VM shares the fcbr0 bridge, so
+# without this a compromised VM could reach a peer VM's 172.16.x.y directly at
+# L2 (the bridge forwards those frames without ever consulting iptables). Two
+# steps fix it: (a) make bridged IP traffic traverse the iptables FORWARD chain
+# (br_netfilter + bridge-nf-call-iptables), then (b) DROP any VM→VM hop
+# (fcbr0→fcbr0). VM→gateway (the host, delivered locally — not FORWARD) and
+# VM→internet (fcbr0→${EXT_IFACE}) are unaffected, so egress + the metadata
+# block above keep working; only peer-to-peer traffic is severed.
+modprobe br_netfilter 2>/dev/null || true
+grep -qx 'br_netfilter' /etc/modules 2>/dev/null || echo 'br_netfilter' >> /etc/modules
+sysctl -w net.bridge.bridge-nf-call-iptables=1 2>/dev/null || true
+grep -q '^net.bridge.bridge-nf-call-iptables=1' /etc/sysctl.conf \
+  || echo 'net.bridge.bridge-nf-call-iptables=1' >> /etc/sysctl.conf
+iptables -C FORWARD -i fcbr0 -o fcbr0 -j DROP 2>/dev/null \
+  || iptables -I FORWARD -i fcbr0 -o fcbr0 -j DROP
+
 netfilter-persistent save || iptables-save > /etc/iptables/rules.v4
 
 echo "[5/6] /dev/kvm group access…"

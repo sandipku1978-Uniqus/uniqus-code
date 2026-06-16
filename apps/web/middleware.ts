@@ -11,11 +11,12 @@ import {
 import { GUEST_COOKIE_NAME, unsealGuestCookie } from "@/lib/guest-session";
 
 /**
- * Public marketing + resource pages (app/(marketing)/* and app/guide). These
- * must be reachable without a WorkOS session or guest cookie, so they're
- * allow-listed here. Patterns are matched with path-to-regexp v6 (anchored,
- * exact), so nested blog posts need the `:path*` wildcard. Keep this in sync
- * with the footer/nav links in components/SiteFooter.tsx + MarketingNav.tsx.
+ * Public marketing + resource pages (app/(marketing)/*, which now includes the
+ * user guide). These must be reachable without a WorkOS session or guest
+ * cookie, so they're allow-listed here. Patterns are matched with
+ * path-to-regexp v6 (anchored, exact), so nested blog posts need the `:path*`
+ * wildcard. Keep this in sync with the footer/nav links in
+ * components/SiteFooter.tsx + MarketingNav.tsx.
  */
 const PUBLIC_PATHS = [
   "/",
@@ -86,5 +87,10 @@ export default async function middleware(
 }
 
 export const config = {
-  matcher: ["/((?!guide(?:/|$)|_next/static|_next/image|favicon.ico|.*\\.png$).*)"],
+  // The guide used to be excluded here (it was a standalone static page). It now
+  // lives in the `(marketing)` group, whose layout calls withAuth() — which
+  // throws unless the AuthKit middleware has stamped the request — so /guide
+  // must run through middleware like every other marketing page. It stays
+  // publicly reachable via PUBLIC_PATHS above.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\\.png$).*)"],
 };

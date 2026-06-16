@@ -11,6 +11,7 @@ import {
   type SlashCommandSummary,
 } from "@/lib/api";
 import { useStore, type ChatItem, type SelectedElement } from "@/lib/store";
+import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
 import { errorCopyFor } from "@/lib/errorCopy";
 import { connect, send } from "@/lib/ws-client";
 import PlanReview from "./PlanReview";
@@ -202,53 +203,9 @@ export default function ChatPanel() {
     };
   }, [project]);
 
-  // Auto-resize textarea: grow with the content, then scroll. Grows up to
-  // ~15 lines on a tall screen, but never past ~30% of the viewport — otherwise
-  // a long draft swallows half a short (mobile) screen, which is exactly the
-  // "the chatbox takes up half the screen on mobile" complaint. Keeps the
-  // compact, hero-composer feel at every size.
-  const autoResize = useCallback(() => {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    ta.style.height = "auto";
-    const lineHeight = 20; // approx line-height in px
-    const vh = typeof window !== "undefined" ? window.innerHeight : 800;
-    // Phones get a tighter cap — at 30vh the composer dominates a short screen.
-    const isNarrow = typeof window !== "undefined" && window.innerWidth <= 760;
-    const maxHeight = Math.min(lineHeight * 15, Math.round(vh * (isNarrow ? 0.22 : 0.3)));
-    ta.style.height = `${Math.min(ta.scrollHeight, maxHeight)}px`;
-    ta.style.overflowY = ta.scrollHeight > maxHeight ? "auto" : "hidden";
-  }, []);
-
-  useEffect(() => {
-    autoResize();
-  }, [input, autoResize]);
-
-  // Recompute on viewport changes (rotation, on-screen keyboard) so the cap
-  // tracks the live screen height.
-  useEffect(() => {
-    window.addEventListener("resize", autoResize);
-    return () => window.removeEventListener("resize", autoResize);
-  }, [autoResize]);
-
-  // Recompute when the textarea's own width changes (pane switches, panel
-  // drags, the first mobile layout pass). scrollHeight depends on width — a
-  // measurement taken while the box was momentarily narrow (placeholder
-  // wrapped into many lines) would otherwise stick as a huge inline height,
-  // leaving an empty composer that swallows a third of a phone screen.
-  useEffect(() => {
-    const ta = textareaRef.current;
-    if (!ta || typeof ResizeObserver === "undefined") return;
-    let lastWidth = ta.clientWidth;
-    const ro = new ResizeObserver(() => {
-      if (ta.clientWidth !== lastWidth) {
-        lastWidth = ta.clientWidth;
-        autoResize();
-      }
-    });
-    ro.observe(ta);
-    return () => ro.disconnect();
-  }, [autoResize]);
+  // The composer grows with its content up to ~10 lines (less on a short
+  // screen), then scrolls — same expanding behavior as the landing-hero box.
+  useAutoGrowTextarea(textareaRef, input);
 
   // Hydrate whenever the key changes (first load OR a project switch). Always
   // replaces `input` with the new key's saved value (or "") so stale text from
@@ -1187,7 +1144,7 @@ export default function ChatPanel() {
                 : "Connecting…"
             }
             rows={2}
-            style={{ resize: "none", overflowY: "hidden" }}
+            style={{ resize: "none" }}
           />
           <input
             ref={fileInputRef}
@@ -2204,6 +2161,11 @@ function describeTool(
       return { verb: "Ran", object: str(a.command), mono: true };
     case "web_search":
       return { verb: "Searched the web for", object: str(a.query) ? `"${str(a.query)}"` : "" };
+    case "knowledge_search":
+      return {
+        verb: "Searched your knowledge for",
+        object: str(a.query) ? `"${str(a.query)}"` : "",
+      };
     case "start_server":
       return { verb: "Started the app", object: a.port ? `on :${a.port}` : "" };
     case "stop_server":

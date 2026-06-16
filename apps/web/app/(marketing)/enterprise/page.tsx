@@ -124,13 +124,13 @@ const VALUES: { icon: Icon; iconClass: string; title: string; body: string }[] =
     icon: "sso",
     iconClass: "grad",
     title: "SSO / SAML & SCIM",
-    body: "Set up during Enterprise onboarding: connect your identity provider for single sign-on, and provision or deprovision members with SCIM so onboarding and offboarding stay in lockstep with your directory. Talk to us about your rollout.",
+    body: "On our roadmap: connect your identity provider for SAML single sign-on, and provision or deprovision members with SCIM so onboarding and offboarding stay in lockstep with your directory. Enterprise authentication runs on WorkOS today — talk to us about your integration timeline.",
   },
   {
     icon: "audit",
     iconClass: "purple",
     title: "Audit logs & role-based access",
-    body: "Secret, connector, and checkpoint actions are already recorded with who did what and when. Org-wide audit views and roles — deciding who can build, who can ship, and who can manage billing and secrets — are configured during Enterprise onboarding.",
+    body: "Secret, connector, and checkpoint actions are already recorded with who did what and when. Org-wide audit views and roles — deciding who can build, who can ship, and who can manage billing and secrets — are rolling out; talk to us about early access.",
   },
   {
     icon: "vm",
@@ -161,7 +161,7 @@ const VALUES: { icon: Icon; iconClass: string; title: string; body: string }[] =
 const STATS = [
   { num: "1 VM", lbl: "per project — fully isolated, no shared tenancy" },
   { num: "3", lbl: "model providers: Claude, GPT & Gemini" },
-  { num: "SSO", lbl: "SAML + SCIM and roles, set up in Enterprise onboarding" },
+  { num: "WorkOS", lbl: "enterprise auth today; SAML + SCIM and org roles on the roadmap" },
   { num: "Plan-first", lbl: "the agent proposes before it changes anything" },
 ];
 

@@ -165,15 +165,8 @@ export default function CustomPromptsCard() {
                   );
                 }}
                 title="Append a curated design-direction pack to your default skills"
-                style={{
-                  background: "var(--bg-elev)",
-                  border: "1px solid var(--border-default)",
-                  borderRadius: 6,
-                  padding: "6px 8px",
-                  color: "var(--text-primary)",
-                  fontSize: 12,
-                  fontFamily: "inherit",
-                }}
+                className="ui-select"
+                style={{ width: "auto", display: "inline-block", fontSize: 12 }}
               >
                 <option value="">Add a pack…</option>
                 {SKILL_PACKS.map((p) => (

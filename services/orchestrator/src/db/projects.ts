@@ -1,5 +1,7 @@
 import { db } from "./client.js";
 import type { DeploymentState } from "./deployments.js";
+import { roleAtLeast, type Role } from "@uniqus/api-types";
+import { getProjectRole, listSharedProjectIds } from "./members.js";
 
 export interface ProjectRecord {
   id: string;
@@ -15,6 +17,8 @@ export interface ProjectRecord {
   github_repo_full_name?: string | null;
   /** Branch the project is linked to on its remote. Null = unknown (UI falls back to 'main'). */
   linked_branch?: string | null;
+  /** Origin remote URL captured on a preserveGit import (P1.1; PAT-free). */
+  github_remote_url?: string | null;
   /** State of the most recent deployment row, surfaced in the All Projects view. */
   latest_deploy_state?: DeploymentState | null;
   /** created_at of the most recent deployment row. */
@@ -68,6 +72,35 @@ export async function listProjects(ownerId: string): Promise<ProjectRecord[]> {
   return (data ?? []).map((row) =>
     withLatestDeploy(row as Record<string, unknown> & { deployments?: EmbeddedDeploymentRow[] | null }),
   );
+}
+
+/** Fetch projects by id, NOT owner-scoped. For shared-access reads only. */
+async function getProjectsByIds(ids: string[]): Promise<ProjectRecord[]> {
+  if (!ids.length) return [];
+  const { data, error } = await db()
+    .from("projects")
+    .select("*, deployments(state, created_at)")
+    .in("id", ids);
+  if (error) throw new Error(`getProjectsByIds failed: ${error.message}`);
+  return (data ?? []).map((row) =>
+    withLatestDeploy(row as Record<string, unknown> & { deployments?: EmbeddedDeploymentRow[] | null }),
+  );
+}
+
+/**
+ * Projects the user can see on their dashboard: the ones they own PLUS the ones
+ * shared with them via project/org membership (P3.2 collaboration). Owned rows
+ * come first (newest-first), shared rows appended (newest-first). Degrades to
+ * just owned if the membership tables aren't applied yet — listSharedProjectIds
+ * is graceful — so single-user installs are unaffected.
+ */
+export async function listAccessibleProjects(userId: string): Promise<ProjectRecord[]> {
+  const owned = await listProjects(userId);
+  const ownedIds = new Set(owned.map((p) => p.id));
+  const sharedIds = (await listSharedProjectIds(userId)).filter((id) => !ownedIds.has(id));
+  const shared = await getProjectsByIds(sharedIds);
+  shared.sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
+  return [...owned, ...shared];
 }
 
 export async function createProject(input: {
@@ -131,6 +164,44 @@ export async function getProject(
     .eq("owner_id", ownerId)
     .maybeSingle();
   if (error) throw new Error(`getProject failed: ${error.message}`);
+  if (!data) return null;
+  return withLatestDeploy(
+    data as Record<string, unknown> & { deployments?: EmbeddedDeploymentRow[] | null },
+  );
+}
+
+/**
+ * Membership-aware project read for the HTTP/WS layer (P3.2 collaboration).
+ *
+ * Returns the project iff the acting user holds at least `minRole` on it — the
+ * owner is the implicit `owner`; shared access comes from `project_members` /
+ * org membership via getProjectRole. `minRole` defaults to `"owner"`, so a bare
+ * call is identical to owner-only getProject and any route that doesn't opt into
+ * a lower role stays owner-only (fail-safe: a missed route is under-permissive,
+ * never an escalation).
+ *
+ * Owner fast-path: the owner-scoped getProject runs first (one round-trip,
+ * unchanged hot path); the membership lookup only happens for a non-owner on a
+ * route that actually allows members.
+ */
+export async function getProjectForUser(
+  id: string,
+  userId: string,
+  minRole: Role = "owner",
+): Promise<ProjectRecord | null> {
+  const owned = await getProject(id, userId);
+  if (owned) return owned;
+  // Not the owner. Owner-only routes deny without a membership lookup.
+  if (minRole === "owner") return null;
+  const role = await getProjectRole(id, userId);
+  if (!roleAtLeast(role, minRole)) return null;
+  // Authorized as a shared member: fetch the row by id (not owner-scoped).
+  const { data, error } = await db()
+    .from("projects")
+    .select("*, deployments(state, created_at)")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw new Error(`getProjectForUser failed: ${error.message}`);
   if (!data) return null;
   return withLatestDeploy(
     data as Record<string, unknown> & { deployments?: EmbeddedDeploymentRow[] | null },
@@ -210,6 +281,30 @@ export async function setGithubRepo(
     .eq("id", id)
     .eq("owner_id", ownerId);
   if (error) throw new Error(`setGithubRepo failed: ${error.message}`);
+}
+
+/**
+ * Record git tracking metadata captured by a preserveGit import (P1.1): the
+ * checked-out branch and the (PAT-free) origin URL. Owner-scoped. Either field
+ * may be null when it couldn't be determined.
+ */
+export async function setProjectGitMeta(
+  id: string,
+  ownerId: string,
+  meta: { branch?: string | null; remoteUrl?: string | null },
+): Promise<void> {
+  const patch: Record<string, string | null> = {};
+  if (meta.branch !== undefined) patch.linked_branch = meta.branch;
+  if (meta.remoteUrl !== undefined) patch.github_remote_url = meta.remoteUrl;
+  if (Object.keys(patch).length === 0) return;
+  const { error } = await db().from("projects").update(patch).eq("id", id).eq("owner_id", ownerId);
+  if (error) throw new Error(`setProjectGitMeta failed: ${error.message}`);
+}
+
+/** Update just the tracked branch for a project (P1.2 branch switcher). Owner-scoped. */
+export async function updateProjectLinkedBranch(id: string, ownerId: string, branch: string): Promise<void> {
+  const { error } = await db().from("projects").update({ linked_branch: branch }).eq("id", id).eq("owner_id", ownerId);
+  if (error) throw new Error(`updateProjectLinkedBranch failed: ${error.message}`);
 }
 
 /**

@@ -109,6 +109,13 @@ const AGENT_TOKEN_SECRET =
 function deriveAgentToken(projectId: string): string {
   return createHash("sha256").update(`fc-agent:${AGENT_TOKEN_SECRET}:${projectId}`).digest("hex").slice(0, 48);
 }
+/**
+ * Per-VM agent bearer auth is MANDATORY (P0.1). Hard-coded on rather than gated
+ * behind an env var so a production deploy can never silently run with agents
+ * that accept unauthenticated RPCs. Surfaced on /health (`agentAuthEnforced`)
+ * so deploys can assert it. `FIRECRACKER_AGENT_AUTH` is now ignored.
+ */
+export const AGENT_AUTH_ENFORCED = true;
 // Identity the golden image is frozen with — IDENTICAL on every clone until the
 // orchestrator re-stamps it (agent /net/configure). Reserved out of the project
 // IP range (allocateNetwork skips it) and the project MAC range (02:fc:<hash>).
@@ -294,13 +301,16 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
   const agentPort = 51_000;
 
   // Per-VM bearer token (F1). Declared OUTSIDE the try so it's in scope for the
-  // VmHandle below. Injected on the cmdline so the in-VM agent can require it on
+  // VmHandle below. Injected on the cmdline so the in-VM agent requires it on
   // every request, closing the unauth-RCE where a peer VM on the shared bridge
-  // could drive another project's agent. `uniqus_auth=1` is only added when
-  // FIRECRACKER_AGENT_AUTH=1, so the token ships dark (provisioned + sent, but
-  // not enforced) until it's validated on the host.
+  // could drive another project's agent. Enforcement is now MANDATORY — every
+  // freshly-booted VM gets `uniqus_auth=1` (P0.1). The legacy dark-launch gate
+  // (FIRECRACKER_AGENT_AUTH) is gone: agent auth is hard-coded on so a
+  // misconfigured deploy can't silently ship unauthenticated agents. (Golden
+  // snapshot clones are re-provisioned + enforced separately on restore — see
+  // restoreFromGolden / agent /net/configure, P0.2.)
   const authToken = deriveAgentToken(opts.projectId);
-  const authEnforced = process.env.FIRECRACKER_AGENT_AUTH === "1";
+  const authEnforced = AGENT_AUTH_ENFORCED;
 
   try {
     await client.putMachineConfig({ vcpu_count: VM_VCPUS, mem_size_mib: VM_MEM_MIB });
@@ -626,12 +636,11 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
     gatewayIp,
     guestMac: mac,
     // Stamp the deterministic token so RPCs carry a Bearer consistent with the
-    // cold/rehydrate paths. NOTE (C-13): the golden snapshot's frozen cmdline
-    // omits uniqus_auth, so the agent on a golden clone does NOT enforce a token
-    // — these clones remain unauthenticated even when FIRECRACKER_AGENT_AUTH=1.
-    // Closing that fully requires the agent to (re)provision + enforce this token
-    // via POST /net/configure during finalizeRestore; tracked as a follow-up.
-    // Both golden + agent-auth are default-off, so this ships safely.
+    // cold/rehydrate paths. The golden snapshot's frozen cmdline omits
+    // uniqus_auth, so the clone RESUMES unauthenticated — but finalizeRestore
+    // below re-provisions this exact token to the agent (auth_token +
+    // uniqus_auth) over /net/configure, after which the clone enforces it just
+    // like a cold-booted VM. (Closes the old C-13 caveat — P0.2.)
     authToken: deriveAgentToken(opts.projectId),
     state: "running",
     lastUsedAt: Date.now(),
@@ -667,6 +676,10 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
             mount_sandbox: true,
             seed,
             time_ms: Date.now(),
+            // P0.2: hand the clone its per-project token + turn enforcement on,
+            // so a golden-restored VM is as locked-down as a cold-booted one.
+            auth_token: handle.authToken,
+            uniqus_auth: AGENT_AUTH_ENFORCED,
           });
           finalized = true;
           break;
@@ -1394,7 +1407,49 @@ async function ensureBridge(): Promise<void> {
       `Firecracker bridge '${BRIDGE_NAME}' is missing. Run infra/firecracker/host-setup.sh on this host.`,
     );
   }
+  await ensureVmIsolation();
   bridgeChecked = true;
+}
+
+let isolationChecked = false;
+/**
+ * P0.3: sever VM↔VM traffic on the shared bridge. host-setup.sh installs this
+ * once at provisioning time, but we re-assert it (best-effort) at runtime so a
+ * host that predates P0.3 — or whose rules were flushed — still gets isolation
+ * without a manual re-run. The bridge forwards peer frames at L2 without
+ * consulting iptables, so we (a) make bridged IP traffic traverse FORWARD via
+ * br_netfilter, then (b) DROP any fcbr0→fcbr0 hop. Uses the same CAP_NET_ADMIN
+ * the orchestrator already relies on for `ip tuntap`; logs + continues if it's
+ * unavailable rather than failing the boot.
+ */
+async function ensureVmIsolation(): Promise<void> {
+  if (isolationChecked) return;
+  isolationChecked = true;
+  try {
+    await runCmdResult("modprobe", ["br_netfilter"]);
+    await runCmdResult("sysctl", ["-w", "net.bridge.bridge-nf-call-iptables=1"]);
+    const present = await runCmdResult(
+      "iptables",
+      ["-C", "FORWARD", "-i", BRIDGE_NAME, "-o", BRIDGE_NAME, "-j", "DROP"],
+    );
+    if (present.code !== 0) {
+      const added = await runCmdResult(
+        "iptables",
+        ["-I", "FORWARD", "-i", BRIDGE_NAME, "-o", BRIDGE_NAME, "-j", "DROP"],
+      );
+      if (added.code !== 0) {
+        console.warn(
+          `[fleet] could not install VM↔VM isolation rule (peer isolation may be missing): ${added.stderr.trim()}`,
+        );
+      } else {
+        console.log(`[fleet] installed VM↔VM isolation rule on ${BRIDGE_NAME} (P0.3)`);
+      }
+    }
+  } catch (err) {
+    console.warn(
+      `[fleet] VM isolation setup failed (best-effort): ${err instanceof Error ? err.message : err}`,
+    );
+  }
 }
 
 async function ensureTapDevice(tapName: string): Promise<void> {

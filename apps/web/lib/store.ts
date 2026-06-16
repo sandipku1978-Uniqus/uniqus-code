@@ -170,6 +170,8 @@ export interface SelectedElement {
   rect: { x: number; y: number; width: number; height: number };
   /** Trimmed, truncated text content — a human hint of what was clicked. */
   text: string;
+  /** Live computed styles for the inspector read-out (P4.1). */
+  computedStyles?: Record<string, string>;
 }
 
 export type ChatItem =

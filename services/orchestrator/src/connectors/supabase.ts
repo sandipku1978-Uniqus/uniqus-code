@@ -4,6 +4,31 @@ import { supabaseFetch } from "../supabase.js";
 import { db } from "../db/client.js";
 import { setSupabaseProject } from "../db/projects.js";
 import { upsertSecret } from "../db/secrets.js";
+import { audit } from "../db/audit.js";
+
+/**
+ * P5.2: classify a SQL statement as destructive so run_sql can require explicit
+ * confirmation (and surface an impact preview) before it runs. Conservative on
+ * purpose — DROP/TRUNCATE/DELETE and `ALTER ... DROP`/REVOKE gate; additive DDL
+ * (CREATE, ALTER ADD COLUMN) and SELECT/INSERT/UPDATE flow straight through.
+ */
+function classifyDestructiveSql(sql: string): { destructive: boolean; op?: string; impactQuery?: string } {
+  const s = sql.trim();
+  const truncate = s.match(/\btruncate\s+(?:table\s+)?([a-zA-Z0-9_."]+)/i);
+  if (truncate) return { destructive: true, op: "TRUNCATE", impactQuery: `select count(*) as rows from ${truncate[1]}` };
+  const dropTable = s.match(/\bdrop\s+(?:table|view|materialized\s+view)\s+(?:if\s+exists\s+)?([a-zA-Z0-9_."]+)/i);
+  if (dropTable) return { destructive: true, op: "DROP", impactQuery: `select count(*) as rows from ${dropTable[1]}` };
+  if (/\bdrop\s+(schema|database)\b/i.test(s)) return { destructive: true, op: "DROP" };
+  const del = s.match(/\bdelete\s+from\s+([a-zA-Z0-9_."]+)([\s\S]*)$/i);
+  if (del) {
+    const where = del[2].match(/\bwhere\b[\s\S]*$/i);
+    const impact = `select count(*) as rows from ${del[1]} ${where ? where[0].replace(/;\s*$/, "") : ""}`.trim();
+    return { destructive: true, op: "DELETE", impactQuery: impact };
+  }
+  if (/\balter\s+table\b[\s\S]*\bdrop\b/i.test(s)) return { destructive: true, op: "ALTER ... DROP" };
+  if (/\brevoke\b/i.test(s)) return { destructive: true, op: "REVOKE" };
+  return { destructive: false };
+}
 
 /**
  * Supabase connector — lets the agent provision and operate a real Postgres
@@ -321,12 +346,16 @@ export const supabaseConnector: ConnectorDefinition = {
     {
       name: "run_sql",
       description:
-        "Run a SQL statement against the linked Supabase project's database (create tables, apply a migration, query). Uses the Management API query endpoint.",
+        "Run a SQL statement against the linked Supabase project's database (create tables, apply a migration, query). Uses the Management API query endpoint. DESTRUCTIVE statements (DROP, TRUNCATE, DELETE, ALTER ... DROP, REVOKE) are NOT executed unless you pass confirm:true — the first call returns an impact preview (e.g. row count affected) so you can confirm with the user in plain language what will be lost, then re-run with confirm:true.",
       args_schema: {
         type: "object",
         properties: {
           query: { type: "string", description: "The SQL to execute." },
           project_ref: { type: "string", description: "Defaults to the project's linked ref." },
+          confirm: {
+            type: "boolean",
+            description: "Required (true) to actually run a destructive statement. Only set this AFTER the user has approved the impact in plain language.",
+          },
         },
         required: ["query"],
       },
@@ -336,9 +365,71 @@ export const supabaseConnector: ConnectorDefinition = {
           throw new Error("run_sql requires a non-empty 'query'.");
         }
         const ref = await resolveRef(ctx, args);
-        return await supabaseFetch(userId, `/projects/${ref}/database/query`, {
+        const cls = classifyDestructiveSql(args.query);
+        const confirmed = args.confirm === true;
+        if (cls.destructive && !confirmed) {
+          // P5.2: don't execute — return an impact preview + a clear instruction
+          // to confirm in plain language first. Never mutate the user's SQL.
+          let impact: unknown = null;
+          if (cls.impactQuery) {
+            try {
+              impact = await supabaseFetch(userId, `/projects/${ref}/database/query`, {
+                method: "POST",
+                body: { query: cls.impactQuery },
+              });
+            } catch {
+              /* impact preview is best-effort */
+            }
+          }
+          return {
+            blocked: true,
+            destructive: true,
+            operation: cls.op,
+            impact_preview: impact,
+            message:
+              `This statement is destructive (${cls.op}) and was NOT executed. Tell the user in plain language ` +
+              `what will be permanently lost (use the impact_preview row count above if present), get their ` +
+              `approval, then re-run run_sql with the same query and confirm:true.`,
+          };
+        }
+        const result = await supabaseFetch(userId, `/projects/${ref}/database/query`, {
           method: "POST",
           body: { query: args.query },
+        });
+        if (cls.destructive) {
+          void audit({
+            project_id: ctx.projectId,
+            user_id: ctx.userId,
+            kind: "db_lifecycle",
+            target: `run_sql:${cls.op}`,
+            metadata: { ref },
+          });
+        }
+        return result;
+      },
+    },
+    {
+      name: "get_schema",
+      description:
+        "Inspect the linked Supabase database: returns every public-schema table with its columns (name, type, nullable, default, primary-key flag). Call this before writing migrations or the add-login recipe so you build on the real schema instead of guessing.",
+      args_schema: {
+        type: "object",
+        properties: { project_ref: { type: "string", description: "Defaults to the project's linked ref." } },
+      },
+      invoke: async (ctx, args) => {
+        const userId = requireUser(ctx);
+        const ref = await resolveRef(ctx, args);
+        const query =
+          "select c.table_name, c.column_name, c.data_type, c.is_nullable, c.column_default, " +
+          "exists (select 1 from information_schema.table_constraints tc " +
+          "join information_schema.key_column_usage kcu on tc.constraint_name = kcu.constraint_name " +
+          "where tc.constraint_type = 'PRIMARY KEY' and tc.table_name = c.table_name " +
+          "and kcu.column_name = c.column_name and tc.table_schema = 'public') as is_pk " +
+          "from information_schema.columns c where c.table_schema = 'public' " +
+          "order by c.table_name, c.ordinal_position";
+        return await supabaseFetch(userId, `/projects/${ref}/database/query`, {
+          method: "POST",
+          body: { query },
         });
       },
     },

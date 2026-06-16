@@ -231,10 +231,25 @@ export async function finalizeRestore(
     seed: string;
     /** Host wall-clock (epoch millis) to correct the frozen guest clock. */
     time_ms: number;
+    /**
+     * P0.2: the per-project bearer token the golden clone must START enforcing.
+     * The golden snapshot's frozen cmdline omits `uniqus_auth`, so the agent
+     * resumes unauthenticated; this call re-provisions the token so the clone
+     * matches a cold/rehydrated VM (which enforce from boot). Once set, every
+     * later RPC — including a retry of THIS call — must carry the token, so we
+     * also send it as a Bearer header below.
+     */
+    auth_token?: string;
+    /** P0.2: when true, the agent enforces `auth_token` on all later requests. */
+    uniqus_auth?: boolean;
   },
   readTimeoutMs = 4_000,
 ): Promise<void> {
-  await rawRequest(bootstrapIp, port, "POST", "/net/configure", body, readTimeoutMs);
+  // Send the token as a Bearer header too: the FIRST configure lands before the
+  // agent enforces (golden resumes dark), but a retry lands AFTER it flipped on,
+  // so the retry needs to authenticate or it'd 401 and brick the restore.
+  const headers = body.auth_token ? { Authorization: `Bearer ${body.auth_token}` } : undefined;
+  await rawRequest(bootstrapIp, port, "POST", "/net/configure", body, readTimeoutMs, headers);
 }
 
 /** Probe an agent at an explicit ip:port (used while waiting on a restored clone). */
@@ -255,6 +270,7 @@ function rawRequest(
   urlPath: string,
   body: unknown,
   readTimeoutMs: number,
+  extraHeaders?: Record<string, string>,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
@@ -268,6 +284,7 @@ function rawRequest(
           Accept: "application/json",
           "Content-Type": "application/json",
           ...(payload ? { "Content-Length": String(payload.length) } : {}),
+          ...(extraHeaders ?? {}),
         },
         timeout: readTimeoutMs,
       },

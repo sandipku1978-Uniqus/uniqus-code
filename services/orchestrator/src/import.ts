@@ -21,6 +21,10 @@ export interface ImportResult {
   total_bytes: number;
   /** True when the archive had a single root dir we stripped (e.g. `repo-main/`). */
   stripped_root: string | null;
+  /** Checked-out branch when git metadata was preserved (P1.1). */
+  current_branch?: string | null;
+  /** origin remote URL when git metadata was preserved (P1.1; PAT scrubbed). */
+  remote_url?: string | null;
 }
 
 /**
@@ -158,6 +162,12 @@ export interface GithubImportInput {
   repo_url: string;
   branch?: string;
   pat?: string;
+  /**
+   * P1.1: keep `.git` (full clone with remote tracking) instead of stripping it,
+   * so the imported project reports its branch + remote and `git log` shows
+   * history. Default false preserves the old clean-export behavior.
+   */
+  preserveGit?: boolean;
 }
 
 /**
@@ -166,8 +176,10 @@ export interface GithubImportInput {
  * The PAT, if provided, is injected into the URL as `https://x-access-token:{pat}@github.com/...`
  * so we don't have to set up a credential helper. PAT is never logged.
  *
- * After clone, `.git/` is removed — the user gets the source tree, not the history.
- * We can re-introduce git tracking later (Phase 3 GitHub bidirectional sync).
+ * By default `.git/` is removed and the user gets a clean source tree. When
+ * `preserveGit` is set (P1.1), we do a FULL clone, keep `.git`, capture the
+ * checked-out branch + origin URL, and scrub any injected PAT from the stored
+ * remote so a token never persists in git config or our DB.
  */
 export async function importGithub(
   input: GithubImportInput,
@@ -176,20 +188,40 @@ export async function importGithub(
   await ensureEmpty(destDir);
 
   const cloneUrl = buildCloneUrl(input.repo_url, input.pat);
+  const preserveGit = input.preserveGit === true;
   // `-c core.symlinks=false` makes git materialize any symlink in the repo as a
   // plain text file containing its target, instead of a real symlink. This is
   // defense-in-depth against symlink-following file reads: an attacker repo
   // can't plant `link -> /proc/self/environ` (or any host path) into the
   // sandbox to later exfiltrate orchestrator env/secrets. The read sinks also
   // realpath-guard, but stopping the symlink at the source is cheaper and total.
-  const args = ["clone", "--depth", "1", "-c", "core.symlinks=false"];
+  // A preserveGit import keeps full history (no --depth 1) so branch/remote
+  // tracking is real.
+  const args = ["clone", "-c", "core.symlinks=false"];
+  if (!preserveGit) args.push("--depth", "1");
   if (input.branch) args.push("--branch", input.branch);
   args.push(cloneUrl, destDir);
 
   await runGit(args);
 
-  // Drop .git so the sandbox tree matches a clean export.
-  await fs.rm(path.join(destDir, ".git"), { recursive: true, force: true });
+  let currentBranch: string | null = null;
+  let remoteUrl: string | null = null;
+  if (preserveGit) {
+    currentBranch =
+      (await runGitCapture(["-C", destDir, "rev-parse", "--abbrev-ref", "HEAD"]).catch(() => "")).trim() || null;
+    const rawRemote = (await runGitCapture(["-C", destDir, "config", "--get", "remote.origin.url"]).catch(() => "")).trim();
+    // Never persist an injected token. If we injected a PAT, reset origin to the
+    // clean URL the user gave us so `git remote -v` and our DB stay token-free.
+    if (input.pat && rawRemote) {
+      await runGit(["-C", destDir, "remote", "set-url", "origin", input.repo_url.trim()]).catch(() => {});
+      remoteUrl = input.repo_url.trim();
+    } else {
+      remoteUrl = rawRemote ? scrubPat(rawRemote) || null : null;
+    }
+  } else {
+    // Drop .git so the sandbox tree matches a clean export.
+    await fs.rm(path.join(destDir, ".git"), { recursive: true, force: true });
+  }
 
   // Walk to count files + bytes for the response. Bail with a hard error if
   // the clone exceeds MAX_CLONE_SIZE so callers can roll back the project
@@ -204,6 +236,14 @@ export async function importGithub(
     }
   });
 
+  // A preserveGit clone keeps `.git` (full history), which walk() skips via
+  // SKIP_TOP_DIRS — so count it explicitly toward the cap. Otherwise a repo with
+  // a multi-GB history but a small checkout would sail past the disk-fill guard
+  // and leave its history on the shared host (sync never offloads `.git`).
+  if (preserveGit) {
+    bytes += await dirBytes(path.join(destDir, ".git"));
+  }
+
   if (bytes > MAX_CLONE_SIZE) {
     throw new Error(
       `cloned repo is too large: ${(bytes / (1024 * 1024)).toFixed(1)} MB ` +
@@ -211,7 +251,13 @@ export async function importGithub(
     );
   }
 
-  return { files_imported: count, total_bytes: bytes, stripped_root: null };
+  return {
+    files_imported: count,
+    total_bytes: bytes,
+    stripped_root: null,
+    current_branch: currentBranch,
+    remote_url: remoteUrl,
+  };
 }
 
 /**
@@ -236,6 +282,22 @@ export function buildCloneUrl(repoUrl: string, pat?: string): string {
   parsed.username = "x-access-token";
   parsed.password = pat;
   return parsed.toString();
+}
+
+/** Run git and capture stdout (for branch/remote lookups after a preserveGit clone). */
+function runGitCapture(args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", args, { env: safeChildEnv(), stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d.toString()));
+    child.stderr.on("data", (d) => (stderr += d.toString()));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`git ${args[0]} failed (exit ${code}): ${scrubPat(stderr).slice(-500)}`));
+    });
+  });
 }
 
 function runGit(args: string[]): Promise<void> {
@@ -270,6 +332,35 @@ function runGit(args: string[]): Promise<void> {
       reject(new Error(`git clone failed (exit ${code}): ${safe.slice(-2000)}`));
     });
   });
+}
+
+/**
+ * Recursive byte total that does NOT honor SKIP_TOP_DIRS, so it descends into
+ * `.git`. Used to count a preserveGit clone's retained history toward
+ * MAX_CLONE_SIZE (walk() skips `.git`, which would otherwise let a repo with
+ * huge history but a small working tree bypass the disk-fill guard).
+ */
+async function dirBytes(dir: string): Promise<number> {
+  let total = 0;
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const e of entries) {
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      total += await dirBytes(full);
+    } else {
+      try {
+        total += (await fs.stat(full)).size;
+      } catch {
+        /* file vanished mid-walk — ignore */
+      }
+    }
+  }
+  return total;
 }
 
 async function walk(

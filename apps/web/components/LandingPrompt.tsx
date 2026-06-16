@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createProjectFromBriefApi } from "@/lib/api";
 import { useStore } from "@/lib/store";
+import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
 import ModelPicker from "./ModelPicker";
 import MicButton from "./MicButton";
 
@@ -16,8 +17,10 @@ import MicButton from "./MicButton";
  */
 export const PENDING_BRIEF_KEY = "uniqus.pendingBrief";
 
-/** ChatPanel hydrates its composer from this localStorage key per project. */
-function draftKeyFor(projectId: string): string {
+/** ChatPanel hydrates its composer from this localStorage key per project.
+ * Shared with the dashboard composer (ProjectPicker) so a brief started there
+ * with attachments lands as a ready-to-send draft in the workspace. */
+export function draftKeyFor(projectId: string): string {
   return `uniqus.draft.${projectId}`;
 }
 
@@ -62,6 +65,10 @@ export default function LandingPrompt({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isHero = variant === "hero";
   const planOn = mode === "plan-then-execute";
+
+  // Grow the box with content up to ~10 lines, then scroll (capped on short
+  // screens). Shared with the dashboard + workspace composers.
+  useAutoGrowTextarea(taRef, text);
 
   // Reflect the real new-project default (plan mode on for the first turn) in
   // the toggle. Programmatic (setMode, not setModeManual) so it doesn't count

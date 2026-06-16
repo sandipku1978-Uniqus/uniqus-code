@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { DeploymentState, ProjectSummary } from "@uniqus/api-types";
@@ -9,11 +15,18 @@ import GuestBanner from "./GuestBanner";
 import DatabasesView from "./DatabasesView";
 import DesignSystemsView from "./DesignSystemsView";
 import SkillsView from "./SkillsView";
+import KnowledgeView from "./KnowledgeView";
+import TemplatesView from "./TemplatesView";
+import { ProjectPreview } from "./UiPreview";
+import Popover from "./Popover";
 import Modal from "./Modal";
 import FirstRunWizard from "./FirstRunWizard";
 import { Skeleton } from "./Skeleton";
+import ModelPicker from "./ModelPicker";
+import MicButton from "./MicButton";
 import { useStore } from "@/lib/store";
-import { PENDING_BRIEF_KEY } from "./LandingPrompt";
+import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
+import { PENDING_BRIEF_KEY, draftKeyFor } from "./LandingPrompt";
 import {
   fetchProjects,
   fetchUsageStatsApi,
@@ -37,6 +50,13 @@ const ICON_CHOICES = [
   "🚀", "✨", "📊", "📈", "🤖", "⚡",
   "💼", "🛠️", "🧪", "📝", "📦", "🎯",
 ];
+
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 /** Short example prompts shown as chips under the hero composer. */
 const EXAMPLE_PROMPTS = [
@@ -249,6 +269,43 @@ export default function ProjectPicker({
   const onboarded = useStore((s) => s.seenHints["onboarded"]);
   const markHintSeen = useStore((s) => s.markHintSeen);
 
+  // Hero-style composer controls (mirror LandingPrompt). `mode` above is the
+  // tab selector; `planMode` is the store's plan/execute toggle, kept separate.
+  const planMode = useStore((s) => s.mode);
+  const setPlanMode = useStore((s) => s.setMode);
+  const setPlanModeManual = useStore((s) => s.setModeManual);
+  const setBriefFiles = useStore((s) => s.setBriefFiles);
+  const [describeFiles, setDescribeFiles] = useState<File[]>([]);
+  const describeFileInputRef = useRef<HTMLInputElement>(null);
+  const describeTaRef = useRef<HTMLTextAreaElement>(null);
+  // Grow the describe box with content up to ~10 lines, then scroll — same
+  // expanding behavior as the landing-hero and workspace composers.
+  useAutoGrowTextarea(describeTaRef, describeText);
+  // Reflect the real new-project default (plan on for the first turn). Programmatic
+  // (setMode, not setModeManual) so it doesn't count as a manual choice — the
+  // workspace still resets mode per-project and honors an explicit toggle later.
+  useEffect(() => {
+    setPlanMode("plan-then-execute");
+  }, [setPlanMode]);
+
+  function addDescribeFiles(list: FileList | null): void {
+    if (!list || list.length === 0) return;
+    setDescribeFiles((current) => {
+      const next = [...current];
+      for (const file of Array.from(list)) {
+        const dup = next.some(
+          (e) =>
+            e.name === file.name &&
+            e.size === file.size &&
+            e.lastModified === file.lastModified,
+        );
+        if (!dup) next.push(file);
+      }
+      return next;
+    });
+    if (describeFileInputRef.current) describeFileInputRef.current.value = "";
+  }
+
   // Per-project menu state. Tracks which tile's dropdown is open so
   // clicking elsewhere closes it; rename/icon dialogs are inline modals.
   const [menuFor, setMenuFor] = useState<string | null>(null);
@@ -257,7 +314,7 @@ export default function ProjectPicker({
   // recent tiles). "all" shows every project as a richer card with URL +
   // repo + status; "recent" shows the same data sorted by activity with
   // more verbose timestamps.
-  type View = "home" | "all" | "recent" | "databases" | "design-systems" | "skills";
+  type View = "home" | "templates" | "all" | "recent" | "databases" | "design-systems" | "skills" | "knowledge";
   const [view, setView] = useState<View>("home");
 
   const [editing, setEditing] = useState<{
@@ -404,25 +461,56 @@ export default function ProjectPicker({
     setDescribeText(prompt);
   }
 
-  // Turn a brief into a project + open the workspace (shared by the direct path
-  // and the first-run wizard).
-  async function proceedCreate(brief: string): Promise<void> {
+  // Turn a brief into a project + open the workspace (shared by the direct path,
+  // the first-run wizard, and the Templates tab). `rethrow` lets a caller that
+  // renders its own error UI (TemplatesView) catch the failure instead of the
+  // home hero's inline `error` block, which isn't mounted on other tabs.
+  async function proceedCreate(
+    brief: string,
+    opts?: { rethrow?: boolean },
+  ): Promise<void> {
     setRefining(true);
     setError(null);
+    // Carry the plan-mode choice through as ?plan= so the workspace's first turn
+    // honors it (the store's `mode` is reset per-project on workspace mount).
+    const planQ = `plan=${planMode === "plan-then-execute" ? "1" : "0"}`;
     try {
       const { project, first_message } = await createProjectFromBriefApi(
         brief,
         designSystemId || null,
       );
-      router.push(`/projects/${project.id}?brief=${encodeURIComponent(first_message)}`);
+      if (describeFiles.length > 0) {
+        // Stage the attachments + refined first message so the user lands in the
+        // workspace with their idea and files ready to review and send — DON'T
+        // auto-fire (reuses ChatPanel's briefFiles + draft hydration).
+        setBriefFiles(describeFiles);
+        try {
+          localStorage.setItem(draftKeyFor(project.id), first_message);
+        } catch {
+          /* draft is a nicety; the user can retype if storage is unavailable */
+        }
+        router.push(`/projects/${project.id}?${planQ}`);
+      } else {
+        router.push(
+          `/projects/${project.id}?brief=${encodeURIComponent(first_message)}&${planQ}`,
+        );
+      }
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error("createProjectFromBrief failed", err);
+      setRefining(false);
+      if (opts?.rethrow) throw err;
       setError(
         "Something went wrong turning your idea into a project. Try rephrasing, or simplify the description.",
       );
-      setRefining(false);
     }
+  }
+
+  // Templates tab: a curated starter's first brief runs through the very same
+  // create-from-brief path. Rethrow so TemplatesView can toast on failure (and
+  // reset its own per-card "Creating…" state); on success this navigates away.
+  async function handleUseTemplate(prompt: string): Promise<void> {
+    await proceedCreate(prompt, { rethrow: true });
   }
 
   async function handleCreate(e: React.FormEvent) {
@@ -569,7 +657,7 @@ export default function ProjectPicker({
     }
   }
 
-  // Outside-click dismissal lives inside each ProjectTile / RichProjectCard
+  // Outside-click dismissal lives inside each ProjectTile / TimelineRow
   // via its own containerRef — see useOutsideClick below. A global window
   // listener here would also fire for clicks on the open menu's own items
   // unless every child handler stopped propagation, which is brittle.
@@ -667,6 +755,29 @@ export default function ProjectPicker({
                 </svg>
               </span>
               Home
+            </button>
+            <button
+              type="button"
+              onClick={() => setView("templates")}
+              className={`nav-item${view === "templates" ? " active" : ""}`}
+            >
+              <span className="ic">
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <rect x="3" y="3" width="18" height="7" rx="1" />
+                  <rect x="3" y="14" width="9" height="7" rx="1" />
+                  <rect x="16" y="14" width="5" height="7" rx="1" />
+                </svg>
+              </span>
+              Templates
             </button>
             <button
               type="button"
@@ -773,6 +884,28 @@ export default function ProjectPicker({
               </span>
               Skills
             </button>
+            <button
+              type="button"
+              onClick={() => setView("knowledge")}
+              className={`nav-item${view === "knowledge" ? " active" : ""}`}
+            >
+              <span className="ic">
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+                  <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+                </svg>
+              </span>
+              Knowledge
+            </button>
           </div>
 
 
@@ -829,12 +962,16 @@ export default function ProjectPicker({
         </aside>
 
         <main className="dash-main">
-          {view === "databases" ? (
+          {view === "templates" ? (
+            <TemplatesView onUse={handleUseTemplate} />
+          ) : view === "databases" ? (
             <DatabasesView isGuest={isGuest} />
           ) : view === "design-systems" ? (
             <DesignSystemsView isGuest={isGuest} />
           ) : view === "skills" ? (
             <SkillsView isGuest={isGuest} />
+          ) : view === "knowledge" ? (
+            <KnowledgeView isGuest={isGuest} />
           ) : view === "all" || view === "recent" ? (
             <ProjectListView
               view={view}
@@ -874,35 +1011,77 @@ export default function ProjectPicker({
                 ))}
               </div>
 
-            <form onSubmit={handleCreate} className="newproj-form">
+            <form
+              onSubmit={handleCreate}
+              className={`newproj-form${mode === "describe" ? " newproj-describe" : ""}`}
+            >
               {mode === "describe" ? (
-                <div className="newproj-blank">
+                <>
                   <textarea
                     autoFocus
+                    ref={describeTaRef}
+                    className="hp-input"
                     value={describeText}
                     onChange={(e) => setDescribeText(e.target.value)}
-                    placeholder={
-                      "Describe the project in your own words. Examples:\n" +
-                      '  "A website for my bakery with a menu, photos, and a contact form."\n' +
-                      '  "A booking page for my consulting business, with available time slots."\n' +
-                      '  "An app that tracks my invoices and reminds me when they’re due."\n' +
-                      "Uniqus picks the project name and turns this into the first prompt."
-                    }
+                    placeholder="Describe the app or internal tool you want — what should it do?"
+                    aria-label="Describe your project"
                     disabled={refining}
-                    rows={6}
+                    rows={2}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                      // Enter sends; Shift+Enter inserts a newline (matches the hero box).
+                      if (e.key === "Enter" && !e.shiftKey) {
                         e.preventDefault();
                         void handleCreate(e as unknown as React.FormEvent);
                       }
                     }}
                   />
-                  <div className="newproj-blank-row">
-                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                      We&apos;ll name the project and turn this into your first prompt.{" "}
-                      <span style={{ color: "var(--text-dim)" }}>Ctrl/⌘ + Enter to start.</span>
-                    </span>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  {describeFiles.length > 0 && (
+                    <div className="composer-attachments">
+                      {describeFiles.map((file, i) => (
+                        <span
+                          key={`${file.name}-${file.size}-${file.lastModified}`}
+                          className="attachment-chip"
+                        >
+                          <span className="attachment-name" title={file.name}>
+                            {file.name}
+                          </span>
+                          <span className="attachment-size">{formatFileSize(file.size)}</span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setDescribeFiles((c) => c.filter((_, idx) => idx !== i))
+                            }
+                            title={`Remove ${file.name}`}
+                            aria-label={`Remove ${file.name}`}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div className="hp-bar">
+                    <div className="hp-left">
+                      <input
+                        ref={describeFileInputRef}
+                        type="file"
+                        multiple
+                        hidden
+                        onChange={(e) => addDescribeFiles(e.target.files)}
+                      />
+                      <button
+                        type="button"
+                        className="hp-icon-btn"
+                        onClick={() => describeFileInputRef.current?.click()}
+                        disabled={refining}
+                        title="Attach files"
+                        aria-label="Attach files"
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+                          <path d="M12 5v14M5 12h14" />
+                        </svg>
+                      </button>
+                      <ModelPicker variant="compact" />
                       {designSystems.length > 0 && (
                         <select
                           value={designSystemId}
@@ -910,15 +1089,7 @@ export default function ProjectPicker({
                           disabled={refining}
                           title="Attach a design system so the agent generates against your tokens"
                           aria-label="Design system"
-                          style={{
-                            background: "var(--bg-dark)",
-                            border: "1px solid var(--border-default)",
-                            borderRadius: "var(--radius-sm)",
-                            color: "var(--text-primary)",
-                            padding: "6px 8px",
-                            fontSize: 12,
-                            fontFamily: "inherit",
-                          }}
+                          className="ui-select hp-select"
                         >
                           <option value="">No design system</option>
                           {designSystems.map((d) => (
@@ -929,15 +1100,50 @@ export default function ProjectPicker({
                         </select>
                       )}
                       <button
+                        type="button"
+                        className={`hp-plan${planMode === "plan-then-execute" ? " on" : ""}`}
+                        onClick={() =>
+                          setPlanModeManual(
+                            planMode === "plan-then-execute"
+                              ? "execute-only"
+                              : "plan-then-execute",
+                          )
+                        }
+                        aria-pressed={planMode === "plan-then-execute"}
+                        title="Plan mode — Uniqus proposes a plan you can edit before it builds"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                        Plan
+                      </button>
+                    </div>
+                    <div className="hp-right">
+                      <MicButton
+                        className="hp-icon-btn"
+                        disabled={refining}
+                        onText={(t) => setDescribeText((prev) => (prev ? `${prev} ${t}` : t))}
+                      />
+                      <button
                         type="submit"
-                        className="btn-primary"
+                        className="hp-send"
+                        aria-label="Start building"
+                        title="Start building"
                         disabled={refining || !describeText.trim()}
                       >
-                        {refining ? "Starting…" : "Start building →"}
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M12 19V5M5 12l7-7 7 7" />
+                        </svg>
                       </button>
                     </div>
                   </div>
-                </div>
+                  <p className="newproj-hint">
+                    We&apos;ll name the project and turn this into your first prompt.{" "}
+                    <span style={{ color: "var(--text-dim)" }}>
+                      Enter to start, Shift+Enter for a new line.
+                    </span>
+                  </p>
+                </>
               ) : (
                 <>
                   <input
@@ -1078,11 +1284,7 @@ export default function ProjectPicker({
                         onChange={(e) => setSelectedRepo(e.target.value)}
                         disabled={creating}
                         aria-label="GitHub repository to clone"
-                        // colorScheme tells the browser to render the native
-                        // <option> popup in dark mode. Without it, options
-                        // render on a white system background regardless of
-                        // the <select>'s own styling.
-                        style={{ ...fieldStyle, colorScheme: "dark" }}
+                        className="ui-select"
                       >
                         <option value="">— select a repository —</option>
                         {repos.map((r) => (
@@ -1455,20 +1657,21 @@ function DashboardWidgets({
 
 /**
  * The ⋯ project-actions dropdown (Rename / Change icon / Delete). Shared by the
- * home ProjectTile and the All/Recent RichProjectCard. Exposes proper
+ * home ProjectTile, the All-projects gallery tiles, and the Recent TimelineRow.
+ * Exposes proper
  * `role="menu"`/`role="menuitem"` semantics plus roving keyboard focus:
  * ArrowUp/Down move between items, Home/End jump to the first/last item, and
  * Escape closes the menu (returning focus to the trigger is the caller's job —
  * here we just signal close). Mouse behaviour is unchanged.
  */
 function ProjectActionsMenu({
+  anchorRef,
   onEdit,
   onClose,
-  style,
 }: {
+  anchorRef: RefObject<HTMLButtonElement | null>;
   onEdit: (field: "rename" | "icon" | "delete") => void;
   onClose: () => void;
-  style?: React.CSSProperties;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -1509,14 +1712,16 @@ function ProjectActionsMenu({
   };
 
   return (
-    <div
-      ref={menuRef}
+    <Popover
+      open
+      anchorRef={anchorRef}
+      placement="bottom-end"
+      floatingRef={menuRef}
       className="proj-menu"
       role="menu"
-      aria-label="Project actions"
+      ariaLabel="Project actions"
       onClick={(e) => e.stopPropagation()}
       onKeyDown={onKeyDown}
-      style={style}
     >
       <button
         type="button"
@@ -1549,7 +1754,7 @@ function ProjectActionsMenu({
       >
         Delete
       </button>
-    </div>
+    </Popover>
   );
 }
 
@@ -1565,6 +1770,7 @@ function ProjectTile({
   onEdit: (field: "rename" | "icon" | "delete") => void;
 }) {
   const tileRef = useRef<HTMLDivElement>(null);
+  const menuBtnRef = useRef<HTMLButtonElement>(null);
   useOutsideClick(tileRef, menuOpen, () => onOpenMenu(false));
   return (
     <div className="proj proj-tile" ref={tileRef}>
@@ -1572,11 +1778,14 @@ function ProjectTile({
         className="proj-cover"
         style={{ background: coverBackground(project.id) }}
         aria-hidden="true"
-      />
+      >
+        <ProjectPreview id={project.id} hue={projectHue(project.id)} />
+      </div>
       <div className="proj-tile-head">
         <ProjectAvatar project={project} />
         <button
           type="button"
+          ref={menuBtnRef}
           className="proj-menu-btn"
           aria-label="Project actions"
           aria-haspopup="menu"
@@ -1591,6 +1800,7 @@ function ProjectTile({
         </button>
         {menuOpen && (
           <ProjectActionsMenu
+            anchorRef={menuBtnRef}
             onEdit={onEdit}
             onClose={() => onOpenMenu(false)}
           />
@@ -1676,37 +1886,31 @@ function ProjectGridSkeleton() {
 }
 
 /**
- * Placeholder rows for the All-projects / Recent list view while it loads.
- * Each row matches the RichProjectCard's three-column grid (avatar · body ·
- * actions) so the list settles in place when the data resolves.
+ * Placeholder for the Recent timeline while it loads — one group of hairline-
+ * divided rows matching the real `.timeline-row` grid (time · node · body ·
+ * action) so the list settles in place when the data resolves.
  */
-function ProjectListSkeleton() {
+function RecentTimelineSkeleton() {
   return (
-    <div style={{ display: "grid", gap: 12 }} aria-hidden="true">
-      {[0, 1, 2, 3].map((i) => (
-        <div
-          key={i}
-          className="proj proj-tile"
-          style={{
-            display: "grid",
-            gridTemplateColumns: "auto 1fr auto",
-            alignItems: "start",
-            gap: 16,
-            padding: 14,
-          }}
-        >
-          <Skeleton width={32} height={32} radius={8} />
-          <div style={{ display: "grid", gap: 8, minWidth: 0 }}>
-            <Skeleton width="40%" height={14} />
-            <Skeleton width="70%" height={12} />
-            <div style={{ display: "flex", gap: 6 }}>
-              <Skeleton width={120} height={18} radius={4} />
-              <Skeleton width={100} height={18} radius={4} />
-            </div>
-          </div>
-          <Skeleton width={64} height={28} radius={6} />
+    <div className="timeline" aria-hidden="true">
+      <div className="timeline-group">
+        <div className="timeline-group-head">
+          <Skeleton width={72} height={11} />
         </div>
-      ))}
+        <div className="timeline-rows">
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="timeline-row">
+              <Skeleton width={48} height={11} />
+              <span className="timeline-node none" />
+              <div className="timeline-body" style={{ gap: 8 }}>
+                <Skeleton width="34%" height={13} />
+                <Skeleton width="62%" height={11} />
+              </div>
+              <Skeleton width={60} height={28} radius={6} />
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1948,12 +2152,271 @@ function relativeTime(iso: string): string {
 }
 
 /**
- * "All projects" + "Recent" view. Same data, different sort: All shows
- * projects alphabetically; Recent shows them by `updated_at` descending so
- * the freshest work is at the top. Cards are richer than the home tiles —
- * each surfaces the deploy URL, GitHub repo link, and a friendly status
- * line so the user can jump straight to whichever surface they want.
+ * Editorial header shared by the All / Recent collection views. Larger, lighter
+ * display type than the stock `.dash-page` h1 (one gradient-accented word), a
+ * mono eyebrow above, and a measured lede — the dashboard echo of the marketing
+ * section heads.
  */
+function CollectionHead({
+  eyebrow,
+  title,
+  lede,
+}: {
+  eyebrow: string;
+  title: React.ReactNode;
+  lede: string;
+}) {
+  return (
+    <header className="coll-head">
+      <span className="page-eyebrow">{eyebrow}</span>
+      <h1>{title}</h1>
+      <p className="lede">{lede}</p>
+    </header>
+  );
+}
+
+/** One cell of a hairline-divided metric strip: a big mono tabular value over a
+ *  mono uppercase label, optionally led by a semantic status dot. */
+function MetricCell({
+  value,
+  label,
+  dot,
+}: {
+  value: number | string;
+  label: string;
+  dot?: "live" | "warn" | "dim";
+}) {
+  return (
+    <div className="metric-cell">
+      <span className="metric-value">
+        {dot && <span className={`metric-dot ${dot}`} aria-hidden="true" />}
+        {value}
+      </span>
+      <span className="metric-label">{label}</span>
+    </div>
+  );
+}
+
+/**
+ * "All projects" — the full gallery. A deterministic duotone-cover tile per
+ * project (signature #11), fronted by an at-a-glance metric strip and a name
+ * filter. Equal-size repetition is justified here: this *is* the collection.
+ * Deliberately a different silhouette from Recent (a timeline).
+ */
+function AllProjectsView({
+  projects,
+  onEdit,
+  menuFor,
+  onOpenMenu,
+}: {
+  projects: ProjectSummary[] | null;
+  onEdit: (field: "rename" | "icon" | "delete", project: ProjectSummary) => void;
+  menuFor: string | null;
+  onOpenMenu: (id: string, open: boolean) => void;
+}) {
+  const [q, setQ] = useState("");
+  const sorted = projects
+    ? [...projects].sort((a, b) => a.name.localeCompare(b.name))
+    : null;
+  const query = q.trim().toLowerCase();
+  const shown =
+    sorted && query
+      ? sorted.filter(
+          (p) =>
+            p.name.toLowerCase().includes(query) ||
+            (p.description ?? "").toLowerCase().includes(query),
+        )
+      : sorted;
+
+  // Metrics span the full set, not the filtered view.
+  const total = projects?.length ?? 0;
+  const live = projects?.filter((p) => p.latest_deploy_state === "READY").length ?? 0;
+  const published = projects?.filter((p) => p.vercel_project_name).length ?? 0;
+  const linked = projects?.filter((p) => p.github_repo_url).length ?? 0;
+
+  return (
+    <>
+      <CollectionHead
+        eyebrow="Workspace"
+        title={
+          <>
+            All <span className="grad">projects</span>
+          </>
+        }
+        lede="Every project you own, sorted by name. Open one to jump into its workspace, or use the ⋯ menu to rename, re-icon, or remove it."
+      />
+
+      <div className="metric-strip">
+        <MetricCell value={total} label="Projects" />
+        <MetricCell value={live} label="Live" dot={live > 0 ? "live" : "dim"} />
+        <MetricCell value={published} label="Published" />
+        <MetricCell value={linked} label="GitHub linked" />
+      </div>
+
+      {projects !== null && projects.length > 0 && (
+        <div className="coll-toolbar">
+          <label className="coll-search">
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              aria-hidden="true"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.3-4.3" />
+            </svg>
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Filter projects…"
+              aria-label="Filter projects by name or description"
+            />
+          </label>
+          {query && shown && (
+            <span className="coll-count">
+              {shown.length} of {sorted?.length ?? 0}
+            </span>
+          )}
+        </div>
+      )}
+
+      {shown === null ? (
+        <ProjectGridSkeleton />
+      ) : projects && projects.length === 0 ? (
+        <div className="empty-state">
+          No projects yet. Head back to <strong>Home</strong> and start one.
+        </div>
+      ) : shown.length === 0 ? (
+        <div className="empty-state">
+          No projects match <strong>“{q.trim()}”</strong> — try a different search.
+        </div>
+      ) : (
+        <div className="proj-grid">
+          {shown.map((p) => (
+            <ProjectTile
+              key={p.id}
+              project={p}
+              menuOpen={menuFor === p.id}
+              onOpenMenu={(open) => onOpenMenu(p.id, open)}
+              onEdit={(field) => onEdit(field, p)}
+            />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Last-touched bucket for the Recent timeline. Day boundaries are local. */
+function recencyBucket(
+  iso: string,
+): "Today" | "Yesterday" | "This week" | "This month" | "Earlier" {
+  const t = new Date(iso).getTime();
+  const now = new Date();
+  const dayMs = 86_400_000;
+  const startToday = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+  ).getTime();
+  if (t >= startToday) return "Today";
+  if (t >= startToday - dayMs) return "Yesterday";
+  if (t >= startToday - 6 * dayMs) return "This week";
+  if (t >= startToday - 29 * dayMs) return "This month";
+  return "Earlier";
+}
+
+const RECENCY_ORDER = [
+  "Today",
+  "Yesterday",
+  "This week",
+  "This month",
+  "Earlier",
+] as const;
+
+/**
+ * "Recent" — an activity timeline, deliberately a different shape from the All
+ * gallery. Projects bucket by last-touched (Today / This week / …) into
+ * hairline-divided rows riding a mono time-rail with status-colored nodes, so a
+ * glance reads as "what did I work on, and when."
+ */
+function RecentView({
+  projects,
+  onEdit,
+  menuFor,
+  onOpenMenu,
+}: {
+  projects: ProjectSummary[] | null;
+  onEdit: (field: "rename" | "icon" | "delete", project: ProjectSummary) => void;
+  menuFor: string | null;
+  onOpenMenu: (id: string, open: boolean) => void;
+}) {
+  const groups = (() => {
+    if (!projects) return null;
+    const sorted = [...projects].sort(
+      (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+    );
+    const map = new Map<string, ProjectSummary[]>();
+    for (const p of sorted) {
+      const b = recencyBucket(p.updated_at);
+      const arr = map.get(b) ?? [];
+      arr.push(p);
+      map.set(b, arr);
+    }
+    return RECENCY_ORDER.filter((o) => map.has(o)).map((o) => ({
+      label: o,
+      items: map.get(o)!,
+    }));
+  })();
+
+  return (
+    <>
+      <CollectionHead
+        eyebrow="Workspace"
+        title={
+          <>
+            Recent <span className="grad">activity</span>
+          </>
+        }
+        lede="Your projects grouped by when you last touched them, freshest first — a running log of where your attention has been."
+      />
+      {groups === null ? (
+        <RecentTimelineSkeleton />
+      ) : groups.length === 0 ? (
+        <div className="empty-state">
+          No projects yet. Head back to <strong>Home</strong> and start one.
+        </div>
+      ) : (
+        <div className="timeline">
+          {groups.map((g) => (
+            <section key={g.label} className="timeline-group">
+              <div className="timeline-group-head">
+                <span className="t">{g.label}</span>
+                <span className="n">{g.items.length}</span>
+              </div>
+              <div className="timeline-rows">
+                {g.items.map((p) => (
+                  <TimelineRow
+                    key={p.id}
+                    project={p}
+                    menuOpen={menuFor === p.id}
+                    onOpenMenu={(open) => onOpenMenu(p.id, open)}
+                    onEdit={(field) => onEdit(field, p)}
+                  />
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Switches between the two collection silhouettes (gallery vs. timeline). */
 function ProjectListView({
   view,
   projects,
@@ -1967,91 +2430,44 @@ function ProjectListView({
   menuFor: string | null;
   onOpenMenu: (id: string, open: boolean) => void;
 }) {
-  const sorted = (() => {
-    if (!projects) return null;
-    const copy = [...projects];
-    if (view === "recent") {
-      copy.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
-    } else {
-      copy.sort((a, b) => a.name.localeCompare(b.name));
-    }
-    return copy;
-  })();
-
-  return (
-    <>
-      <div className="pagehead">
-        <div>
-          <span className="page-eyebrow">Workspace</span>
-          <h1>{view === "all" ? "All projects" : "Recent activity"}</h1>
-          <p>
-            {view === "all"
-              ? "Every project you own. Click a card to open the workspace, or use the buttons to jump to its repo or deployment."
-              : "Most recently touched first. Each card shows the project's last update plus its repo and deploy URLs."}
-          </p>
-        </div>
-      </div>
-      {sorted === null ? (
-        <ProjectListSkeleton />
-      ) : sorted.length === 0 ? (
-        <div className="empty-state">
-          No projects yet. Head back to <strong>Home</strong> and start one.
-        </div>
-      ) : (
-        <div style={{ display: "grid", gap: 12 }}>
-          {sorted.map((p) => (
-            <RichProjectCard
-              key={p.id}
-              project={p}
-              menuOpen={menuFor === p.id}
-              onOpenMenu={(open) => onOpenMenu(p.id, open)}
-              onEdit={(field) => onEdit(field, p)}
-              showFullTimestamp={view === "recent"}
-            />
-          ))}
-        </div>
-      )}
-    </>
-  );
+  const props = { projects, onEdit, menuFor, onOpenMenu };
+  return view === "all" ? <AllProjectsView {...props} /> : <RecentView {...props} />;
 }
 
-function RichProjectCard({
+/**
+ * One row of the Recent timeline. A mono time-stamp on the left rail, a
+ * status-colored node on the connecting line, then the project identity, deploy
+ * status, and quick links. The whole row is a clickable/keyboard-activatable
+ * link; inner controls are guarded via closest() (same pattern the home tiles
+ * use).
+ */
+function TimelineRow({
   project,
   menuOpen,
   onOpenMenu,
   onEdit,
-  showFullTimestamp,
 }: {
   project: ProjectSummary;
   menuOpen: boolean;
   onOpenMenu: (open: boolean) => void;
   onEdit: (field: "rename" | "icon" | "delete") => void;
-  showFullTimestamp: boolean;
 }) {
-  // Vercel deploy URL: derived from `vercel_project_name` since that's what
-  // we persist after the first deploy. Returns null when the project has
-  // never deployed.
+  const rowRef = useRef<HTMLDivElement>(null);
+  const menuBtnRef = useRef<HTMLButtonElement>(null);
+  useOutsideClick(rowRef, menuOpen, () => onOpenMenu(false));
+  const router = useRouter();
+  const ds = deployStatus(project.latest_deploy_state);
   const vercelUrl =
     project.vercel_project_name && project.vercel_project_name.trim()
       ? `https://${project.vercel_project_name}.vercel.app`
       : null;
   const repoUrl = project.github_repo_url ?? null;
   const repoName = project.github_repo_full_name ?? null;
-  const updated = showFullTimestamp
-    ? new Date(project.updated_at).toLocaleString()
-    : relativeTime(project.updated_at);
-  const cardRef = useRef<HTMLDivElement>(null);
-  useOutsideClick(cardRef, menuOpen, () => onOpenMenu(false));
-  const router = useRouter();
 
   return (
     <div
-      ref={cardRef}
-      className="proj proj-tile"
-      // Whole card is clickable AND keyboard-activatable (role=link + Enter/
-      // Space). Inner interactive controls are guarded via closest() so they
-      // keep their own behavior without each call site remembering
-      // stopPropagation; the title Link stays a real focusable link (§E).
+      ref={rowRef}
+      className="timeline-row"
       role="link"
       tabIndex={0}
       aria-label={`Open ${project.name}`}
@@ -2065,99 +2481,61 @@ function RichProjectCard({
           router.push(`/projects/${project.id}`);
         }
       }}
-      style={{
-        display: "grid",
-        gridTemplateColumns: "auto 1fr auto",
-        alignItems: "start",
-        gap: 16,
-        padding: 14,
-      }}
     >
-      <ProjectAvatar project={project} />
-      <div style={{ minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+      <span
+        className="timeline-time"
+        title={`Last edited ${new Date(project.updated_at).toLocaleString()}`}
+      >
+        {relativeTime(project.updated_at)}
+      </span>
+      <span className={`timeline-node ${ds.dotClass}`} aria-hidden="true" />
+      <div className="timeline-body">
+        <div className="timeline-row-top">
+          <ProjectAvatar project={project} />
           <Link
             href={`/projects/${project.id}`}
+            className="timeline-name"
             onClick={(e) => e.stopPropagation()}
-            style={{
-              color: "var(--text-primary)",
-              textDecoration: "none",
-              fontWeight: 600,
-              fontSize: 14,
-            }}
           >
             {project.name}
           </Link>
-          {(() => {
-            const ds = deployStatus(project.latest_deploy_state);
-            return (
-              <span
-                className="status"
-                title={ds.title}
-                style={{ fontSize: 11, color: "var(--text-muted)" }}
-              >
-                <span className={`d ${ds.dotClass}`} /> {ds.label} · edited {updated}
-              </span>
-            );
-          })()}
+          <span className="status" title={ds.title}>
+            <span className={`d ${ds.dotClass}`} /> {ds.label}
+          </span>
         </div>
-        <div
-          className="desc"
-          style={{
-            fontSize: 12,
-            color: "var(--text-muted)",
-            marginBottom: 8,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {project.description ?? "No description"}
-        </div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, fontSize: 11 }}>
-          {vercelUrl ? (
+        <div className="timeline-meta">
+          {project.description && (
+            <span className="timeline-desc">{project.description}</span>
+          )}
+          {vercelUrl && (
             <CardChip
               href={vercelUrl}
               title={`Open ${vercelUrl}`}
               icon="▲"
               label={vercelUrl.replace(/^https:\/\//, "")}
             />
-          ) : (
-            <CardChip
-              muted
-              icon="▲"
-              label="Not published yet"
-              title="Open the project and click Deploy in the topbar to publish it"
-            />
           )}
-          {repoUrl ? (
+          {repoUrl && (
             <CardChip
               href={repoUrl}
               title={`Open ${repoName ?? repoUrl} on github.com`}
               icon="◉"
               label={repoName ?? "GitHub repo"}
             />
-          ) : (
-            <CardChip
-              muted
-              icon="◉"
-              label="GitHub not connected"
-              title="Open the project and click Create GitHub repo in the topbar to connect"
-            />
           )}
         </div>
       </div>
-      <div style={{ position: "relative", display: "flex", gap: 8, alignSelf: "center" }}>
+      <div className="timeline-actions">
         <Link
           href={`/projects/${project.id}`}
           onClick={(e) => e.stopPropagation()}
-          className="btn-primary"
-          style={{ fontSize: 12, padding: "6px 12px", textDecoration: "none" }}
+          className="btn-secondary timeline-open"
         >
           Open
         </Link>
         <button
           type="button"
+          ref={menuBtnRef}
           className="proj-menu-btn"
           aria-label="Project actions"
           aria-haspopup="menu"
@@ -2167,15 +2545,14 @@ function RichProjectCard({
             e.preventDefault();
             onOpenMenu(!menuOpen);
           }}
-          style={{ position: "static" }}
         >
           ⋯
         </button>
         {menuOpen && (
           <ProjectActionsMenu
+            anchorRef={menuBtnRef}
             onEdit={onEdit}
             onClose={() => onOpenMenu(false)}
-            style={{ top: "100%", right: 0 }}
           />
         )}
       </div>

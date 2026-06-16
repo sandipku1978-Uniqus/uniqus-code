@@ -10,10 +10,12 @@ import { getSecretValue } from "../db/secrets.js";
  * secret values in its context — connector methods reference secrets by
  * name; the registry resolves and uses them server-side.
  *
- * Phase-2 ships starter connectors (Slack, generic HTTP, Postgres, GitHub)
- * to validate the shape. The remaining 11 in Plan §5 (Salesforce, HubSpot,
- * Snowflake, Notion, etc.) plug into the same registry — each one is a
- * self-contained file in this folder.
+ * Shipped connectors today (each a self-contained file in this folder):
+ * generic HTTP, Slack, Postgres, GitHub, and Supabase. Additional sources
+ * in Plan §5 (Stripe, Salesforce, Notion, Airtable, etc.) plug into the same
+ * registry the same way — add a file, export a ConnectorDefinition, register
+ * it in REGISTRY below. Do not advertise a connector here (or in the agent's
+ * tool descriptions) before its file exists.
  *
  * Every invocation writes an audit_events row (Plan §6).
  */
@@ -58,6 +60,7 @@ import { slackConnector } from "./slack.js";
 import { postgresConnector } from "./postgres.js";
 import { githubConnector } from "./github.js";
 import { supabaseConnector } from "./supabase.js";
+import { stripeConnector } from "./stripe.js";
 
 const REGISTRY: Map<string, ConnectorDefinition> = new Map([
   [httpConnector.id, httpConnector],
@@ -65,6 +68,7 @@ const REGISTRY: Map<string, ConnectorDefinition> = new Map([
   [postgresConnector.id, postgresConnector],
   [githubConnector.id, githubConnector],
   [supabaseConnector.id, supabaseConnector],
+  [stripeConnector.id, stripeConnector],
 ]);
 
 export function listConnectors(): ConnectorDefinition[] {

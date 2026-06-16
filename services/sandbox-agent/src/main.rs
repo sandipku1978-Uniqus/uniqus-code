@@ -92,9 +92,13 @@ fn main() {
 
     let servers: ServerTable = Arc::new(Mutex::new(HashMap::new()));
     let server = Arc::new(server);
-    // F1: the bearer token required on every request (None ⇒ not enforced).
-    let auth: Arc<Option<String>> = Arc::new(read_required_token());
-    if auth.is_some() {
+    // F1/P0.2: the bearer token required on every request (None ⇒ not enforced).
+    // Wrapped in a Mutex (not a plain Arc<Option>) because a golden-snapshot
+    // clone resumes WITHOUT uniqus_auth on its frozen cmdline, then gets its
+    // per-project token (re)provisioned via POST /net/configure at restore — so
+    // the enforced token must be mutable at runtime, not read-once at boot.
+    let auth: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(read_required_token()));
+    if auth.lock().map(|g| g.is_some()).unwrap_or(false) {
         eprintln!("[uniqus-agent] request auth ENFORCED (per-VM bearer token)");
     }
     // Thread-per-request keeps the implementation small. The only client is
@@ -256,16 +260,23 @@ fn mount_sandbox() {
     run_cmd("mount", &["-t", "ext4", "/dev/vdb", &*dir]);
 }
 
-fn handle(mut req: Request, servers: ServerTable, auth: Arc<Option<String>>) -> std::io::Result<()> {
+fn handle(
+    mut req: Request,
+    servers: ServerTable,
+    auth: Arc<Mutex<Option<String>>>,
+) -> std::io::Result<()> {
     let url = req.url().to_string();
     let method = req.method().clone();
     let (path, query) = split_url(&url);
 
     // F1: require the per-VM bearer token on every endpoint except /health (an
     // unauthenticated readiness probe the orchestrator pings before attaching
-    // the token). `auth` is None when enforcement is off (dark launch).
+    // the token). The required token is None when enforcement is off — true on a
+    // golden clone only until /net/configure provisions it (P0.2). Snapshot the
+    // value and drop the lock before the work below.
     if path != "/health" {
-        if let Some(required) = auth.as_ref() {
+        let required = auth.lock().ok().and_then(|g| g.clone());
+        if let Some(required) = required {
             let expected = format!("Bearer {}", required);
             // C-115: constant-time comparison of the presented token against the
             // expected value so a bridge-local attacker can't recover it byte by
@@ -296,6 +307,22 @@ fn handle(mut req: Request, servers: ServerTable, auth: Arc<Option<String>>) -> 
                 let ip = require_str(&body, "ip")?;
                 let gw = require_str(&body, "gw")?;
                 let mac = body.get("mac").and_then(|v| v.as_str()).map(str::to_string);
+                // P0.2: (re)provision + ENFORCE this clone's per-project bearer
+                // token. A golden clone resumes unauthenticated (its frozen
+                // cmdline omits uniqus_auth); this is the moment it adopts the
+                // same token a cold-booted VM would have had from boot. After
+                // this, every later request — including a retry of THIS call —
+                // must present the token (finalizeRestore sends it as a Bearer).
+                if body.get("uniqus_auth").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    if let Some(token) = body.get("auth_token").and_then(|v| v.as_str()) {
+                        if let Ok(mut g) = auth.lock() {
+                            *g = Some(token.to_string());
+                        }
+                        eprintln!(
+                            "[uniqus-agent] request auth ENFORCED via /net/configure (golden restore)"
+                        );
+                    }
+                }
                 // These don't disturb the link we're replying over, so do them now:
                 // mount the project's sandbox drive (golden left it unmounted; the
                 // drive was repointed at this project's image via the relative path
@@ -961,6 +988,9 @@ fn start_server(
     ready_timeout_ms: u64,
 ) -> Result<Value, AgentError> {
     let id = format!("srv_{}", random_hex(8));
+    // Free the port first so we truly take it over (a prior dev server can be
+    // left holding it — a pre-fix orphan, or one started via run_command).
+    clear_port(port);
     let mut child = Command::new("/bin/sh")
         .arg("-c")
         .arg(command)
@@ -968,6 +998,11 @@ fn start_server(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Own process group (PGID == child PID) so stop_server can SIGKILL the
+        // whole tree (sh → npm → node), not just sh. Mirrors run_command —
+        // killing only sh orphaned the grandchild node, which kept the port and
+        // served stale code.
+        .process_group(0)
         .spawn()
         .map_err(|e| AgentError::Io(format!("spawn server: {}", e)))?;
     let pid = child.id();
@@ -1014,6 +1049,10 @@ fn start_server(
         // Kill it; the reaper will clear the entry on its next tick, but we
         // can also remove it now to avoid handing a half-dead handle back.
         if let Some(mut entry) = servers.lock().unwrap().remove(&id) {
+            // Group-kill so a daemonized grandchild can't survive the failed start.
+            unsafe {
+                libc::kill(-(entry.pid as i32), libc::SIGKILL);
+            }
             let _ = entry.child.kill();
         }
         let tail = tail_str(&log_tail, 1500).to_string();
@@ -1064,7 +1103,36 @@ fn wait_for_port(port: u16, timeout: Duration) -> bool {
 fn stop_server(servers: &ServerTable, id: &str) {
     let mut table = servers.lock().unwrap();
     if let Some(mut entry) = table.remove(id) {
+        // Kill the whole process group (sh → npm → node), not just sh — the
+        // grandchild node is what holds the port. -pid targets PGID == pid
+        // because start_server spawned with process_group(0).
+        unsafe {
+            libc::kill(-(entry.pid as i32), libc::SIGKILL);
+        }
         let _ = entry.child.kill();
+    }
+}
+
+/// Is anyone accepting TCP connections on this port right now?
+fn port_is_bound(port: u16) -> bool {
+    TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(200)).is_ok()
+}
+
+/// Free a TCP port before (re)binding. `ss` (iproute2, in the rootfs) reports the
+/// holding pid; SIGKILL it and wait for the socket to release so the new server
+/// doesn't hit EADDRINUSE (and the old one stops answering with stale code).
+fn clear_port(port: u16) {
+    if !port_is_bound(port) {
+        return;
+    }
+    let snippet = format!(
+        "for pid in $(ss -tlnpH \"sport = :{}\" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u); do kill -9 \"$pid\" 2>/dev/null || true; done",
+        port
+    );
+    let _ = Command::new("/bin/sh").arg("-c").arg(&snippet).status();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline && port_is_bound(port) {
+        thread::sleep(Duration::from_millis(150));
     }
 }
 

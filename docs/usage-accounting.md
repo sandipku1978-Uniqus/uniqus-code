@@ -19,8 +19,12 @@ input tokens):
 | --- | --- | --- | --- |
 | `input_tokens` | `input_tokens` | **FRESH (uncached)** input only | full `input` rate |
 | `output_tokens` | `output_tokens` | generated output | `output` rate |
-| `cache_read_tokens` | `cache_read_tokens` | prompt tokens served from cache | `input × 0.1` |
-| `cache_creation_tokens` | `cache_creation_tokens` | tokens written to the cache (Anthropic) | `input × 1.25` |
+| `cache_read_tokens` | `cache_read_tokens` | prompt tokens served from cache | `cacheRead` rate (default `input × 0.1`) |
+| `cache_creation_tokens` | `cache_creation_tokens` | tokens written to the cache (Anthropic) | `cacheWrite` rate (default `input × 1.25`) |
+
+Each row also stores a `cost_usd` **snapshot** — the turn's estimated cost priced
+at record time (long-context band applied; see below). It's NULL on rows written
+before the snapshot shipped; those are priced at read time from the token columns.
 
 `db/usage.ts` is explicit: `inputTokens` is fresh/uncached input only; replayed
 prefix tokens go into the cache buckets, not the full-price input bucket.
@@ -29,45 +33,68 @@ The provider adapters populate all four (`loop.ts`'s `usage` shape carries
 
 ## Per-model pricing (`MODEL_PRICING`)
 
-`MODEL_PRICING` in `@uniqus/api-types` maps the provider-native model id to
-approximate published list prices in **USD per 1,000,000 tokens**
-(`{ input, output }`). Current entries include `claude-opus-4-8`
-(`{5, 25}`), `claude-sonnet-4-6` (`{3, 15}`), `gpt-5.5` (`{1.25, 10}`),
-`gpt-5.5-pro` (`{15, 120}`), `gemini-3.1-pro-preview-customtools` (`{2, 12}`),
-and others. Unknown model ids fall back to `DEFAULT_PRICE` (`{ input: 3,
-output: 15 }`).
+`MODEL_PRICING` in `@uniqus/api-types` maps the provider-native model id to a
+`ModelPrice` in **USD per 1,000,000 tokens**: a base `{ input, output }`, an
+optional per-model `{ cacheRead, cacheWrite }` override, and an optional
+`longContext` band. Current bases include `claude-opus-4-8` (`{5, 25}`),
+`claude-sonnet-4-6` (`{3, 15}`), `gpt-5.5` (`{1.25, 10}`), `gpt-5.5-pro`
+(`{15, 120}`), `gemini-3.1-pro-preview-customtools` (`{2, 12}`), and others.
+Unknown model ids fall back to `DEFAULT_PRICE` (`{ input: 3, output: 15 }`).
 
-Cache multipliers (relative to the model's fresh `input` rate):
+Cache rates default to multiples of the model's fresh `input` rate (a model only
+sets `cacheRead`/`cacheWrite` when its cache pricing diverges):
 
-- `CACHE_READ_MULTIPLIER = 0.1` — a cache read is ~10% of fresh input.
+- `CACHE_READ_MULTIPLIER = 0.1` — a cache read is ~10% of fresh input. Accurate
+  across providers for the cache tokens we measure (Anthropic 0.1×, OpenAI 0.1×,
+  Gemini's *implicit* cache is a 90% discount = 0.1×).
 - `CACHE_WRITE_MULTIPLIER = 1.25` — a cache write (Anthropic, the one-time cost
-  of populating the 5-minute cache) is 1.25× fresh input.
+  of populating the 5-minute cache) is 1.25× fresh input. (The 1-hour cache, 2×,
+  isn't used.)
+
+**Long-context bands** (`longContext: { thresholdTokens, above }`): providers
+charge a premium once a turn's *prompt* (fresh input + both cache buckets)
+exceeds a threshold — Anthropic/Google at 200K, OpenAI at 272K — repricing the
+WHOLE turn at ~2× input / ~1.5× output. The `above` rates are stored absolutely
+but track the ×2 / ×1.5 multiples of the base (e.g. Gemini 3.1 Pro 2/12 → 4/18).
+Models whose context can't exceed the threshold (Opus, 200K) or that price flat
+(Flash, the `*-pro` single tier) have no band.
 
 These are **best-effort estimates for the dashboard, not a billing figure** —
-the source comments say so, and prices must be updated as providers change
-them.
+the source comments say so, and prices must be updated as providers change them.
 
-## Cost estimation (`estimateCostUsd`)
+## Cost estimation (`estimateCostUsd` / `estimateTurnCostUsd`)
+
+Two estimators share one rate engine (`costUsdFromRates`):
+
+```
+estimateTurnCostUsd(model, { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens })
+```
+
+prices ONE turn and **applies the long-context band** (keyed off that turn's
+prompt size). This is the most precise figure and is what the orchestrator
+snapshots onto each `usage_events.cost_usd` at record time, and what the chat
+shows as "≈ $X est." per run.
 
 ```
 estimateCostUsd(model, input, output, cacheRead = 0, cacheCreation = 0)
 ```
 
-computes:
+prices at the model's **base rates with no band**. Use it for an AGGREGATE of
+many turns (account/day/project), where the per-turn prompt size is unknowable —
+summing tokens first and then banding would wrongly cross the threshold. Passing
+only input/output reproduces the old full-price estimate.
+
+Both compute:
 
 ```
-inputCost = input·p.input
-          + cacheRead·p.input·0.1
-          + cacheCreation·p.input·1.25
-total     = (inputCost + output·p.output) / 1_000_000
+total = (input·input_rate
+       + cacheRead·cacheRead_rate          (default input·0.1)
+       + cacheCreation·cacheWrite_rate     (default input·1.25)
+       + output·output_rate) / 1_000_000
 ```
 
-where `p = MODEL_PRICING[model] ?? DEFAULT_PRICE`. Passing only input/output
-(cache args default to 0) reproduces the old full-price estimate, so callers
-that don't track the cache split stay correct — just pessimistic. The dashboard
-endpoint in `server.ts` calls this **per model** over the aggregate and sums
-into `total_cost_usd`, deliberately pricing cached reads/writes at the
-discounted rates so a heavily-cached loop isn't billed ~10× over reality.
+where the rates come from `MODEL_PRICING[model] ?? DEFAULT_PRICE` (and the
+`longContext.above` band for `estimateTurnCostUsd` past the threshold).
 
 ## Per-turn `usage_events` rows
 
@@ -79,25 +106,36 @@ token counts is > 0). Each row carries:
 - `provider`, `model` (provider-native id)
 - `input_tokens`, `output_tokens`, `cache_read_tokens`,
   `cache_creation_tokens` (all clamped `≥ 0` and rounded)
+- `cost_usd` — the `estimateTurnCostUsd` snapshot for this turn (NULL on rows
+  written before the snapshot shipped)
 - `elapsed_ms`
 
 Rows are pure analytics — no plaintext, no secrets — and cascade-delete with
 their project/user. The `usage_events` table is RLS-locked (all access via the
 orchestrator's service-role key).
 
-**Graceful migration:** `recordUsageEvent` first inserts the full row including
-the `cache_*` columns; if the DB returns a "missing column" /
-schema-cache-miss error (`isMissingCacheColumnError`, e.g. PostgREST
-`PGRST204`), it retries with just the base columns so analytics keep working on
-an un-migrated DB. Apply `schema.sql` to enable cache analytics.
+**Graceful migration:** `recordUsageEvent` inserts the full row (cache split +
+`cost_usd`) and, on a "missing column" / schema-cache-miss error
+(`isMissingColumnError`, e.g. PostgREST `PGRST204`), degrades column-by-column —
+full → cache-only → base — so analytics keep working on a partially- or
+un-migrated DB. Apply `schema.sql` to enable the cache + cost columns.
 
 ## Aggregation for the dashboard
 
 `getUsageAggregate(ownerId)` calls the Postgres `account_usage_stats(uid)`
-function (in `schema.sql`), which sums the four token classes + `elapsed_ms` +
-turn count account-wide and returns a per-model breakdown ordered by total
-tokens. Aggregating **in Postgres** avoids PostgREST's per-request row cap. If
-the function/table aren't migrated yet it returns zeros (the dashboard degrades
-gracefully); older functions without cache columns are coalesced to 0. The API
-layer (`server.ts`) then layers on `estimateCostUsd` and human labels from
-`MODEL_CATALOG` to produce the `AccountUsageStats` shape consumed by the UI.
+function (in `schema.sql`), which sums the token classes + `elapsed_ms` + turn
+count account-wide and returns a per-model breakdown ordered by total tokens.
+Aggregating **in Postgres** avoids PostgREST's per-request row cap. Per model it
+also returns `cost_usd` (the Σ of stored per-turn snapshots) and `uncosted_*`
+token sums (legacy rows that have no snapshot).
+
+The API layer (`server.ts`) prices each model as **`cost_usd` snapshot +
+`estimateCostUsd(uncosted_* tokens)`** — exact, band-aware spend for recorded
+turns, plus a flat read-time estimate for pre-snapshot rows so the total never
+under-counts history. The per-day and per-project breakdowns instead sweep the
+rows and price **per row** with `estimateTurnCostUsd` (band applied to each
+turn), since they need a token-size context the account aggregate can't carry.
+If the function/table aren't migrated the aggregate returns zeros (the dashboard
+degrades gracefully); an older function without the new fields falls back to
+pricing the full token sums (the pre-snapshot behavior). Human labels come from
+`MODEL_CATALOG`, producing the `AccountUsageStats` shape the UI consumes.

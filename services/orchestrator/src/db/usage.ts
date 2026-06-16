@@ -1,3 +1,4 @@
+import { estimateTurnCostUsd } from "@uniqus/api-types";
 import { db } from "./client.js";
 
 /**
@@ -24,19 +25,32 @@ export interface RecordUsageInput {
   cacheReadTokens?: number;
   /** Tokens written to the cache (Anthropic, ~1.25×). Defaults to 0. */
   cacheCreationTokens?: number;
+  /**
+   * Estimated USD cost SNAPSHOT for this turn (api-types estimateTurnCostUsd,
+   * long-context band applied). Stored so the account total reflects the price
+   * at the time, not whatever the rates are when the dashboard is later viewed.
+   */
+  costUsd?: number;
   elapsedMs: number;
 }
 
 /**
- * True if a Supabase/PostgREST error indicates the cache_* columns haven't been
- * migrated yet (the schema-cache miss code, or a message naming a missing
- * column). Lets recordUsageEvent fall back to the base insert so analytics keep
- * working on an un-migrated DB rather than dropping every usage row.
+ * True if a Supabase/PostgREST error indicates an optional analytics column
+ * (the cache_* split or the cost snapshot) hasn't been migrated yet — the
+ * schema-cache miss code, or a message naming a missing column. Lets
+ * recordUsageEvent fall back to a leaner insert so analytics keep working on an
+ * un-migrated DB rather than dropping every usage row.
  */
-function isMissingCacheColumnError(error: { code?: string; message?: string }): boolean {
+function isMissingColumnError(error: { code?: string; message?: string }): boolean {
   if (error.code === "PGRST204") return true;
   const msg = (error.message ?? "").toLowerCase();
-  if (msg.includes("cache_read_tokens") || msg.includes("cache_creation_tokens")) return true;
+  if (
+    msg.includes("cache_read_tokens") ||
+    msg.includes("cache_creation_tokens") ||
+    msg.includes("cost_usd")
+  ) {
+    return true;
+  }
   return msg.includes("column") && (msg.includes("does not exist") || msg.includes("schema cache"));
 }
 
@@ -55,10 +69,19 @@ export async function recordUsageEvent(input: RecordUsageInput): Promise<void> {
     cache_read_tokens: Math.max(0, Math.round(input.cacheReadTokens ?? 0)),
     cache_creation_tokens: Math.max(0, Math.round(input.cacheCreationTokens ?? 0)),
   };
-  let { error } = await db().from("usage_events").insert(withCache);
-  if (error && isMissingCacheColumnError(error)) {
-    // Cache columns not migrated yet — record the base row so the dashboard
-    // still gets input/output/time. Apply schema.sql to enable cache analytics.
+  const full =
+    input.costUsd === undefined
+      ? withCache
+      : { ...withCache, cost_usd: Math.max(0, input.costUsd) };
+
+  // Degrade column-by-column on an un-migrated DB: full (cache + cost) →
+  // cache-only → base. Each fallback only runs on a missing-column error, so a
+  // fully-migrated DB inserts once and a partial one keeps the columns it has.
+  let { error } = await db().from("usage_events").insert(full);
+  if (error && isMissingColumnError(error) && full !== withCache) {
+    ({ error } = await db().from("usage_events").insert(withCache));
+  }
+  if (error && isMissingColumnError(error)) {
     ({ error } = await db().from("usage_events").insert(base));
   }
   if (error) throw new Error(`recordUsageEvent failed: ${error.message}`);
@@ -72,6 +95,17 @@ export interface UsagePerModel {
   output_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
+  /** Σ of the per-turn cost SNAPSHOTS for this model (rows that have one). */
+  cost_usd: number;
+  /**
+   * Token sums restricted to LEGACY rows (no cost snapshot). The API layer
+   * prices these at read time with estimateCostUsd and adds them to `cost_usd`,
+   * so the account total still counts pre-snapshot turns.
+   */
+  uncosted_input_tokens: number;
+  uncosted_output_tokens: number;
+  uncosted_cache_read_tokens: number;
+  uncosted_cache_creation_tokens: number;
   turns: number;
 }
 
@@ -118,15 +152,38 @@ export async function getUsageAggregate(ownerId: string): Promise<UsageAggregate
     total_time_ms: Number(raw.total_time_ms ?? 0),
     turns: Number(raw.turns ?? 0),
     per_model: Array.isArray(raw.per_model)
-      ? raw.per_model.map((m) => ({
-          model: String(m.model),
-          provider: String(m.provider),
-          input_tokens: Number(m.input_tokens ?? 0),
-          output_tokens: Number(m.output_tokens ?? 0),
-          cache_read_tokens: Number(m.cache_read_tokens ?? 0),
-          cache_creation_tokens: Number(m.cache_creation_tokens ?? 0),
-          turns: Number(m.turns ?? 0),
-        }))
+      ? (raw.per_model as Array<Partial<UsagePerModel>>).map((m) => {
+          const input_tokens = Number(m.input_tokens ?? 0);
+          const output_tokens = Number(m.output_tokens ?? 0);
+          const cache_read_tokens = Number(m.cache_read_tokens ?? 0);
+          const cache_creation_tokens = Number(m.cache_creation_tokens ?? 0);
+          return {
+            model: String(m.model),
+            provider: String(m.provider),
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            cost_usd: Number(m.cost_usd ?? 0),
+            // When the SQL function predates the cost snapshot it omits the
+            // uncosted_* fields; treat EVERY token as uncosted so the read-time
+            // estimate prices the whole model (the pre-snapshot behavior) rather
+            // than zeroing its cost.
+            uncosted_input_tokens:
+              m.uncosted_input_tokens === undefined ? input_tokens : Number(m.uncosted_input_tokens),
+            uncosted_output_tokens:
+              m.uncosted_output_tokens === undefined ? output_tokens : Number(m.uncosted_output_tokens),
+            uncosted_cache_read_tokens:
+              m.uncosted_cache_read_tokens === undefined
+                ? cache_read_tokens
+                : Number(m.uncosted_cache_read_tokens),
+            uncosted_cache_creation_tokens:
+              m.uncosted_cache_creation_tokens === undefined
+                ? cache_creation_tokens
+                : Number(m.uncosted_cache_creation_tokens),
+            turns: Number(m.turns ?? 0),
+          };
+        })
       : [],
   };
 }
@@ -137,6 +194,12 @@ interface ModelTokenTotals {
   output_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
+  /**
+   * Σ of the per-turn cost (estimateTurnCostUsd) of every row in this bucket.
+   * Priced PER ROW so the long-context band keys off each turn's own prompt
+   * size — summing the bucket's tokens first would wrongly cross the band.
+   */
+  cost_usd: number;
 }
 
 /** One (date, model) bucket from {@link getDailyUsageByModel}. */
@@ -181,14 +244,30 @@ const ZERO_TOTALS = (): ModelTokenTotals => ({
   output_tokens: 0,
   cache_read_tokens: 0,
   cache_creation_tokens: 0,
+  cost_usd: 0,
 });
 
-/** Add one event's token columns into an accumulator bucket. */
+/**
+ * Add one event's token columns into an accumulator bucket, plus its per-turn
+ * estimated cost (long-context band applied to this row's own prompt size).
+ * Recomputed from the token split rather than read from the stored cost_usd
+ * snapshot, so the breakdown works even on a DB where cost_usd isn't migrated.
+ */
 function addTokens(into: ModelTokenTotals, row: Partial<UsageEventRow>): void {
-  into.input_tokens += Number(row.input_tokens ?? 0);
-  into.output_tokens += Number(row.output_tokens ?? 0);
-  into.cache_read_tokens += Number(row.cache_read_tokens ?? 0);
-  into.cache_creation_tokens += Number(row.cache_creation_tokens ?? 0);
+  const input_tokens = Number(row.input_tokens ?? 0);
+  const output_tokens = Number(row.output_tokens ?? 0);
+  const cache_read_tokens = Number(row.cache_read_tokens ?? 0);
+  const cache_creation_tokens = Number(row.cache_creation_tokens ?? 0);
+  into.input_tokens += input_tokens;
+  into.output_tokens += output_tokens;
+  into.cache_read_tokens += cache_read_tokens;
+  into.cache_creation_tokens += cache_creation_tokens;
+  into.cost_usd += estimateTurnCostUsd(String(row.model ?? ""), {
+    inputTokens: input_tokens,
+    outputTokens: output_tokens,
+    cacheReadTokens: cache_read_tokens,
+    cacheCreationTokens: cache_creation_tokens,
+  });
 }
 
 /** Raw usage_events columns the breakdown sweeps read. */

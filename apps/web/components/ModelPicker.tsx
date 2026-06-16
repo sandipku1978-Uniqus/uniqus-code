@@ -1,13 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import {
   MODEL_CATALOG,
   type ModelProvider,
   type ThinkingEffort,
 } from "@uniqus/api-types";
 import { useStore } from "@/lib/store";
+import Popover from "./Popover";
 
 const PROVIDER_LABEL: Record<ModelProvider, string> = {
   anthropic: "Anthropic — Claude",
@@ -66,37 +66,16 @@ function CompactPicker() {
   const mounted = useMounted();
 
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      const target = e.target as Element | null;
-      // The "More models" flyout is portaled to <body>, so it's outside `ref`.
-      // Don't treat a click inside it (e.g. picking a model) as an outside
-      // click — that would unmount the popover before the option's onClick
-      // could fire.
-      if (target?.closest?.(".model-picker-flyout")) return;
-      if (ref.current && !ref.current.contains(target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   // Before mount, render the SSR-safe defaults so hydration matches.
   const curModel = mounted ? model : "auto";
   const curThinking = mounted ? thinking : "medium";
 
   return (
-    <div ref={ref} style={{ position: "relative" }}>
+    <div style={{ position: "relative", display: "inline-flex" }}>
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen((o) => !o)}
         className="model-picker-trigger"
@@ -111,20 +90,27 @@ function CompactPicker() {
         <span style={{ opacity: 0.55, fontSize: 9 }}>▾</span>
       </button>
 
-      {open && (
-        <div className="model-picker-pop">
-          <PickerBody
-            model={curModel}
-            thinking={curThinking}
-            flyout
-            onPickModel={(m) => {
-              setModel(m);
-              setOpen(false);
-            }}
-            onPickThinking={setThinking}
-          />
-        </div>
-      )}
+      {/* Portaled + fixed so it can't be clipped by the composer / chat pane
+          overflow, nor painted under the editor pane to its right. Opens above
+          the composer (top-start), flipping below only if there's no room. */}
+      <Popover
+        open={open}
+        anchorRef={triggerRef}
+        placement="top-start"
+        onRequestClose={() => setOpen(false)}
+        className="model-picker-pop"
+      >
+        <PickerBody
+          model={curModel}
+          thinking={curThinking}
+          flyout
+          onPickModel={(m) => {
+            setModel(m);
+            setOpen(false);
+          }}
+          onPickThinking={setThinking}
+        />
+      </Popover>
     </div>
   );
 }
@@ -205,11 +191,10 @@ function ModelList({
 }
 
 /**
- * The composer's "More models" flyout. Rendered into a portal at <body> with
- * fixed positioning so it can't be clipped by the chat pane's overflow or
- * painted under the editor / file panes to its right (the bug this fixes). It
- * opens to the right of the trigger and flips to the left when there isn't room,
- * and is clamped vertically to the viewport with an internal scroll.
+ * The composer's "More models" flyout. A Popover (portaled to <body>, fixed) so
+ * it can't be clipped by the chat pane's overflow or painted under the editor /
+ * file panes to its right. Opens to the right of the trigger and flips to the
+ * left when there isn't room; capped to the viewport with an internal scroll.
  */
 function ModelFlyout({
   model,
@@ -219,61 +204,7 @@ function ModelFlyout({
   onPick: (m: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; left: number; maxHeight: number } | null>(
-    null,
-  );
   const btnRef = useRef<HTMLButtonElement>(null);
-
-  const computePos = (): { top: number; left: number; maxHeight: number } | null => {
-    const r = btnRef.current?.getBoundingClientRect();
-    if (!r) return null;
-    const width = 248;
-    const gap = 8;
-    const margin = 8;
-    const maxHeight = Math.min(440, window.innerHeight - margin * 2);
-    // Horizontal: open to the right; flip to the left if it would overflow.
-    let left = r.right + gap;
-    if (left + width > window.innerWidth - margin) left = r.left - gap - width;
-    if (left < margin) left = margin;
-    // Vertical: align to the trigger's top, then clamp so the whole list stays
-    // on screen (it grows downward from `top`, capped at maxHeight).
-    let top = r.top;
-    if (top + maxHeight > window.innerHeight - margin) {
-      top = window.innerHeight - margin - maxHeight;
-    }
-    if (top < margin) top = margin;
-    return { top, left, maxHeight };
-  };
-
-  const toggle = (): void => {
-    if (open) {
-      setOpen(false);
-    } else {
-      setPos(computePos());
-      setOpen(true);
-    }
-  };
-
-  // Reposition on resize/scroll while open, and close on an outside pointer-down
-  // (anything that isn't the trigger or the flyout itself).
-  useEffect(() => {
-    if (!open) return;
-    const reflow = () => setPos(computePos());
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as Element | null;
-      if (btnRef.current?.contains(t as Node)) return;
-      if (t?.closest?.(".model-picker-flyout")) return;
-      setOpen(false);
-    };
-    window.addEventListener("resize", reflow);
-    window.addEventListener("scroll", reflow, true);
-    document.addEventListener("mousedown", onDown);
-    return () => {
-      window.removeEventListener("resize", reflow);
-      window.removeEventListener("scroll", reflow, true);
-      document.removeEventListener("mousedown", onDown);
-    };
-  }, [open]);
 
   return (
     <>
@@ -282,40 +213,31 @@ function ModelFlyout({
         type="button"
         className="model-picker-more"
         data-open={open ? "true" : "false"}
-        onClick={toggle}
+        onClick={() => setOpen((o) => !o)}
         aria-haspopup="true"
         aria-expanded={open ? "true" : "false"}
       >
         <span>More models</span>
         <span style={{ fontSize: 9, opacity: 0.6 }}>▸</span>
       </button>
-      {open &&
-        pos &&
-        typeof document !== "undefined" &&
-        createPortal(
-          <div
-            className="model-picker-flyout"
-            role="menu"
-            style={{
-              position: "fixed",
-              top: pos.top,
-              left: pos.left,
-              bottom: "auto",
-              maxHeight: pos.maxHeight,
-              overflowY: "auto",
-              zIndex: 120,
-            }}
-          >
-            <ModelList
-              model={model}
-              onPick={(m) => {
-                setOpen(false);
-                onPick(m);
-              }}
-            />
-          </div>,
-          document.body,
-        )}
+      <Popover
+        open={open}
+        anchorRef={btnRef}
+        placement="right-start"
+        gap={8}
+        onRequestClose={() => setOpen(false)}
+        className="model-picker-flyout"
+        role="menu"
+        style={{ maxHeight: "min(440px, 65vh)", zIndex: 120 }}
+      >
+        <ModelList
+          model={model}
+          onPick={(m) => {
+            setOpen(false);
+            onPick(m);
+          }}
+        />
+      </Popover>
     </>
   );
 }

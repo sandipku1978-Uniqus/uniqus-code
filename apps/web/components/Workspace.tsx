@@ -21,6 +21,8 @@ import TerminalPanel from "./TerminalPanel";
 import DeployButton from "./DeployButton";
 import BrandLockup from "./BrandLockup";
 import GithubRepoButton from "./GithubRepoButton";
+import Modal from "./Modal";
+import MembersView from "./MembersView";
 import GuestBanner from "./GuestBanner";
 import SkillsModal from "./SkillsModal";
 import SecretsModal from "./SecretsModal";
@@ -79,6 +81,7 @@ export default function Workspace({
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [secretsOpen, setSecretsOpen] = useState(false);
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(false);
   // Bumped to force a clean PanelGroup remount after "Reset layout" clears the
   // saved drag sizes (UI/UX audit §B).
   const [layoutKey, setLayoutKey] = useState(0);
@@ -353,6 +356,24 @@ export default function Workspace({
         </svg>
         <span>Rewind</span>
       </button>
+      {!isGuest && (
+        <button
+          onClick={() => {
+            setMembersOpen(true);
+            setOverflowOpen(false);
+          }}
+          className="toggle-btn"
+          title="Invite teammates and manage their roles on this project"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+            <circle cx="9" cy="7" r="4" />
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+            <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+          </svg>
+          <span>Members</span>
+        </button>
+      )}
     </>
   );
 
@@ -799,6 +820,15 @@ export default function Workspace({
       )}
       {checkpointsOpen && (
         <CheckpointsModal projectId={projectId} onClose={() => setCheckpointsOpen(false)} />
+      )}
+      {membersOpen && (
+        <Modal
+          title="Collaborators"
+          subtitle="Invite teammates by email and set their role on this project."
+          onClose={() => setMembersOpen(false)}
+        >
+          <MembersView projectId={projectId} />
+        </Modal>
       )}
 
       {/* Status bar — Code view only. It's developer plumbing (connection,

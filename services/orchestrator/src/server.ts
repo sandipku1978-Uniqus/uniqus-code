@@ -22,6 +22,7 @@ import type {
   TreeEntry,
   ProjectSummary,
   UploadedFileSummary,
+  KnowledgeDocument,
   ModelChoice,
   ThinkingEffort,
   AccountUsageStats,
@@ -32,7 +33,12 @@ import type {
   DesignSystemDraft,
   ChangedFile,
 } from "@uniqus/api-types";
-import { MODEL_CATALOG, estimateCostUsd, DEFAULT_DESIGN_TOKENS } from "@uniqus/api-types";
+import {
+  MODEL_CATALOG,
+  estimateCostUsd,
+  estimateTurnCostUsd,
+  DEFAULT_DESIGN_TOKENS,
+} from "@uniqus/api-types";
 import { runAgentLoop } from "./agent/loop.js";
 import {
   parseSelectedElement,
@@ -51,8 +57,10 @@ import {
   findPackById,
 } from "./agent/skills.js";
 import { expandSlashCommand, listSlashCommands } from "./agent/slashCommands.js";
-import { listSecrets, upsertSecret, deleteSecret } from "./db/secrets.js";
+import { listSecrets, upsertSecret, deleteSecret, normalizeEnv, DEFAULT_ENV } from "./db/secrets.js";
+import { plumbSecretToEnvFile, removeEnvVarFromSandbox } from "./secrets.js";
 import { audit, listAudit } from "./db/audit.js";
+import { handleCollabRoute } from "./collabRoutes.js";
 import { listProjectConnectors } from "./connectors/index.js";
 import {
   commitCheckpoint,
@@ -70,6 +78,7 @@ import {
   stopIdleSweeper,
   touch as touchVm,
   shutdownAll as shutdownAllVms,
+  AGENT_AUTH_ENFORCED,
 } from "./firecracker/index.js";
 import type { VmHandle } from "./firecracker/types.js";
 import * as fcAgent from "./firecracker/agentRpc.js";
@@ -103,13 +112,17 @@ import {
 } from "./db/users.js";
 import {
   listProjects,
+  listAccessibleProjects,
   createProject,
   getProject,
+  getProjectForUser,
   touchProject,
   deleteProject,
   updateProject,
   setGithubRepo,
   clearGithubRepo,
+  setProjectGitMeta,
+  updateProjectLinkedBranch,
   setProjectDesignSystem,
   setProjectSkillLibraries,
 } from "./db/projects.js";
@@ -130,6 +143,15 @@ import {
   getAttachedSkillBodies,
   resolveOwnedSkillIds,
 } from "./db/skillLibraries.js";
+import {
+  listKnowledgeDocuments,
+  listKnowledgeDocumentTitles,
+  getKnowledgeDocument,
+  createKnowledgeDocument,
+  updateKnowledgeDocument,
+  deleteKnowledgeDocument,
+} from "./db/knowledgeDocuments.js";
+import { extractText } from "./agent/knowledgeExtract.js";
 import { loadHistory, appendMessage, clearHistory } from "./db/messages.js";
 import {
   recordUsageEvent,
@@ -155,7 +177,14 @@ import {
   handleGuestMerge,
   handleGuestRecoveryCode,
 } from "./auth/guest.js";
-import { ensureBucket, listAll as storageListAll, remove as storageRemove } from "./storage/client.js";
+import {
+  ensureBucket,
+  listAll as storageListAll,
+  remove as storageRemove,
+  uploadObject as storageUploadObject,
+  downloadObject as storageDownloadObject,
+  removeObjects as storageRemoveObjects,
+} from "./storage/client.js";
 import { getTracker, clearTracker } from "./storage/sync.js";
 import { resolveTarget, proxyHttp, proxyWebSocket, previewErrorPage } from "./proxy.js";
 import { importZip, importGithub } from "./import.js";
@@ -413,6 +442,9 @@ async function main(): Promise<void> {
   if (isFirecrackerEnabled()) {
     startIdleSweeper();
     console.log("[firecracker] enabled — VMs boot lazily on first user_message");
+    // P0.1: agent auth is hard-coded on; surface it at boot so a deploy can
+    // confirm enforcement without scraping /health (also reported there).
+    console.log(`[firecracker] per-VM agent bearer auth enforced: ${AGENT_AUTH_ENFORCED}`);
   }
 
   // Guest account inactivity cleanup runs regardless of Firecracker — the
@@ -707,6 +739,8 @@ function healthSnapshot(): {
   firecracker?: {
     vms: number;
     agents: { rust: number; node: number; unknown: number };
+    /** P0.1: per-VM agent bearer auth is mandatory; deploys can assert this is true. */
+    agentAuthEnforced: boolean;
   };
 } {
   if (!isFirecrackerEnabled()) return { ok: true };
@@ -716,7 +750,10 @@ function healthSnapshot(): {
     const kind = vm.agentKind ?? "unknown";
     agents[kind] += 1;
   }
-  return { ok: true, firecracker: { vms: handles.length, agents } };
+  return {
+    ok: true,
+    firecracker: { vms: handles.length, agents, agentAuthEnforced: AGENT_AUTH_ENFORCED },
+  };
 }
 
 async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -846,6 +883,10 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     });
   }
 
+  // Collaboration / org-RBAC / comments / durable-task routes (P3/P8). Returns
+  // true once it has answered; falls through to the rest of the router otherwise.
+  if (await handleCollabRoute(req, res, user, { json, readJsonBody })) return;
+
   // Account-wide agent customization (Settings → Custom prompts & default
   // skills). custom_prompt is injected into the agent system prompt every
   // turn; default_skills seeds .uniqus/skills.md on new projects. Available
@@ -930,7 +971,9 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   }
 
   if (req.url === "/api/projects" && req.method === "GET") {
-    const rows = await listProjects(user.id);
+    // Owned projects PLUS those shared with the user via membership (P3.2), so
+    // an invited collaborator can actually discover and open shared projects.
+    const rows = await listAccessibleProjects(user.id);
     return json(res, 200, { projects: rows.map(toProjectSummary) });
   }
 
@@ -1008,6 +1051,8 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       link_repo?: boolean;
       /** owner/repo, when the caller already knows it (OAuth repo picker). */
       repo_full_name?: string;
+      /** P1.1: keep .git + record branch/remote instead of stripping history. */
+      preserve_git?: boolean;
     }>(req);
     const name = (body.name ?? "").trim();
     const repoUrl = (body.repo_url ?? "").trim();
@@ -1046,10 +1091,18 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
 
     try {
       const result = await importGithub(
-        { repo_url: repoUrl, branch: body.branch, pat: authToken },
+        { repo_url: repoUrl, branch: body.branch, pat: authToken, preserveGit: body.preserve_git === true },
         dest,
       );
       await getTracker(project.id, dest).syncChanges();
+
+      // P1.1: persist the captured branch + remote so the workspace shows them.
+      if (body.preserve_git === true && (result.current_branch || result.remote_url)) {
+        await setProjectGitMeta(project.id, user.id, {
+          branch: result.current_branch ?? undefined,
+          remoteUrl: result.remote_url ?? undefined,
+        }).catch((err) => console.error(`[import-github] git meta store failed for ${project.id}:`, err));
+      }
 
       // Optionally link the project to the cloned repo so the workspace shows
       // it and can push back later. Only meaningful when we can resolve
@@ -1081,6 +1134,21 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     }
   }
 
+  // P1.2: switch the project's tracked branch (updates linked_branch). Owner-scoped.
+  const branchSwitchMatch = req.url?.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/branch$/);
+  if (branchSwitchMatch && req.method === "POST") {
+    if (guestForbidden(res, user)) return;
+    const projectId = branchSwitchMatch[1];
+    const project = await getProject(projectId, user.id); // P3.2: owner-only — branch tracking is owner-managed project config
+    if (!project) return json(res, 404, { error: "project not found" });
+    const b = await readJsonBody<{ branch?: string }>(req);
+    const branch = (b.branch ?? "").trim();
+    if (!branch) return json(res, 400, { error: "branch is required" });
+    await updateProjectLinkedBranch(projectId, user.id, branch);
+    void audit({ project_id: projectId, user_id: user.id, kind: "github_action", target: "switch_branch", metadata: { branch } });
+    return json(res, 200, { ok: true, linked_branch: branch });
+  }
+
   // Codebase import: ZIP upload. Multipart/form-data with a file field plus
   // text fields `name` and (optional) `description`.
   if (req.url === "/api/projects/import-zip" && req.method === "POST") {
@@ -1100,7 +1168,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   );
   if (rawFileMatch && req.method === "GET") {
     const projectId = rawFileMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "viewer");
     if (!project) return json(res, 404, { error: "project not found" });
     const relPath = decodeURIComponent(rawFileMatch[2]);
     const dest = sandboxDirFor(projectId);
@@ -1151,7 +1219,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   const skillsMatch = req.url?.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/skills$/);
   if (skillsMatch && req.method === "GET") {
     const projectId = skillsMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "viewer");
     if (!project) return json(res, 404, { error: "project not found" });
     const dest = sandboxDirFor(projectId);
     const content = await readSkills(dest);
@@ -1159,7 +1227,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   }
   if (skillsMatch && req.method === "PUT") {
     const projectId = skillsMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "editor");
     if (!project) return json(res, 404, { error: "project not found" });
     const body = await readJsonBody<{ content?: string }>(req);
     if (typeof body.content !== "string") {
@@ -1189,7 +1257,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   );
   if (flyShapeMatch && req.method === "GET") {
     const projectId = flyShapeMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "viewer");
     if (!project) return json(res, 404, { error: "project not found" });
     const sandbox = sandboxDirFor(projectId);
     const shape = await detectShape(sandbox);
@@ -1210,7 +1278,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (flyDeployMatch && req.method === "POST") {
     if (guestForbidden(res, user)) return;
     const projectId = flyDeployMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "editor");
     if (!project) return json(res, 404, { error: "project not found" });
     const body = await readJsonBody<{
       app_name?: string;
@@ -1250,7 +1318,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   );
   if (exportZipMatch && req.method === "GET") {
     const projectId = exportZipMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "viewer");
     if (!project) return json(res, 404, { error: "project not found" });
     try {
       // The zip is built from the host mirror — pull any VM-side files a
@@ -1285,7 +1353,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (previewShareMatch && (req.method === "POST" || req.method === "DELETE")) {
     const projectId = previewShareMatch[1];
     const serverId = previewShareMatch[2];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "editor");
     if (!project) return json(res, 404, { error: "project not found" });
     const srv = getServer(serverId);
     if (!srv || srv.project_id !== projectId) {
@@ -1311,7 +1379,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   );
   if (checkpointsListMatch && req.method === "GET") {
     const projectId = checkpointsListMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "viewer");
     if (!project) return json(res, 404, { error: "project not found" });
     const sandbox = sandboxDirFor(projectId);
     const checkpoints = await listCheckpoints(sandbox, projectId, 100);
@@ -1325,7 +1393,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (checkpointDiffMatch && req.method === "GET") {
     const projectId = checkpointDiffMatch[1];
     const sha = checkpointDiffMatch[2];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "viewer");
     if (!project) return json(res, 404, { error: "project not found" });
     const result = await getCheckpointDiff(sandboxDirFor(projectId), projectId, sha);
     if (!result.ok) return json(res, 400, { error: result.error });
@@ -1337,7 +1405,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (checkpointRestoreMatch && req.method === "POST") {
     const projectId = checkpointRestoreMatch[1];
     const sha = checkpointRestoreMatch[2];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "editor");
     if (!project) return json(res, 404, { error: "project not found" });
     const sandbox = sandboxDirFor(projectId);
     const result = await restoreCheckpoint(sandbox, projectId, sha);
@@ -1363,7 +1431,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   );
   if (sessionsListMatch && req.method === "GET") {
     const projectId = sessionsListMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "viewer");
     if (!project) return json(res, 404, { error: "project not found" });
     const sessions = await listSessions(projectId);
     return json(res, 200, {
@@ -1379,7 +1447,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // to a numbered "Chat N" if omitted.
   if (sessionsListMatch && req.method === "POST") {
     const projectId = sessionsListMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "editor");
     if (!project) return json(res, 404, { error: "project not found" });
     const body = await readJsonBody<{ title?: string }>(req).catch<{
       title?: string;
@@ -1401,7 +1469,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (sessionItemMatch && req.method === "PATCH") {
     const projectId = sessionItemMatch[1];
     const sessionId = sessionItemMatch[2];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "editor");
     if (!project) return json(res, 404, { error: "project not found" });
     const body = await readJsonBody<{ title?: string }>(req);
     const title = (body.title ?? "").trim();
@@ -1419,7 +1487,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (sessionItemMatch && req.method === "DELETE") {
     const projectId = sessionItemMatch[1];
     const sessionId = sessionItemMatch[2];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "editor");
     if (!project) return json(res, 404, { error: "project not found" });
     await deleteSession(projectId, sessionId);
     return json(res, 200, { ok: true });
@@ -1433,7 +1501,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   );
   if (secretsListMatch && req.method === "GET") {
     const projectId = secretsListMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "viewer");
     if (!project) return json(res, 404, { error: "project not found" });
     // ?env=production filters to one env; ?env=* (or omitted) returns every env.
     // The Secrets pane uses ?env=* so the user can see + manage all envs at once.
@@ -1458,7 +1526,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // Create / update a secret. Body: { name, value, env?, description? }.
   if (secretsListMatch && req.method === "POST") {
     const projectId = secretsListMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "editor");
     if (!project) return json(res, 404, { error: "project not found" });
     const body = await readJsonBody<{
       name?: string;
@@ -1498,6 +1566,21 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       target: name,
       metadata: { env: row.env },
     });
+    // Auto-sync the default-env secret into the sandbox `.env` so the running
+    // app picks it up WITHOUT the user re-prompting the agent to plumb it — the
+    // "set it like a Vercel env var" experience. VM-aware (writes inside the VM
+    // where the app runs when one is booted). Non-default envs are deploy-target
+    // scoped and intentionally NOT written to the local .env. Best-effort.
+    if (row.env === DEFAULT_ENV) {
+      const vm = listVms().find((v) => v.projectId === projectId);
+      void plumbSecretToEnvFile({
+        sandbox: { rootDir: sandboxDirFor(projectId), vm },
+        projectId,
+        userId: user.id,
+        name,
+        env: row.env,
+      }).catch((err) => console.error(`[secrets] auto-write .env failed for ${name}:`, err));
+    }
     return json(res, 200, {
       secret: {
         id: row.id,
@@ -1515,7 +1598,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (secretDeleteMatch && req.method === "DELETE") {
     const projectId = secretDeleteMatch[1];
     const name = secretDeleteMatch[2];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "editor");
     if (!project) return json(res, 404, { error: "project not found" });
     const envParam = parsedSecretsUrl.searchParams.get("env");
     try {
@@ -1530,6 +1613,15 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       target: name,
       metadata: { env: envParam ?? null },
     });
+    // Keep the auto-synced .env in lockstep: drop the line when a default-env
+    // secret is deleted from the pane.
+    if (normalizeEnv(envParam) === DEFAULT_ENV) {
+      const vm = listVms().find((v) => v.projectId === projectId);
+      void removeEnvVarFromSandbox({
+        sandbox: { rootDir: sandboxDirFor(projectId), vm },
+        name,
+      }).catch((err) => console.error(`[secrets] auto-remove .env failed for ${name}:`, err));
+    }
     return json(res, 200, { ok: true });
   }
   // Audit log (recent events for a project).
@@ -1538,7 +1630,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   );
   if (auditMatch && req.method === "GET") {
     const projectId = auditMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "viewer");
     if (!project) return json(res, 404, { error: "project not found" });
     const events = await listAudit(projectId, 200);
     return json(res, 200, { events });
@@ -1552,7 +1644,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   );
   if (slashListMatch && req.method === "GET") {
     const projectId = slashListMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "viewer");
     if (!project) return json(res, 404, { error: "project not found" });
     const dest = sandboxDirFor(projectId);
     const commands = await listSlashCommands(dest);
@@ -1590,7 +1682,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (applyPackMatch && req.method === "POST") {
     const projectId = applyPackMatch[1];
     const packId = applyPackMatch[2];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "editor");
     if (!project) return json(res, 404, { error: "project not found" });
     const pack = findPackById(packId);
     if (!pack) return json(res, 404, { error: "skill pack not found" });
@@ -1937,12 +2029,72 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       return json(res, 200, { ok: true });
     }
   }
+  // ── Knowledge documents (account-level Knowledge library) ────────────────────
+  // Account-scoped files (regulations, papers, datasets, specs, …) the agent can
+  // reference across ALL of the user's projects via the knowledge_search tool.
+  // Raw bytes live in object storage; extracted text lives in the DB. List/get
+  // are owner-scoped (a guest just sees an empty library); writes are gated.
+  const MAX_KNOWLEDGE_TITLE = 200;
+  const MAX_KNOWLEDGE_DESC = 500;
+  if (req.url === "/api/knowledge-documents" && req.method === "GET") {
+    return json(res, 200, { documents: await listKnowledgeDocuments(user.id) });
+  }
+  if (req.url === "/api/knowledge-documents" && req.method === "POST") {
+    if (guestForbidden(res, user)) return;
+    return await handleKnowledgeUpload(req, res, user);
+  }
+  // Stream the original file bytes back (download / preview). Checked before the
+  // bare :id route — though the trailing `/raw` already excludes it.
+  const knowledgeRawMatch = req.url?.match(
+    /^\/api\/knowledge-documents\/([0-9a-fA-F-]{8,})\/raw$/,
+  );
+  if (knowledgeRawMatch && req.method === "GET") {
+    return await handleKnowledgeDownload(res, user, knowledgeRawMatch[1]);
+  }
+  const knowledgeMatch = req.url?.match(/^\/api\/knowledge-documents\/([0-9a-fA-F-]{8,})$/);
+  if (knowledgeMatch) {
+    const id = knowledgeMatch[1];
+    if (req.method === "GET") {
+      const doc = await getKnowledgeDocument(user.id, id);
+      if (!doc) return json(res, 404, { error: "document not found" });
+      return json(res, 200, { document: doc.document, content: doc.content });
+    }
+    if (req.method === "PUT") {
+      if (guestForbidden(res, user)) return;
+      const body = await readJsonBody<{ title?: string; description?: string | null }>(req);
+      const patch: { title?: string; description?: string | null } = {};
+      if (typeof body.title === "string" && body.title.trim()) {
+        patch.title = body.title.trim().slice(0, MAX_KNOWLEDGE_TITLE);
+      }
+      if (body.description !== undefined) {
+        patch.description =
+          typeof body.description === "string"
+            ? body.description.trim().slice(0, MAX_KNOWLEDGE_DESC) || null
+            : null;
+      }
+      const doc = await updateKnowledgeDocument(user.id, id, patch);
+      if (!doc) return json(res, 404, { error: "document not found" });
+      return json(res, 200, { document: doc });
+    }
+    if (req.method === "DELETE") {
+      if (guestForbidden(res, user)) return;
+      const existing = await getKnowledgeDocument(user.id, id);
+      await deleteKnowledgeDocument(user.id, id);
+      if (existing) {
+        await storageRemoveObjects([existing.storage_path]).catch((err) =>
+          console.error(`knowledge: storage cleanup failed for ${id}:`, err),
+        );
+      }
+      return json(res, 200, { ok: true });
+    }
+  }
+
   // Set a project's attached library skills (additive list). Owner-scoped; only
   // ids the user actually owns are persisted.
   const projSkillsMatch = req.url?.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/skill-libraries$/);
   if (projSkillsMatch && req.method === "POST") {
     const projectId = projSkillsMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProject(projectId, user.id); // P3.2: owner-only — skill libraries are the owner's account-level resource
     if (!project) return json(res, 404, { error: "project not found" });
     const body = await readJsonBody<{ skill_library_ids?: unknown }>(req);
     const ids = Array.isArray(body.skill_library_ids)
@@ -2058,7 +2210,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   const projDsMatch = req.url?.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/design-system$/);
   if (projDsMatch && req.method === "POST") {
     const projectId = projDsMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProject(projectId, user.id); // P3.2: owner-only — design system is the owner's account-level resource
     if (!project) return json(res, 404, { error: "project not found" });
     const body = await readJsonBody<{ design_system_id?: string | null }>(req);
     const resolved = await resolveDesignSystemId(user.id, body.design_system_id);
@@ -2074,7 +2226,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   );
   if (projectUsageMatch && req.method === "GET") {
     const projectId = projectUsageMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProject(projectId, user.id); // P3.2: owner-only — usage rollup is owner-scoped (per-actor usage_events)
     if (!project) return json(res, 404, { error: "project not found" });
     return json(res, 200, { stats: await projectUsageStats(user.id, projectId) });
   }
@@ -2086,7 +2238,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   );
   if (deployListMatch && req.method === "GET") {
     const projectId = deployListMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "viewer");
     if (!project) return json(res, 403, { error: "project not found or access denied" });
     const rows = await listDeployments(projectId);
     return json(res, 200, { deployments: rows });
@@ -2101,7 +2253,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (deployStartMatch && req.method === "POST") {
     if (guestForbidden(res, user)) return;
     const projectId = deployStartMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProject(projectId, user.id); // P3.2: owner-only — Vercel deploy uses the owner's connected Vercel account
     if (!project) return json(res, 403, { error: "project not found or access denied" });
 
     const auth2 = await getVercelAuth(user);
@@ -2205,7 +2357,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (stopMatch && req.method === "DELETE") {
     const projectId = stopMatch[1];
     const serverId = stopMatch[2];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "editor");
     if (!project) return json(res, 403, { error: "project not found or access denied" });
     // Verify the server belongs to this project before killing it (defense
     // in depth — listServers + getProject already gate access).
@@ -2228,7 +2380,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   const runMatch = req.url?.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/run$/);
   if (runMatch && req.method === "POST") {
     const projectId = runMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "editor");
     if (!project) return json(res, 403, { error: "project not found or access denied" });
 
     const dest = sandboxDirFor(projectId);
@@ -2449,7 +2601,7 @@ async function handleProjectUploads(
   user: UserRecord,
   projectId: string,
 ): Promise<void> {
-  const project = await getProject(projectId, user.id);
+  const project = await getProjectForUser(projectId, user.id, "editor");
   if (!project) return json(res, 403, { error: "project not found or access denied" });
 
   const pending: PendingUpload[] = [];
@@ -2548,6 +2700,133 @@ async function handleProjectUploads(
       error: `upload failed: ${err instanceof Error ? err.message : String(err)}`,
     });
   }
+}
+
+// ── Knowledge library uploads (account-level, object-storage backed) ─────────
+const KNOWLEDGE_MAX_FILES = 10;
+const KNOWLEDGE_MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MB per document
+
+interface PendingKnowledge {
+  fileName: string;
+  mimeType: string;
+  content: Buffer;
+}
+
+/**
+ * POST /api/knowledge-documents — multipart upload of one or more documents into
+ * the user's account-level Knowledge library. Each file is stored raw in object
+ * storage AND has its text extracted (best-effort) into the DB so the
+ * knowledge_search tool can find it. Not tied to any project.
+ */
+async function handleKnowledgeUpload(
+  req: IncomingMessage,
+  res: ServerResponse,
+  user: UserRecord,
+): Promise<void> {
+  const pending: PendingKnowledge[] = [];
+  let parseError: string | null = null;
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const bb = Busboy({
+        headers: req.headers,
+        limits: { fileSize: KNOWLEDGE_MAX_FILE_SIZE, files: KNOWLEDGE_MAX_FILES },
+      });
+      bb.on("file", (_field, file, info) => {
+        const fileName = sanitizeUploadFileName(info.filename || "document");
+        const chunks: Buffer[] = [];
+        let hitLimit = false;
+        file.on("data", (d: Buffer) => chunks.push(d));
+        file.on("limit", () => {
+          hitLimit = true;
+          parseError = `${fileName} exceeds the 25 MB per-document limit`;
+        });
+        file.on("end", () => {
+          if (hitLimit || parseError) return;
+          pending.push({
+            fileName,
+            mimeType: info.mimeType || "application/octet-stream",
+            content: Buffer.concat(chunks),
+          });
+        });
+      });
+      bb.on("filesLimit", () => {
+        parseError = `upload accepts at most ${KNOWLEDGE_MAX_FILES} files at a time`;
+      });
+      bb.on("finish", () => resolve());
+      bb.on("error", (err) => reject(err));
+      req.pipe(bb);
+    });
+  } catch (err) {
+    return json(res, 400, {
+      error: `multipart parse failed: ${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
+
+  if (parseError) return json(res, 400, { error: parseError });
+  if (pending.length === 0) return json(res, 400, { error: "no files uploaded" });
+
+  // Each file is its own unit of work: a failure mid-batch cleans up that file's
+  // orphaned storage object and skips it, rather than discarding the files that
+  // already succeeded. Only a fully-empty result is reported as a 500.
+  const saved: KnowledgeDocument[] = [];
+  let lastError: unknown = null;
+  for (const item of pending) {
+    const docId = randomUUID();
+    const storagePath = `knowledge/${user.id}/${docId}-${item.fileName}`;
+    let uploaded = false;
+    try {
+      await storageUploadObject(storagePath, item.content);
+      uploaded = true;
+      const { text, ok } = await extractText(item.content, item.mimeType, item.fileName);
+      const doc = await createKnowledgeDocument(user.id, {
+        title: item.fileName,
+        description: null,
+        file_name: item.fileName,
+        mime_type: item.mimeType,
+        size_bytes: item.content.length,
+        storage_path: storagePath,
+        content: text,
+        extracted: ok,
+      });
+      saved.push(doc);
+    } catch (err) {
+      lastError = err;
+      console.error(`knowledge upload: ${item.fileName} failed:`, err);
+      // Don't leave a stored object with no DB row pointing at it.
+      if (uploaded) {
+        await storageRemoveObjects([storagePath]).catch(() => {});
+      }
+    }
+  }
+
+  if (saved.length === 0) {
+    return json(res, 500, {
+      error: `knowledge upload failed: ${
+        lastError instanceof Error ? lastError.message : String(lastError ?? "unknown error")
+      }`,
+    });
+  }
+  return json(res, 201, { documents: saved });
+}
+
+/** GET /api/knowledge-documents/:id/raw — stream the original file bytes back. */
+async function handleKnowledgeDownload(
+  res: ServerResponse,
+  user: UserRecord,
+  id: string,
+): Promise<void> {
+  const doc = await getKnowledgeDocument(user.id, id);
+  if (!doc) return json(res, 404, { error: "document not found" });
+  const buf = await storageDownloadObject(doc.storage_path);
+  if (!buf) return json(res, 404, { error: "file bytes not found" });
+  const safeName = doc.document.file_name.replace(/["\\\r\n]/g, "_");
+  res.writeHead(200, {
+    "Content-Type": doc.document.mime_type || "application/octet-stream",
+    "Content-Length": buf.length,
+    "Content-Disposition": `attachment; filename="${safeName}"`,
+  });
+  res.end(buf);
 }
 
 function sanitizeUploadFileName(raw: string): string {
@@ -2742,7 +3021,7 @@ async function handleFileOp(
   user: UserRecord,
   projectId: string,
 ): Promise<void> {
-  const project = await getProject(projectId, user.id);
+  const project = await getProjectForUser(projectId, user.id, "editor");
   if (!project) return json(res, 404, { error: "project not found" });
 
   const body = await readJsonBody<FileOpRequest>(req);
@@ -2995,15 +3274,21 @@ async function accountUsageStats(ownerId: string): Promise<AccountUsageStats> {
   }
   let totalCost = 0;
   const topModels = agg.per_model.map((m) => {
-    // Price cached reads/writes at their discounted rates — not the full input
-    // rate — so a heavily-cached agent loop isn't billed ~10× over reality.
-    totalCost += estimateCostUsd(
-      m.model,
-      m.input_tokens,
-      m.output_tokens,
-      m.cache_read_tokens,
-      m.cache_creation_tokens,
-    );
+    // Prefer the per-turn cost SNAPSHOTS recorded at each turn (long-context band
+    // applied, priced at the time). Legacy rows have no snapshot, so price their
+    // token sums at read time with estimateCostUsd — the flat (no-band) estimator,
+    // since the band can't be applied to a sum of many turns. Cached reads/writes
+    // get their discounted rates either way, so a heavily-cached loop isn't billed
+    // ~10× over reality.
+    totalCost +=
+      m.cost_usd +
+      estimateCostUsd(
+        m.model,
+        m.uncosted_input_tokens,
+        m.uncosted_output_tokens,
+        m.uncosted_cache_read_tokens,
+        m.uncosted_cache_creation_tokens,
+      );
     const catalog = MODEL_CATALOG.find((c) => c.model === m.model);
     return {
       model: m.model,
@@ -3028,13 +3313,8 @@ async function accountUsageStats(ownerId: string): Promise<AccountUsageStats> {
     const byDate = new Map<string, { cost_usd: number; tokens: number }>();
     for (const r of dailyRows) {
       const slot = byDate.get(r.date) ?? { cost_usd: 0, tokens: 0 };
-      slot.cost_usd += estimateCostUsd(
-        r.model,
-        r.input_tokens,
-        r.output_tokens,
-        r.cache_read_tokens,
-        r.cache_creation_tokens,
-      );
+      // r.cost_usd is already the band-accurate sum of this bucket's per-row costs.
+      slot.cost_usd += r.cost_usd;
       slot.tokens += r.input_tokens + r.output_tokens;
       byDate.set(r.date, slot);
     }
@@ -3056,13 +3336,7 @@ async function accountUsageStats(ownerId: string): Promise<AccountUsageStats> {
       const slot =
         byProjectId.get(r.project_id) ??
         { project_name: r.project_name, cost_usd: 0, tokens: 0 };
-      slot.cost_usd += estimateCostUsd(
-        r.model,
-        r.input_tokens,
-        r.output_tokens,
-        r.cache_read_tokens,
-        r.cache_creation_tokens,
-      );
+      slot.cost_usd += r.cost_usd; // band-accurate per-row sum from the sweep
       slot.tokens += r.input_tokens + r.output_tokens;
       byProjectId.set(r.project_id, slot);
     }
@@ -3150,13 +3424,7 @@ async function projectUsageStats(
     totalCacheRead += r.cache_read_tokens;
     totalCacheCreation += r.cache_creation_tokens;
     turns += r.turns;
-    totalCost += estimateCostUsd(
-      r.model,
-      r.input_tokens,
-      r.output_tokens,
-      r.cache_read_tokens,
-      r.cache_creation_tokens,
-    );
+    totalCost += r.cost_usd; // band-accurate per-row sum from the sweep
     const slot =
       byModel.get(r.model) ??
       {
@@ -3290,7 +3558,7 @@ async function handleUpgrade(
   const projectId = url.searchParams.get("project");
   if (!projectId) return reject(400, "Missing project query parameter");
 
-  const project = await getProject(projectId, auth.user.id);
+  const project = await getProjectForUser(projectId, auth.user.id, "editor");
   if (!project) return reject(403, "Project not found or access denied");
 
   // Resolve which chat session this WS will read/write. Defaults to the
@@ -4155,7 +4423,7 @@ async function runSession(
   // Linked GitHub repo (per-turn read so connect/disconnect takes effect on the
   // next turn without a reconnect). Injected into the system prompt so the agent
   // knows the project has a repo. Non-fatal if the lookup fails.
-  const projectRow = await getProject(projectId, userId).catch(() => null);
+  const projectRow = await getProjectForUser(projectId, userId, "viewer").catch(() => null);
   const repo = projectRow?.github_repo_url
     ? {
         fullName: projectRow.github_repo_full_name ?? projectRow.github_repo_url,
@@ -4171,6 +4439,12 @@ async function runSession(
   // injected ahead of the project's own skills.md). Non-fatal on lookup error.
   const librarySkills = projectRow?.skill_library_ids?.length
     ? await getAttachedSkillBodies(userId, projectRow.skill_library_ids).catch(() => [])
+    : [];
+  // Account-level Knowledge library (titles only, per-turn read so newly uploaded
+  // docs are visible to the agent on the next turn). Lets the system prompt list
+  // what's available and advertise the knowledge_search tool. Non-fatal on error.
+  const knowledgeDocs = userId
+    ? await listKnowledgeDocumentTitles(userId).catch(() => [])
     : [];
   let finalMessage = messageWithRefs;
   // The selected-element block, rendered once. The execute loop appends its own
@@ -4346,6 +4620,7 @@ async function runSession(
     repo,
     designSystem,
     librarySkills,
+    knowledgeDocs,
     selectedElement,
     // Per-session so a sibling chat session in the same project doesn't see this
     // turn's todos pop into its Tasks pane (B-11).
@@ -4524,15 +4799,17 @@ async function runSession(
       }
     ).usageTotals;
     if (u && (u.inputTokens || u.outputTokens || u.cacheReadTokens || u.cacheCreationTokens)) {
+      const errModel = (err as { usageModel?: string }).usageModel ?? "unknown";
       void recordUsageEvent({
         projectId,
         userId,
         provider: (err as { usageProvider?: "anthropic" | "openai" | "google" }).usageProvider ?? "anthropic",
-        model: (err as { usageModel?: string }).usageModel ?? "unknown",
+        model: errModel,
         inputTokens: u.inputTokens,
         outputTokens: u.outputTokens,
         cacheReadTokens: u.cacheReadTokens,
         cacheCreationTokens: u.cacheCreationTokens,
+        costUsd: estimateTurnCostUsd(errModel, u),
         elapsedMs: Date.now() - start,
       }).catch((e) => console.error("recordUsageEvent (error path) failed:", e));
     }
@@ -4579,6 +4856,12 @@ async function runSession(
 
   const elapsedMs = Date.now() - start;
 
+  // Per-run cost estimate (C5): price THIS turn's honest fresh/cache split with
+  // the long-context band applied (estimateTurnCostUsd) — the chat shows it as
+  // "≈ $0.40 est." and it's snapshotted onto the usage row so the account total
+  // reflects the price at the time. Not a billed amount — keep the "est." hedge.
+  const costUsd = estimateTurnCostUsd(result.model, result.usage);
+
   // Record the turn's usage for the dashboard rollups. Best-effort — a failed
   // analytics write must never break the turn. Skipped when nothing was billed
   // (e.g. an instant abort before the first token).
@@ -4597,20 +4880,10 @@ async function runSession(
       outputTokens: result.usage.outputTokens,
       cacheReadTokens: result.usage.cacheReadTokens,
       cacheCreationTokens: result.usage.cacheCreationTokens,
+      costUsd,
       elapsedMs,
     }).catch((err) => console.error("recordUsageEvent failed:", err));
   }
-
-  // Per-run cost estimate (C5): price the honest fresh/cache split with the same
-  // engine the dashboard uses, so the chat can show "≈ $0.40 est." for THIS run.
-  // Not a billed amount — there's no credit system; keep the "est." hedge in UI.
-  const costUsd = estimateCostUsd(
-    result.model,
-    result.usage.inputTokens,
-    result.usage.outputTokens,
-    result.usage.cacheReadTokens,
-    result.usage.cacheCreationTokens,
-  );
 
   send({
     type: "complete",
@@ -5615,7 +5888,7 @@ async function handleDesignSystemAnalyze(
       sourceLabel = "brief";
     } else if (source === "project") {
       const projectId = fields.project_id ?? "";
-      const project = await getProject(projectId, user.id);
+      const project = await getProjectForUser(projectId, user.id, "viewer");
       if (!project) return fail(404, "project not found");
       phase(`Loading files from “${project.name}”…`);
       const dir = sandboxDirFor(projectId);

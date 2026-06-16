@@ -22,7 +22,19 @@
       "WebFetch(domain:thenewstack.io)",
       "WebFetch(domain:www.mindstudio.ai)",
       "WebFetch(domain:developers.figma.com)",
-      "WebFetch(domain:supabase.com)"
+      "WebFetch(domain:supabase.com)",
+      "Skill(deep-research)",
+      "Skill(deep-research:*)",
+      "WebFetch(domain:www.hetzner.com)",
+      "WebFetch(domain:www.techpowerup.com)",
+      "WebFetch(domain:docs.mesa3d.org)",
+      "WebFetch(domain:en.wikichip.org)",
+      "WebFetch(domain:www.phoronix.com)",
+      "WebFetch(domain:kasmweb.com)",
+      "WebFetch(domain:jimmy-claw.github.io)",
+      "WebFetch(domain:e2b.dev)",
+      "WebFetch(domain:guacamole.apache.org)",
+      "mcp__claude_ai_Tiny_Fish__search"
     ],
     "additionalDirectories": [
       "c:\\Users\\thech\\AppData\\Local\\Temp\\uniqus-shot",

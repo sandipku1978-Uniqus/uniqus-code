@@ -53,9 +53,9 @@ the objective. **Gap** = no implemented control today.
 | CC6.1 | Secrets/credentials encrypted at rest | AES-256-GCM, random 12-byte IV, 16-byte auth tag, 256-bit key from `OAUTH_TOKEN_ENCRYPTION_KEY`. Layout `IV‖TAG‖CIPHERTEXT` base64. `services/orchestrator/src/auth/encrypt.ts` (`encryptToken`/`decryptToken`) | Implemented |
 | CC6.1 | Project secrets stored encrypted, never exposed to the VM/agent | `project_secrets.encrypted_value` (`services/orchestrator/src/db/schema.sql` ~258–309); decrypted server-side only; connectors pass ephemeral handles, never plaintext, to the agent loop | Implemented |
 | CC6.1 | Per-tenant authorization on data access | Every project route resolves through `getProject(id, ownerId)`, which filters `.eq("owner_id", ownerId)` (`services/orchestrator/src/db/projects.ts` ~105–114). Database tables have RLS enabled (`schema.sql`) | Implemented |
-| CC6.1 | Tenant isolation of compute | One Firecracker microVM per project + per-project sandbox directories (`services/orchestrator/src/firecracker/fleet.ts`) | Partial — VMs are separate but share one L2 bridge (see CC6.6 / P0) |
+| CC6.1 | Tenant isolation of compute | One Firecracker microVM per project + per-project sandbox directories (`services/orchestrator/src/firecracker/fleet.ts`). VMs share the `fcbr0` bridge, but VM↔VM traffic is dropped at L3 via `br_netfilter` + an `fcbr0→fcbr0` DROP rule (`infra/firecracker/host-setup.sh`; re-asserted at runtime by `fleet.ts` `ensureVmIsolation`) | Implemented in code (P0.3) — requires `host-setup.sh` re-run + host validation that a peer-IP connection fails |
 | CC6.6 | Restrict outbound egress (anti-SSRF) | `services/orchestrator/src/connectors/ssrfGuard.ts` blocks private/loopback/link-local/CGNAT/multicast/fleet-bridge ranges (IPv4 **and** IPv6, reasoning over raw bytes to defeat alternate spellings), re-validates **every** redirect hop, and strips credential headers on cross-origin redirects. `http` connector additionally requires `allowed_secret_hosts` | Implemented |
-| CC6.6 | Restrict inbound access to the in-VM agent | The sandbox-agent binds `0.0.0.0:51000` with **no authentication** (`services/sandbox-agent/src/main.rs` ~79; `src/agent.mjs` ~146), and all VMs share one bridge | **Gap (P0 — see §3)** |
+| CC6.6 | Restrict inbound access to the in-VM agent | The sandbox-agent on `0.0.0.0:51000` requires a per-VM bearer token on every non-`/health` request, validated in constant time (`services/sandbox-agent/src/main.rs` ~259–282; `src/agent.mjs` ~174–181). Enforcement is **mandatory** — hard-coded on at boot (`fleet.ts` `AGENT_AUTH_ENFORCED`), re-provisioned + enforced on golden-snapshot clones via `/net/configure`. Combined with the L2 isolation above (CC6.1), a peer VM can neither route to nor authenticate against another tenant's agent | Implemented (P0.1/P0.2/P0.3) |
 | CC6.7 | Protect data in transit | TLS 1.3 on both public domains: `app.uniqus-code.com` (Vercel) and `api2.uniqus-code.com` (Hetzner) | Implemented |
 | CC6.7 | Scope preview access to authorized holders | 128-bit unguessable capability `serverId`; preview cookie is `HttpOnly; Secure; SameSite=None; Max-Age=3600` (`services/orchestrator/src/proxy.ts` ~53–61) | Implemented |
 | CC6.1/6.3 | Role-based access control, SSO, provisioning/deprovisioning | No `members`/`roles` tables; no SAML/SSO/SCIM backend. Access is single-owner per project | **Gap (see §3)** |
@@ -99,26 +99,33 @@ completeness; none should be read as implemented.
 
 Ordered by severity and by what blocks an external audit/pentest.
 
-### P0 — Unremediated critical: unauthenticated in-VM sandbox-agent (blocker)
+### P0 — Cross-tenant sandbox-agent isolation (remediated in code; needs host validation)
 
-The sandbox-agent listens on `0.0.0.0:51000` with **no authentication**
-(`services/sandbox-agent/src/main.rs`, `src/agent.mjs`), and **all project VMs
-share one L2 bridge**. Any VM that can address a peer's bridge IP can drive that
-peer's agent RPC — arbitrary file read/write and command execution inside
-another tenant's microVM. This is a cross-tenant remote-code-execution risk and
-it directly contradicts the CC6 isolation objective.
+The original critical was a sandbox-agent that listened on `0.0.0.0:51000`
+**without authentication** while **all project VMs shared one L2 bridge** — any
+VM that could address a peer's bridge IP could drive that peer's agent RPC
+(cross-tenant RCE). Both required defenses are now implemented in code:
 
-**Required remediation (hard prerequisite before engaging a SOC 2 auditor or
-commissioning a pentest):**
+1. **Per-VM authentication (Implemented — P0.1/P0.2).** The orchestrator mints a
+   deterministic per-project bearer token and the in-VM agent requires it on
+   every non-`/health` request, validated in constant time. Enforcement is
+   **mandatory** (hard-coded on, not a dark-launch env gate) and is
+   re-provisioned + enforced on golden-snapshot clones via `/net/configure`
+   (closing the old C-13 caveat). Surfaced on `/health` as `agentAuthEnforced`.
+2. **L2 network isolation (Implemented — P0.3).** `br_netfilter` +
+   `bridge-nf-call-iptables=1` route bridged frames through iptables, and an
+   `fcbr0→fcbr0` DROP rule severs all VM↔VM traffic while leaving VM→gateway and
+   VM→internet egress intact. Installed by `host-setup.sh` and re-asserted at
+   runtime by `fleet.ts` `ensureVmIsolation`.
 
-1. A per-VM authentication token (minted by the orchestrator per project,
-   required on every agent RPC, rejected if absent/mismatched), **and**
-2. L2 network isolation so VMs cannot reach each other's bridge IP at all
-   (e.g. per-VM tap with no peer routing, or per-project network namespace).
+**Remaining before a SOC 2 auditor / pentest:** deploy (re-run `host-setup.sh`
+on each host so the isolation rules + `br_netfilter` sysctl are present) and
+**validate on the host** that a connection from inside VM A to VM B's
+`172.16.x.y:51000` fails while egress + the metadata block still work.
 
-Defense-in-depth, not a substitute: the SSRF guard already blocks the
-orchestrator from reaching `172.16.x.y:51000`, but that does not stop VM↔VM
-traffic on the shared bridge.
+Defense-in-depth, still in place: the SSRF guard blocks the orchestrator (and
+connectors) from reaching `172.16.x.y:51000`, and now pins connect-time IPs to
+close the DNS-rebind TOCTOU (P0.4).
 
 ### P1 — Data retention & purge
 
@@ -200,9 +207,11 @@ claims**:
   over a period.
 - **No completed penetration test** and **no vulnerability-management program**
   exist today.
-- **A known critical is unremediated** — the unauthenticated sandbox-agent on a
-  shared bridge (§3, P0). The platform should not represent its tenant
-  isolation as complete until P0 ships.
+- **The former P0 critical is remediated in code, not yet host-validated** —
+  the sandbox-agent now requires mandatory per-VM bearer auth and VM↔VM bridge
+  traffic is dropped (§3, P0). The platform should not represent its tenant
+  isolation as independently verified until the isolation rules are deployed to
+  every host and a peer-to-peer reachability test is run there.
 - **No SSO/SAML/SCIM/RBAC** backend exists. Any marketing implying enterprise
   access controls is ahead of the implementation.
 - **No data-retention/purge policy** is enforced; data persists for the life of

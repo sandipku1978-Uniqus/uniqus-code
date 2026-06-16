@@ -201,6 +201,10 @@ function DatabaseModal({
   const [sql, setSql] = useState("");
   const [sqlRows, setSqlRows] = useState<Row[] | null>(null);
   const [sqlError, setSqlError] = useState<string | null>(null);
+  // P5.2: when the typed SQL is destructive, hold the detected operation and
+  // require an explicit "Run anyway" before executing (the console runs as
+  // postgres, bypassing RLS — there is no undo).
+  const [pendingDestructive, setPendingDestructive] = useState<string | null>(null);
   const [sqlBusy, setSqlBusy] = useState(false);
   const [sqlMs, setSqlMs] = useState<number | null>(null);
 
@@ -253,9 +257,28 @@ function DatabaseModal({
     }
   }
 
-  async function runSql() {
+  /** P5.2: classify a statement as destructive (mirrors the agent run_sql gate). */
+  function classifyDestructive(query: string): string | null {
+    const s = query.trim();
+    if (/\btruncate\s+(?:table\s+)?[a-zA-Z0-9_."]+/i.test(s)) return "TRUNCATE";
+    if (/\bdrop\s+(table|schema|database|view|materialized\s+view)\b/i.test(s)) return "DROP";
+    if (/\bdelete\s+from\s+[a-zA-Z0-9_."]+/i.test(s)) return "DELETE";
+    if (/\balter\s+table\b[\s\S]*\bdrop\b/i.test(s)) return "ALTER … DROP";
+    if (/\brevoke\b/i.test(s)) return "REVOKE";
+    return null;
+  }
+
+  async function runSql(force = false) {
     const q = sql.trim();
     if (!q || sqlBusy) return;
+    const op = classifyDestructive(q);
+    if (op && !force) {
+      // Don't run yet — surface a confirmation banner the user must accept.
+      setPendingDestructive(op);
+      setSqlError(null);
+      return;
+    }
+    setPendingDestructive(null);
     setSqlBusy(true);
     setSqlError(null);
     setSqlRows(null);
@@ -446,7 +469,10 @@ function DatabaseModal({
                 <textarea
                   className="db-sql-input"
                   value={sql}
-                  onChange={(e) => setSql(e.target.value)}
+                  onChange={(e) => {
+                    setSql(e.target.value);
+                    if (pendingDestructive) setPendingDestructive(null);
+                  }}
                   spellCheck={false}
                   placeholder={"select * from users limit 10;"}
                   onKeyDown={(e) => {
@@ -466,6 +492,40 @@ function DatabaseModal({
                     </span>
                   )}
                 </div>
+                {pendingDestructive && (
+                  <div
+                    role="alertdialog"
+                    aria-label="Confirm destructive statement"
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 12,
+                      padding: "10px 12px",
+                      borderRadius: "var(--radius-md)",
+                      border: "1px solid var(--conf-low)",
+                      background: "rgba(239,68,68,0.10)",
+                    }}
+                  >
+                    <span style={{ color: "var(--conf-low)", fontSize: "var(--fs-md)" }} aria-hidden>
+                      ⚠
+                    </span>
+                    <span style={{ fontSize: "var(--fs-sm)", color: "var(--text-primary)", flex: 1 }}>
+                      This is a destructive <strong>{pendingDestructive}</strong> statement. It runs as{" "}
+                      <code>postgres</code> and <strong>cannot be undone</strong>. Run it anyway?
+                    </span>
+                    <button type="button" className="btn-ghost" onClick={() => setPendingDestructive(null)}>
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      style={{ background: "var(--conf-low)" }}
+                      onClick={() => void runSql(true)}
+                    >
+                      Run anyway
+                    </button>
+                  </div>
+                )}
                 {sqlError && (
                   <pre className="db-sql-error">{sqlError}</pre>
                 )}
@@ -527,6 +587,32 @@ function DatabaseModal({
   );
 }
 
+/** Line-art database glyph — one stroke weight, matching the sidebar icon set
+ *  (never an emoji as a UI icon). */
+function DatabaseIcon() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <ellipse cx="12" cy="5" rx="9" ry="3" />
+      <path d="M3 5v14a9 3 0 0 0 18 0V5" />
+      <path d="M3 12a9 3 0 0 0 18 0" />
+    </svg>
+  );
+}
+
+/** One cell of the databases metric strip — shared visual language with the
+ *  projects metric strip (mono tabular value over a mono label). */
+function DbMetric({ value, label, dot }: { value: number | string; label: string; dot?: "live" | "warn" | "dim" }) {
+  return (
+    <div className="metric-cell">
+      <span className="metric-value">
+        {dot && <span className={`metric-dot ${dot}`} aria-hidden="true" />}
+        {value}
+      </span>
+      <span className="metric-label">{label}</span>
+    </div>
+  );
+}
+
 // ── Tab root ──────────────────────────────────────────────────────────────────
 
 export default function DatabasesView({ isGuest }: { isGuest: boolean }) {
@@ -578,6 +664,13 @@ export default function DatabasesView({ isGuest }: { isGuest: boolean }) {
     (ref && links.find((l) => l.ref === ref)) || null;
   const openDb = openRef ? (projects ?? []).find((p) => p.ref === openRef) ?? null : null;
 
+  // At-a-glance counts for the metric strip (over all databases, not a filter).
+  const healthyCount = (projects ?? []).filter((p) => p.status === "ACTIVE_HEALTHY").length;
+  const pausedCount = (projects ?? []).filter(
+    (p) => p.status === "INACTIVE" || p.status === "PAUSED" || p.status === "PAUSING",
+  ).length;
+  const linkedCount = (projects ?? []).filter((p) => p.ref && links.some((l) => l.ref === p.ref)).length;
+
   if (isGuest) {
     return (
       <div className="dash-page" style={{ maxWidth: 880 }}>
@@ -594,12 +687,16 @@ export default function DatabasesView({ isGuest }: { isGuest: boolean }) {
 
   return (
     <div className="dash-page ds-page">
-      <span className="page-eyebrow">Storage</span>
-      <h1>Databases</h1>
-      <p className="lede">
-        Postgres databases provisioned through your connected Supabase account. Browse tables, run SQL, and
-        pause or delete databases — or open a project and ask the agent to “create a database”.
-      </p>
+      <header className="coll-head">
+        <span className="page-eyebrow">Storage</span>
+        <h1>
+          Your <span className="grad">databases</span>
+        </h1>
+        <p className="lede">
+          Postgres databases provisioned through your connected Supabase account. Browse tables, run SQL, and
+          pause or delete them — or open a project and ask the agent to “create a database”.
+        </p>
+      </header>
 
       {status === null ? (
         <div className="dash-card">
@@ -607,7 +704,7 @@ export default function DatabasesView({ isGuest }: { isGuest: boolean }) {
         </div>
       ) : !status.connected ? (
         <div className="dash-card skills-empty">
-          <div className="skills-empty-plus" aria-hidden="true">🗄</div>
+          <div className="skills-empty-plus" aria-hidden="true"><DatabaseIcon /></div>
           <h2>Connect Supabase</h2>
           <p>
             Connect your Supabase account and the agent can provision a real Postgres database per project —
@@ -619,6 +716,15 @@ export default function DatabasesView({ isGuest }: { isGuest: boolean }) {
         </div>
       ) : (
         <>
+          {projects !== null && projects.length > 0 && (
+            <div className="metric-strip">
+              <DbMetric value={projects.length} label="Databases" />
+              <DbMetric value={healthyCount} label="Healthy" dot={healthyCount > 0 ? "live" : "dim"} />
+              <DbMetric value={pausedCount} label="Paused" dot={pausedCount > 0 ? "warn" : "dim"} />
+              <DbMetric value={linkedCount} label="Powering projects" />
+            </div>
+          )}
+
           <div className="section-title">
             <div className="head">
               <span className="eyebrow">{status.org_name ?? "Connected"}</span>
@@ -661,7 +767,7 @@ export default function DatabasesView({ isGuest }: { isGuest: boolean }) {
             </div>
           ) : projects.length === 0 ? (
             <div className="dash-card skills-empty">
-              <div className="skills-empty-plus" aria-hidden="true">🗄</div>
+              <div className="skills-empty-plus" aria-hidden="true"><DatabaseIcon /></div>
               <h2>No databases yet</h2>
               <p>
                 Open a project and ask the agent to “create a database” — it provisions a Supabase Postgres

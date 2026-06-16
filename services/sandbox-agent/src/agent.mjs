@@ -123,10 +123,13 @@ function setClock(ms) {
 
 configureNetwork();
 
-// F1: per-VM bearer token required on every request except /health. Enforced
-// only when `uniqus_auth=1` is on the cmdline (dark-launch safe). Mirrors
-// main.rs::read_required_token.
-const REQUIRED_TOKEN = (() => {
+// F1/P0.2: per-VM bearer token required on every request except /health. Cold &
+// rehydrated VMs read it from `uniqus_token=` on the cmdline (with uniqus_auth=1
+// always present now). A golden-snapshot clone resumes WITHOUT uniqus_auth on
+// its frozen cmdline, so this starts null and is (re)provisioned at restore via
+// POST /net/configure — hence a mutable `let`, not a `const`. Mirrors
+// main.rs::read_required_token + the dynamic /net/configure provisioning.
+let enforcedToken = (() => {
   let cmdline = "";
   try {
     cmdline = readFileSync("/proc/cmdline", "utf-8");
@@ -136,7 +139,7 @@ const REQUIRED_TOKEN = (() => {
   if (!/(?:^|\s)uniqus_auth=1(?:\s|$)/.test(cmdline)) return null;
   return (cmdline.match(/(?:^|\s)uniqus_token=([^\s]+)/) ?? [])[1] ?? null;
 })();
-if (REQUIRED_TOKEN) {
+if (enforcedToken) {
   console.error("[uniqus-agent] request auth ENFORCED (per-VM bearer token)");
 }
 
@@ -173,9 +176,9 @@ async function handleRequest(req, res) {
 
     // F1: enforce the per-VM bearer token on every endpoint except /health.
     // C-115: constant-time compare so response timing can't leak the token.
-    if (url.pathname !== "/health" && REQUIRED_TOKEN) {
+    if (url.pathname !== "/health" && enforcedToken) {
       const authz = req.headers["authorization"];
-      if (!constantTimeEqual(authz, `Bearer ${REQUIRED_TOKEN}`)) {
+      if (!constantTimeEqual(authz, `Bearer ${enforcedToken}`)) {
         return json(res, 401, { error: "unauthorized" });
       }
     }
@@ -196,6 +199,15 @@ async function handleRequest(req, res) {
       const ip = body.ip;
       const gw = body.gw;
       const mac = body.mac ? String(body.mac) : null;
+      // P0.2: (re)provision + ENFORCE this clone's per-project bearer token. A
+      // golden clone resumed unauthenticated; this is where it adopts the same
+      // token a cold-booted VM would have had from boot. After this, every later
+      // request (incl. a retry of THIS call) must carry it — finalizeRestore
+      // sends it as a Bearer. Mirrors main.rs.
+      if (body.uniqus_auth === true && typeof body.auth_token === "string" && body.auth_token) {
+        enforcedToken = body.auth_token;
+        console.error("[uniqus-agent] request auth ENFORCED via /net/configure (golden restore)");
+      }
       // Base-snapshot restore. Safe-now steps: mount this project's sandbox drive
       // (golden left it unmounted) and de-correlate clock + RNG. Mirrors main.rs.
       if (body.mount_sandbox) mountSandbox();
@@ -509,11 +521,67 @@ async function waitForPort(port, timeoutMs) {
   return false;
 }
 
+/** Is anyone accepting connections on this port right now? */
+function isPortBound(port) {
+  return new Promise((resolve) => {
+    const s = net.createConnection({ port, host: "127.0.0.1" });
+    s.once("connect", () => {
+      s.end();
+      resolve(true);
+    });
+    s.once("error", () => resolve(false));
+  });
+}
+
+/**
+ * Free a TCP port before we (re)bind it. A prior dev server can be left holding
+ * the port — e.g. a zombie orphaned before the process-group fix, or one started
+ * via run_command. ss (iproute2, in the rootfs) reports the holding pid; kill it
+ * and wait for the socket to release so the new server doesn't hit EADDRINUSE.
+ * Without this, the new process can't bind and the OLD one keeps answering — the
+ * "restart did nothing / stale code" failure.
+ */
+async function clearPort(port) {
+  if (!(await isPortBound(port))) return;
+  try {
+    spawnSync("/bin/sh", [
+      "-c",
+      `for pid in $(ss -tlnpH "sport = :${port}" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u); do kill -9 "$pid" 2>/dev/null || true; done`,
+    ]);
+  } catch {}
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline && (await isPortBound(port))) {
+    await new Promise((r) => setTimeout(r, 150));
+  }
+}
+
+/**
+ * Kill a server's WHOLE process tree, not just the `/bin/sh` we spawned. Because
+ * we spawn detached (own process group, pgid == child pid), `kill(-pid)` signals
+ * sh + npm + the node it spawned. Killing just the sh pid (the old behavior)
+ * orphaned the grandchild `node`, which kept holding the port and serving stale
+ * code. Falls back to a single-pid kill if the group signal fails.
+ */
+function killServerTree(child) {
+  try {
+    if (child.pid) process.kill(-child.pid, "SIGKILL");
+    return;
+  } catch {}
+  try {
+    child.kill("SIGKILL");
+  } catch {}
+}
+
 async function startServer(command, port, readyTimeoutMs) {
   const id = `srv_${randomUUID().slice(0, 8)}`;
+  // Clear any process still holding the target port so we truly take it over.
+  await clearPort(port);
   const child = spawn("/bin/sh", ["-c", command], {
     cwd: SANDBOX_DIR,
     stdio: ["ignore", "pipe", "pipe"],
+    // Lead our own process group so stop_server can kill the whole tree
+    // (sh → npm → node), not just sh. Mirrors the run_command path.
+    detached: true,
   });
   const log = { value: "" };
   child.stdout?.on("data", (d) => (log.value = (log.value + d.toString()).slice(-MAX_LOG)));
@@ -529,7 +597,7 @@ async function startServer(command, port, readyTimeoutMs) {
   child.on("exit", () => servers.delete(id));
   const ok = await waitForPort(port, readyTimeoutMs);
   if (!ok) {
-    child.kill("SIGKILL");
+    killServerTree(child);
     servers.delete(id);
     throw new Error(`server did not open port ${port} within ${readyTimeoutMs}ms\nrecent log:\n${log.value.slice(-1500)}`);
   }
@@ -539,9 +607,7 @@ async function startServer(command, port, readyTimeoutMs) {
 function stopServer(id) {
   const s = servers.get(id);
   if (!s) return;
-  try {
-    s.proc.kill("SIGKILL");
-  } catch {}
+  killServerTree(s.proc);
   servers.delete(id);
 }
 

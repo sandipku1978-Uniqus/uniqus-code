@@ -155,53 +155,143 @@ export const MODEL_CATALOG: ReadonlyArray<ModelOption> = [
 ];
 
 /**
+ * A set of $/1,000,000-token rates. `cacheRead` / `cacheWrite` are optional:
+ * when omitted they're derived from `input` via the CACHE_*_MULTIPLIER below,
+ * which matches the published rates for every provider we use today (a cache
+ * read is 10% of input on Anthropic/OpenAI and Gemini's implicit cache; a
+ * 5-minute cache write is 1.25× input on Anthropic). Set them explicitly only
+ * for a model whose cache pricing diverges from those multiples.
+ */
+export interface ModelRates {
+  /** $/1M FRESH (uncached) input tokens. */
+  input: number;
+  /** $/1M output tokens. */
+  output: number;
+  /** $/1M cache-read tokens. Omit ⇒ `input × CACHE_READ_MULTIPLIER`. */
+  cacheRead?: number;
+  /** $/1M cache-write tokens (Anthropic). Omit ⇒ `input × CACHE_WRITE_MULTIPLIER`. */
+  cacheWrite?: number;
+}
+
+/**
+ * Per-model pricing: base {@link ModelRates} plus an optional long-context tier.
+ * `longContext` mirrors how Anthropic/OpenAI/Google publish a premium band — a
+ * turn whose *prompt* (fresh input + cache read + cache write) exceeds
+ * `thresholdTokens` reprices the ENTIRE turn at `above`. This is per-turn, so it
+ * can only be applied with a single turn's token split (see estimateTurnCostUsd),
+ * never on an aggregate of many turns.
+ */
+export interface ModelPrice extends ModelRates {
+  longContext?: { thresholdTokens: number; above: ModelRates };
+}
+
+/**
  * Approximate published list prices in USD per 1,000,000 tokens, keyed by the
  * provider-native model id (what the orchestrator persists on each usage row).
  * Used only to render the dashboard's "estimated cost" widget — it is a
  * best-effort estimate, NOT a billing figure. The `input` rate applies to
- * FRESH (uncached) input tokens; cached prompt tokens are billed far cheaper
- * and are priced separately via the cache multipliers below (see
- * estimateCostUsd). Update these as provider pricing changes; unknown models
- * fall back to DEFAULT_PRICE.
+ * FRESH (uncached) input tokens; cached prompt tokens are priced separately via
+ * the cache multipliers below; turns past `longContext.thresholdTokens` reprice
+ * at the premium band (see estimateTurnCostUsd). Update these as provider
+ * pricing changes; unknown models fall back to DEFAULT_PRICE.
  */
-export const MODEL_PRICING: Record<string, { input: number; output: number }> = {
-  // source: provider published list prices as of 2026-06-09. Keep this dated
+export const MODEL_PRICING: Record<string, ModelPrice> = {
+  // source: provider published list prices as of 2026-06-16. Keep this dated
   // and keep every MODEL_CATALOG id below explicitly priced — the
   // `MODEL_CATALOG ⊆ MODEL_PRICING` invariant is asserted in pricing.test.ts so
   // a new catalogued model can never silently fall through to DEFAULT_PRICE
   // (which can be 5–40× off and corrupts the per-run/account cost estimate).
+  //
+  // Long-context bands: providers publish a premium above a prompt-size
+  // threshold (Anthropic/Google 200K, OpenAI 272K) where the whole turn reprices
+  // at ~2× input / ~1.5× output. Models whose context window can't exceed the
+  // threshold (Opus 200K) or that price flat (Flash, the *-pro single tier) have
+  // no band. The ×2 / ×1.5 multiples are applied to the base rates above so they
+  // track any base-price edit (e.g. Gemini 3.1 Pro 2/12 → 4/18, matching docs).
   // Anthropic
   "claude-opus-4-8": { input: 5, output: 25 },
-  "claude-sonnet-4-6": { input: 3, output: 15 },
+  "claude-sonnet-4-6": {
+    input: 3,
+    output: 15,
+    longContext: { thresholdTokens: 200_000, above: { input: 6, output: 22.5 } },
+  },
   // OpenAI
-  "gpt-5.5": { input: 1.25, output: 10 },
+  "gpt-5.5": {
+    input: 1.25,
+    output: 10,
+    longContext: { thresholdTokens: 272_000, above: { input: 2.5, output: 15 } },
+  },
   "gpt-5.5-pro": { input: 15, output: 120 },
-  "gpt-5.3-codex": { input: 1.25, output: 10 },
+  "gpt-5.3-codex": {
+    input: 1.25,
+    output: 10,
+    longContext: { thresholdTokens: 272_000, above: { input: 2.5, output: 15 } },
+  },
   // Google
-  "gemini-3.1-pro-preview-customtools": { input: 2, output: 12 },
+  "gemini-3.1-pro-preview-customtools": {
+    input: 2,
+    output: 12,
+    longContext: { thresholdTokens: 200_000, above: { input: 4, output: 18 } },
+  },
   "gemini-3.5-flash": { input: 0.3, output: 2.5 },
-  "gemini-2.5-pro": { input: 1.25, output: 10 },
+  "gemini-2.5-pro": {
+    input: 1.25,
+    output: 10,
+    longContext: { thresholdTokens: 200_000, above: { input: 2.5, output: 15 } },
+  },
 };
 
 /** Fallback $/1M when a model id isn't in MODEL_PRICING (mid-tier estimate). */
-export const DEFAULT_PRICE = { input: 3, output: 15 } as const;
+export const DEFAULT_PRICE: ModelRates = { input: 3, output: 15 };
 
 /**
- * Cache-token price multipliers relative to the model's fresh `input` rate.
- * A cache READ is ~10% of fresh input across providers (Anthropic 0.1×,
- * OpenAI/Gemini also deep discounts); a cache WRITE (Anthropic-only — the
- * one-time cost of populating the 5-minute cache) is 1.25× fresh input.
- * Best-effort, not a billing figure — see estimateCostUsd.
+ * Cache-token price multipliers relative to the model's fresh `input` rate, used
+ * when a model's pricing doesn't override `cacheRead` / `cacheWrite`. A cache
+ * READ is ~10% of fresh input across providers (Anthropic 0.1×, OpenAI 0.1×,
+ * Gemini's implicit cache is a 90% discount = 0.1×); a cache WRITE (Anthropic —
+ * the one-time cost of populating the 5-minute cache) is 1.25× fresh input.
+ * Best-effort, not a billing figure.
  */
 export const CACHE_READ_MULTIPLIER = 0.1;
 export const CACHE_WRITE_MULTIPLIER = 1.25;
 
+/** Token split for a single turn (a subset of the providers' TokenUsage). */
+export interface TurnTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+}
+
+/** Cost in USD for the given token counts at a fixed set of rates. */
+function costUsdFromRates(
+  r: ModelRates,
+  inputTokens: number,
+  outputTokens: number,
+  cacheReadTokens: number,
+  cacheCreationTokens: number,
+): number {
+  const cacheReadRate = r.cacheRead ?? r.input * CACHE_READ_MULTIPLIER;
+  const cacheWriteRate = r.cacheWrite ?? r.input * CACHE_WRITE_MULTIPLIER;
+  return (
+    (inputTokens * r.input +
+      cacheReadTokens * cacheReadRate +
+      cacheCreationTokens * cacheWriteRate +
+      outputTokens * r.output) /
+    1_000_000
+  );
+}
+
 /**
- * Estimated USD cost for a turn's token counts on a given model. Fresh input
- * bills at the full `input` rate; cached reads and writes bill at their
- * discounted multipliers (see CACHE_*_MULTIPLIER). Passing only input/output
- * (cache args defaulting to 0) reproduces the old full-price estimate, so
- * callers that don't track the cache split stay correct — just pessimistic.
+ * Estimated USD cost at a model's BASE rates (no long-context band). Fresh input
+ * bills at the full `input` rate; cached reads/writes at their discounted rates
+ * (per-model overrides or the CACHE_*_MULTIPLIER defaults). Passing only
+ * input/output (cache args default to 0) reproduces the old full-price estimate.
+ *
+ * Use this when pricing an AGGREGATE of many turns (e.g. an account/day/project
+ * rollup), where the per-turn prompt size — and therefore the long-context band
+ * — is unknowable. For a single turn, prefer {@link estimateTurnCostUsd}, which
+ * also applies the band.
  */
 export function estimateCostUsd(
   model: string,
@@ -211,11 +301,27 @@ export function estimateCostUsd(
   cacheCreationTokens = 0,
 ): number {
   const p = MODEL_PRICING[model] ?? DEFAULT_PRICE;
-  const inputCost =
-    inputTokens * p.input +
-    cacheReadTokens * p.input * CACHE_READ_MULTIPLIER +
-    cacheCreationTokens * p.input * CACHE_WRITE_MULTIPLIER;
-  return (inputCost + outputTokens * p.output) / 1_000_000;
+  return costUsdFromRates(p, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens);
+}
+
+/**
+ * Estimated USD cost for ONE turn, applying the model's long-context band: when
+ * the turn's prompt (fresh input + both cache buckets) exceeds the model's
+ * `longContext.thresholdTokens`, the whole turn reprices at the premium band —
+ * exactly how the providers bill. This is the most precise per-turn estimate;
+ * the orchestrator snapshots it onto each usage row at record time so historical
+ * spend isn't re-priced when rates change.
+ */
+export function estimateTurnCostUsd(model: string, usage: TurnTokenUsage): number {
+  const p = MODEL_PRICING[model] ?? DEFAULT_PRICE;
+  const cacheRead = usage.cacheReadTokens ?? 0;
+  const cacheCreation = usage.cacheCreationTokens ?? 0;
+  const promptTokens = usage.inputTokens + cacheRead + cacheCreation;
+  const rates =
+    "longContext" in p && p.longContext && promptTokens > p.longContext.thresholdTokens
+      ? p.longContext.above
+      : p;
+  return costUsdFromRates(rates, usage.inputTokens, usage.outputTokens, cacheRead, cacheCreation);
 }
 
 /** Per-model rollup for the dashboard "top models" widget. */
@@ -461,6 +567,33 @@ export interface SkillLibrarySummary {
   id: string;
   name: string;
   description: string | null;
+  updated_at: string;
+}
+
+/**
+ * An account-level Knowledge document: a file the user uploaded (regulation,
+ * research paper, dataset, spec, …) once, available to the agent across ALL of
+ * their projects via the `knowledge_search` tool. The raw file is kept in object
+ * storage; the extracted plain text lives in the DB and powers search. This list
+ * shape omits the full extracted text — fetch one document to read its content.
+ */
+export interface KnowledgeDocument {
+  id: string;
+  /** Display title — defaults to the original filename, user-renameable. */
+  title: string;
+  /** Optional one-line note about what the document is / when to use it. */
+  description: string | null;
+  /** Original uploaded filename (e.g. "ifrs-16-leases.pdf"). */
+  file_name: string;
+  /** MIME type sniffed from the upload (e.g. "application/pdf"). */
+  mime_type: string;
+  /** Size of the original file in bytes. */
+  size_bytes: number;
+  /** Number of characters of plain text extracted (0 if extraction failed). */
+  char_count: number;
+  /** Whether text extraction succeeded — false ⇒ not searchable, download only. */
+  extracted: boolean;
+  created_at: string;
   updated_at: string;
 }
 
@@ -890,4 +1023,138 @@ export const SKILL_PACKS: readonly SkillPack[] = [
 
 export function findPackById(id: string): SkillPack | null {
   return SKILL_PACKS.find((p) => p.id === id) ?? null;
+}
+
+// ── Collaboration, organizations & RBAC (P3/P8/P10) ───────────────────────────
+// Single source of truth for the roles, statuses, and row shapes shared by the
+// orchestrator (db + routes) and the web UI. Mirrors the tables added to
+// `services/orchestrator/src/db/schema.sql`.
+
+/** RBAC role on an org or a project, most→least privileged. */
+export type Role = "owner" | "admin" | "editor" | "viewer";
+
+/** Privilege rank for `Role` — higher is more privileged. */
+export const ROLE_RANK: Record<Role, number> = {
+  owner: 3,
+  admin: 2,
+  editor: 1,
+  viewer: 0,
+};
+
+/** True when `role` is at least as privileged as `min`. */
+export function roleAtLeast(role: Role | null | undefined, min: Role): boolean {
+  if (!role) return false;
+  return ROLE_RANK[role] >= ROLE_RANK[min];
+}
+
+export interface Organization {
+  id: string;
+  name: string;
+  owner_id: string;
+  monthly_budget_usd: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OrgMember {
+  id: string;
+  org_id: string;
+  user_id: string;
+  role: Role;
+  created_at: string;
+  /** Joined for display (not a column). */
+  email?: string | null;
+  display_name?: string | null;
+}
+
+export interface ProjectMember {
+  id: string;
+  project_id: string;
+  user_id: string;
+  role: Role;
+  created_at: string;
+  email?: string | null;
+  display_name?: string | null;
+}
+
+export type CommentTargetKind = "element" | "file" | "checkpoint" | "pr" | "general";
+
+export interface Comment {
+  id: string;
+  project_id: string;
+  user_id: string | null;
+  target_kind: CommentTargetKind;
+  target_ref: string | null;
+  body: string;
+  resolved: boolean;
+  created_at: string;
+  author_email?: string | null;
+  author_name?: string | null;
+}
+
+/** Lifecycle of a durable async agent task (P8.1). */
+export type AgentTaskStatus = "queued" | "running" | "done" | "failed" | "canceled";
+
+export interface AgentTask {
+  id: string;
+  project_id: string;
+  org_id: string | null;
+  created_by: string | null;
+  title: string;
+  prompt: string;
+  status: AgentTaskStatus;
+  branch: string | null;
+  acceptance_criteria: string | null;
+  result_summary: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Kind of evidence captured during a turn and persisted with a checkpoint (P2.3). */
+export type ArtifactKind = "interaction" | "screenshot" | "console" | "network" | "a11y" | "flow";
+
+export interface CheckpointArtifact {
+  id: string;
+  project_id: string;
+  session_id: string | null;
+  checkpoint_sha: string | null;
+  kind: ArtifactKind;
+  summary: string | null;
+  data: Record<string, unknown>;
+  created_at: string;
+}
+
+/** Audit event kinds exposed to the admin audit UI (P10.3). Mirrors db AuditKind. */
+export type AuditEventKind =
+  | "secret_read"
+  | "secret_write"
+  | "secret_delete"
+  | "connector_invoke"
+  | "connector_invoke_error"
+  | "checkpoint_create"
+  | "checkpoint_restore"
+  | "login"
+  | "logout"
+  | "project_create"
+  | "project_update"
+  | "project_delete"
+  | "member_invite"
+  | "member_remove"
+  | "role_change"
+  | "deploy"
+  | "preview_share"
+  | "github_action"
+  | "db_lifecycle"
+  | "org_create"
+  | "org_update";
+
+export interface AuditEvent {
+  id: number;
+  project_id: string | null;
+  user_id: string | null;
+  kind: AuditEventKind;
+  target: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
 }

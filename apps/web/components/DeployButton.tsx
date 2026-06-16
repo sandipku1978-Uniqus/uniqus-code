@@ -636,7 +636,8 @@ function DeployModal({
                 }}
                 disabled={busy}
                 aria-label="Add an environment variable from Project Secrets"
-                style={{ ...modalFieldStyle, padding: "4px 6px" }}
+                className="ui-select"
+                style={{ width: "auto", display: "inline-block", padding: "4px 26px 4px 8px", fontSize: 11 }}
               >
                 <option value="">choose…</option>
                 {secretNames.map((n) => (

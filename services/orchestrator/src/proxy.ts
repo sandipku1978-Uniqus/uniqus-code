@@ -610,6 +610,26 @@ function elementPickerScript(serverId: string): string {
     }
     return parts.join(" > ");
   }
+  // P4.1: harvest the computed styles the inspector reads out. Only the subset
+  // the panel shows (spacing / typography / color / radius / layout) so the
+  // message stays small; each value capped to avoid enormous shadow stacks.
+  function computedStylesOf(el) {
+    try {
+      var cs = window.getComputedStyle(el);
+      var keys = [
+        "color", "background-color", "font-family", "font-size", "font-weight",
+        "line-height", "letter-spacing", "text-align", "text-transform",
+        "padding", "margin", "border-radius", "border", "box-shadow",
+        "display", "position", "width", "height", "opacity", "gap", "z-index"
+      ];
+      var out = {};
+      for (var i = 0; i < keys.length; i++) {
+        var v = cs.getPropertyValue(keys[i]);
+        if (v) out[keys[i]] = String(v).slice(0, 200);
+      }
+      return out;
+    } catch (e) { return {}; }
+  }
   function describe(el) {
     var r = el.getBoundingClientRect();
     var classes = el.classList ? Array.prototype.slice.call(el.classList) : [];
@@ -623,7 +643,8 @@ function elementPickerScript(serverId: string): string {
         width: Math.round(r.width), height: Math.round(r.height),
         top: Math.round(r.top), right: Math.round(r.right),
         bottom: Math.round(r.bottom), left: Math.round(r.left) },
-      text: text
+      text: text,
+      computed_styles: computedStylesOf(el)
     };
   }
   function paint(el) {

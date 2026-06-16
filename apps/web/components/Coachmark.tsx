@@ -1,7 +1,16 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useStore } from "@/lib/store";
+import Popover from "./Popover";
+import type { Placement } from "@/lib/useAnchoredPosition";
+
+const CM_PLACEMENT: Record<"top" | "bottom" | "left" | "right", Placement> = {
+  top: "top-start",
+  bottom: "bottom-start",
+  left: "left-start",
+  right: "right-start",
+};
 
 // Only one coachmark may be on screen at a time so a first-time user isn't
 // swarmed (the plan's "wizard and coachmarks don't fire simultaneously" rule).
@@ -45,6 +54,7 @@ export default function Coachmark({
   const seen = useStore((s) => s.seenHints[id]);
   const markHintSeen = useStore((s) => s.markHintSeen);
   const [show, setShow] = useState(false);
+  const wrapRef = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
     if (seen) return;
@@ -71,19 +81,25 @@ export default function Coachmark({
   };
 
   return (
-    <span className="cm-wrap">
+    <span className="cm-wrap" ref={wrapRef}>
       {children}
-      {show && !seen && (
-        <div className={`cm-pop cm-${placement}`} role="dialog" aria-label={title}>
-          <div className="cm-title">{title}</div>
-          <div className="cm-body">{body}</div>
-          <div className="cm-actions">
-            <button type="button" className="cm-dismiss" onClick={dismiss}>
-              Got it
-            </button>
-          </div>
+      <Popover
+        open={show && !seen}
+        anchorRef={wrapRef}
+        placement={CM_PLACEMENT[placement]}
+        gap={10}
+        role="dialog"
+        ariaLabel={title}
+        className="cm-pop"
+      >
+        <div className="cm-title">{title}</div>
+        <div className="cm-body">{body}</div>
+        <div className="cm-actions">
+          <button type="button" className="cm-dismiss" onClick={dismiss}>
+            Got it
+          </button>
         </div>
-      )}
+      </Popover>
     </span>
   );
 }

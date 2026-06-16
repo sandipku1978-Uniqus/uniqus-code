@@ -14,6 +14,7 @@ import { useStore, type SelectedElement } from "@/lib/store";
 import { toast } from "@/lib/toast";
 import PreviewAnnotator from "./PreviewAnnotator";
 import Modal from "./Modal";
+import Popover from "./Popover";
 
 // Match the page's TLS state for the dev fallback so the iframe doesn't get
 // mixed-content blocked when the app is loaded over HTTPS. Production should
@@ -78,7 +79,21 @@ function parseElementMessage(data: unknown): SelectedElement | null {
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
   const rect = { x: num(r.x), y: num(r.y), width: num(r.width), height: num(r.height) };
   const text = typeof d.text === "string" ? d.text.trim().slice(0, 280) : "";
-  return { selector, tag, classes, id, rect, text };
+  // P4.1: carry the live computed styles (sanitized: known-shape keys, capped).
+  let computedStyles: Record<string, string> | undefined;
+  if (d.computed_styles && typeof d.computed_styles === "object") {
+    const out: Record<string, string> = {};
+    let n = 0;
+    for (const [k, v] of Object.entries(d.computed_styles as Record<string, unknown>)) {
+      if (n >= 30) break;
+      if (/^[a-z-]{1,40}$/.test(k) && typeof v === "string") {
+        out[k] = v.slice(0, 200);
+        n++;
+      }
+    }
+    if (Object.keys(out).length) computedStyles = out;
+  }
+  return { selector, tag, classes, id, rect, text, computedStyles };
 }
 
 /** A short, human label for an element ("button.cta#submit"). */
@@ -86,6 +101,101 @@ function describeElement(el: SelectedElement): string {
   const id = el.id ? `#${el.id}` : "";
   const cls = el.classes.length > 0 ? `.${el.classes.slice(0, 2).join(".")}` : "";
   return `${el.tag || "element"}${id}${cls}` || el.selector;
+}
+
+/**
+ * Live style inspector (P4.1) — a read-only read-out of the picked element's
+ * computed styles, grouped. House design language: hairline border + faint top
+ * sheen (one depth technique), mono micro-labels, a color swatch where the value
+ * is a color. Lets the user see the element's current spacing / typography /
+ * color / radius before asking the agent to change it.
+ */
+const INSPECTOR_GROUPS: { label: string; keys: string[] }[] = [
+  { label: "Type", keys: ["color", "font-size", "font-weight", "font-family", "line-height", "letter-spacing", "text-align", "text-transform"] },
+  { label: "Spacing", keys: ["padding", "margin", "gap"] },
+  { label: "Box", keys: ["width", "height", "border-radius", "border", "box-shadow"] },
+  { label: "Layout", keys: ["display", "position", "opacity", "z-index"] },
+  { label: "Background", keys: ["background-color"] },
+];
+
+function StyleInspector({ styles }: { styles: Record<string, string> }) {
+  return (
+    <div
+      style={{
+        marginTop: 8,
+        maxHeight: 240,
+        overflowY: "auto",
+        border: "1px solid var(--border-default)",
+        borderRadius: "var(--radius-md)",
+        background:
+          "linear-gradient(180deg, color-mix(in srgb, #fff 4%, transparent), transparent 60%), var(--bg-elev)",
+        padding: "8px 10px",
+        fontSize: "var(--fs-sm)",
+      }}
+    >
+      {INSPECTOR_GROUPS.map((g) => {
+        const rows = g.keys.filter((k) => styles[k]);
+        if (!rows.length) return null;
+        return (
+          <div key={g.label} style={{ marginBottom: 8 }}>
+            <div
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "var(--fs-2xs)",
+                textTransform: "uppercase",
+                letterSpacing: "0.08em",
+                color: "var(--text-dim)",
+                marginBottom: 4,
+              }}
+            >
+              {g.label}
+            </div>
+            {rows.map((k) => {
+              const v = styles[k];
+              const isColor = (k === "color" || k === "background-color") && /^(rgb|#|hsl)/.test(v);
+              return (
+                <div
+                  key={k}
+                  style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "1px 0", alignItems: "center" }}
+                >
+                  <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>{k}</span>
+                  <span
+                    style={{
+                      fontFamily: "var(--font-mono)",
+                      color: "var(--text-primary)",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 6,
+                      maxWidth: "62%",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                    title={v}
+                  >
+                    {isColor && (
+                      <span
+                        aria-hidden
+                        style={{
+                          width: 11,
+                          height: 11,
+                          borderRadius: 3,
+                          border: "1px solid var(--border-strong)",
+                          background: v,
+                          flex: "0 0 auto",
+                        }}
+                      />
+                    )}
+                    {v}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 /**
@@ -244,6 +354,7 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
   // standard picker gesture), so one message pauses pick-mode into a confirm.
   const [picking, setPicking] = useState(false);
   const [candidate, setCandidate] = useState<SelectedElement | null>(null);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [justAttached, setJustAttached] = useState(false);
   const setPendingSelectedElement = useStore((s) => s.setPendingSelectedElement);
   const setPendingComposerText = useStore((s) => s.setPendingComposerText);
@@ -362,7 +473,7 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
-  const deviceMenuRef = useRef<HTMLDivElement>(null);
+  const deviceTriggerRef = useRef<HTMLButtonElement>(null);
 
   // Route through the orchestrator's preview proxy so the iframe works in
   // production (Vercel + Hetzner) where the dev server isn't on a public port.
@@ -619,16 +730,6 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
     return () => window.clearTimeout(slowAt);
   }, [baseUrl, server.id, reloadKey]);
 
-  // Close the device menu on an outside click.
-  useEffect(() => {
-    if (!deviceMenuOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (!deviceMenuRef.current?.contains(e.target as Node)) setDeviceMenuOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
-  }, [deviceMenuOpen]);
-
   const attachCandidate = () => {
     if (!candidate) return;
     setPendingSelectedElement(candidate);
@@ -773,8 +874,9 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
 
         {/* Device-breakpoint picker (generalizes the old phone toggle). */}
         {!isMobile && (
-          <div className="device-picker" ref={deviceMenuRef}>
+          <div className="device-picker">
             <button
+              ref={deviceTriggerRef}
               type="button"
               onClick={() => setDeviceMenuOpen((v) => !v)}
               className="icon-btn-sm"
@@ -791,32 +893,38 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
               </svg>
               <span>{framed ? `${preset.width}` : "Responsive"}</span>
             </button>
-            {deviceMenuOpen && (
-              <div role="menu" aria-label="Preview device width" className="device-menu">
-                {DEVICE_ORDER.map((key) => {
-                  const p = DEVICE_PRESETS[key];
-                  const active = key === device;
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      role="menuitemradio"
-                      aria-checked={active}
-                      className={`device-menu-item${active ? " active" : ""}`}
-                      onClick={() => {
-                        setDevice(key);
-                        setDeviceMenuOpen(false);
-                      }}
-                    >
-                      <span>{p.label}</span>
-                      <span className="device-menu-dim">
-                        {p.width ? `${p.width}×${p.height}` : "fill"}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
+            <Popover
+              open={deviceMenuOpen}
+              anchorRef={deviceTriggerRef}
+              placement="bottom-end"
+              onRequestClose={() => setDeviceMenuOpen(false)}
+              role="menu"
+              ariaLabel="Preview device width"
+              className="device-menu"
+            >
+              {DEVICE_ORDER.map((key) => {
+                const p = DEVICE_PRESETS[key];
+                const active = key === device;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={active}
+                    className={`device-menu-item${active ? " active" : ""}`}
+                    onClick={() => {
+                      setDevice(key);
+                      setDeviceMenuOpen(false);
+                    }}
+                  >
+                    <span>{p.label}</span>
+                    <span className="device-menu-dim">
+                      {p.width ? `${p.width}×${p.height}` : "fill"}
+                    </span>
+                  </button>
+                );
+              })}
+            </Popover>
           </div>
         )}
 
@@ -976,21 +1084,33 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
             <code className="picker-confirm-sel">{describeElement(candidate)}</code>
             {candidate.text && <span className="picker-confirm-text">“{candidate.text.slice(0, 60)}”</span>}
           </div>
+          {inspectorOpen && candidate.computedStyles && <StyleInspector styles={candidate.computedStyles} />}
           <div className="picker-confirm-actions">
             <button type="button" className="picker-btn primary" onClick={attachCandidate}>
               Attach to chat
             </button>
+            {candidate.computedStyles && (
+              <button
+                type="button"
+                className="picker-btn"
+                aria-pressed={inspectorOpen}
+                onClick={() => setInspectorOpen((o) => !o)}
+              >
+                {inspectorOpen ? "Hide styles" : "Inspect styles"}
+              </button>
+            )}
             <button
               type="button"
               className="picker-btn"
               onClick={() => {
                 setCandidate(null);
+                setInspectorOpen(false);
                 startPicking();
               }}
             >
               Re-pick
             </button>
-            <button type="button" className="picker-btn ghost" onClick={() => setCandidate(null)}>
+            <button type="button" className="picker-btn ghost" onClick={() => { setCandidate(null); setInspectorOpen(false); }}>
               Cancel
             </button>
           </div>

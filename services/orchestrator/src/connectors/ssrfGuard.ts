@@ -1,5 +1,11 @@
 import { lookup } from "node:dns/promises";
-import net from "node:net";
+import net, { type LookupFunction } from "node:net";
+import {
+  Agent,
+  fetch as pinnedFetch,
+  type RequestInit as UndiciRequestInit,
+  type Response as UndiciResponse,
+} from "undici";
 
 /**
  * SSRF guard shared by the outbound connectors (http/postgres) and the
@@ -15,11 +21,12 @@ import net from "node:net";
  * credential headers on a cross-origin redirect so a 30x can't bounce a request
  * (or an attached secret — H-2) onto an internal target.
  *
- * Residual: a determined attacker controlling DNS could rebind between this
- * resolution and the kernel's connect() (TOCTOU). Closing that fully needs the
- * connect-time IP pinned to the validated address (an undici dispatcher with a
- * validating `lookup`); tracked as a follow-up. This guard already blocks every
- * concrete vector the audit demonstrated.
+ * DNS rebinding (TOCTOU): a determined attacker controlling DNS could otherwise
+ * rebind a hostname between our pre-flight resolution and the kernel's connect().
+ * `safeFetch` closes that window with `pinningAgent` (P0.4): an undici dispatcher
+ * whose `connect.lookup` re-resolves, re-validates EVERY address, and hands the
+ * socket the exact validated IP — so the address we vetted is the address the
+ * kernel dials, with no second uncontrolled lookup in between.
  */
 
 /**
@@ -164,36 +171,110 @@ export function validatePathComponent(value: string, label = "path component"): 
 const CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorization"];
 
 /**
+ * P0.4: a Node-style `dns.lookup` that pins outbound connections to a validated
+ * IP. undici calls this when establishing a socket; we re-resolve, reject if ANY
+ * resolved address is blocked, then hand back a vetted address. Because undici
+ * connects to exactly the address we return (no further DNS), a rebind between
+ * resolve and connect can't slip a private target past the guard.
+ */
+function pinningLookup(
+  hostname: string,
+  options: { family?: number },
+  callback: (err: Error | null, address?: string, family?: number) => void,
+): void {
+  lookup(hostname, { all: true, verbatim: true })
+    .then((addrs) => {
+      if (!addrs.length) {
+        callback(new Error(`could not resolve host: ${hostname}`));
+        return;
+      }
+      for (const a of addrs) {
+        if (isBlockedIp(a.address)) {
+          callback(new Error(`host ${hostname} resolves to a blocked address (${a.address})`));
+          return;
+        }
+      }
+      const wantFamily = options?.family;
+      if (wantFamily) {
+        // Honor the dns.lookup contract: when a specific family is requested and
+        // none resolved, ERROR — never hand undici a mismatched-family address
+        // (which would make it open the wrong socket type and fail the connect).
+        const match = addrs.find((a) => a.family === wantFamily);
+        if (!match) {
+          callback(new Error(`host ${hostname} has no address for family ${wantFamily}`));
+          return;
+        }
+        callback(null, match.address, match.family);
+        return;
+      }
+      callback(null, addrs[0].address, addrs[0].family);
+    })
+    .catch(() => callback(new Error(`could not resolve host: ${hostname}`)));
+}
+
+/** Shared dispatcher that validates + pins the connect-time IP for every request. */
+const pinningAgent = new Agent({
+  // The cast bridges our readable lookup signature to Node's LookupFunction —
+  // the runtime contract (hostname, options, callback(err, address, family)) is
+  // exactly what undici invokes.
+  connect: { lookup: pinningLookup as unknown as LookupFunction },
+});
+
+/**
  * fetch() with SSRF validation on the initial URL and on every redirect hop.
  * Redirects are followed manually (so each Location is re-validated) and any
  * credential header is dropped when a redirect crosses to a different origin —
  * otherwise a 30x to an attacker host would carry a secret-derived header off
- * to it (H-2).
+ * to it (H-2). The `pinningAgent` dispatcher additionally pins each connect to a
+ * freshly-validated IP, closing the DNS-rebind TOCTOU (P0.4).
  */
 export async function safeFetch(
   rawUrl: string,
-  init: RequestInit & { headers?: Record<string, string> } = {},
+  init: Omit<UndiciRequestInit, "headers"> & { headers?: Record<string, string> } = {},
   maxRedirects = 4,
-): Promise<Response> {
+): Promise<UndiciResponse> {
   let current = await assertPublicUrl(rawUrl);
   let headers: Record<string, string> = { ...(init.headers ?? {}) };
+  // Track method + body across hops so we can apply RFC 7231 redirect semantics
+  // rather than blindly replaying the original request to every target.
+  let method = String(init.method ?? "GET").toUpperCase();
+  let body = init.body;
   for (let hop = 0; ; hop++) {
-    const res = await fetch(current.toString(), {
+    const res = await pinnedFetch(current.toString(), {
       ...init,
+      method,
+      body,
       headers,
       redirect: "manual",
+      dispatcher: pinningAgent,
     });
     const isRedirect = res.status >= 300 && res.status < 400 && res.headers.has("location");
     // Stop (and hand back the 3xx) when there's nothing to follow OR the budget
     // is spent. maxRedirects:0 therefore means "never follow" — used when a
     // secret is attached so the credential can't be bounced to another host.
     if (!isRedirect || hop >= maxRedirects) return res;
+    // We ARE going to follow: drain this hop's body so undici returns the socket
+    // to the pool instead of leaking the connection across a redirect chain.
+    void res.body?.cancel().catch(() => {});
     const next = new URL(res.headers.get("location") as string, current);
     await assertPublicUrl(next.toString());
     if (next.origin !== current.origin) {
       // Don't carry credentials across origins on a redirect.
       headers = Object.fromEntries(
         Object.entries(headers).filter(([k]) => !CREDENTIAL_HEADERS.includes(k.toLowerCase())),
+      );
+    }
+    // RFC 7231: 301/302/303 turn the follow-up into a bodyless GET; 307/308
+    // preserve method + body. Without this a POST body (which may carry a
+    // secret) would be replayed verbatim to the redirect target.
+    if ((res.status === 301 || res.status === 302 || res.status === 303) && method !== "GET" && method !== "HEAD") {
+      method = "GET";
+      body = undefined;
+      headers = Object.fromEntries(
+        Object.entries(headers).filter(([k]) => {
+          const lk = k.toLowerCase();
+          return lk !== "content-type" && lk !== "content-length";
+        }),
       );
     }
     current = next;

@@ -10,6 +10,7 @@ import {
   type ChatSessionSummary,
 } from "@/lib/api";
 import Modal from "./Modal";
+import Popover from "./Popover";
 
 /**
  * Topbar dropdown for switching between chat sessions in the same project.
@@ -30,7 +31,7 @@ export default function ChatSessionDropdown({ projectId }: { projectId: string }
   const [renaming, setRenaming] = useState<ChatSessionSummary | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [deleting, setDeleting] = useState<ChatSessionSummary | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   // Server-side, no ?session= binds to ensureDefaultSession(), which chooses
   // the oldest-created session. The list API returns newest-updated first, so
@@ -54,17 +55,6 @@ export default function ChatSessionDropdown({ projectId }: { projectId: string }
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
-
-  // Close on outside click — small dropdown, not worth a portal.
-  useEffect(() => {
-    if (!open) return;
-    const onClick = (e: MouseEvent): void => {
-      if (!containerRef.current) return;
-      if (!containerRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    window.addEventListener("click", onClick);
-    return () => window.removeEventListener("click", onClick);
-  }, [open]);
 
   const switchTo = (sessionId: string): void => {
     if (sessionId === active?.id) {
@@ -145,11 +135,9 @@ export default function ChatSessionDropdown({ projectId }: { projectId: string }
   const buttonLabel = active?.title ?? (sessions ? "Default" : "…");
 
   return (
-    <div
-      ref={containerRef}
-      style={{ position: "relative", display: "inline-flex" }}
-    >
+    <div style={{ display: "inline-flex" }}>
       <button
+        ref={triggerRef}
         type="button"
         className="toggle-btn"
         onClick={() => setOpen((v) => !v)}
@@ -163,21 +151,21 @@ export default function ChatSessionDropdown({ projectId }: { projectId: string }
         </span>
         <span style={{ fontSize: 9, opacity: 0.6 }}>▾</span>
       </button>
-      {open && (
-        <div
-          style={{
-            position: "absolute",
-            top: "calc(100% + 4px)",
-            right: 0,
-            minWidth: 260,
-            background: "var(--bg-surface, #16161e)",
-            border: "1px solid var(--border-default, #2a2a36)",
-            borderRadius: 6,
-            padding: 4,
-            zIndex: 50,
-            boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-          }}
-        >
+      <Popover
+        open={open}
+        anchorRef={triggerRef}
+        placement="bottom-end"
+        onRequestClose={() => setOpen(false)}
+        style={{
+          minWidth: 260,
+          background: "var(--bg-surface, #16161e)",
+          border: "1px solid var(--border-default, #2a2a36)",
+          borderRadius: 6,
+          padding: 4,
+          zIndex: 50,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+        }}
+      >
           <button
             type="button"
             onClick={() => void onNewChat()}
@@ -269,8 +257,7 @@ export default function ChatSessionDropdown({ projectId }: { projectId: string }
               {error}
             </div>
           )}
-        </div>
-      )}
+      </Popover>
 
       {renaming && (
         <Modal
