@@ -1293,7 +1293,10 @@ section.band .sub {
 }
 /* Overlap rules key off the cover sibling so the All/Recent LIST rows (which
    reuse .proj-tile without a cover) keep their plain inline avatar. */
-.proj-cover + .proj-tile-head { align-items: flex-start; padding-top: 0; }
+/* z-index:2 lifts the head (avatar + ⋯ button) above the cover's UiPreview SVG
+   (svg.ui-preview is z-index:1); .proj-tile-head is already position:relative,
+   so without this the avatar's -18px overlap paints behind the cover art. */
+.proj-cover + .proj-tile-head { align-items: flex-start; padding-top: 0; z-index: 2; }
 .proj-cover + .proj-tile-head .proj-avatar {
   /* Straddle the cover's bottom edge; the surface-colored ring separates the
      avatar from whatever hue the cover landed on. */
@@ -5505,6 +5508,15 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand-magenta) 35%, transparent);
 }
 .ui-select:disabled { opacity: 0.55; cursor: not-allowed; }
+/* The opened popup is OS-rendered. `color-scheme: dark` alone fails to darken it
+   on some browsers (notably Chrome on Windows/Linux), leaving a white popup —
+   and the <option> inherits the select's near-white --text-primary, so options
+   render invisible (white on white). Set the popup colors explicitly. */
+.ui-select option,
+.field select option {
+  background-color: var(--bg-elev);
+  color: var(--text-primary);
+}
 
 /* Text inputs & textareas — a base surface so fields that only set incidental
    styles (font-size, flex, padding) stop falling back to the white OS box on
