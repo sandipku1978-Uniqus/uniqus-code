@@ -30,7 +30,7 @@ const TOPICS: Topic[] = [
             tool that tracks support tickets,&rdquo; for example — and the agent
             spins up a private workspace, writes a plan, and starts building. You
             don&rsquo;t need to scaffold anything yourself. See the{" "}
-            <Link href="/guide">guide</Link> for a full walkthrough.
+            <Link href="/docs">docs</Link> for a full walkthrough.
           </>
         ),
       },
@@ -352,8 +352,8 @@ export default function SupportPage() {
             walkthrough.
           </p>
           <div className="mk-hero-cta">
-            <Link href="/guide" className="btn-primary btn-lg">
-              Read the guide
+            <Link href="/docs" className="btn-primary btn-lg">
+              Read the docs
             </Link>
             <Link href="/contact" className="btn-secondary btn-lg">
               Contact us

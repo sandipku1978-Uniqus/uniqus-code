@@ -251,6 +251,54 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
         </button>
       </div>
 
+      {/* How attached library skills get APPLIED when the agent builds a project.
+          Spells out the attach→apply mental model: a skill lives in the library
+          until you attach it to a project (from that project's Skills panel);
+          attached bodies are injected into the system prompt BEFORE the
+          project's own .uniqus/skills.md, which stays the per-project override. */}
+      <div
+        className="dash-card"
+        style={{
+          display: "grid",
+          gap: 8,
+          padding: "14px 16px",
+          marginBottom: 8,
+          borderRadius: "var(--radius-md)",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            fontSize: "var(--fs-sm)",
+            fontWeight: 600,
+            color: "var(--text-primary)",
+          }}
+        >
+          <span aria-hidden="true" style={{ color: "var(--brand-magenta)" }}>↳</span>
+          How attached skills apply
+        </div>
+        <p style={{ margin: 0, fontSize: "var(--fs-sm)", color: "var(--text-dim)", lineHeight: 1.55 }}>
+          A skill here is just a reusable rule-set — it does nothing on its own until you{" "}
+          <strong style={{ color: "var(--text-primary)", fontWeight: 600 }}>attach it to a project</strong>{" "}
+          from that project&apos;s workspace Skills panel. When the agent builds, every attached skill is
+          injected into its system prompt{" "}
+          <strong style={{ color: "var(--text-primary)", fontWeight: 600 }}>before</strong> the project&apos;s own{" "}
+          <code
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: "var(--fs-xs)",
+              color: "var(--text-muted)",
+            }}
+          >
+            .uniqus/skills.md
+          </code>
+          . So attached skills set the baselines for that project, and the project&apos;s own skills file
+          refines or overrides them.
+        </p>
+      </div>
+
       <div className="section-title">
         <div className="head">
           <span className="eyebrow">Your library</span>

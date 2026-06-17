@@ -31,7 +31,7 @@ export default async function MarketingPage() {
           <a href="#workspaces">Workspaces</a>
           <Link href="/pricing">Pricing</Link>
           <a href="#trust">Trust</a>
-          <Link href="/guide">Guide</Link>
+          <Link href="/docs">Docs</Link>
         </div>
         <div className="right">
           {!user && (

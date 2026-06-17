@@ -384,6 +384,32 @@ function persistView(view: WorkspaceView): void {
   }
 }
 
+/** One streamed frame of a live agent interaction (P2 "Preview (Agent)"). */
+export interface AgentPreviewFrame {
+  seq: number;
+  label: string;
+  ok: boolean;
+  detail?: string;
+  url: string;
+  /** base64-encoded image (no `data:` prefix). */
+  image: string;
+  mime: string;
+  title?: string;
+}
+
+/** Live "Preview (Agent)" state — the agent driving the running app, frame by frame. */
+export interface AgentPreviewState {
+  /** call_id (or "flow:<id>") tying the current run's frames together. */
+  callId: string | null;
+  /** Set when the current run is a saved-flow replay, for the caption. */
+  flowName: string | null;
+  frames: AgentPreviewFrame[];
+  /** True while a run is streaming; cleared on the final `done` frame. */
+  active: boolean;
+  /** True when new frames arrived but the user hasn't opened the tab yet. */
+  unseen: boolean;
+}
+
 interface State {
   connected: boolean;
   /**
@@ -458,8 +484,10 @@ interface State {
    * load content); `openFiles` is the tab strip.
    */
   openFiles: string[];
-  /** Active tab id in the editor area: "file:<path>" or "preview:<id>". */
+  /** Active tab id in the editor area: "file:<path>", "preview:<id>", or "agent-preview". */
   editorTab: string;
+  /** P2 live "Preview (Agent)" view — frames stream in as the agent drives the app. */
+  agentPreview: AgentPreviewState;
   panels: PanelVisibility;
   /**
    * Which workspace surface is shown: "builder" (Chat + big live Preview, the
@@ -630,6 +658,24 @@ interface State {
   openFile(path: string): void;
   closeOpenFile(path: string): void;
   setEditorTab(tab: string): void;
+  /** Append a streamed interaction frame (from an `agent_preview_frame` event). */
+  addAgentPreviewFrame(frame: {
+    call_id: string;
+    seq: number;
+    label: string;
+    ok: boolean;
+    detail?: string;
+    url: string;
+    image: string;
+    mime: string;
+    title?: string;
+    done?: boolean;
+    flow_name?: string;
+  }): void;
+  /** Reset the live view (e.g. when leaving a project). */
+  clearAgentPreview(): void;
+  /** Clear the "new frames" badge once the user opens the Preview (Agent) tab. */
+  markAgentPreviewSeen(): void;
   togglePanel(name: keyof PanelVisibility): void;
   setPanel(name: keyof PanelVisibility, value: boolean): void;
   /** Restore default panel visibility (used by "Reset layout"). */
@@ -669,6 +715,16 @@ const resetIds = () => {
 
 export const fileTabId = (path: string): string => `file:${path}`;
 export const previewTabId = (serverId: string): string => `preview:${serverId}`;
+/** Fixed id for the single live "Preview (Agent)" tab (P2). */
+export const AGENT_PREVIEW_TAB = "agent-preview";
+
+const emptyAgentPreview = (): AgentPreviewState => ({
+  callId: null,
+  flowName: null,
+  frames: [],
+  active: false,
+  unseen: false,
+});
 
 export const useStore = create<State>((set, get) => ({
   connected: false,
@@ -698,6 +754,7 @@ export const useStore = create<State>((set, get) => ({
   previews: [],
   openFiles: [],
   editorTab: "",
+  agentPreview: emptyAgentPreview(),
   // Files panel defaults ON: a builder shell with no visible file tree on
   // first paint feels empty even when the project has hundreds of files.
   // Terminal stays opt-in (it's currently a log viewer, not a real shell).
@@ -1033,7 +1090,61 @@ export const useStore = create<State>((set, get) => ({
       }
       return { openFiles, editorTab };
     }),
-  setEditorTab: (tab) => set({ editorTab: tab }),
+  setEditorTab: (tab) =>
+    set((s) =>
+      // Opening the agent tab also clears its "new frames" badge.
+      tab === AGENT_PREVIEW_TAB && s.agentPreview.unseen
+        ? { editorTab: tab, agentPreview: { ...s.agentPreview, unseen: false } }
+        : { editorTab: tab },
+    ),
+
+  addAgentPreviewFrame: (frame) =>
+    set((s) => {
+      const cur = s.agentPreview;
+      // A new run starts when the call_id changes, or a fresh seq-0 frame lands
+      // after the previous run finished (each interact_preview / run_flow run
+      // numbers its frames from 0). Within a run we append; the final `done`
+      // frame just flips `active` off.
+      const isNewRun = frame.call_id !== cur.callId || (frame.seq === 0 && !cur.active);
+      const f: AgentPreviewFrame = {
+        seq: frame.seq,
+        label: frame.label,
+        ok: frame.ok,
+        detail: frame.detail,
+        url: frame.url,
+        image: frame.image,
+        mime: frame.mime,
+        title: frame.title,
+      };
+      const next = isNewRun ? [f] : [...cur.frames, f];
+      // Cap retained frames so a long flow can't grow the store unbounded — keep
+      // the most recent 60 (each frame is tens of KB of base64).
+      const frames = next.length > 60 ? next.slice(next.length - 60) : next;
+      const onTab = s.editorTab === AGENT_PREVIEW_TAB;
+      // Take over the surface like a screen-share when a run starts — unless the
+      // user is actively editing a file (don't yank them out of code). If they're
+      // on a preview/agent tab or nothing's open, switch to the live view.
+      const takeOver =
+        isNewRun && (s.editorTab === "" || s.editorTab.startsWith("preview:") || onTab);
+      const willBeOnTab = onTab || takeOver;
+      return {
+        agentPreview: {
+          callId: frame.call_id,
+          flowName: frame.flow_name ?? null,
+          frames,
+          active: !frame.done,
+          unseen: willBeOnTab ? false : true,
+        },
+        ...(takeOver ? { editorTab: AGENT_PREVIEW_TAB } : {}),
+      };
+    }),
+
+  clearAgentPreview: () => set({ agentPreview: emptyAgentPreview() }),
+
+  markAgentPreviewSeen: () =>
+    set((s) =>
+      s.agentPreview.unseen ? { agentPreview: { ...s.agentPreview, unseen: false } } : {},
+    ),
 
   togglePanel: (name) =>
     set((s) => {
@@ -1151,6 +1262,7 @@ export const useStore = create<State>((set, get) => ({
       previews: [],
       openFiles: [],
       editorTab: "",
+      agentPreview: emptyAgentPreview(),
       // panels + view intentionally omitted — both are account-wide layout prefs
       // persisted to localStorage; a project switch must not reset the user's
       // open/closed panel choice (UI/UX audit §B) or their Builder/Code view.

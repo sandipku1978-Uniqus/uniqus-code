@@ -120,10 +120,10 @@ export default function SkillsModal({
     else onClose();
   };
 
-  // One design pack active at a time — the API supports append, but stacking
-  // packs ("retro pixel" + "liquid glass") produces contradictory guidance
-  // and was confusing in the UI. The skills file is still freeform; you can
-  // hand-edit it to mix concepts.
+  // "Use as starter": load a curated template into THIS project's skills file
+  // editor (replace semantics). Distinct from attaching library skills — this
+  // seeds the per-project override file itself. One starter at a time; the file
+  // stays freeform, so you can hand-edit it afterwards to mix concepts.
   const applyPack = (id: string) => {
     if (packBusy) return;
     // Confirm before clobbering a non-empty editor buffer (§D).
@@ -160,8 +160,8 @@ export default function SkillsModal({
     setUndoBuffer(null);
   };
 
-  // A pack is "active" when its body header (`# Design: <Name>`) is present in
-  // the current skills.md. Cheap, robust, doesn't require backend changes.
+  // A starter is "in file" when its body header (`# Design: <Name>`) is present
+  // in the current skills.md. Cheap, robust, doesn't require backend changes.
   const activePackId = (() => {
     if (!content) return null;
     for (const p of packs) {
@@ -194,7 +194,7 @@ export default function SkillsModal({
               error
             ) : undoBuffer !== null ? (
               <>
-                Pack applied ·{" "}
+                Starter loaded ·{" "}
                 <button
                   type="button"
                   onClick={undoPack}
@@ -266,9 +266,11 @@ export default function SkillsModal({
             <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 8, color: "var(--text-primary)" }}>
               Attach reusable skills
             </div>
-            <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10 }}>
-              From your Skills library. Attached skills steer the agent on top of
-              this file. Manage them in the Skills tab.
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10, lineHeight: 1.5 }}>
+              From your Skills library. Attached skills are injected{" "}
+              <strong style={{ color: "var(--text-primary)", fontWeight: 600 }}>before</strong> this
+              project&apos;s skills file, so they set baselines this file can then refine. Manage them in
+              the Skills tab.
             </div>
             <div style={{ display: "grid", gap: 6 }}>
               {library.map((sk) => {
@@ -284,7 +286,7 @@ export default function SkillsModal({
                       borderRadius: 6,
                       padding: "8px 10px",
                       cursor: attachBusy ? "default" : "pointer",
-                      background: on ? "rgba(178,30,125,0.08)" : undefined,
+                      background: on ? "color-mix(in srgb, var(--brand-magenta) 9%, var(--bg-surface))" : undefined,
                     }}
                   >
                     <input
@@ -310,75 +312,90 @@ export default function SkillsModal({
             </div>
           </div>
         )}
-        <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 8, color: "var(--text-primary)" }}>
-          Curated design packs
-        </div>
-        <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10 }}>
-          Pick one. Applying replaces the current Skills file with that
-          pack&apos;s body — you can hand-edit afterwards.
-        </div>
-        <div style={{ display: "grid", gap: 8 }}>
-          {packs.map((p) => {
-            const isActive = activePackId === p.id;
-            return (
-              <div
-                key={p.id}
-                style={{
-                  border: isActive
-                    ? "1px solid var(--accent)"
-                    : "1px solid var(--border-default)",
-                  borderRadius: 6,
-                  padding: 10,
-                  background: isActive ? "rgba(178,30,125,0.08)" : undefined,
-                }}
-              >
+        <div
+          style={{
+            borderTop: "1px solid var(--border-default)",
+            marginTop: 16,
+            paddingTop: 16,
+          }}
+        >
+          <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 8, color: "var(--text-primary)" }}>
+            Start this file from a template
+          </div>
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10, lineHeight: 1.5 }}>
+            A different layer from attaching: each replaces{" "}
+            <strong style={{ color: "var(--text-primary)", fontWeight: 600 }}>this project&apos;s</strong>{" "}
+            skills file with a curated starter you then hand-edit. Loads into the editor — nothing
+            is saved until you click Save, and you can undo.
+          </div>
+          <div style={{ display: "grid", gap: 8 }}>
+            {packs.map((p) => {
+              const isActive = activePackId === p.id;
+              return (
                 <div
+                  key={p.id}
                   style={{
-                    fontSize: 12,
-                    fontWeight: 600,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
+                    border: isActive
+                      ? "1px solid var(--accent)"
+                      : "1px solid var(--border-default)",
+                    borderRadius: "var(--radius-sm)",
+                    padding: 10,
+                    background: isActive ? "color-mix(in srgb, var(--brand-magenta) 9%, var(--bg-surface))" : undefined,
                   }}
                 >
-                  {p.name}
-                  {isActive && (
-                    <span
-                      style={{
-                        fontSize: 10,
-                        color: "var(--accent)",
-                        border: "1px solid var(--accent)",
-                        borderRadius: 3,
-                        padding: "0 4px",
-                        textTransform: "uppercase",
-                        letterSpacing: 0.5,
-                      }}
-                    >
-                      Active
-                    </span>
-                  )}
-                </div>
-                <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>
-                  {p.summary}
-                </div>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <button
-                    onClick={() => applyPack(p.id)}
-                    disabled={!!packBusy || isActive}
-                    className="btn-secondary"
-                    style={{ padding: "3px 10px", fontSize: 11 }}
-                    title={
-                      isActive
-                        ? `${p.name} is already active`
-                        : `Apply ${p.name} (replaces current Skills)`
-                    }
+                  <div
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 600,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      color: "var(--text-primary)",
+                    }}
                   >
-                    {isActive ? "Active" : packBusy === p.id ? "Applying…" : "Apply"}
-                  </button>
+                    {p.name}
+                    {isActive && (
+                      <span
+                        style={{
+                          fontSize: 10,
+                          color: "var(--accent)",
+                          border: "1px solid var(--accent)",
+                          borderRadius: 3,
+                          padding: "0 4px",
+                          textTransform: "uppercase",
+                          letterSpacing: 0.5,
+                        }}
+                      >
+                        In file
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>
+                    {p.summary}
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button
+                      onClick={() => applyPack(p.id)}
+                      disabled={!!packBusy || isActive}
+                      className="btn-secondary"
+                      style={{ padding: "3px 10px", fontSize: 11 }}
+                      title={
+                        isActive
+                          ? `${p.name} is already in this Skills file`
+                          : `Replace this project's Skills file with the ${p.name} starter`
+                      }
+                    >
+                      {isActive
+                        ? "In file"
+                        : packBusy === p.id
+                          ? "Loading…"
+                          : "Use as starter"}
+                    </button>
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
       </div>
     </Modal>
@@ -421,7 +438,7 @@ export default function SkillsModal({
 
     {confirmPack && (
       <Modal
-        title="Replace your Skills?"
+        title="Replace this project's Skills file?"
         width={460}
         onClose={() => setConfirmPack(null)}
         footer={
@@ -440,17 +457,17 @@ export default function SkillsModal({
                 className="btn-primary"
                 onClick={() => applyPackNow(confirmPack)}
               >
-                Replace
+                Replace with starter
               </button>
             </div>
           </>
         }
       >
         <p style={{ margin: 0, fontSize: 13, color: "var(--text-dim)" }}>
-          Applying the{" "}
-          <strong>{packs.find((p) => p.id === confirmPack)?.name ?? "selected"}</strong> pack
-          overwrites everything currently in the editor. You can undo it right after, and
-          nothing is saved until you click Save.
+          The{" "}
+          <strong>{packs.find((p) => p.id === confirmPack)?.name ?? "selected"}</strong> starter
+          overwrites everything currently in this project&apos;s Skills file editor. You can undo
+          it right after, and nothing is saved until you click Save.
         </p>
       </Modal>
     )}

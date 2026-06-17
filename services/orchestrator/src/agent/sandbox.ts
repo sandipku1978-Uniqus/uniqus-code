@@ -118,6 +118,32 @@ export async function writeFile(sandbox: Sandbox, p: string, content: string): P
   await fs.writeFile(full, content, "utf-8");
 }
 
+/**
+ * Binary-safe sibling of writeFile (e.g. a generated image). In Firecracker mode
+ * the file is pushed into the VM (the authoritative copy the dev server serves)
+ * AND mirrored host-side so the file tree / storage sync still see it.
+ */
+export async function writeFileBinary(
+  sandbox: Sandbox,
+  p: string,
+  content: Buffer,
+): Promise<void> {
+  if (sandbox.vm) {
+    await fcAgent.pushFile(sandbox.vm, p, content);
+    try {
+      const full = resolvePath(sandbox, p);
+      await fs.mkdir(path.dirname(full), { recursive: true });
+      await fs.writeFile(full, content);
+    } catch (err) {
+      console.error(`[sandbox] host mirror failed for ${p}:`, err);
+    }
+    return;
+  }
+  const full = resolvePath(sandbox, p);
+  await fs.mkdir(path.dirname(full), { recursive: true });
+  await fs.writeFile(full, content);
+}
+
 export async function editFile(
   sandbox: Sandbox,
   p: string,

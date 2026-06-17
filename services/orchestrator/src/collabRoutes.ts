@@ -4,6 +4,8 @@ import { audit } from "./db/audit.js";
 import * as members from "./db/members.js";
 import * as comments from "./db/comments.js";
 import * as tasks from "./db/agentTasks.js";
+import * as flows from "./db/flows.js";
+import type { FlowStep } from "@uniqus/api-types";
 
 /**
  * Collaboration, org/RBAC, comments, and durable-task routes (P3.1/P3.2/P3.4/
@@ -185,6 +187,51 @@ export async function handleCollabRoute(
         return (json(res, 200, { ok: true }), true);
       }
       return (json(res, 400, { error: "only status:canceled is accepted here" }), true);
+    }
+  }
+
+  // ── Saved smoke-flows (P2.4) ─────────────────────────────────────────────
+  // CRUD only; the live-streaming `/flows/:id/run` replay is handled in
+  // server.ts (it needs the sandbox + broadcast plumbing). The regex's trailing
+  // `$` means `/flows/<id>/run` falls through to there rather than matching here.
+  const fm = url.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/flows(?:\/([0-9a-fA-F-]{8,}))?$/);
+  if (fm) {
+    const projectId = fm[1];
+    const flowId = fm[2];
+    if (method === "GET" && !flowId) {
+      if (!(await requireProjectRole(projectId, "viewer"))) return true;
+      json(res, 200, { flows: await flows.listFlows(projectId) });
+      return true;
+    }
+    if (method === "POST" && !flowId) {
+      if (!(await requireProjectRole(projectId, "editor"))) return true;
+      const body = await readJsonBody<{
+        name?: string;
+        description?: string;
+        steps?: FlowStep[];
+        start_path?: string;
+      }>(req);
+      const name = (body.name ?? "").trim();
+      if (!name) return (json(res, 400, { error: "name is required" }), true);
+      if (!Array.isArray(body.steps) || body.steps.length === 0) {
+        return (json(res, 400, { error: "steps must be a non-empty array" }), true);
+      }
+      const flow = await flows.upsertFlow({
+        projectId,
+        createdBy: user.id,
+        name,
+        description: body.description ?? null,
+        steps: body.steps,
+        startPath: body.start_path ?? null,
+      });
+      json(res, 200, { flow });
+      return true;
+    }
+    if (method === "DELETE" && flowId) {
+      if (!(await requireProjectRole(projectId, "editor"))) return true;
+      await flows.deleteFlow(projectId, flowId);
+      json(res, 200, { ok: true });
+      return true;
     }
   }
 

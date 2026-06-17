@@ -742,6 +742,36 @@ export type ServerEvent =
       lines_added?: number;
       lines_removed?: number;
     }
+  | {
+      /**
+       * P2 live "Preview (Agent)" view — one frame per step as the agent (or a
+       * one-click smoke-flow replay) drives the running app via interact_preview.
+       * The web renders these in the dedicated "Preview (Agent)" tab so the user
+       * watches the agent operate the browser in near-real-time, like a
+       * screen-share (Claude-in-Chrome / Antigravity feel) — instead of a single
+       * opaque "Interact Preview" tool row. `image` is a base64 JPEG (no `data:`
+       * prefix). `call_id` ties a frame stream together: the originating
+       * interact_preview tool-call id for agent runs, or the flow id for a UI
+       * replay. The final frame of a run carries `done: true`.
+       */
+      type: "agent_preview_frame";
+      call_id: string;
+      /** 0-based frame index within this run. */
+      seq: number;
+      /** Human caption for the step, e.g. "Opened /login" or "click #submit". */
+      label: string;
+      ok: boolean;
+      detail?: string;
+      url: string;
+      image: string;
+      mime: string;
+      /** Page <title> at capture time, when known. */
+      title?: string;
+      /** True on the last frame of the run. */
+      done?: boolean;
+      /** Set on a saved-flow replay so the UI can caption "Replaying <name>". */
+      flow_name?: string;
+    }
   | { type: "plan_proposed"; plan: Plan }
   | { type: "plan_running" }
   | { type: "tree_listing"; entries: TreeEntry[] }
@@ -1123,6 +1153,64 @@ export interface CheckpointArtifact {
   summary: string | null;
   data: Record<string, unknown>;
   created_at: string;
+}
+
+/**
+ * One step of a saved smoke-flow (P2.4) — the exact action vocabulary the
+ * agent's `interact_preview` tool drives. Stored as `project_flows.steps`
+ * (jsonb) and replayed verbatim through the same Playwright path, so a saved
+ * flow and a live agent interaction are the same shape.
+ */
+export interface FlowStep {
+  type:
+    | "navigate"
+    | "click"
+    | "type"
+    | "fill"
+    | "select"
+    | "press"
+    | "scroll"
+    | "wait_for_text"
+    | "wait"
+    | "assert_text"
+    | "assert_url"
+    | "assert_visible"
+    | "screenshot";
+  /** CSS selector for click/type/fill/select/press/assert_visible. */
+  selector?: string;
+  /** Text to type/select, key to press, text/url to assert or wait for. */
+  value?: string;
+  /** Absolute URL or same-origin sub-path for navigate. */
+  url?: string;
+  direction?: "up" | "down";
+  pixels?: number;
+  timeout_ms?: number;
+}
+
+export type FlowRunStatus = "pass" | "fail" | "error";
+
+/**
+ * A saved, replayable smoke-flow (P2.4) — e.g. "create an invoice and mark it
+ * paid". The agent records one after building a feature (`save_flow`) and
+ * replays it after later changes (`run_flow`); the user can also replay it
+ * one-click from the Preview (Agent) tab. The `last_*` fields capture the most
+ * recent replay as a compact evidence card ("Uniqus tried the app — here's what
+ * it checked"), not a mandatory gate.
+ */
+export interface ProjectFlow {
+  id: string;
+  project_id: string;
+  created_by: string | null;
+  name: string;
+  description: string | null;
+  steps: FlowStep[];
+  /** Optional sub-path to start the flow at (resolved against the preview origin). */
+  start_path: string | null;
+  last_status: FlowRunStatus | null;
+  last_run_at: string | null;
+  last_summary: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 /** Audit event kinds exposed to the admin audit UI (P10.3). Mirrors db AuditKind. */

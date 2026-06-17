@@ -33,10 +33,10 @@ export default async function LoginPage() {
         <GuestLoginActions isExistingGuest={isExistingGuest} />
         <div style={{ textAlign: "center", marginTop: 14 }}>
           <a
-            href="/guide"
+            href="/docs"
             style={{ fontSize: 12, color: "var(--text-muted)", textDecoration: "none" }}
           >
-            New here? Read the guide →
+            New here? Read the docs →
           </a>
         </div>
         <div className="footer">

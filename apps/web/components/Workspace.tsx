@@ -9,20 +9,23 @@ import {
   PanelResizeHandle,
 } from "react-resizable-panels";
 import { connect, disconnect, send } from "@/lib/ws-client";
-import { useStore, previewTabId, fileTabId } from "@/lib/store";
+import { useStore, previewTabId, fileTabId, AGENT_PREVIEW_TAB } from "@/lib/store";
 import { useIsMobile } from "@/lib/use-is-mobile";
-import { runProjectApi } from "@/lib/api";
+import { runProjectApi, switchProjectBranchApi } from "@/lib/api";
 import { toast } from "@/lib/toast";
 import ChatPanel from "./ChatPanel";
 import FileExplorer from "./FileExplorer";
 import EditorPreviewArea from "./EditorPreviewArea";
 import PreviewPanel from "./PreviewPanel";
+import AgentPreviewPanel from "./AgentPreviewPanel";
 import TerminalPanel from "./TerminalPanel";
 import DeployButton from "./DeployButton";
 import BrandLockup from "./BrandLockup";
 import GithubRepoButton from "./GithubRepoButton";
 import Modal from "./Modal";
 import MembersView from "./MembersView";
+import CommentsView from "./CommentsView";
+import TasksView from "./TasksView";
 import GuestBanner from "./GuestBanner";
 import SkillsModal from "./SkillsModal";
 import SecretsModal from "./SecretsModal";
@@ -47,6 +50,7 @@ export default function Workspace({
   const view = useStore((s) => s.view);
   const setView = useStore((s) => s.setView);
   const project = useStore((s) => s.project);
+  const setProject = useStore((s) => s.setProject);
   const reset = useStore((s) => s.reset);
   const lastSyncedAt = useStore((s) => s.lastSyncedAt);
   // Real conversation history — anything that isn't a `system` item. The
@@ -82,6 +86,8 @@ export default function Workspace({
   const [secretsOpen, setSecretsOpen] = useState(false);
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
+  const [commentsOpen, setCommentsOpen] = useState(false);
+  const [tasksOpen, setTasksOpen] = useState(false);
   // Bumped to force a clean PanelGroup remount after "Reset layout" clears the
   // saved drag sizes (UI/UX audit §B).
   const [layoutKey, setLayoutKey] = useState(0);
@@ -374,6 +380,37 @@ export default function Workspace({
           <span>Members</span>
         </button>
       )}
+      {!isGuest && (
+        <button
+          onClick={() => {
+            setCommentsOpen(true);
+            setOverflowOpen(false);
+          }}
+          className="toggle-btn"
+          title="Read and leave review comments on this project"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+          </svg>
+          <span>Comments</span>
+        </button>
+      )}
+      {!isGuest && (
+        <button
+          onClick={() => {
+            setTasksOpen(true);
+            setOverflowOpen(false);
+          }}
+          className="toggle-btn"
+          title="Queue and track durable agent tasks for this project"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M9 11l3 3L22 4" />
+            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+          </svg>
+          <span>Tasks</span>
+        </button>
+      )}
     </>
   );
 
@@ -469,15 +506,13 @@ export default function Workspace({
           </Link>
           {/* Git branch is developer jargon — only shown in Code view. */}
           {view === "code" && (
-            <span className="branch">
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="6" y1="3" x2="6" y2="15" />
-                <circle cx="18" cy="6" r="3" />
-                <circle cx="6" cy="18" r="3" />
-                <path d="M18 9a9 9 0 0 1-9 9" />
-              </svg>
-              {project?.linked_branch ?? "main"}
-            </span>
+            <BranchChip
+              projectId={projectId}
+              branch={project?.linked_branch ?? "main"}
+              onSwitched={(linked_branch) => {
+                if (project) setProject({ ...project, linked_branch });
+              }}
+            />
           )}
         </div>
 
@@ -546,10 +581,15 @@ export default function Workspace({
               {renderOverflow(secondaryActionsRest)}
             </>
           ) : (
-            /* Desktop Code: the full developer cluster, inline (unchanged). */
+            /* Desktop Code: keep inline only the controls a developer flips
+               constantly — Deploy plus the Files & Logs panel toggles. The
+               project tools (GitHub/Skills/Secrets/Rewind/Members), Reset
+               layout, and Sign out fold into the same ⋯ menu the Builder view
+               uses, so the developer topbar stays uncluttered and the two
+               views stay consistent. (renderOverflow appends Reset layout +
+               Sign out itself.) */
             <>
               {deployAction}
-              {secondaryActionsRest}
               <ToggleButton
                 on={panels.files}
                 onClick={() => togglePanel("files")}
@@ -571,32 +611,7 @@ export default function Workspace({
                   </svg>
                 }
               />
-              <button
-                type="button"
-                onClick={resetLayout}
-                className="icon-btn"
-                title="Reset layout (panel sizes + visibility)"
-                aria-label="Reset layout"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <polyline points="23 4 23 10 17 10" />
-                  <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-                </svg>
-              </button>
-              <span style={{ width: 1, height: 18, background: "var(--border-default)" }} />
-              <a
-                href={signOutUrl}
-                className="icon-btn"
-                title="Sign out"
-                aria-label="Sign out"
-                style={{ textDecoration: "none" }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-                  <polyline points="16 17 21 12 16 7" />
-                  <line x1="21" y1="12" x2="9" y2="12" />
-                </svg>
-              </a>
+              {renderOverflow(secondaryActionsRest)}
             </>
           )}
         </div>
@@ -830,31 +845,40 @@ export default function Workspace({
           <MembersView projectId={projectId} />
         </Modal>
       )}
+      {commentsOpen && (
+        <Modal
+          title="Comments"
+          subtitle="Leave review comments scoped to an element, file, checkpoint, PR, or the whole project."
+          onClose={() => setCommentsOpen(false)}
+        >
+          <CommentsView projectId={projectId} />
+        </Modal>
+      )}
+      {tasksOpen && (
+        <Modal
+          title="Agent tasks"
+          subtitle="Queue durable tasks for the agent and track their status."
+          onClose={() => setTasksOpen(false)}
+        >
+          <TasksView projectId={projectId} />
+        </Modal>
+      )}
 
       {/* Status bar — Code view only. It's developer plumbing (connection,
           sync state, branch), so Builder hides it; mobile hides it too (the
           bottom tab bar owns the bottom edge). */}
       {!isMobile && view === "code" && (
       <div className="status-bar">
-        <span className="seg">
-          <span
-            style={{
-              width: 7,
-              height: 7,
-              borderRadius: "50%",
-              background: connected
-                ? "var(--conf-high)"
-                : connectionFailed
-                ? "var(--conf-low)"
-                : "var(--text-dim)",
-            }}
-          />
-          {connected
-            ? "online"
-            : connectionFailed
-            ? "connection failed"
-            : "connecting…"}
-          {!connected && connectionFailed && (
+        {/* The always-"online" connection pill was noise (the socket auto-
+            reconnects with backoff). Only surface the connection state when it
+            has actually FAILED — i.e. auto-reconnect gave up — so the manual
+            Retry recovery path is preserved without the steady-state clutter. */}
+        {connectionFailed && (
+          <span className="seg">
+            <span
+              style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--conf-low)" }}
+            />
+            connection lost
             <button
               type="button"
               onClick={() => connect(projectId, sessionParam)}
@@ -864,8 +888,8 @@ export default function Workspace({
             >
               Retry
             </button>
-          )}
-        </span>
+          </span>
+        )}
         <span className="seg">{project?.name ?? "—"}</span>
         <span className="seg" title="Files synced to Supabase Storage">
           {lastSyncedAt ? `synced ${relativeAge(lastSyncedAt)}` : "not synced yet"}
@@ -932,6 +956,194 @@ function useRunProject(projectId: string) {
   return { run, busy };
 }
 
+/**
+ * Interactive linked-branch chip (P1.2). The chip in the Code-view topbar used
+ * to be a read-only display of the tracked branch; now it's a button that opens
+ * a small inline popover with a free-text branch input + Save. Save calls
+ * switchProjectBranchApi and, on success, updates the store's
+ * project.linked_branch (via onSwitched) and toasts. A "pick from repo branches"
+ * list is intentionally out of scope (no list endpoint yet) — free-text is the
+ * shippable version.
+ */
+function BranchChip({
+  projectId,
+  branch,
+  onSwitched,
+}: {
+  projectId: string;
+  branch: string;
+  onSwitched: (linkedBranch: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState(branch);
+  const [busy, setBusy] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Re-seed the field with the current branch each time the popover opens, and
+  // move focus into it.
+  useEffect(() => {
+    if (open) {
+      setValue(branch);
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [open, branch]);
+
+  const close = useCallback(() => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  }, []);
+
+  async function save() {
+    const next = value.trim();
+    if (!next || busy) return;
+    if (next === branch) {
+      setOpen(false);
+      return;
+    }
+    setBusy(true);
+    try {
+      const { linked_branch } = await switchProjectBranchApi(projectId, next);
+      onSwitched(linked_branch);
+      toast.success(`Switched to ${linked_branch}`);
+      setOpen(false);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Couldn't switch branch");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <span
+      style={{ position: "relative", display: "inline-flex" }}
+      onKeyDown={(e) => {
+        if (e.key === "Escape" && open) {
+          e.stopPropagation();
+          close();
+        }
+      }}
+    >
+      <button
+        ref={triggerRef}
+        type="button"
+        className="branch"
+        onClick={() => setOpen((v) => !v)}
+        title="Change the git branch this project tracks"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        style={{
+          border: "1px solid var(--border-default)",
+          cursor: "pointer",
+        }}
+      >
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <line x1="6" y1="3" x2="6" y2="15" />
+          <circle cx="18" cy="6" r="3" />
+          <circle cx="6" cy="18" r="3" />
+          <path d="M18 9a9 9 0 0 1-9 9" />
+        </svg>
+        {branch}
+      </button>
+
+      {open && (
+        <>
+          {/* Click-away backdrop. */}
+          <button
+            type="button"
+            aria-label="Close branch editor"
+            tabIndex={-1}
+            onClick={close}
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "transparent",
+              border: "none",
+              cursor: "default",
+              zIndex: 40,
+            }}
+          />
+          <div
+            role="dialog"
+            aria-label="Switch branch"
+            style={{
+              position: "absolute",
+              top: "calc(100% + 6px)",
+              left: 0,
+              zIndex: 41,
+              minWidth: 248,
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+              padding: 12,
+              background: "var(--bg-elev)",
+              border: "1px solid var(--border-default)",
+              borderRadius: "var(--radius-md)",
+              boxShadow: "0 8px 24px rgba(0, 0, 0, 0.35)",
+            }}
+          >
+            <label
+              htmlFor="branch-switch-input"
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "var(--fs-2xs)",
+                textTransform: "uppercase",
+                letterSpacing: "0.08em",
+                color: "var(--text-dim)",
+              }}
+            >
+              Linked branch
+            </label>
+            <input
+              id="branch-switch-input"
+              ref={inputRef}
+              type="text"
+              className="ui-input"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void save();
+                }
+              }}
+              placeholder="main"
+              aria-label="Branch name"
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
+              style={{
+                width: "100%",
+                background: "var(--bg-surface)",
+                border: "1px solid var(--border-default)",
+                borderRadius: "var(--radius-md)",
+                color: "var(--text-primary)",
+                fontFamily: "var(--font-mono)",
+                fontSize: "var(--fs-sm)",
+                padding: "7px 9px",
+              }}
+            />
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button type="button" className="btn-ghost" onClick={close} disabled={busy}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => void save()}
+                disabled={busy || !value.trim() || value.trim() === branch}
+              >
+                {busy ? "Switching…" : "Save"}
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </span>
+  );
+}
+
 function RunButton({ projectId }: { projectId: string }) {
   const { run, busy } = useRunProject(projectId);
 
@@ -969,6 +1181,10 @@ function BuilderStage({ projectId }: { projectId: string }) {
   const previews = useStore((s) => s.previews);
   const editorTab = useStore((s) => s.editorTab);
   const setEditorTab = useStore((s) => s.setEditorTab);
+  // Narrow selectors so streamed frames don't re-render the big stage when it's
+  // showing the App (only AgentPreviewPanel, mounted below, needs each frame).
+  const agentHasFrames = useStore((s) => s.agentPreview.frames.length > 0);
+  const agentActive = useStore((s) => s.agentPreview.active);
   const { run, busy } = useRunProject(projectId);
 
   // Prefer the preview the shared editorTab points at — addPreview sets it to
@@ -980,7 +1196,15 @@ function BuilderStage({ projectId }: { projectId: string }) {
     previews[0] ||
     null;
 
-  if (!active) {
+  // The live "Preview (Agent)" surface is available once the agent has produced
+  // any interaction frames (or a run is mid-flight). When a run starts the store
+  // flips editorTab to it, so the builder stage takes over like a screen-share.
+  const showAgent = agentHasFrames || agentActive;
+  const onAgent = editorTab === AGENT_PREVIEW_TAB && showAgent;
+
+  // Empty state only when there's nothing to show at all — neither a running
+  // preview nor an agent interaction to replay.
+  if (!active && !onAgent) {
     return (
       <div className="builder-stage">
         <div className="builder-empty">
@@ -1008,30 +1232,55 @@ function BuilderStage({ projectId }: { projectId: string }) {
 
   return (
     <div className="builder-stage">
-      {previews.length > 1 && (
+      {(previews.length > 1 || showAgent) && (
         <div
           className="builder-preview-bar"
           role="tablist"
-          aria-label="Running previews"
+          aria-label="Preview surfaces"
         >
           {previews.map((p) => (
             <button
               key={p.id}
               type="button"
               role="tab"
-              aria-selected={p.id === active.id}
+              aria-selected={!onAgent && p.id === active?.id}
               className="toggle-btn"
-              data-on={p.id === active.id}
+              data-on={!onAgent && p.id === active?.id}
               onClick={() => setEditorTab(previewTabId(p.id))}
               title={`Show the app running on port ${p.port}`}
             >
               :{p.port}
             </button>
           ))}
+          {showAgent && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={onAgent}
+              className="toggle-btn"
+              data-on={onAgent}
+              onClick={() => setEditorTab(AGENT_PREVIEW_TAB)}
+              title="Watch the agent interact with your app, and replay saved flows"
+              style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+            >
+              Agent
+              {agentActive && (
+                <span
+                  style={{
+                    width: 7,
+                    height: 7,
+                    borderRadius: "50%",
+                    background: "var(--danger, #d9534f)",
+                    animation: "pulse-dot 1.4s ease-in-out infinite",
+                  }}
+                />
+              )}
+            </button>
+          )}
         </div>
       )}
       <ErrorBoundary label="preview">
-        <PreviewPanel server={active} />
+        {onAgent ? <AgentPreviewPanel /> : active ? <PreviewPanel server={active} /> : null}
       </ErrorBoundary>
     </div>
   );

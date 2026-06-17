@@ -40,6 +40,9 @@ import {
   DEFAULT_DESIGN_TOKENS,
 } from "@uniqus/api-types";
 import { runAgentLoop } from "./agent/loop.js";
+import { runInteractPreview, type InteractAction } from "./agent/interact.js";
+import { getFlow, setFlowRunResult } from "./db/flows.js";
+import { recordArtifact } from "./db/artifacts.js";
 import {
   parseSelectedElement,
   formatSelectedElementBlock,
@@ -154,11 +157,17 @@ import {
 import { extractText } from "./agent/knowledgeExtract.js";
 import { loadHistory, appendMessage, clearHistory } from "./db/messages.js";
 import {
+  claimNextQueuedTask,
+  updateAgentTask,
+} from "./db/agentTasks.js";
+import {
   recordUsageEvent,
   getUsageAggregate,
   getDailyUsageByModel,
   getUsageByProjectByModel,
+  orgMonthToDateSpendUsd,
 } from "./db/usage.js";
+import { getOrganization, getProjectOrgId } from "./db/members.js";
 import {
   ensureDefaultSession,
   listSessions,
@@ -452,6 +461,10 @@ async function main(): Promise<void> {
   // Firecracker is off.
   startGuestSweeper(sandboxDirFor);
   startShareTokenSweeper();
+  // Durable agent-task worker (P8.1). Dark by default — logs its enabled/disabled
+  // state and only drains the queue when UNIQUS_TASK_WORKER=1 (see startTaskWorker
+  // for the P3.3 concurrency-safety rationale).
+  startTaskWorker();
 
   const httpServer = createServer((req, res) => {
     handleHttp(req, res).catch((err) => {
@@ -885,7 +898,99 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
 
   // Collaboration / org-RBAC / comments / durable-task routes (P3/P8). Returns
   // true once it has answered; falls through to the rest of the router otherwise.
+  // (Flow CRUD lives there; the live-streaming `/run` below stays here because it
+  // needs the sandbox + broadcast plumbing.)
   if (await handleCollabRoute(req, res, user, { json, readJsonBody })) return;
+
+  // ── Saved-flow replay (P2.4) ───────────────────────────────────────────────
+  // One-click replay of a saved smoke-flow from the Preview (Agent) tab. Drives
+  // the flow's steps through the same Playwright path as the agent's run_flow
+  // tool, STREAMING each step as an `agent_preview_frame` to the project so the
+  // user watches the replay live, then returns the structured pass/fail result
+  // and persists it as the flow's evidence card.
+  const flowRunMatch = req.url
+    ?.split("?")[0]
+    .match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/flows\/([0-9a-fA-F-]{8,})\/run$/);
+  if (flowRunMatch && req.method === "POST") {
+    const projectId = flowRunMatch[1];
+    const flowId = flowRunMatch[2];
+    const project = await getProjectForUser(projectId, user.id, "editor");
+    if (!project) return json(res, 404, { error: "project not found" });
+    const flow = await getFlow(projectId, flowId);
+    if (!flow) return json(res, 404, { error: "flow not found" });
+    const body = await readJsonBody<{ server_id?: string; url?: string; path?: string }>(req);
+    if (!body.server_id && !body.url) {
+      return json(res, 400, { error: "server_id or url is required (start the preview first)" });
+    }
+    try {
+      const result = await runInteractPreview({
+        sandboxRoot: sandboxDirFor(projectId),
+        serverId: typeof body.server_id === "string" ? body.server_id : undefined,
+        url: typeof body.url === "string" ? body.url : undefined,
+        pathSuffix: typeof body.path === "string" ? body.path : (flow.start_path ?? undefined),
+        actions: flow.steps as unknown as InteractAction[],
+        onFrame: (frame) =>
+          broadcastToProject(projectId, {
+            type: "agent_preview_frame",
+            call_id: `flow:${flow.id}`,
+            seq: frame.seq,
+            label: frame.label,
+            ok: frame.ok,
+            detail: frame.detail,
+            url: frame.url,
+            image: frame.image,
+            mime: frame.mime,
+            title: frame.title,
+            done: frame.done,
+            flow_name: flow.name,
+          }),
+      });
+      const status: "pass" | "fail" =
+        result.assertion_failures.length > 0 || result.steps.some((s) => !s.ok) ? "fail" : "pass";
+      const summary = `${result.steps.length} step(s), ${result.assertion_failures.length} assertion failure(s), ${result.console_errors.length} console error(s)`;
+      const ranAt = new Date().toISOString();
+      void setFlowRunResult(projectId, flow.id, { status, summary, ranAt });
+      void recordArtifact({
+        projectId,
+        sessionId: null,
+        kind: "flow",
+        summary: `flow "${flow.name}" — ${status} — ${summary}`,
+        data: {
+          flow_id: flow.id,
+          flow_name: flow.name,
+          status,
+          final_url: result.final_url,
+          page_title: result.page_title,
+          screenshot: result.asset_path,
+          steps: result.steps,
+          assertion_failures: result.assertion_failures,
+          console_errors: result.console_errors,
+          failed_requests: result.failed_requests,
+          a11y_issues: result.a11y_issues,
+        },
+      });
+      return json(res, 200, {
+        status,
+        summary,
+        last_run_at: ranAt,
+        final_url: result.final_url,
+        page_title: result.page_title,
+        steps: result.steps,
+        assertion_failures: result.assertion_failures,
+        console_errors: result.console_errors,
+        failed_requests: result.failed_requests,
+        a11y_issues: result.a11y_issues,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      void setFlowRunResult(projectId, flow.id, {
+        status: "error",
+        summary: message.slice(0, 200),
+        ranAt: new Date().toISOString(),
+      });
+      return json(res, 500, { error: message });
+    }
+  }
 
   // Account-wide agent customization (Settings → Custom prompts & default
   // skills). custom_prompt is injected into the agent system prompt every
@@ -4394,6 +4499,17 @@ async function runSession(
 ): Promise<void> {
   const start = Date.now();
   let toolCalls = 0;
+  // Org budget enforcement (P3.5): if this project belongs to an org with a
+  // monthly spend cap that's ALREADY exceeded, abort the turn before the loop
+  // runs — emitted as the same pre-turn error shape the WS handler uses for boot
+  // failures. No org / no cap / under cap ⇒ checkOrgBudget returns null and the
+  // turn proceeds exactly as before. Best-effort: a DB error fails open inside
+  // the helper, never blocking the paid path on a transient lookup failure.
+  const budgetBlock = await checkOrgBudget(projectId);
+  if (budgetBlock) {
+    send({ type: "error", message: budgetBlock, code: "budget_exceeded", retryable: false });
+    return;
+  }
   // BYOK (F7): resolve this account's provider keys (account key preferred, else
   // the platform env key) once per turn. `anthropicKey` flows to planning AND
   // compaction so a BYOK account never silently bills the platform for those.
@@ -4622,10 +4738,35 @@ async function runSession(
     librarySkills,
     knowledgeDocs,
     selectedElement,
+    // GRIPE-9: the dev servers running RIGHT NOW for this project, snapshotted
+    // here (not from replayed history) so the system prompt reflects the live
+    // state. After a reopen with nothing restarted this is empty, which tells
+    // the agent NOT to screenshot / read the log of a server it "remembers"
+    // from an earlier turn.
+    runningServers: listServers(projectId),
     // Per-session so a sibling chat session in the same project doesn't see this
     // turn's todos pop into its Tasks pane (B-11).
     onTodoWrite: (items) =>
       broadcastToSession(projectId, sessionId, { type: "todos_updated", todos: items }),
+    // P2 live "Preview (Agent)" view: each interact_preview / run_flow step
+    // streams a screenshot frame here. Broadcast to the whole project so the
+    // Preview (Agent) tab shows the agent driving the browser in real time,
+    // regardless of which socket is bound.
+    onPreviewFrame: (callId, frame, flowName) =>
+      broadcastToProject(projectId, {
+        type: "agent_preview_frame",
+        call_id: callId,
+        seq: frame.seq,
+        label: frame.label,
+        ok: frame.ok,
+        detail: frame.detail,
+        url: frame.url,
+        image: frame.image,
+        mime: frame.mime,
+        title: frame.title,
+        done: frame.done,
+        flow_name: flowName,
+      }),
     onUsage: emitUsage,
     requestUserAnswer: registerUserAnswer,
     requestPlan,
@@ -4935,6 +5076,242 @@ function classifyError(err: unknown): { code: string; retryable: boolean } {
   if (/max iterations|exceeded max iterations/.test(msg))
     return { code: "max_iterations", retryable: false };
   return { code: "unknown", retryable: false };
+}
+
+/**
+ * Org budget gate (P3.5). Returns a user-facing message when the project's org
+ * has a monthly spend cap that has ALREADY been exceeded this calendar month
+ * (so the turn must be aborted), or `null` when the turn may proceed — which is
+ * the case for the common path: no org, no cap, or month-to-date spend under it.
+ *
+ * Reads the project's org_id directly (it isn't on the typed ProjectRecord) and
+ * only does the spend rollup when there's actually a numeric cap to enforce, so
+ * solo/un-orged projects pay one cheap column read and nothing more. Fails OPEN:
+ * any lookup error returns null so a transient DB hiccup can't wall off a paying
+ * org — orgMonthToDateSpendUsd already degrades to 0 internally, and an org/cap
+ * lookup failure here is treated the same way.
+ */
+async function checkOrgBudget(projectId: string): Promise<string | null> {
+  // org_id is read via a dedicated single-column helper (it isn't on the typed
+  // ProjectRecord); it returns null on a missing column / un-migrated DB too.
+  const orgId = await getProjectOrgId(projectId).catch(() => null);
+  if (!orgId) return null;
+
+  const org = await getOrganization(orgId).catch(() => null);
+  const cap = org?.monthly_budget_usd;
+  // No org row or no cap set (null) ⇒ nothing to enforce.
+  if (cap == null || !(cap > 0)) return null;
+
+  const spent = await orgMonthToDateSpendUsd(orgId).catch(() => 0);
+  if (spent < cap) return null;
+  return (
+    `This team's monthly budget of $${cap.toFixed(2)} has been reached ` +
+    `($${spent.toFixed(2)} spent this month). New agent runs are paused until ` +
+    `the budget is raised or the month resets.`
+  );
+}
+
+// ── Durable task worker (P8.1) ────────────────────────────────────────────────
+
+/** Poll interval for the queue when it was empty last tick. */
+const TASK_WORKER_IDLE_MS = 5_000;
+
+/**
+ * Run ONE claimed agent_task end-to-end through the agent loop: hydrate the
+ * sandbox, boot the VM + ensure deps (mirroring the essential, non-socket parts
+ * of handleConnection/runSession), execute the loop with no-op interactive
+ * hooks, persist the appended messages + a checkpoint + usage, and return a
+ * short result summary. Throws on failure so the caller marks the task failed.
+ *
+ * This deliberately does NOT touch runSession — it's a slimmer, headless twin so
+ * runSession's interactive (socket/plan/ask_user) path stays exactly as is.
+ */
+async function executeAgentTask(task: {
+  id: string;
+  project_id: string;
+  created_by: string | null;
+  title: string;
+  prompt: string;
+}): Promise<string> {
+  const projectId = task.project_id;
+  // The queuing user is the acting user for key resolution + usage attribution.
+  // A task with no creator (system-queued) falls back to empty (env keys, no
+  // per-account usage row owner) rather than failing.
+  const userId = task.created_by ?? "";
+  const sandboxDir = sandboxDirFor(projectId);
+  const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
+
+  // Org budget gate — the same one runSession enforces, so a task can't blow
+  // past a team's cap just because it ran headless.
+  const budgetBlock = await checkOrgBudget(projectId);
+  if (budgetBlock) throw new Error(budgetBlock);
+
+  // 1. Sandbox prep: make sure the dir exists and is hydrated from Storage (a
+  // fresh orchestrator/host has an empty local mirror). Mirrors handleConnection.
+  await fs.mkdir(sandboxDir, { recursive: true });
+  const tracker = getTracker(projectId, sandboxDir);
+  try {
+    await tracker.initialize();
+    if (tracker.isLocalEmpty()) await tracker.hydrateFromStorage();
+  } catch (err) {
+    console.error(`[task ${task.id}] sandbox hydrate failed:`, err);
+  }
+
+  // 2. Boot the VM + install deps if Firecracker is on (the loop runs commands
+  // inside the VM). ensureVm/ensureProjectDeps are idempotent + install-locked.
+  let vmHandle: VmHandle | null = null;
+  if (isFirecrackerEnabled()) {
+    vmHandle = await ensureVm({ projectId, hostSandboxDir: sandboxDir });
+    touchVm(projectId);
+  }
+  await ensureProjectDeps({ rootDir: sandboxDir, vm: vmHandle ?? undefined }, projectId);
+
+  // 3. History: tasks run on the project's default chat session so their work is
+  // visible in the workspace alongside interactive turns.
+  const session = await ensureDefaultSession(projectId);
+  const sessionId = session.id;
+  const history = await loadHistory(projectId, sessionId).catch(() => [] as Anthropic.MessageParam[]);
+
+  // Per-turn enrichment, resolved best-effort (each is optional to the loop).
+  // resolveProviderKeysForUser already swallows its own errors and falls back to
+  // the platform env keys, so it's safe with an empty/unknown userId.
+  const resolvedKeys = await resolveProviderKeysForUser(userId);
+  const anthropicKey = resolvedKeys.anthropic ?? apiKey;
+  const skillsBody = await readSkills(sandboxDir).catch(() => null);
+
+  // 4. Pre-run checkpoint (background, best-effort — never blocks the task).
+  commitCheckpoint(sandboxDir, projectId, `pre-task: ${task.title.slice(0, 80)}`).catch((err) =>
+    console.error(`[task ${task.id}] pre-task checkpoint failed:`, err),
+  );
+
+  const turnMessages: Anthropic.MessageParam[] = [];
+  const start = Date.now();
+  let loopResult: Awaited<ReturnType<typeof runAgentLoop>> | undefined;
+  try {
+    loopResult = await runAgentLoop(task.prompt, {
+      sandbox: { rootDir: sandboxDir, vm: vmHandle ?? undefined },
+      apiKey: anthropicKey,
+      providerKeys: resolvedKeys,
+      projectId,
+      sessionId,
+      messages: history,
+      collectMessages: turnMessages,
+      previewBaseUrl: PREVIEW_BASE_URL,
+      skills: skillsBody,
+      userId: userId || null,
+      thinkingEffort: "medium",
+      // Headless: no socket, no plan/ask_user prompts. Omitting requestPlan /
+      // requestUserAnswer makes those tools no-op for an autonomous task; the
+      // hooks below are pure side-effect-free sinks so nothing streams to a UI.
+    });
+  } finally {
+    // Persist exactly what the turn appended, even on throw (matches runSession's
+    // finally so the DB never diverges from the loaded history).
+    for (const m of turnMessages) {
+      await appendMessage(projectId, sessionId, m).catch((err) =>
+        console.error(`[task ${task.id}] appendMessage failed:`, err),
+      );
+    }
+  }
+  // A throw inside the try propagates past the finally above (skipping this), so
+  // reaching here means the loop returned — loopResult is defined.
+  const result = loopResult!;
+
+  // 5. Sync the resulting files to Storage + a post-run checkpoint so the work
+  // is durable and visible. Best-effort; the task is already done.
+  await tracker.syncChanges().catch((err) => console.error(`[task ${task.id}] sync failed:`, err));
+  commitCheckpoint(sandboxDir, projectId, `task: ${task.title.slice(0, 80)}`).catch((err) =>
+    console.error(`[task ${task.id}] post-task checkpoint failed:`, err),
+  );
+
+  // 6. Record usage for the dashboard rollups (best-effort, like runSession).
+  if (
+    result.usage.inputTokens > 0 ||
+    result.usage.outputTokens > 0 ||
+    result.usage.cacheReadTokens > 0 ||
+    result.usage.cacheCreationTokens > 0
+  ) {
+    void recordUsageEvent({
+      projectId,
+      userId,
+      provider: result.provider,
+      model: result.model,
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+      cacheReadTokens: result.usage.cacheReadTokens,
+      cacheCreationTokens: result.usage.cacheCreationTokens,
+      costUsd: estimateTurnCostUsd(result.model, result.usage),
+      elapsedMs: Date.now() - start,
+    }).catch((err) => console.error(`[task ${task.id}] recordUsageEvent failed:`, err));
+  }
+
+  const changed = result.changedFiles.length;
+  return changed > 0
+    ? `Completed in ${((Date.now() - start) / 1000).toFixed(0)}s · ${changed} file${changed === 1 ? "" : "s"} changed.`
+    : `Completed in ${((Date.now() - start) / 1000).toFixed(0)}s · no file changes.`;
+}
+
+/**
+ * Background loop that drains the durable agent_tasks queue one task at a time.
+ *
+ * GATED OFF by default — only starts when UNIQUS_TASK_WORKER === "1". This is a
+ * real worker an operator turns on under controlled conditions, NOT a stub:
+ * running a task concurrently with an interactive edit on the SAME project's
+ * sandbox is unsafe today because there's no editing-lane lock yet (deferred
+ * P3.3). The env gate is the safe-rollout switch until that lock lands; an
+ * operator enables it only when no interactive editing is happening on the
+ * orchestrator (e.g. a dedicated task-runner instance).
+ *
+ * Hard safety properties: ONE task at a time (claimNextQueuedTask + awaited
+ * execution — no concurrency); every iteration is wrapped in try/catch so the
+ * worker can NEVER crash the orchestrator; on any error the task is marked
+ * `failed` with the message and the loop simply continues to the next one.
+ */
+function startTaskWorker(): void {
+  const enabled = process.env.UNIQUS_TASK_WORKER === "1";
+  console.log(
+    enabled
+      ? "[task-worker] ENABLED (UNIQUS_TASK_WORKER=1) — draining agent_tasks one at a time"
+      : "[task-worker] disabled (set UNIQUS_TASK_WORKER=1 to enable; off by default — no editing-lane lock yet, P3.3)",
+  );
+  if (!enabled) return;
+
+  let stopped = false;
+  const loop = async (): Promise<void> => {
+    while (!stopped) {
+      let claimedId: string | null = null;
+      try {
+        const task = await claimNextQueuedTask();
+        if (!task) {
+          // Queue empty — back off before polling again.
+          await new Promise((r) => setTimeout(r, TASK_WORKER_IDLE_MS));
+          continue;
+        }
+        claimedId = task.id;
+        console.log(`[task-worker] running task ${task.id} (project ${task.project_id.slice(0, 8)})`);
+        const summary = await executeAgentTask(task);
+        await updateAgentTask(task.id, { status: "done", result_summary: summary, error: null });
+        console.log(`[task-worker] task ${task.id} done`);
+      } catch (err) {
+        // A failure must never crash the worker. Mark the claimed task failed
+        // (best-effort) and continue. If we crashed before claiming a task,
+        // there's nothing to mark — just log and keep polling.
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[task-worker] task ${claimedId ?? "(unclaimed)"} failed:`, message);
+        if (claimedId) {
+          await updateAgentTask(claimedId, { status: "failed", error: message }).catch((e) =>
+            console.error(`[task-worker] could not mark task ${claimedId} failed:`, e),
+          );
+        }
+        // Brief pause so a tight, repeatedly-failing condition (e.g. DB down)
+        // doesn't spin the CPU.
+        await new Promise((r) => setTimeout(r, TASK_WORKER_IDLE_MS));
+      }
+    }
+  };
+  // Detach: the worker runs for the process lifetime. Its own try/catch per
+  // iteration means this promise should never reject, but guard anyway.
+  void loop().catch((err) => console.error("[task-worker] loop exited unexpectedly:", err));
 }
 
 /**

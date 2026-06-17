@@ -16,6 +16,7 @@ import DatabasesView from "./DatabasesView";
 import DesignSystemsView from "./DesignSystemsView";
 import SkillsView from "./SkillsView";
 import KnowledgeView from "./KnowledgeView";
+import OrganizationsView from "./OrganizationsView";
 import TemplatesView from "./TemplatesView";
 import { ProjectPreview } from "./UiPreview";
 import Popover from "./Popover";
@@ -25,6 +26,7 @@ import { Skeleton } from "./Skeleton";
 import ModelPicker from "./ModelPicker";
 import MicButton from "./MicButton";
 import { useStore } from "@/lib/store";
+import { toast } from "@/lib/toast";
 import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
 import { PENDING_BRIEF_KEY, draftKeyFor } from "./LandingPrompt";
 import {
@@ -277,6 +279,7 @@ export default function ProjectPicker({
   const setBriefFiles = useStore((s) => s.setBriefFiles);
   const [describeFiles, setDescribeFiles] = useState<File[]>([]);
   const describeFileInputRef = useRef<HTMLInputElement>(null);
+  const zipFileInputRef = useRef<HTMLInputElement>(null);
   const describeTaRef = useRef<HTMLTextAreaElement>(null);
   // Grow the describe box with content up to ~10 lines, then scroll — same
   // expanding behavior as the landing-hero and workspace composers.
@@ -314,7 +317,7 @@ export default function ProjectPicker({
   // recent tiles). "all" shows every project as a richer card with URL +
   // repo + status; "recent" shows the same data sorted by activity with
   // more verbose timestamps.
-  type View = "home" | "templates" | "all" | "recent" | "databases" | "design-systems" | "skills" | "knowledge";
+  type View = "home" | "templates" | "all" | "recent" | "databases" | "design-systems" | "skills" | "knowledge" | "teams";
   const [view, setView] = useState<View>("home");
 
   const [editing, setEditing] = useState<{
@@ -724,11 +727,11 @@ export default function ProjectPicker({
             Retry
           </a>
           <a
-            href="/guide"
+            href="/docs"
             className="btn-ghost"
             style={{ fontSize: 12, padding: "3px 9px" }}
           >
-            Get help
+            Documentation
           </a>
         </div>
       )}
@@ -906,12 +909,36 @@ export default function ProjectPicker({
               </span>
               Knowledge
             </button>
+            <button
+              type="button"
+              onClick={() => setView("teams")}
+              className={`nav-item${view === "teams" ? " active" : ""}`}
+            >
+              <span className="ic">
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                  <circle cx="9" cy="7" r="4" />
+                  <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                  <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                </svg>
+              </span>
+              Teams
+            </button>
           </div>
 
 
           <div className="group">
             <div className="label-micro">Help &amp; account</div>
-            <Link href="/guide" className="nav-item">
+            <Link href="/docs" className="nav-item">
               <span className="ic">
                 <svg
                   width="14"
@@ -926,7 +953,7 @@ export default function ProjectPicker({
                   <line x1="12" y1="17" x2="12.01" y2="17" />
                 </svg>
               </span>
-              User guide
+              Documentation
             </Link>
             <Link href="/settings" className="nav-item">
               <span className="ic">
@@ -972,6 +999,8 @@ export default function ProjectPicker({
             <SkillsView isGuest={isGuest} />
           ) : view === "knowledge" ? (
             <KnowledgeView isGuest={isGuest} />
+          ) : view === "teams" ? (
+            <OrganizationsView />
           ) : view === "all" || view === "recent" ? (
             <ProjectListView
               view={view}
@@ -1295,13 +1324,20 @@ export default function ProjectPicker({
                         ))}
                       </select>
                     )}
-                    <input
-                      value={branch}
-                      onChange={(e) => setBranch(e.target.value)}
-                      placeholder="branch (optional, default = repo default)"
-                      disabled={creating}
-                      style={fieldStyle}
-                    />
+                    <label style={branchFieldStyle}>
+                      <span style={branchLabelStyle}>Branch (optional)</span>
+                      <input
+                        value={branch}
+                        onChange={(e) => setBranch(e.target.value)}
+                        placeholder="e.g. main, develop"
+                        disabled={creating}
+                        aria-label="Branch to clone (optional)"
+                        style={fieldStyle}
+                      />
+                      <span style={branchHelpStyle}>
+                        Defaults to the repo&apos;s default branch.
+                      </span>
+                    </label>
                     <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>
                       Cloned with your GitHub OAuth token. Token stays encrypted on
                       our server; revoke any time from GitHub → Settings →
@@ -1319,22 +1355,36 @@ export default function ProjectPicker({
                       style={fieldStyle}
                     />
                     <div style={{ display: "flex", gap: 8 }}>
-                      <input
-                        value={branch}
-                        onChange={(e) => setBranch(e.target.value)}
-                        placeholder="branch (optional, default = repo default)"
-                        disabled={creating}
-                        style={{ ...fieldStyle, flex: 1 }}
-                      />
-                      <input
-                        type="password"
-                        value={pat}
-                        onChange={(e) => setPat(e.target.value)}
-                        placeholder="GitHub PAT (only for private repos)"
-                        disabled={creating}
-                        autoComplete="off"
-                        style={{ ...fieldStyle, flex: 1 }}
-                      />
+                      <label style={{ ...branchFieldStyle, flex: 1 }}>
+                        <span style={branchLabelStyle}>Branch (optional)</span>
+                        <input
+                          value={branch}
+                          onChange={(e) => setBranch(e.target.value)}
+                          placeholder="e.g. main, develop"
+                          disabled={creating}
+                          aria-label="Branch to clone (optional)"
+                          style={fieldStyle}
+                        />
+                        <span style={branchHelpStyle}>
+                          Defaults to the repo&apos;s default branch.
+                        </span>
+                      </label>
+                      <label style={{ ...branchFieldStyle, flex: 1 }}>
+                        <span style={branchLabelStyle}>Access token</span>
+                        <input
+                          type="password"
+                          value={pat}
+                          onChange={(e) => setPat(e.target.value)}
+                          placeholder="GitHub PAT (only for private repos)"
+                          disabled={creating}
+                          autoComplete="off"
+                          aria-label="GitHub personal access token (optional)"
+                          style={fieldStyle}
+                        />
+                        <span style={branchHelpStyle}>
+                          Only needed for private repos.
+                        </span>
+                      </label>
                     </div>
                     <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>
                       PAT is used once to clone, never stored. Use a fine-scoped
@@ -1347,14 +1397,64 @@ export default function ProjectPicker({
 
             {mode === "zip" && (
               <div className="newproj-extra" style={{ display: "grid", gap: 8, marginTop: 10 }}>
+                {/* Native file inputs render white-on-white on the dark surface,
+                    so we hide the control and drive it from a visible styled
+                    button — same affordance as the describe-mode attach button. */}
                 <input
+                  ref={zipFileInputRef}
                   type="file"
                   accept=".zip,application/zip"
                   aria-label="Project source .zip file"
-                  onChange={(e) => setZipFile(e.target.files?.[0] ?? null)}
+                  hidden
+                  onChange={(e) => {
+                    const file = e.target.files?.[0] ?? null;
+                    if (file && !/\.zip$/i.test(file.name)) {
+                      toast.error("Please choose a .zip file");
+                      setZipFile(null);
+                      if (zipFileInputRef.current) zipFileInputRef.current.value = "";
+                      return;
+                    }
+                    setZipFile(file);
+                  }}
                   disabled={creating}
-                  style={{ fontSize: 13, color: "var(--text-muted)" }}
                 />
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    onClick={() => zipFileInputRef.current?.click()}
+                    disabled={creating}
+                    style={{ fontSize: 13 }}
+                  >
+                    {zipFile ? "Change file" : "Choose .zip file"}
+                  </button>
+                  {zipFile ? (
+                    <span className="attachment-chip">
+                      <span className="attachment-name" title={zipFile.name}>
+                        {zipFile.name}
+                      </span>
+                      <span className="attachment-size">
+                        {formatFileSize(zipFile.size)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setZipFile(null);
+                          if (zipFileInputRef.current) zipFileInputRef.current.value = "";
+                        }}
+                        disabled={creating}
+                        title={`Remove ${zipFile.name}`}
+                        aria-label={`Remove ${zipFile.name}`}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                      No file chosen
+                    </span>
+                  )}
+                </div>
                 <p style={{ fontSize: 11, color: "var(--text-muted)", margin: 0 }}>
                   Up to 250 MB compressed. <code>.git/</code> and{" "}
                   <code>node_modules/</code> are skipped on extract.
@@ -2133,11 +2233,33 @@ function LinkRepoDialog({
 const fieldStyle: React.CSSProperties = {
   background: "var(--bg-elev)",
   border: "1px solid var(--border-default)",
-  borderRadius: 6,
+  borderRadius: "var(--radius-md)",
   padding: "8px 10px",
   color: "var(--text-primary)",
   fontSize: 13,
   fontFamily: "inherit",
+};
+
+// A labelled import field: mono uppercase "eyebrow" micro-label stacked over the
+// input, with dim helper text beneath. Used for the Branch (optional) + access-
+// token fields so the import form reads as a real form, not bare placeholders.
+const branchFieldStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+};
+
+const branchLabelStyle: React.CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--fs-2xs)",
+  textTransform: "uppercase",
+  letterSpacing: "0.08em",
+  color: "var(--text-dim)",
+};
+
+const branchHelpStyle: React.CSSProperties = {
+  fontSize: 11,
+  color: "var(--text-muted)",
 };
 
 function relativeTime(iso: string): string {

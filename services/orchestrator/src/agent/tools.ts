@@ -235,6 +235,97 @@ export const TOOLS: Anthropic.Tool[] = [
     },
   },
   {
+    name: "generate_image",
+    description:
+      "Generate (or edit) a real raster image with Google's Nano Banana models and save it into the project. Use for hero images, logos, illustrations, backgrounds, icons, OG/social images, or product mockups instead of placeholder boxes — pass a SPECIFIC prompt (subject, style, colors, composition). Saves under assets/generated/ and returns the path(s); reference them from your code (e.g. copy into public/ and use the URL). To EDIT an existing project image, pass input_image (a path inside the project) + a prompt describing the change. Requires a Google API key on the server. Costs money per image (~$0.04 nano-banana-2 → ~$0.13 nano-banana-pro), so don't generate gratuitously.",
+    input_schema: {
+      type: "object",
+      properties: {
+        prompt: {
+          type: "string",
+          description: "What to generate, or how to edit input_image. Be specific about subject, style, colours, composition, and any in-image text.",
+        },
+        model: {
+          type: "string",
+          enum: ["nano-banana-2", "nano-banana-pro", "nano-banana"],
+          description:
+            "Optional, default nano-banana-2 (Gemini 3.1 Flash Image — fast). nano-banana-pro (Gemini 3 Pro Image — higher fidelity + best in-image text, pricier); nano-banana (Gemini 2.5 Flash Image).",
+        },
+        aspect_ratio: {
+          type: "string",
+          description: "Optional, e.g. \"1:1\", \"16:9\", \"9:16\", \"4:3\", \"3:4\", \"21:9\".",
+        },
+        input_image: {
+          type: "string",
+          description: "Optional project-relative path to an existing image to EDIT (image-to-image). Omit to generate from scratch.",
+        },
+      },
+      required: ["prompt"],
+    },
+  },
+  {
+    name: "save_flow",
+    description:
+      "Save a reusable smoke-flow (P2.4) — a named, replayable list of interact_preview steps ('create an invoice and mark it paid'). Call this once a multi-step flow works so it becomes a regression checklist; re-run it after later changes with run_flow. Re-saving the same name updates that flow (no duplicates). The user sees saved flows in the Preview (Agent) tab and can replay them one-click. Don't save a flow every turn — save it when a feature is solid.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Short unique name, e.g. \"signup + login\" or \"create invoice\"." },
+        description: { type: "string", description: "Optional one-line description of what the flow checks." },
+        start_path: { type: "string", description: "Optional sub-path to start the flow at (e.g. \"/login\")." },
+        actions: {
+          type: "array",
+          description: "The flow's steps — same shape as interact_preview.actions, executed in order on replay.",
+          items: {
+            type: "object",
+            properties: {
+              type: {
+                type: "string",
+                enum: [
+                  "navigate", "click", "type", "fill", "select", "press",
+                  "scroll", "wait", "wait_for_text",
+                  "assert_text", "assert_url", "assert_visible", "screenshot",
+                ],
+              },
+              selector: { type: "string" },
+              value: { type: "string" },
+              url: { type: "string" },
+              direction: { type: "string", enum: ["up", "down"] },
+              pixels: { type: "number" },
+              timeout_ms: { type: "number" },
+            },
+            required: ["type"],
+          },
+        },
+      },
+      required: ["name", "actions"],
+    },
+  },
+  {
+    name: "run_flow",
+    description:
+      "Replay a saved smoke-flow (P2.4) against the running app and report pass/fail. Loads the flow's steps and drives them through the same path as interact_preview — streaming each step live to the Preview (Agent) tab and returning a final screenshot, per-step pass/fail, console errors, failed requests, and an accessibility scan. Use this as a cheap regression check after changes that could affect a previously-verified flow. Identify the flow by name OR flow_id; pass server_id (or url) for the running preview.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Name of the saved flow to replay (use this OR flow_id)." },
+        flow_id: { type: "string", description: "Id of the saved flow (use this OR name)." },
+        server_id: { type: "string", description: "ID from start_server. Use this OR url." },
+        url: { type: "string", description: "Absolute http(s) URL. Use this OR server_id." },
+        path: { type: "string", description: "Optional sub-path override (defaults to the flow's start_path)." },
+        viewport_width: { type: "number", description: "Optional, default 1280." },
+        viewport_height: { type: "number", description: "Optional, default 800." },
+        a11y: { type: "boolean", description: "Optional, default true." },
+      },
+    },
+  },
+  {
+    name: "list_flows",
+    description:
+      "List the project's saved smoke-flows (P2.4) — name, step count, and the last replay's pass/fail. Check this before saving (to avoid duplicates) or before run_flow (to pick a flow to replay).",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
     name: "run_in_background",
     description:
       "Start a long-running shell command in the background and return immediately with a job id. Use for builds (`npm run build`), test suites (`npm test`), large installs, or any command expected to take longer than ~60s where you want to keep editing files while it runs. NOT for dev servers — use start_server for those (this tool does not wait for a port). Poll with read_background_log; stop with kill_background. The job's log is captured (last 64 KB) and exit code is recorded when it finishes.",
@@ -275,17 +366,17 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "list_connectors",
     description:
-      "List the first-party connectors available to this project (HTTP, Slack, Postgres, GitHub, Supabase) with their methods. Each method's args schema is described in the connector definition; use call_connector to invoke.",
+      "List the first-party connectors available to this project (HTTP, Slack, Postgres, GitHub, Supabase, Stripe) with their methods. Each method's args schema is described in the connector definition; use call_connector to invoke.",
     input_schema: { type: "object", properties: {} },
   },
   {
     name: "call_connector",
     description:
-      "Invoke a method on a first-party connector. Authentication / secrets resolve server-side: pass secret NAMES (not values) in the args. Audit-logged. Use this instead of writing OAuth dances or API-key plumbing in generated code — connectors give you typed, audited access to Slack/HTTP/Postgres/GitHub/Supabase. Call list_connectors for the exact set available to this project and each method's args schema.",
+      "Invoke a method on a first-party connector. Authentication / secrets resolve server-side: pass secret NAMES (not values) in the args. Audit-logged. Use this instead of writing OAuth dances or API-key plumbing in generated code — connectors give you typed, audited access to Slack/HTTP/Postgres/GitHub/Supabase/Stripe. Call list_connectors for the exact set available to this project and each method's args schema.",
     input_schema: {
       type: "object",
       properties: {
-        connector: { type: "string", description: "Connector id (e.g. 'slack', 'http', 'postgres', 'github', 'supabase')." },
+        connector: { type: "string", description: "Connector id (e.g. 'slack', 'http', 'postgres', 'github', 'supabase', 'stripe')." },
         method: { type: "string", description: "Method name on that connector (e.g. 'post_webhook')." },
         args: { type: "object", description: "Method-specific args. See list_connectors for each method's schema." },
       },

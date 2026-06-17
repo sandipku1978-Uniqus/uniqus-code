@@ -10,7 +10,7 @@ import {
   uploadProjectFilesApi,
   type SlashCommandSummary,
 } from "@/lib/api";
-import { useStore, type ChatItem, type SelectedElement } from "@/lib/store";
+import { useStore, AGENT_PREVIEW_TAB, type ChatItem, type SelectedElement } from "@/lib/store";
 import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
 import { errorCopyFor } from "@/lib/errorCopy";
 import { connect, send } from "@/lib/ws-client";
@@ -340,6 +340,47 @@ export default function ChatPanel() {
   }, []);
 
   const turns = useMemo(() => buildTurns(chat), [chat]);
+
+  // GRIPE 10 — single ghost-text follow-up suggestion (replaces the old
+  // follow-up chips). The first suggestion of the most-recently completed turn
+  // is offered as dimmed text overlaid on the empty composer; Tab (or a click)
+  // accepts it into the input without sending. Keyed by the complete-marker id
+  // so a manual dismiss sticks to that turn but a NEW turn re-offers a fresh
+  // hint. Cleared automatically whenever the input is non-empty.
+  const latestComplete = useMemo(() => {
+    for (let i = turns.length - 1; i >= 0; i--) {
+      const c = turns[i].complete;
+      if (c) return c;
+    }
+    return null;
+  }, [turns]);
+  const [ghostDismissedId, setGhostDismissedId] = useState<string | null>(null);
+  const ghostSuggestion: string | null =
+    latestComplete &&
+    latestComplete.id !== ghostDismissedId &&
+    !busy &&
+    !uploading &&
+    connected &&
+    !!project &&
+    input.length === 0
+      ? (latestComplete.suggestions?.[0]?.trim() || null)
+      : null;
+  // Fill the suggestion into the composer (Tab / click). Does NOT send — the
+  // user reviews and presses Enter themselves. Dismisses the hint for this turn.
+  const acceptGhostSuggestion = useCallback(() => {
+    if (!ghostSuggestion) return;
+    setInput(ghostSuggestion);
+    setGhostDismissedId(latestComplete?.id ?? null);
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (ta) {
+        ta.focus();
+        const end = ta.value.length;
+        ta.setSelectionRange(end, end);
+      }
+    });
+  }, [ghostSuggestion, latestComplete]);
+
   // Bound the rendered conversation for very long sessions (A3 item 4). The
   // per-row/per-turn memoization above is the real freeze cure; this caps the
   // initial mount + live DOM size so a many-hundred-turn history doesn't render
@@ -481,27 +522,14 @@ export default function ChatPanel() {
     if (last && last.kind === "user") void sendText(last.content);
   }, [sendText]);
 
-  // Hand a failed tool's error back to the agent with a "fix it" framing (§C
-  // error→fix loop; the frontend slice — no terminal needed).
-  const handleFixError = useCallback(
-    (name: string, result: string) => {
-      const snippet = (result || "").slice(0, 1500);
-      void sendText(
-        `The \`${name}\` step failed. Please diagnose the cause and fix it.\n\n\`\`\`\n${snippet}\n\`\`\``,
-      );
-    },
-    [sendText],
-  );
-
   const chatHandlers = useMemo<ChatHandlers>(
     () => ({
       onEdit: handleEditMessage,
       onResend: handleResend,
-      onFixError: handleFixError,
       onRetryRun: handleRetryRun,
       canAct: connected && !busy,
     }),
-    [handleEditMessage, handleResend, handleFixError, handleRetryRun, connected, busy],
+    [handleEditMessage, handleResend, handleRetryRun, connected, busy],
   );
 
   const handleSubmit = async (e?: React.FormEvent) => {
@@ -686,12 +714,12 @@ export default function ChatPanel() {
             <div style={{ marginTop: 6, fontStyle: "normal" }}>
               New here?{" "}
               <a
-                href="/guide"
+                href="/docs"
                 target="_blank"
                 rel="noreferrer"
                 style={{ color: "var(--accent, #a78bfa)", textDecoration: "none" }}
               >
-                Read the guide
+                Read the docs
               </a>
               .
             </div>
@@ -813,10 +841,18 @@ export default function ChatPanel() {
             (mode === "plan-then-execute" ? "Thinking about a plan…" : "Thinking…");
           return (
             <div className="msg">
-              <div className="head">
-                <span className="av agent">U</span>
-                <span className="name">Uniqus</span>
-                <span className="frame thinking-indicator">{label}</span>
+              <div className="head working-row">
+                <img
+                  className="working-spinner"
+                  src="/brand/uniqus-small-logo-color.png"
+                  alt=""
+                  aria-hidden="true"
+                  width={18}
+                  height={18}
+                />
+                <span className="working-label" role="status" aria-live="polite">
+                  {label}
+                </span>
               </div>
             </div>
           );
@@ -1069,6 +1105,7 @@ export default function ChatPanel() {
               ))}
             </div>
           )}
+          <div className="composer-input-wrap">
           <textarea
             ref={textareaRef}
             value={input}
@@ -1128,6 +1165,21 @@ export default function ChatPanel() {
                   return;
                 }
               }
+              // Tab accepts the ghost-text follow-up suggestion into the input
+              // (no palette is open at this point — each returns above). Escape
+              // dismisses the hint for this turn without touching the draft.
+              if (ghostSuggestion) {
+                if (e.key === "Tab") {
+                  e.preventDefault();
+                  acceptGhostSuggestion();
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setGhostDismissedId(latestComplete?.id ?? null);
+                  return;
+                }
+              }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 void handleSubmit();
@@ -1135,17 +1187,37 @@ export default function ChatPanel() {
             }}
             disabled={busy || uploading || !project || !connected}
             placeholder={
-              busy
+              // The ghost suggestion (when shown) owns the empty-state line, so
+              // suppress the native placeholder to avoid two overlaid texts.
+              ghostSuggestion
+                ? ""
+                : busy
                 ? "Uniqus is running…"
                 : !connected
                 ? "Reconnecting…"
                 : project
-                ? "Describe what you want Uniqus to build…"
+                ? "Describe what to build…"
                 : "Connecting…"
             }
             rows={2}
             style={{ resize: "none" }}
           />
+          {ghostSuggestion && (
+            // Dimmed follow-up hint overlaying the empty textarea. Same font
+            // metrics so it sits on the first text line; click or Tab fills it.
+            <button
+              type="button"
+              className="composer-ghost"
+              tabIndex={-1}
+              aria-hidden="true"
+              onClick={acceptGhostSuggestion}
+              title="Tab to use this suggestion"
+            >
+              <span className="composer-ghost-text">{ghostSuggestion}</span>
+              <span className="composer-ghost-key">Tab</span>
+            </button>
+          )}
+          </div>
           <input
             ref={fileInputRef}
             type="file"
@@ -1319,8 +1391,6 @@ interface ChatHandlers {
   onEdit: (text: string) => void;
   /** Re-send a user message / regenerate a turn's answer. */
   onResend: (text: string) => void;
-  /** Hand a failed tool's error back to the agent with a "fix it" prompt. */
-  onFixError: (name: string, result: string) => void;
   /** Retry the last run after a failure (C7). */
   onRetryRun: () => void;
   /** Whether send-style actions are currently possible (connected + idle). */
@@ -1502,8 +1572,6 @@ const Turn = memo(function Turn({
               ? () => handlers.onResend(userContent)
               : undefined
           }
-          onSuggestion={handlers.onEdit}
-          showSuggestions={isLastTurn && handlers.canAct}
         />
       )}
     </>
@@ -1753,7 +1821,7 @@ const ChatItemView = memo(function ChatItemView({
     return <ReasoningCard item={item} isLive={isLiveReasoning} />;
   }
   if (item.kind === "tool") {
-    return <ToolCard item={item} onFixError={handlers.onFixError} canAct={handlers.canAct} />;
+    return <ToolCard item={item} />;
   }
   if (item.kind === "user_question") {
     return <UserQuestionCard item={item} />;
@@ -1958,17 +2026,11 @@ function CompleteRow({
   expanded,
   onToggle,
   onRegenerate,
-  onSuggestion,
-  showSuggestions,
 }: {
   item: Extract<ChatItem, { kind: "complete" }>;
   expanded: boolean;
   onToggle?: () => void;
   onRegenerate?: () => void;
-  /** Drop a suggested follow-up into the composer (C2). */
-  onSuggestion?: (text: string) => void;
-  /** Only the last, actionable turn shows suggestion chips. */
-  showSuggestions?: boolean;
 }) {
   const [changesOpen, setChangesOpen] = useState(false);
   const parts = [
@@ -1990,7 +2052,6 @@ function CompleteRow({
   }
   const summary = parts.join(" · ");
   const changed = item.changed_files ?? [];
-  const suggestions = item.suggestions ?? [];
   return (
     <div className="complete-row">
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2064,23 +2125,6 @@ function CompleteRow({
           )}
         </div>
       )}
-
-      {/* Suggested next prompts (C2) — drop into composer, never auto-send. */}
-      {showSuggestions && suggestions.length > 0 && onSuggestion && (
-        <div className="followups">
-          {suggestions.map((s) => (
-            <button
-              key={s}
-              type="button"
-              className="followup-chip"
-              onClick={() => onSuggestion(s)}
-              title="Put this in the composer"
-            >
-              {s}
-            </button>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -2096,24 +2140,61 @@ function ReasoningCard({
   // a "Thought for Ns" pill once the step finishes so past reasoning doesn't
   // bury the answer (§C). Still manually re-openable.
   const [expanded, setExpanded] = useState(isLive);
-  const startRef = useRef<number | null>(null);
-  const [durationMs, setDurationMs] = useState<number | null>(null);
+  // Timestamp the first and last thinking delta as the trace streams in.
+  const firstAtRef = useRef<number | null>(null);
+  const lastAtRef = useRef<number | null>(null);
+  const [finalMs, setFinalMs] = useState<number | null>(null);
+  // Re-render tick while live so the label can flip from "Thinking…" to a frozen
+  // "Thought for Ns" once the deltas stop, without waiting for the next item.
+  const [, tick] = useState(0);
 
+  // Each thinking delta grows item.content; stamp first + last delta times.
   useEffect(() => {
-    if (isLive && startRef.current === null) startRef.current = Date.now();
-    if (!isLive && startRef.current !== null && durationMs === null) {
-      setDurationMs(Date.now() - startRef.current);
+    const now = Date.now();
+    if (firstAtRef.current === null) firstAtRef.current = now;
+    lastAtRef.current = now;
+  }, [item.content]);
+
+  // Finalize the duration to the LAST thinking delta — NOT to when the next chat
+  // item (a tool call / answer text) lands. On Gemini a function call (e.g.
+  // write_file's whole contents) is generated and delivered atomically AFTER
+  // thinking ends, so measuring to the next item counted that file-writing time
+  // as "thinking". Measuring delta-span counts only the actual reasoning, for
+  // every provider.
+  useEffect(() => {
+    if (
+      !isLive &&
+      finalMs === null &&
+      firstAtRef.current !== null &&
+      lastAtRef.current !== null
+    ) {
+      setFinalMs(Math.max(0, lastAtRef.current - firstAtRef.current));
     }
-  }, [isLive, durationMs]);
+  }, [isLive, finalMs]);
 
   useEffect(() => {
-    if (!isLive) setExpanded(false);
+    if (!isLive) {
+      setExpanded(false);
+      return;
+    }
+    const t = window.setInterval(() => tick((n) => n + 1), 250);
+    return () => window.clearInterval(t);
   }, [isLive]);
 
-  const label = isLive
+  // "Actively thinking" = a delta arrived recently. Once they stop (the model
+  // moved on to generating output / tool args) freeze the shown time rather than
+  // implying it's still thinking through a long post-thinking pause.
+  const streamingThought =
+    isLive && (lastAtRef.current === null || Date.now() - lastAtRef.current < 900);
+  const shownMs =
+    finalMs ??
+    (firstAtRef.current !== null && lastAtRef.current !== null
+      ? lastAtRef.current - firstAtRef.current
+      : 0);
+  const label = streamingThought
     ? "Thinking…"
-    : durationMs !== null && durationMs >= 1000
-    ? `Thought for ${Math.round(durationMs / 1000)}s`
+    : shownMs >= 1000
+    ? `Thought for ${Math.round(shownMs / 1000)}s`
     : "Thought";
 
   return (
@@ -2178,6 +2259,14 @@ function describeTool(
       return { verb: "Waited for", object: a.port ? `port ${a.port}` : "the server" };
     case "screenshot_preview":
       return { verb: "Checked the UI" };
+    case "interact_preview":
+      return { verb: "Tested in the browser", object: str(a.url) || str(a.server_id) || "", mono: !!(a.url || a.server_id) };
+    case "run_flow":
+      return { verb: "Replayed flow", object: str(a.name), mono: !!a.name };
+    case "save_flow":
+      return { verb: "Saved a test flow", object: str(a.name), mono: !!a.name };
+    case "list_flows":
+      return { verb: "Listed saved flows" };
     case "read_asset":
       return { verb: "Viewed", object: path || "an asset", mono: !!path };
     case "list_assets":
@@ -2200,18 +2289,18 @@ function describeTool(
 
 function ToolCard({
   item,
-  onFixError,
-  canAct,
 }: {
   item: Extract<ChatItem, { kind: "tool" }>;
-  onFixError: (name: string, result: string) => void;
-  canAct: boolean;
 }) {
   const isError = item.is_error === true;
   // Auto-expand errors so the reason is visible without a click (§C).
   const [expanded, setExpanded] = useState(isError);
   const desc = describeTool(item.name, item.input);
   const hasResult = item.result !== undefined;
+  // Interaction tools stream a live screenshot run into the Preview (Agent) tab;
+  // offer a jump so the user can watch it instead of reading the text result.
+  const isInteraction = item.name === "interact_preview" || item.name === "run_flow";
+  const setEditorTab = useStore((s) => s.setEditorTab);
   // First non-empty line of the error, shown inline in the collapsed card so a
   // failure isn't just a bare red badge.
   const errorPreview =
@@ -2250,19 +2339,14 @@ function ToolCard({
         )}
         {expanded && hasResult && <pre className={isError ? "err" : ""}>{item.result}</pre>}
       </button>
-      {isError && hasResult && (
+      {isInteraction && (
         <button
           type="button"
           className="tool-fix-btn"
-          disabled={!canAct}
-          title={
-            canAct
-              ? "Send this error back to the agent to diagnose and fix"
-              : "Available once the agent is idle and connected"
-          }
-          onClick={() => onFixError(item.name, item.result ?? "")}
+          title="Open the Preview (Agent) tab to watch this interaction"
+          onClick={() => setEditorTab(AGENT_PREVIEW_TAB)}
         >
-          Fix this →
+          Open Preview (Agent) ↗
         </button>
       )}
     </>

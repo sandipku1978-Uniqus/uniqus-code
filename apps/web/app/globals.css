@@ -294,6 +294,11 @@ code, pre, .mono {
   transition: background var(--dur-base) ease;
 }
 .btn-ghost:hover { background: var(--bg-surface-hover); }
+.btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-ghost:disabled:hover { background: transparent; }
+/* Disabled clear/remove (×) on an attachment chip — e.g. while a project import
+   is in flight (gripe 11). */
+.attachment-chip button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .kbd {
   font-family: var(--font-mono-stack);
@@ -1606,12 +1611,50 @@ section.band .sub {
   white-space: nowrap;
 }
 .msg .head .name { flex-shrink: 0; }
-.thinking-indicator {
-  animation: pulse-dim 1.5s ease-in-out infinite;
-}
 @keyframes pulse-dim {
   0%, 100% { opacity: 0.5; }
   50% { opacity: 1; }
+}
+
+/* GRIPE 4 — busy/"Working…" indicator: a small spinning Uniqus mark + label,
+   left-aligned with the agent rows. The spin is ease-in-out with a brief hold
+   at each full turn (Claude-Code-style) rather than a constant linear spin, so
+   it accelerates, levels, pauses, then goes again. */
+.working-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.working-spinner {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  display: block;
+  object-fit: contain;
+  transform-origin: 50% 50%;
+  animation: working-spin 1.6s ease-in-out infinite;
+}
+.working-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  animation: pulse-dim 1.6s ease-in-out infinite;
+}
+@keyframes working-spin {
+  /* One full turn over the first ~70% (ease-in-out via the keyframe spacing),
+     then a brief hold at 360° before the next revolution. */
+  0% { transform: rotate(0deg); }
+  10% { transform: rotate(0deg); }
+  45% { transform: rotate(180deg); }
+  80% { transform: rotate(360deg); }
+  100% { transform: rotate(360deg); }
+}
+/* Reduced motion: the global reduce rule already neutralizes the spin (it caps
+   iteration count), but a half-rotated frozen logo reads as broken — so pin the
+   mark upright and lean on the label's pulse-dim breathing (the same gentle cue
+   the old text-only thinking indicator used) to signal "still working". */
+@media (prefers-reduced-motion: reduce) {
+  .working-spinner { animation: none; transform: none; }
+  .working-label { animation: pulse-dim 1.5s ease-in-out infinite; }
 }
 .msg-body {
   font-size: 13px;
@@ -1781,29 +1824,9 @@ section.band .sub {
 }
 .plan-card .actions { display: flex; gap: 8px; margin-top: 12px; }
 
-.followups {
-  padding-left: 30px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 8px;
-}
-
-/* Suggested next-prompt chips on the complete marker (C2). */
-.followup-chip {
-  text-align: left;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md, 8px);
-  padding: 7px 11px;
-  color: var(--text-primary);
-  cursor: pointer;
-  font-size: 12.5px;
-  line-height: 1.35;
-  transition: border-color var(--dur-fast, 0.12s) ease, background var(--dur-fast, 0.12s) ease;
-}
-.followup-chip::before { content: "↳ "; color: var(--text-dim); }
-.followup-chip:hover { border-color: var(--brand-magenta, #c026d3); background: rgba(192, 38, 211, 0.05); }
+/* (Follow-up suggestion CHIPS were removed — GRIPE 10. The single most-recent
+   suggestion is now offered as ghost text inside the composer; see
+   .composer-ghost above.) */
 
 /* "What changed" deterministic file list on the complete marker (C6 Tier-1). */
 .complete-row { display: flex; flex-direction: column; gap: 4px; }
@@ -2084,6 +2107,7 @@ section.band .sub {
   box-shadow: inset 0 0 0 1px var(--brand-purple);
 }
 .composer textarea {
+  display: block;
   background: transparent;
   border: 0;
   color: var(--text-primary);
@@ -2092,11 +2116,78 @@ section.band .sub {
   resize: none;
   outline: none;
   width: 100%;
-  min-height: 40px;
+  /* Resting height ≈ 2 text lines (font-size × line-height × 2). The JS
+     auto-grow sets an inline `height` as content grows up to its cap; this is
+     just the empty/initial floor so the box never opens far taller than two
+     lines on load. `box-sizing: content-box` keeps the math exact since the
+     textarea itself carries no padding (padding lives on `.field`). */
+  box-sizing: content-box;
+  padding: 0;
+  min-height: calc(13px * 1.5 * 2);
   line-height: 1.5;
 }
 .composer textarea:disabled { color: var(--text-dim); }
 .composer textarea::placeholder { color: var(--text-dim); }
+
+/* GRIPE 10 — ghost-text follow-up suggestion overlay. The wrapper is the
+   positioning context for the absolutely-placed hint, which sits on the
+   textarea's first line with matching font metrics so it reads like inline
+   ghost text. It only renders while the textarea is empty (React-gated), so it
+   never overlaps typed text; pointer-events stay on the chip so a click fills
+   it, while the textarea below still receives focus/typing through the gaps. */
+.composer-input-wrap {
+  position: relative;
+  display: block;
+}
+.composer-ghost {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  /* Line up with the first line of the textarea (same line-height as the
+     13px/1.5 textarea); the textarea carries no padding of its own. */
+  height: calc(13px * 1.5);
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: text;
+  overflow: hidden;
+  animation: fadeIn var(--dur-base) var(--ease-out) backwards;
+}
+.composer-ghost-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.composer-ghost-key {
+  flex: 0 0 auto;
+  font-family: var(--font-mono-stack);
+  font-size: 10px;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  padding: 1px 5px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm, 5px);
+  background: var(--bg-surface);
+}
+.composer-ghost:hover .composer-ghost-text { color: var(--text-muted); }
+.composer-ghost:hover .composer-ghost-key {
+  border-color: color-mix(in srgb, var(--brand-magenta) 45%, var(--border-default));
+  color: var(--text-primary);
+}
+
 .composer .controls {
   display: flex;
   align-items: center;
@@ -5321,7 +5412,6 @@ section.band .sub {
 .ask-user-card {
   animation: fadeInUp var(--dur-base) var(--ease-out) backwards;
 }
-.followups { animation: fadeIn var(--dur-base) var(--ease-out) backwards; }
 
 /* ── Settings cards ─────────────────────────────────────────────────────── */
 .settings-card { animation: fadeInUp var(--dur-base) var(--ease-out) backwards; }
@@ -7417,6 +7507,9 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
 }
+/* The "Open Preview (Agent) ↗" jump shown under an interaction tool card. (The
+   old red error "Fix this →" variant that also used this class was removed —
+   GRIPE 1 — so this is now a neutral, brand-accented navigation chip.) */
 .tool-fix-btn {
   margin-top: 6px;
   align-self: flex-start;
@@ -7424,10 +7517,15 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 11px;
   font-weight: 600;
   border-radius: 5px;
-  border: 1px solid var(--conf-low);
-  background: color-mix(in srgb, var(--conf-low) 12%, transparent);
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
   color: var(--text-primary);
   cursor: pointer;
+  transition: border-color var(--dur-fast, 0.12s) ease, background var(--dur-fast, 0.12s) ease;
+}
+.tool-fix-btn:hover {
+  border-color: color-mix(in srgb, var(--brand-magenta) 50%, var(--border-default));
+  background: color-mix(in srgb, var(--brand-magenta) 8%, transparent);
 }
 .chat-offline-pill {
   display: flex;

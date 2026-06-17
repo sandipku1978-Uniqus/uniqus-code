@@ -2,10 +2,15 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TreeEntry } from "@uniqus/api-types";
+import { FileIcon, defaultStyles } from "react-file-icon";
 import { useStore } from "@/lib/store";
 import { send } from "@/lib/ws-client";
 import { fileOpApi } from "@/lib/api";
 import { toast } from "@/lib/toast";
+
+// react-file-icon@1.6.0 ships no types; the ambient module declaration lives in
+// apps/web/react-file-icon.d.ts. `FileIcon` renders a colored VSCode/Atom-style
+// SVG file glyph; `defaultStyles` is the per-extension preset map.
 
 interface TreeNode {
   name: string;
@@ -45,211 +50,100 @@ function buildTree(entries: TreeEntry[]): TreeNode[] {
   return root.children;
 }
 
+type FileIconStyle = import("react-file-icon").FileIconProps;
+
 /**
- * Resolve a file's display label + accent color from its name. Drives the
- * VSCode-Seti-inspired SVG file glyph below. Single source of truth — both
- * the tree and the quick-open palette read from here.
+ * Resolve react-file-icon `<FileIcon>` props for a filename — the colored,
+ * VSCode/Atom-style glyph. Single source of truth: the tree, the filtered
+ * search, the inline-create preview, and the Cmd-P palette all read from here.
  *
- * Special-cased filenames (package.json, Dockerfile, etc.) are detected
- * before extension fallback so they get distinctive colors.
+ * Strategy:
+ *  1. Special-case whole filenames (Dockerfile, .env, package.json, …) and a
+ *     few extensions react-file-icon doesn't curate (tsx/go/rs/sh/vue/…), so
+ *     they still get a sensible `type` archetype + label.
+ *  2. Otherwise spread the library's own `defaultStyles[ext]` preset.
+ *  3. Fall back to a generic document for unknown extensions.
+ *
+ * Every result carries an `extension` so the fold always shows a label.
  */
-function fileMeta(name: string): { label: string; color: string } {
+function getFileIcon(name: string): FileIconStyle {
   const lower = name.toLowerCase();
-  // Filename matches first.
-  if (lower === "package.json") return { label: "{}", color: "#cb3837" };
-  if (lower === "package-lock.json") return { label: "{}", color: "#888" };
-  if (lower === "tsconfig.json") return { label: "{}", color: "#3178c6" };
-  if (lower === "dockerfile" || lower === "dockerfile.dev") return { label: "DK", color: "#2496ed" };
-  if (lower === ".gitignore" || lower === ".gitattributes") return { label: "GIT", color: "#f05033" };
-  if (lower === ".env" || lower.startsWith(".env.")) return { label: "ENV", color: "#ecd06f" };
-  if (lower === "readme.md" || lower === "readme") return { label: "RM", color: "#519aba" };
-  if (lower === "license" || lower === "license.md") return { label: "LIC", color: "#999" };
-  if (lower === "cargo.toml") return { label: "RS", color: "#dea584" };
-  if (lower === "go.mod" || lower === "go.sum") return { label: "GO", color: "#00add8" };
-  if (lower === "fly.toml") return { label: "FLY", color: "#824ff1" };
-  if (lower === "nixpacks.toml") return { label: "NIX", color: "#7e7eff" };
-
   const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
-  switch (ext) {
-    case "ts": return { label: "TS", color: "#3178c6" };
-    case "tsx": return { label: "TSX", color: "#3178c6" };
-    case "js": case "mjs": case "cjs": return { label: "JS", color: "#f0db4f" };
-    case "jsx": return { label: "JSX", color: "#f0db4f" };
-    case "py": return { label: "PY", color: "#3b82f6" };
-    case "go": return { label: "GO", color: "#00add8" };
-    case "rs": return { label: "RS", color: "#dea584" };
-    case "json": return { label: "{}", color: "#cba253" };
-    case "md": case "mdx": return { label: "MD", color: "#519aba" };
-    case "css": case "scss": case "sass": case "less":
-      return { label: "CSS", color: "#519aba" };
-    case "html": case "htm": return { label: "<>", color: "#e34c26" };
-    case "yml": case "yaml": return { label: "YML", color: "#cb171e" };
-    case "toml": return { label: "TOM", color: "#9c4221" };
-    case "sh": case "bash": case "zsh": case "fish":
-      return { label: "SH", color: "#4eaa25" };
-    case "sql": return { label: "SQL", color: "#336791" };
-    case "env": return { label: "ENV", color: "#ecd06f" };
-    case "lock": return { label: "LCK", color: "#888" };
-    case "svg": return { label: "SVG", color: "#ffb13b" };
-    case "png": case "jpg": case "jpeg": case "gif": case "webp": case "ico":
-      return { label: "IMG", color: "#ad7bd6" };
-    case "pdf": return { label: "PDF", color: "#dc2626" };
-    case "txt": return { label: "TXT", color: "#9ca3af" };
-    case "csv": return { label: "CSV", color: "#10b981" };
-    case "xml": return { label: "XML", color: "#fb923c" };
-    case "vue": return { label: "VUE", color: "#42b883" };
-    case "svelte": return { label: "SV", color: "#ff3e00" };
-    case "rb": return { label: "RB", color: "#cc342d" };
-    case "java": return { label: "JV", color: "#f89820" };
-    case "c": case "h": return { label: "C", color: "#a8b9cc" };
-    case "cpp": case "cc": case "cxx": case "hpp":
-      return { label: "C++", color: "#00599c" };
-    case "kt": case "kts": return { label: "KT", color: "#a97bff" };
-    case "swift": return { label: "SW", color: "#fa7343" };
-    default:
-      return { label: ext ? ext.slice(0, 3).toUpperCase() : "•", color: "#9ca3af" };
+
+  // 1a. Whole-filename matches (no extension, or a distinctive identity).
+  const byName: Record<string, FileIconStyle> = {
+    dockerfile: { extension: "docker", type: "settings", labelColor: "#2496ed", glyphColor: "#2496ed" },
+    "dockerfile.dev": { extension: "docker", type: "settings", labelColor: "#2496ed", glyphColor: "#2496ed" },
+    ".gitignore": { extension: "git", type: "settings", labelColor: "#f05033", glyphColor: "#f05033" },
+    ".gitattributes": { extension: "git", type: "settings", labelColor: "#f05033", glyphColor: "#f05033" },
+    ".dockerignore": { extension: "docker", type: "settings", labelColor: "#2496ed", glyphColor: "#2496ed" },
+    "cargo.toml": { extension: "toml", type: "settings", labelColor: "#dea584", glyphColor: "#dea584" },
+    "cargo.lock": { extension: "lock", type: "binary", labelColor: "#8b949e", glyphColor: "#8b949e" },
+    "go.mod": { extension: "mod", type: "settings", labelColor: "#00add8", glyphColor: "#00add8" },
+    "go.sum": { extension: "sum", type: "settings", labelColor: "#00add8", glyphColor: "#00add8" },
+    "fly.toml": { extension: "fly", type: "settings", labelColor: "#824ff1", glyphColor: "#824ff1" },
+    "nixpacks.toml": { extension: "nix", type: "settings", labelColor: "#7e7eff", glyphColor: "#7e7eff" },
+    license: { extension: "lic", type: "document", labelColor: "#a3a3a3", glyphColor: "#a3a3a3" },
+    "license.md": { extension: "lic", type: "document", labelColor: "#a3a3a3", glyphColor: "#a3a3a3" },
+    readme: { extension: "md", type: "document", labelColor: "#519aba", glyphColor: "#519aba" },
+  };
+  if (byName[lower]) return byName[lower];
+  // Any dotenv-family file (.env, .env.local, .env.production, …).
+  if (lower === ".env" || lower.startsWith(".env.")) {
+    return { extension: "env", type: "settings", labelColor: "#ecd06f", glyphColor: "#ecd06f" };
   }
-}
+  // package.json / -lock.json get the npm-red treatment; tsconfig the TS blue.
+  if (lower === "package.json") return { extension: "json", type: "code", labelColor: "#cb3837", glyphColor: "#cb3837" };
+  if (lower === "package-lock.json") return { extension: "lock", type: "binary", labelColor: "#8b949e", glyphColor: "#8b949e" };
+  if (lower === "tsconfig.json") return { extension: "json", type: "code", labelColor: "#3178c6", glyphColor: "#3178c6" };
 
-type FileIconKind =
-  | "c"
-  | "cpp"
-  | "csv"
-  | "css"
-  | "docker"
-  | "env"
-  | "file"
-  | "git"
-  | "go"
-  | "html"
-  | "image"
-  | "java"
-  | "json"
-  | "kotlin"
-  | "license"
-  | "lock"
-  | "markdown"
-  | "nix"
-  | "npm"
-  | "pdf"
-  | "python"
-  | "react"
-  | "ruby"
-  | "rust"
-  | "shell"
-  | "sql"
-  | "svelte"
-  | "swift"
-  | "text"
-  | "toml"
-  | "typescript"
-  | "vue"
-  | "xml"
-  | "yaml";
+  // 1b. Extensions react-file-icon doesn't curate (or we want a nicer color).
+  const byExt: Record<string, FileIconStyle> = {
+    tsx: { extension: "tsx", type: "code", labelColor: "#3178c6", glyphColor: "#3178c6" },
+    mjs: { extension: "mjs", type: "code", labelColor: "#f0db4f", glyphColor: "#f0db4f" },
+    cjs: { extension: "cjs", type: "code", labelColor: "#f0db4f", glyphColor: "#f0db4f" },
+    mdx: { extension: "mdx", type: "document", labelColor: "#519aba", glyphColor: "#519aba" },
+    go: { extension: "go", type: "code", labelColor: "#00add8", glyphColor: "#00add8" },
+    rs: { extension: "rs", type: "code", labelColor: "#dea584", glyphColor: "#dea584" },
+    toml: { extension: "toml", type: "settings", labelColor: "#9c4221", glyphColor: "#9c4221" },
+    lock: { extension: "lock", type: "binary", labelColor: "#8b949e", glyphColor: "#8b949e" },
+    env: { extension: "env", type: "settings", labelColor: "#ecd06f", glyphColor: "#ecd06f" },
+    sh: { extension: "sh", type: "code", labelColor: "#4eaa25", glyphColor: "#4eaa25" },
+    bash: { extension: "bash", type: "code", labelColor: "#4eaa25", glyphColor: "#4eaa25" },
+    zsh: { extension: "zsh", type: "code", labelColor: "#4eaa25", glyphColor: "#4eaa25" },
+    fish: { extension: "fish", type: "code", labelColor: "#4eaa25", glyphColor: "#4eaa25" },
+    sql: { extension: "sql", type: "settings", labelColor: "#336791", glyphColor: "#336791" },
+    vue: { extension: "vue", type: "code", labelColor: "#42b883", glyphColor: "#42b883" },
+    svelte: { extension: "svelte", type: "code", labelColor: "#ff3e00", glyphColor: "#ff3e00" },
+    kt: { extension: "kt", type: "code", labelColor: "#a97bff", glyphColor: "#a97bff" },
+    kts: { extension: "kts", type: "code", labelColor: "#a97bff", glyphColor: "#a97bff" },
+    swift: { extension: "swift", type: "code", labelColor: "#fa7343", glyphColor: "#fa7343" },
+    h: { extension: "h", type: "code", labelColor: "#a8b9cc", glyphColor: "#a8b9cc" },
+    cc: { extension: "cc", type: "code", labelColor: "#00599c", glyphColor: "#00599c" },
+    cxx: { extension: "cxx", type: "code", labelColor: "#00599c", glyphColor: "#00599c" },
+    hpp: { extension: "hpp", type: "code", labelColor: "#00599c", glyphColor: "#00599c" },
+    htm: { extension: "htm", type: "code", labelColor: "#e34c26", glyphColor: "#e34c26" },
+    sass: { extension: "sass", type: "code", labelColor: "#cf649a", glyphColor: "#cf649a" },
+    less: { extension: "less", type: "code", labelColor: "#1d365d", glyphColor: "#2a4d80" },
+    xml: { extension: "xml", type: "code", labelColor: "#fb923c", glyphColor: "#fb923c" },
+    yaml: { extension: "yaml", type: "settings", labelColor: "#cb171e", glyphColor: "#cb171e" },
+    webp: { extension: "webp", type: "image", labelColor: "#ad7bd6", glyphColor: "#ad7bd6" },
+    ico: { extension: "ico", type: "image", labelColor: "#ad7bd6", glyphColor: "#ad7bd6" },
+  };
+  if (byExt[ext]) return byExt[ext];
 
-function fileIconMeta(name: string): { kind: FileIconKind; color: string; label?: string } {
-  const lower = name.toLowerCase();
-  if (lower === "package.json") return { kind: "npm", color: "#cb3837" };
-  if (lower === "package-lock.json") return { kind: "lock", color: "#8b949e" };
-  if (lower === "tsconfig.json") return { kind: "typescript", color: "#3178c6" };
-  if (lower === "dockerfile" || lower === "dockerfile.dev") return { kind: "docker", color: "#2496ed" };
-  if (lower === ".gitignore" || lower === ".gitattributes") return { kind: "git", color: "#f05033" };
-  if (lower === ".env" || lower.startsWith(".env.")) return { kind: "env", color: "#ecd06f" };
-  if (lower === "readme.md" || lower === "readme") return { kind: "markdown", color: "#519aba" };
-  if (lower === "license" || lower === "license.md") return { kind: "license", color: "#9ca3af" };
-  if (lower === "cargo.toml") return { kind: "rust", color: "#dea584" };
-  if (lower === "go.mod" || lower === "go.sum") return { kind: "go", color: "#00add8" };
-  if (lower === "fly.toml") return { kind: "toml", color: "#824ff1", label: "fly" };
-  if (lower === "nixpacks.toml") return { kind: "nix", color: "#7e7eff" };
+  // 2. The library's own curated preset (js/ts/json/css/scss/md/py/rb/php/java/
+  //    c/cpp/html/yml/svg/png/jpg/gif/pdf/txt/csv/… are all covered here).
+  const preset = ext ? defaultStyles[ext] : undefined;
+  if (preset) return { ...preset, extension: ext };
 
-  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
-  switch (ext) {
-    case "ts":
-      return { kind: "typescript", color: "#3178c6" };
-    case "tsx":
-      return { kind: "react", color: "#61dafb", label: "TS" };
-    case "js":
-    case "mjs":
-    case "cjs":
-      return { kind: "typescript", color: "#f0db4f", label: "JS" };
-    case "jsx":
-      return { kind: "react", color: "#61dafb", label: "JS" };
-    case "py":
-      return { kind: "python", color: "#3b82f6" };
-    case "go":
-      return { kind: "go", color: "#00add8" };
-    case "rs":
-      return { kind: "rust", color: "#dea584" };
-    case "json":
-      return { kind: "json", color: "#cba253" };
-    case "md":
-    case "mdx":
-      return { kind: "markdown", color: "#519aba" };
-    case "css":
-    case "scss":
-    case "sass":
-    case "less":
-      return { kind: "css", color: "#519aba" };
-    case "html":
-    case "htm":
-      return { kind: "html", color: "#e34c26" };
-    case "yml":
-    case "yaml":
-      return { kind: "yaml", color: "#cb171e" };
-    case "toml":
-      return { kind: "toml", color: "#9c4221" };
-    case "sh":
-    case "bash":
-    case "zsh":
-    case "fish":
-      return { kind: "shell", color: "#4eaa25" };
-    case "sql":
-      return { kind: "sql", color: "#336791" };
-    case "env":
-      return { kind: "env", color: "#ecd06f" };
-    case "lock":
-      return { kind: "lock", color: "#8b949e" };
-    case "svg":
-      return { kind: "xml", color: "#ffb13b", label: "svg" };
-    case "png":
-    case "jpg":
-    case "jpeg":
-    case "gif":
-    case "webp":
-    case "ico":
-      return { kind: "image", color: "#ad7bd6" };
-    case "pdf":
-      return { kind: "pdf", color: "#dc2626" };
-    case "txt":
-      return { kind: "text", color: "#9ca3af" };
-    case "csv":
-      return { kind: "csv", color: "#10b981" };
-    case "xml":
-      return { kind: "xml", color: "#fb923c" };
-    case "vue":
-      return { kind: "vue", color: "#42b883" };
-    case "svelte":
-      return { kind: "svelte", color: "#ff3e00" };
-    case "rb":
-      return { kind: "ruby", color: "#cc342d" };
-    case "java":
-      return { kind: "java", color: "#f89820" };
-    case "c":
-    case "h":
-      return { kind: "c", color: "#a8b9cc" };
-    case "cpp":
-    case "cc":
-    case "cxx":
-    case "hpp":
-      return { kind: "cpp", color: "#00599c" };
-    case "kt":
-    case "kts":
-      return { kind: "kotlin", color: "#a97bff" };
-    case "swift":
-      return { kind: "swift", color: "#fa7343" };
-    default:
-      return { kind: "file", color: "#9ca3af", label: ext ? ext.slice(0, 3).toUpperCase() : "" };
-  }
+  // 3. Generic fallback for unknown extensions / extensionless files.
+  return {
+    extension: ext || "",
+    type: "document",
+    labelColor: "#9ca3af",
+    glyphColor: "#9ca3af",
+  };
 }
 
 export default function FileExplorer({
@@ -678,226 +572,22 @@ function highlightMatch(path: string, query: string): React.ReactNode {
 }
 
 /**
- * VSCode Seti-style file icon — a small rounded square filled with the
- * language color and a short label. Visually matches the reference icons.
+ * Colored, VSCode/Atom-style file icon (react-file-icon — the react-file-icon
+ * look). The library's SVG renders at width:100% inside its 40×48 viewBox; we
+ * constrain it to a fixed ~16px box via the wrapper so every row's glyph lines
+ * up. Sizing lives in inline styles (we don't own globals.css). The `.file-glyph`
+ * class is shared with `FolderGlyph` for consistent layout/flex/centering.
  */
 function FileGlyph({ name }: { name: string }) {
-  const { kind, color, label } = fileIconMeta(name);
+  const iconProps = getFileIcon(name);
   return (
     <span className="file-glyph" aria-hidden="true">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-        <FileIconShape kind={kind} color={color} label={label} />
-      </svg>
+      {/* 40×48 viewBox → at 13.3px wide the icon is ~16px tall, filling the box. */}
+      <span style={{ width: 13.3, display: "inline-flex", lineHeight: 0 }}>
+        <FileIcon {...iconProps} />
+      </span>
     </span>
   );
-}
-
-function FileIconShape({
-  kind,
-  color,
-  label,
-}: {
-  kind: FileIconKind;
-  color: string;
-  label?: string;
-}) {
-  const text = label ?? defaultIconLabel(kind);
-  const iconText = (
-    <text
-      x="8"
-      y="11.4"
-      textAnchor="middle"
-      fill={color}
-      fontSize={text.length > 2 ? 4.4 : 5.4}
-      fontWeight="800"
-      fontFamily="Arial, Helvetica, sans-serif"
-      letterSpacing="0"
-    >
-      {text}
-    </text>
-  );
-
-  switch (kind) {
-    case "markdown":
-      return (
-        <>
-          <path d="M1.4 4.1h13.2v7.8H1.4z" stroke={color} strokeWidth="1.3" />
-          <path d="M3.1 10.2V5.9h1.1l1.2 1.8 1.2-1.8h1.1v4.3H6.5V7.8L5.4 9.4 4.3 7.8v2.4H3.1z" fill={color} />
-          <path d="M11.2 5.9v2.5h1.3L10.7 11 8.9 8.4h1.2V5.9h1.1z" fill={color} />
-        </>
-      );
-    case "git":
-      return (
-        <>
-          <path d="M7.2 1.4a1.1 1.1 0 0 1 1.6 0l5.8 5.8a1.1 1.1 0 0 1 0 1.6l-5.8 5.8a1.1 1.1 0 0 1-1.6 0L1.4 8.8a1.1 1.1 0 0 1 0-1.6l5.8-5.8z" fill={color} />
-          <path d="M6 5.1a1 1 0 1 0 1.4.9l1.8 1.8a1.2 1.2 0 0 0 .2.9L7.1 11a1 1 0 1 0 .8.7l2.2-2.2a1 1 0 1 0-.2-2L8 5.6a1 1 0 0 0-1.9-.5z" fill="#fff" />
-        </>
-      );
-    case "react":
-      return (
-        <>
-          <ellipse cx="8" cy="8" rx="6.5" ry="2.4" stroke={color} strokeWidth="1.1" />
-          <ellipse cx="8" cy="8" rx="6.5" ry="2.4" stroke={color} strokeWidth="1.1" transform="rotate(60 8 8)" />
-          <ellipse cx="8" cy="8" rx="6.5" ry="2.4" stroke={color} strokeWidth="1.1" transform="rotate(120 8 8)" />
-          <circle cx="8" cy="8" r="1.35" fill={color} />
-        </>
-      );
-    case "json":
-      return (
-        <>
-          <path d="M6 3.1c-1.7 0-2.4.7-2.4 2.2v1.1c0 .7-.3 1.2-.9 1.5.6.3.9.8.9 1.5v1.2c0 1.5.7 2.2 2.4 2.2" stroke={color} strokeWidth="1.5" strokeLinecap="round" />
-          <path d="M10 3.1c1.7 0 2.4.7 2.4 2.2v1.1c0 .7.3 1.2.9 1.5-.6.3-.9.8-.9 1.5v1.2c0 1.5-.7 2.2-2.4 2.2" stroke={color} strokeWidth="1.5" strokeLinecap="round" />
-        </>
-      );
-    case "css":
-      return <path d="M2.4 2.1h11.2l-1 10.4L8 13.9l-4.6-1.4-1-10.4zm3 3.1h5.2l-.1 1.1H5.6l.1 1h4.7l-.4 3-2 .6-2-.6-.1-1.4h1.3l.1.5.7.2.8-.2.1-.9H5.8l-.4-3.3z" fill={color} />;
-    case "html":
-      return <path d="M2.2 2.1h11.6l-1.1 10.4L8 13.9l-4.7-1.4L2.2 2.1zm3 3.2h5.7l.1-1.2H4.9l.3 4.3h4.1l-.1 1.1-1.2.3-1.2-.3-.1-.8H5.5l.2 1.8L8 11.2l2.4-.7.3-3.3H6.4l-.1-1h4.5l.1-.9H5.2z" fill={color} />;
-    case "docker":
-      return (
-        <>
-          <path d="M5 6.1h1.7V4.5H5v1.6zm2.1 0h1.7V4.5H7.1v1.6zm2.1 0h1.7V4.5H9.2v1.6zM2.9 8.1h1.7V6.5H2.9v1.6zm2.1 0h1.7V6.5H5v1.6zm2.1 0h1.7V6.5H7.1v1.6zm2.1 0h1.7V6.5H9.2v1.6z" fill={color} />
-          <path d="M13.4 7.3c-.3-.7-.9-1.1-1.7-1.1-.1.6 0 1.1.4 1.5-.6.3-1.4.4-2.5.4H2.1c.3 2.5 1.8 3.9 4.5 3.9 2.5 0 4.6-.9 5.6-3.1.8 0 1.4-.3 1.8-.9-.2-.3-.4-.5-.6-.7z" fill={color} />
-        </>
-      );
-    case "python":
-      return <path d="M8.2 1.6c-2.6 0-3.5.8-3.5 2.2v1.5h3.7v.8H3.6c-1.3 0-2.3.9-2.3 2.5 0 1.7.9 2.8 2.3 2.8h1.3V9.6c0-1.4.9-2.4 2.4-2.4h3.3c1.2 0 2-.9 2-2.1V3.8c0-1.3-1-2.2-4.4-2.2zM6.5 3.1a.7.7 0 1 1 0 1.4.7.7 0 0 1 0-1.4zm2 11.3c2.6 0 3.5-.8 3.5-2.2v-1.5H8.3v-.8h4.8c1.3 0 2.3-.9 2.3-2.5 0-1.7-.9-2.8-2.3-2.8h-1.3v1.8c0 1.4-.9 2.4-2.4 2.4H6.1c-1.2 0-2 .9-2 2.1v1.3c0 1.3 1 2.2 4.4 2.2zm1.7-1.5a.7.7 0 1 1 0-1.4.7.7 0 0 1 0 1.4z" fill={color} />;
-    case "go":
-      return (
-        <>
-          <path d="M5.2 6.1h5.7c1.5 0 2.4 1 2.1 2.5-.3 1.7-1.6 2.9-3.4 2.9H6.1c-1.6 0-2.6-1.2-2.2-2.9.3-1.5 1.7-2.5 3.2-2.5h.2" stroke={color} strokeWidth="1.25" strokeLinecap="round" />
-          <path d="M1.7 5.6h4M1.2 7.8h3.1M1.8 10h2.3" stroke={color} strokeWidth="1.1" strokeLinecap="round" />
-          <circle cx="8.2" cy="8.5" r=".6" fill={color} />
-          <circle cx="10.6" cy="8.5" r=".6" fill={color} />
-        </>
-      );
-    case "rust":
-      return (
-        <>
-          <circle cx="8" cy="8" r="5.7" stroke={color} strokeWidth="1.2" />
-          <path d="M5.8 11V5h2.7c1.4 0 2.3.7 2.3 1.9 0 .8-.4 1.4-1.1 1.7L11.3 11H9.8L8.4 8.9H7.1V11H5.8zm1.3-3.2h1.2c.8 0 1.2-.3 1.2-.9S9.1 6 8.3 6H7.1v1.8z" fill={color} />
-        </>
-      );
-    case "vue":
-      return <path d="M1.4 2.7h3.9L8 7.5l2.7-4.8h3.9L8 14.1 1.4 2.7zm3.5 0L8 8.1l3.1-5.4H9.6L8 5.6 6.4 2.7H4.9z" fill={color} />;
-    case "svelte":
-      return <path d="M10.9 2.4c-1.4-.9-3.2-.6-4.3.7L4.1 5.9a3 3 0 0 0-.5 3.2 3.1 3.1 0 0 0 1.5 4.2c1.4.8 3.2.5 4.3-.8l2.5-2.8a3 3 0 0 0 .5-3.1 3.1 3.1 0 0 0-1.5-4.2zM7.4 4.1c.6-.7 1.6-.8 2.4-.4.4.3.7.6.9 1.1.2.6.1 1.2-.3 1.7l-.3.4a.8.8 0 0 1-1.1.1L7.8 6.2a.8.8 0 0 0-1 .1l-.4.4c-.3.4-.2.9.2 1.2l1.6 1a.8.8 0 0 0 1-.1l.5-.5c.3-.4.9-.4 1.2-.1.4.3.4.8.1 1.2l-2.5 2.8c-.6.7-1.6.8-2.4.4-.4-.3-.7-.6-.9-1.1-.2-.6-.1-1.2.3-1.7l.3-.4c.3-.3.8-.4 1.1-.1l1.2.8c.3.2.8.1 1-.1l.4-.4c.3-.4.2-.9-.2-1.2L7.7 7.4a.8.8 0 0 0-1 .1l-.5.5c-.3.4-.9.4-1.2.1-.4-.3-.4-.8-.1-1.2l2.5-2.8z" fill={color} />;
-    case "image":
-      return (
-        <>
-          <path d="M2.1 3.2h11.8v9.6H2.1z" stroke={color} strokeWidth="1.2" />
-          <circle cx="5.4" cy="6" r="1.1" fill={color} />
-          <path d="M3.3 11.4l3-3 2.1 2 1.5-1.4 2.8 2.4H3.3z" fill={color} />
-        </>
-      );
-    case "pdf":
-      return (
-        <>
-          <path d="M3.4 1.8h6.1l3.1 3.1v9.3H3.4V1.8z" stroke={color} strokeWidth="1.1" />
-          <path d="M9.4 1.8v3.2h3.2" stroke={color} strokeWidth="1.1" />
-          <text x="8" y="11.5" textAnchor="middle" fill={color} fontSize="4.3" fontWeight="800" fontFamily="Arial, Helvetica, sans-serif" letterSpacing="0">PDF</text>
-        </>
-      );
-    case "lock":
-      return (
-        <>
-          <rect x="3.3" y="7" width="9.4" height="6.7" rx="1" stroke={color} strokeWidth="1.2" />
-          <path d="M5.4 7V5.4a2.6 2.6 0 0 1 5.2 0V7" stroke={color} strokeWidth="1.2" />
-          <circle cx="8" cy="10.1" r=".8" fill={color} />
-        </>
-      );
-    case "license":
-      return (
-        <>
-          <path d="M4 2.1h8v11.8l-4-2.1-4 2.1V2.1z" stroke={color} strokeWidth="1.2" />
-          <path d="M6.1 5.2h3.8M6.1 7.4h3.8" stroke={color} strokeWidth="1.1" strokeLinecap="round" />
-        </>
-      );
-    case "shell":
-      return (
-        <>
-          <path d="M2.2 4.3l3.4 3.7-3.4 3.7" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-          <path d="M7.6 11.5h5.5" stroke={color} strokeWidth="1.5" strokeLinecap="round" />
-        </>
-      );
-    case "sql":
-      return (
-        <>
-          <ellipse cx="8" cy="3.8" rx="4.6" ry="2" stroke={color} strokeWidth="1.1" />
-          <path d="M3.4 3.8v7.9c0 1.1 2.1 2 4.6 2s4.6-.9 4.6-2V3.8M3.4 7.7c0 1.1 2.1 2 4.6 2s4.6-.9 4.6-2" stroke={color} strokeWidth="1.1" />
-        </>
-      );
-    case "java":
-      return (
-        <>
-          <path d="M7.4 2.1c1.8 1.2-1.8 2.3.1 3.6M9.6 1.6c2.2 1.6-2.2 2.7-.2 4.4" stroke={color} strokeWidth="1" strokeLinecap="round" />
-          <path d="M4.7 8.1c1.7.8 5.4.8 7.1-.1M4.8 10.1c1.7.8 5.2.8 7-.1M5.3 12.3c1.5.7 4.4.7 5.8-.1" stroke={color} strokeWidth="1.2" strokeLinecap="round" />
-          <path d="M4.2 6.7h7.6l-.8 6.5H5.1l-.9-6.5z" stroke={color} strokeWidth="1" />
-        </>
-      );
-    case "ruby":
-      return <path d="M8 1.8l5.9 4.2L8 14.2 2.1 6 8 1.8zm0 1.5L4 6.1h8L8 3.3zm-4 4 4 5.2 4-5.2H4z" fill={color} />;
-    case "swift":
-      return <path d="M2.2 3.1c2.1 2.5 4.4 4.4 6.6 5.4-1.8-2-3.1-4.3-3.9-6.7 2.2 2.2 4.3 3.9 6.1 5-.6-1-1.1-2-1.4-3 2 1.4 3.5 3.3 4.2 5.5.6 2.1-.7 4.6-3.1 4.8-1.6.1-2.6-.6-3.5-1.2-1.1.4-2.6.5-4.3-.2 1.4-.2 2.6-.6 3.4-1.2-1.8-1.3-3.4-3.3-4.1-5.8z" fill={color} />;
-    case "yaml":
-    case "toml":
-    case "nix":
-    case "typescript":
-    case "c":
-    case "cpp":
-    case "kotlin":
-    case "csv":
-    case "xml":
-    case "env":
-    case "npm":
-    case "text":
-      return (
-        <>
-          <path d="M3.4 1.8h6.2l3 3v9.4H3.4V1.8z" stroke={color} strokeWidth="1.1" />
-          <path d="M9.5 1.8v3.1h3.1" stroke={color} strokeWidth="1.1" />
-          {iconText}
-        </>
-      );
-    default:
-      return (
-        <>
-          <path d="M3.4 1.8h6.2l3 3v9.4H3.4V1.8z" stroke={color} strokeWidth="1.1" />
-          <path d="M9.5 1.8v3.1h3.1" stroke={color} strokeWidth="1.1" />
-          {text ? iconText : <path d="M5.3 7.2h5.4M5.3 9.4h5.4M5.3 11.6h3.8" stroke={color} strokeWidth="1" strokeLinecap="round" />}
-        </>
-      );
-  }
-}
-
-function defaultIconLabel(kind: FileIconKind): string {
-  switch (kind) {
-    case "c":
-      return "C";
-    case "cpp":
-      return "C++";
-    case "csv":
-      return "csv";
-    case "env":
-      return ".env";
-    case "kotlin":
-      return "K";
-    case "nix":
-      return "nix";
-    case "npm":
-      return "npm";
-    case "text":
-      return "txt";
-    case "toml":
-      return "toml";
-    case "typescript":
-      return "TS";
-    case "xml":
-      return "xml";
-    case "yaml":
-      return "yaml";
-    default:
-      return "";
-  }
 }
 
 /**

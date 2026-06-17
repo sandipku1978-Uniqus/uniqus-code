@@ -10,7 +10,10 @@ import type {
   DeploymentState,
   DesignSystem,
   DesignTokens,
+  FlowRunStatus,
+  FlowStep,
   KnowledgeDocument,
+  ProjectFlow,
   OrgMember,
   Organization,
   ProjectMember,
@@ -782,6 +785,51 @@ export const revokePreviewShareApi = (
     body: JSON.stringify({ token: token ?? null }),
   });
 
+// ── Saved smoke-flows (P2.4) ────────────────────────────────────────────────────
+
+export type { ProjectFlow, FlowStep, FlowRunStatus } from "@uniqus/api-types";
+
+/** Per-project saved interaction flows the agent (or user) can replay. */
+export const listFlowsApi = (projectId: string): Promise<{ flows: ProjectFlow[] }> =>
+  api(`/api/projects/${projectId}/flows`);
+
+export const createFlowApi = (
+  projectId: string,
+  body: { name: string; description?: string; steps: FlowStep[]; start_path?: string },
+): Promise<{ flow: ProjectFlow }> =>
+  api(`/api/projects/${projectId}/flows`, { method: "POST", body: JSON.stringify(body) });
+
+export const deleteFlowApi = (projectId: string, flowId: string): Promise<{ ok: true }> =>
+  api(`/api/projects/${projectId}/flows/${flowId}`, { method: "DELETE" });
+
+export interface FlowRunResult {
+  status: FlowRunStatus;
+  summary: string;
+  last_run_at: string;
+  final_url: string;
+  page_title: string;
+  steps: { index: number; action: string; ok: boolean; detail?: string; url: string }[];
+  assertion_failures: string[];
+  console_errors: string[];
+  failed_requests: string[];
+  a11y_issues: { id: string; help: string; nodes: number }[];
+}
+
+/**
+ * Replay a saved flow against a running preview. Streams each step live as an
+ * `agent_preview_frame` over the WS (into the Preview (Agent) tab) and resolves
+ * with the structured pass/fail result for the evidence card.
+ */
+export const runFlowApi = (
+  projectId: string,
+  flowId: string,
+  body: { server_id?: string; url?: string; path?: string },
+): Promise<FlowRunResult> =>
+  api(`/api/projects/${projectId}/flows/${flowId}/run`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
 // ── Export ────────────────────────────────────────────────────────────────────
 
 /**
@@ -1064,6 +1112,12 @@ export const addOrgMemberApi = (orgId: string, email: string, role: Role): Promi
 
 export const setOrgBudgetApi = (orgId: string, monthlyBudgetUsd: number | null): Promise<{ ok: true }> =>
   api(`/api/orgs/${orgId}/budget`, { method: "PATCH", body: JSON.stringify({ monthly_budget_usd: monthlyBudgetUsd }) });
+
+export const setOrgMemberRoleApi = (orgId: string, userId: string, role: Role): Promise<{ ok: true }> =>
+  api(`/api/orgs/${orgId}/members/${userId}`, { method: "PATCH", body: JSON.stringify({ role }) });
+
+export const removeOrgMemberApi = (orgId: string, userId: string): Promise<{ ok: true }> =>
+  api(`/api/orgs/${orgId}/members/${userId}`, { method: "DELETE" });
 
 export const fetchCommentsApi = (projectId: string): Promise<{ comments: Comment[] }> =>
   api(`/api/projects/${projectId}/comments`);

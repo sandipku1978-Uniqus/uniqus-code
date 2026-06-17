@@ -209,8 +209,8 @@ export default function ModelsPage() {
             <Link href="/login" className="btn-primary btn-lg">
               Start building
             </Link>
-            <Link href="/guide" className="btn-secondary btn-lg">
-              Read the guide
+            <Link href="/docs" className="btn-secondary btn-lg">
+              Read the docs
             </Link>
           </div>
         </div>

@@ -356,6 +356,23 @@ function handleEvent(event: ServerEvent): void {
         lines_removed: event.lines_removed,
       });
       break;
+    case "agent_preview_frame":
+      // P2 live "Preview (Agent)" view — one screenshot frame per interaction
+      // step. The store opens the tab on the first frame of a run.
+      s.addAgentPreviewFrame({
+        call_id: event.call_id,
+        seq: event.seq,
+        label: event.label,
+        ok: event.ok,
+        detail: event.detail,
+        url: event.url,
+        image: event.image,
+        mime: event.mime,
+        title: event.title,
+        done: event.done,
+        flow_name: event.flow_name,
+      });
+      break;
     case "plan_proposed":
       s.addPlanProposal(event.plan);
       break;

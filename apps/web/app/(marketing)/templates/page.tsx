@@ -33,7 +33,7 @@ export default function TemplatesPage() {
             <Link href="/login" className="btn-primary btn-lg">
               Start from a template
             </Link>
-            <Link href="/guide" className="btn-secondary btn-lg">
+            <Link href="/docs" className="btn-secondary btn-lg">
               How it works
             </Link>
           </div>

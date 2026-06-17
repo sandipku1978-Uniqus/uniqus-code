@@ -7,6 +7,7 @@ import {
   useStore,
   fileTabId,
   previewTabId,
+  AGENT_PREVIEW_TAB,
   flushSave,
   flushAllPendingEdits,
 } from "@/lib/store";
@@ -15,6 +16,7 @@ import { stopServerApi, getApiBase } from "@/lib/api";
 import Modal from "./Modal";
 import CodeEditor from "./CodeEditor";
 import PreviewPanel from "./PreviewPanel";
+import AgentPreviewPanel from "./AgentPreviewPanel";
 
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"]);
 
@@ -224,6 +226,12 @@ export default function EditorPreviewArea() {
   const openFiles = useStore((s) => s.openFiles);
   const editorTab = useStore((s) => s.editorTab);
   const setEditorTab = useStore((s) => s.setEditorTab);
+  // Narrow selectors (not the whole agentPreview object) so streaming frames
+  // don't re-render the editor area every frame — only the booleans that gate
+  // the tab's existence + indicators change at run start/end.
+  const agentHasFrames = useStore((s) => s.agentPreview.frames.length > 0);
+  const agentActive = useStore((s) => s.agentPreview.active);
+  const agentUnseen = useStore((s) => s.agentPreview.unseen);
   const closeOpenFile = useStore((s) => s.closeOpenFile);
   const removePreview = useStore((s) => s.removePreview);
   const saveStatus = useStore((s) => s.saveStatus);
@@ -234,7 +242,10 @@ export default function EditorPreviewArea() {
   // Preview-tab close confirm — closing stops the dev server, so warn first (§C).
   const [confirmStop, setConfirmStop] = useState<{ id: string; port: number } | null>(null);
 
-  const hasAnyTabs = openFiles.length > 0 || previews.length > 0;
+  // The single live "Preview (Agent)" tab appears once the agent has produced
+  // any interaction frames (or a run is mid-flight).
+  const showAgentTab = agentHasFrames || agentActive;
+  const hasAnyTabs = openFiles.length > 0 || previews.length > 0 || showAgentTab;
   // How many open files have unsaved edits, for the Save-all affordance.
   const dirtyCount = openFiles.filter(
     (p) => saveStatus[p]?.kind === "dirty" || saveStatus[p]?.kind === "saving",
@@ -242,6 +253,7 @@ export default function EditorPreviewArea() {
 
   // Pick what to render based on editorTab; fall back to first available tab.
   let activeTab = editorTab;
+  if (!activeTab && showAgentTab) activeTab = AGENT_PREVIEW_TAB;
   if (!activeTab && previews[0]) activeTab = previewTabId(previews[0].id);
   if (!activeTab && openFiles[0]) activeTab = fileTabId(openFiles[0]);
 
@@ -350,6 +362,43 @@ export default function EditorPreviewArea() {
               </button>
             );
           })}
+          {showAgentTab && (
+            <button
+              type="button"
+              onClick={() => setEditorTab(AGENT_PREVIEW_TAB)}
+              className={`tab ${activeTab === AGENT_PREVIEW_TAB ? "active" : ""}`}
+              title="Watch the agent interact with your app, and replay saved flows"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M3 3l7 17 2-7 7-2z" />
+              </svg>
+              <span>Preview (Agent)</span>
+              {agentActive ? (
+                <span
+                  style={{
+                    width: 7,
+                    height: 7,
+                    borderRadius: "50%",
+                    background: "var(--danger, #d9534f)",
+                    animation: "pulse-dot 1.4s ease-in-out infinite",
+                  }}
+                  title="Live"
+                />
+              ) : (
+                agentUnseen && (
+                  <span
+                    style={{
+                      width: 7,
+                      height: 7,
+                      borderRadius: "50%",
+                      background: "var(--accent-primary, #7c5cff)",
+                    }}
+                    title="New activity"
+                  />
+                )
+              )}
+            </button>
+          )}
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4 }}>
             {dirtyCount > 1 && (
               <button
@@ -383,6 +432,7 @@ export default function EditorPreviewArea() {
       )}
 
       <div className="editor-content">
+        {activeTab === AGENT_PREVIEW_TAB && <AgentPreviewPanel />}
         {activePreview && <PreviewPanel server={activePreview} />}
         {activeFilePath && isImageFile(activeFilePath) ? (
           <ImageViewer path={activeFilePath} projectId={projectId} />

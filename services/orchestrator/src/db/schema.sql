@@ -641,6 +641,34 @@ create index if not exists checkpoint_artifacts_project_idx on checkpoint_artifa
 create index if not exists checkpoint_artifacts_session_idx on checkpoint_artifacts (session_id, created_at desc);
 alter table checkpoint_artifacts enable row level security;
 
+-- ── Saved smoke-flows (P2.4) ─────────────────────────────────────────────────
+-- Per-project replayable interaction flows ("create an invoice and mark it
+-- paid"). `steps` is a FlowStep[] (the same action vocabulary interact_preview
+-- drives). The agent records a flow after building a feature (save_flow) and
+-- replays it after later changes (run_flow); the user can also replay one-click
+-- from the Preview (Agent) tab. last_* hold the most recent replay as a compact
+-- evidence card — pass/fail + when + a one-line summary.
+create table if not exists project_flows (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references projects(id) on delete cascade,
+  created_by uuid references users(id) on delete set null,
+  name text not null,
+  description text,
+  steps jsonb not null default '[]'::jsonb,
+  start_path text,
+  last_status text check (last_status in ('pass', 'fail', 'error')),
+  last_run_at timestamptz,
+  last_summary text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (project_id, name)
+);
+create index if not exists project_flows_project_idx on project_flows (project_id, updated_at desc);
+drop trigger if exists project_flows_updated_at on project_flows;
+create trigger project_flows_updated_at before update on project_flows
+  for each row execute function touch_project_updated_at();
+alter table project_flows enable row level security;
+
 -- ── Durable agent task queue (P8.1) ──────────────────────────────────────────
 -- Survives restarts (unlike the in-memory background-shell-job Map). One row per
 -- queued/running/done agent task, optionally on its own branch with a review packet.

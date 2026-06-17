@@ -87,6 +87,64 @@ export async function recordUsageEvent(input: RecordUsageInput): Promise<void> {
   if (error) throw new Error(`recordUsageEvent failed: ${error.message}`);
 }
 
+/** First instant of the current calendar month, in the orchestrator's LOCAL
+ * timezone, as a UTC ISO string. usage_events.created_at is `timestamptz`
+ * (stored UTC); comparing against this local-month boundary keeps "this month"
+ * consistent with how the dashboard buckets days (localDayKey / B-15). */
+function startOfMonthIso(): string {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0).toISOString();
+}
+
+/**
+ * Org month-to-date spend in USD (P3.5 budget enforcement): Σ of the per-turn
+ * `cost_usd` snapshots across EVERY project owned by `orgId`, for usage_events
+ * on/after the start of the current calendar month.
+ *
+ * Two steps because usage_events has no org_id column — the org→projects join
+ * is done in app code: list the org's project ids, then sum their rows. Pages
+ * past PostgREST's 1000-row cap so a busy org isn't silently under-counted (an
+ * under-count would let a turn through after the cap was really blown). Rows
+ * written before the cost snapshot shipped have a NULL cost_usd and contribute
+ * 0 — this intentionally UNDER-counts legacy spend rather than re-pricing tokens
+ * here; the guard only blocks once snapshotted spend alone exceeds the cap.
+ *
+ * Returns 0 on any DB error (missing table/column on an un-migrated DB, etc.)
+ * so a transient analytics failure can never wrongly block the paid path — the
+ * cap fails OPEN, matching the rest of the membership/usage code's degrade-to-
+ * permissive posture.
+ */
+export async function orgMonthToDateSpendUsd(orgId: string): Promise<number> {
+  // 1. Project ids belonging to the org.
+  const proj = await db().from("projects").select("id").eq("org_id", orgId);
+  if (proj.error) {
+    console.error("orgMonthToDateSpendUsd: project lookup failed (returning 0):", proj.error.message);
+    return 0;
+  }
+  const projectIds = (proj.data ?? []).map((r) => (r as { id: string }).id);
+  if (projectIds.length === 0) return 0;
+
+  // 2. Sum cost_usd for those projects this calendar month, paging the sweep.
+  const since = startOfMonthIso();
+  let total = 0;
+  for (let from = 0; ; from += USAGE_PAGE_SIZE) {
+    const { data, error } = await db()
+      .from("usage_events")
+      .select("cost_usd")
+      .in("project_id", projectIds)
+      .gte("created_at", since)
+      .range(from, from + USAGE_PAGE_SIZE - 1);
+    if (error) {
+      console.error("orgMonthToDateSpendUsd: usage sweep failed (returning partial):", error.message);
+      break;
+    }
+    const page = (data ?? []) as Array<{ cost_usd: number | null }>;
+    for (const row of page) total += Number(row.cost_usd ?? 0);
+    if (page.length < USAGE_PAGE_SIZE) break;
+  }
+  return total;
+}
+
 /** Per-model rollup as returned by the `account_usage_stats` SQL function. */
 export interface UsagePerModel {
   model: string;

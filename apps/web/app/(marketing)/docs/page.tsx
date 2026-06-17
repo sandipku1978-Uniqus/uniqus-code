@@ -1,41 +1,48 @@
 import Link from "next/link";
 
 export const metadata = {
-  title: "User guide - Uniqus Code",
+  title: "Documentation - Uniqus Code",
+  description:
+    "Learn how to build, inspect, run, and ship real apps with Uniqus Code — creating projects, working with the agent, previewing, prompting well, and troubleshooting.",
 };
 
 /**
- * The user guide lives inside the `(marketing)` route group so it inherits the
- * shared chrome — `MarketingNav` (which links back to the landing page and every
- * marketing/resource page) and the `SiteFooter` + "Ready to build?" composer.
- * That's deliberate: a visitor who opens the guide from the marketing site must
- * be able to get back without hitting a sign-in wall, and the page should read
- * as the same product. The URL stays `/guide` (route groups don't affect it).
+ * Product documentation. Lives inside the `(marketing)` route group so it
+ * inherits the shared chrome — `MarketingNav` (which links back to the landing
+ * page and every marketing/resource page) and the `SiteFooter` + "Ready to
+ * build?" composer. That's deliberate: a visitor who opens the docs from the
+ * marketing site must be able to get back without hitting a sign-in wall, and
+ * the page should read as the same product. The URL is `/docs` (route groups
+ * don't affect it). NOTE: `/docs` must be present in PUBLIC_PATHS in
+ * apps/web/middleware.ts or the `(marketing)` layout's withAuth() bounces
+ * visitors to sign-in.
  *
- * The page itself only renders the docs body into `.mk-main`; it uses the shared
- * `.doc-*` styles (the same ones Settings uses) so the type and surfaces match
- * the app rather than inventing a parallel look.
+ * The page renders the docs body using the shared `.doc-*` styles (the same
+ * ones Settings uses) so the type and surfaces match the app rather than
+ * inventing a parallel look.
  */
 
-const toc = [
-  ["#start", "Start here"],
-  ["#create", "Create projects"],
-  ["#workspace", "Workspace tour"],
-  ["#chat", "Work with the agent"],
-  ["#run", "Run and preview"],
-  ["#files", "Files and logs"],
-  ["#configure", "Configure"],
-  ["#ship", "Ship"],
-  ["#recover", "Recover safely"],
-  ["#prompting", "Prompting"],
-  ["#troubleshoot", "Troubleshooting"],
-] as const;
+type TocEntry = { href: string; label: string; index: string };
 
-const quickPaths = [
+const TOC: TocEntry[] = [
+  { href: "#overview", label: "Overview", index: "" },
+  { href: "#create", label: "Create a project", index: "01" },
+  { href: "#workspace", label: "The workspace", index: "02" },
+  { href: "#chat", label: "Work with the agent", index: "03" },
+  { href: "#run", label: "Run and preview", index: "04" },
+  { href: "#files", label: "Files, editor, logs", index: "05" },
+  { href: "#configure", label: "Configure", index: "06" },
+  { href: "#ship", label: "Ship", index: "07" },
+  { href: "#recover", label: "Recover safely", index: "08" },
+  { href: "#prompting", label: "Prompting", index: "09" },
+  { href: "#troubleshoot", label: "Troubleshooting", index: "10" },
+];
+
+const QUICK_PATHS = [
   {
     label: "Start from an idea",
-    title: "Describe in detail",
-    body: "Write the project in plain English. Uniqus names it, sharpens the first prompt, opens the workspace, and begins with a plan for new projects.",
+    title: "Describe it",
+    body: "Write the project in plain English. Uniqus names it, sharpens the first prompt, opens the workspace, and starts new projects with a plan you can review.",
   },
   {
     label: "Bring code with you",
@@ -44,17 +51,17 @@ const quickPaths = [
   },
   {
     label: "Keep moving",
-    title: "Open an existing project",
+    title: "Reopen a project",
     body: "Projects reopen with their sandbox files, chat sessions, previews, skills, secrets, and checkpoints still attached.",
   },
 ] as const;
 
-const projectModes = [
+const PROJECT_MODES = [
   {
     title: "Describe your idea",
     bestFor: "A new app, website, tool, automation, or prototype.",
     detail:
-      "Write the project in plain English. Haiku names it (~200ms) and the workspace opens with your brief forwarded to the agent verbatim — starting with a plan first for new projects. The fastest path when you can describe the shape.",
+      "Write the project in plain English. Uniqus names it in about 200ms and the workspace opens with your brief forwarded to the agent verbatim — new projects start with a plan first. The fastest path when you can describe the shape.",
   },
   {
     title: "Upload .zip",
@@ -70,7 +77,7 @@ const projectModes = [
   },
 ] as const;
 
-const workspaceAreas = [
+const WORKSPACE_AREAS = [
   {
     title: "Chat",
     body: "Give instructions, review plans, attach references, switch chat sessions, pick a model, and stop an in-flight turn.",
@@ -80,7 +87,7 @@ const workspaceAreas = [
     body: "Browse the sandbox tree, open files, edit directly, and reference files in chat with @-mentions.",
   },
   {
-    title: "Editor and preview",
+    title: "Editor & preview",
     body: "Inspect code, preview Markdown, and view running apps in the preview tabs created by Run or the agent.",
   },
   {
@@ -97,7 +104,7 @@ const workspaceAreas = [
   },
 ] as const;
 
-const agentControls = [
+const AGENT_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ["Plan", "Ask Uniqus to inspect the project with read-only tools and propose editable steps before it changes files — you watch it investigate in real time. New projects start this way by default."],
   ["Execute", "Let the agent act immediately for small, clear changes."],
   ["Files", "Attach images, PDFs, CSVs, design references, or other files the agent should use as evidence."],
@@ -105,16 +112,16 @@ const agentControls = [
   ["/ commands", "Run built-in or project slash commands from the composer."],
   ["Model", "Stay on Auto, or pick Claude, GPT, or Gemini for this turn and dial thinking effort from low to high."],
   ["Stop", "Cancel the current turn. Work already written to disk is kept, so you can redirect from there."],
-] as const;
+];
 
-const configItems = [
+const CONFIG_ITEMS = [
   {
     title: "Skills",
-    body: "Project instructions that are prepended to the agent's system prompt. Use them for conventions, design rules, preferred libraries, testing habits, and project-specific constraints.",
+    body: "Project instructions prepended to the agent's system prompt. Use them for conventions, design rules, preferred libraries, testing habits, and project-specific constraints.",
   },
   {
     title: "Secrets",
-    body: "Encrypted API keys and tokens. The agent can request values through controlled tooling, but the secret values are not printed back into chat.",
+    body: "Encrypted API keys and tokens. Panel-set secrets are written straight to .env in the sandbox; the agent can use them, but raw secret values are never printed back into chat.",
   },
   {
     title: "Default model",
@@ -126,54 +133,100 @@ const configItems = [
   },
   {
     title: "Appearance",
-    body: "Switch dark/light theme and comfortable/compact density in Settings. The guide, dashboard, and workspace share the same tokens.",
+    body: "Switch dark/light theme and comfortable/compact density in Settings. Docs, dashboard, and workspace share the same tokens.",
   },
 ] as const;
 
-const troubleshooting = [
+// Prompting principles excerpted and reworded for users from the agent's
+// system prompt (services/orchestrator/src/agent/loop.ts, buildSystemPrompt).
+// Only the user-relevant parts — not the whole prompt.
+const PROMPTING_PRINCIPLES = [
   {
-    title: "The preview does not start",
-    body: "Open Logs and ask Uniqus to read the failing command output, fix the root cause, and rerun the app. Mention the exact error if you see one.",
+    title: "The agent verifies UI by interacting with it",
+    body: "After meaningful frontend work, Uniqus starts a preview and drives it — clicking through real flows, filling forms, submitting, navigating — then checks desktop and mobile, console errors, and accessibility before reporting done. You can ask for this explicitly: \"run the signup flow and confirm it lands on the dashboard.\" You'll watch each step live in a Preview (Agent) tab.",
+  },
+  {
+    title: "Secrets stay server-side",
+    body: "Add API keys and tokens in the Secrets pane — they're written to .env automatically and resolve server-side. The agent won't print secret values back into chat or bake a service-role key into client code, so don't paste live credentials into a normal message; use Secrets instead.",
+  },
+  {
+    title: "Let Uniqus run things for you",
+    body: "You don't have a terminal in the sandbox, and the agent knows that — it won't tell you to run npm run dev, installs, builds, or deploys yourself. If a command is needed, it runs with the agent's tools and the output streams into Logs. When a web app is ready, the agent shares the real public preview URL, never a localhost link.",
+  },
+  {
+    title: "Dev servers bind to 0.0.0.0, not localhost",
+    body: "The preview reaches your dev server across a network boundary, so a server bound to 127.0.0.1 shows up as a blank 502. The agent binds to 0.0.0.0 for you. If you bring your own start script or run command, make sure it passes the framework's host flag (next dev -H 0.0.0.0, vite --host 0.0.0.0, flask run --host=0.0.0.0, and so on).",
+  },
+  {
+    title: "Ask for current facts when they matter",
+    body: "Training data lags reality by months, especially for AI model names, library versions, and prices. When your task depends on the current lineup — a model picker, a \"compare the latest\" page, a freshly released API — say so. The agent can web-search to confirm before it writes code instead of trusting a stale memory.",
+  },
+] as const;
+
+const PROMPT_PARTS: ReadonlyArray<readonly [string, string]> = [
+  ["Goal", "Say who it is for and what success looks like."],
+  ["Context", "Name the stack, files, data shape, screenshots, constraints, and examples."],
+  ["Scope", "Ask for one coherent slice, then iterate after you see it."],
+  ["Proof", "Ask for tests, preview checks, screenshots, or command output."],
+];
+
+const TROUBLESHOOTING = [
+  {
+    title: "Preview shows a 502 with an empty log",
+    body: "Almost always a dev server bound to localhost instead of 0.0.0.0 — the preview proxy can't reach it across the sandbox boundary. The agent binds correctly by default; if you supplied a custom command, tell Uniqus \"the preview is 502, rebind the server to 0.0.0.0 and restart.\" An empty server log with a 502 is the tell.",
+  },
+  {
+    title: "The preview won't start at all",
+    body: "Open Logs and ask Uniqus to read the failing command output, fix the root cause, and rerun the app. Common culprits are a wrong port, a project in a subdirectory, or a syntax error surfaced in the log. Paste the exact error if you see one.",
+  },
+  {
+    title: "Dependencies look corrupted or modules \"disappear\"",
+    body: "This is a dependency-install race — two installs running in the same folder at once. Let the agent handle installs; it auto-installs at the sandbox root and won't run a second install on top. If you see missing-module errors after a manual install, ask Uniqus to reinstall cleanly and restart the server.",
+  },
+  {
+    title: "A long chat slows down or loses the thread",
+    body: "Long sessions hit the model's context limit and get compacted (summarized) automatically, which can blur older detail. For a clean break, start a new chat session — it shares the same files, skills, secrets, and sandbox but begins with a fresh thread. Re-state the key facts the agent needs at the top.",
+  },
+  {
+    title: "The connection drops or the workspace looks stale",
+    body: "Uniqus reconnects on its own; the status bar shows connection state and how recently files synced. If a turn looks stuck after a reconnect, refresh the workspace — your sandbox files and chat history are persisted, so nothing is lost. Then ask the agent to confirm the current state with git status or by re-reading the file.",
   },
   {
     title: "The agent changed the wrong thing",
-    body: "Stop the turn, point at the specific file or UI area, and ask for a focused correction. Use Rewind when you want to restore a checkpoint.",
+    body: "Stop the turn, point at the specific file or UI area, and ask for a focused correction. Use Rewind to restore an earlier checkpoint when a direction goes sideways.",
   },
   {
-    title: "A private repo will not import",
+    title: "A private repo won't import",
     body: "Connect GitHub from the dashboard or Settings, or paste a token with repo access. Guest accounts must sign in before GitHub features appear.",
   },
   {
     title: "The design is close but not right",
-    body: "Attach screenshots, name the target screen size, and ask Uniqus to verify with the preview. Small visual feedback works best when it is concrete.",
-  },
-  {
-    title: "A chat got too noisy",
-    body: "Create a new chat session for a fresh thread. Sessions share the same project files, skills, secrets, and sandbox.",
+    body: "Attach screenshots, name the target screen size, and ask Uniqus to verify with the preview. Concrete, specific visual feedback lands far better than \"make it nicer.\"",
   },
 ] as const;
 
-export default function GuidePage() {
+export default function DocsPage() {
   return (
     <div className="doc-shell doc-shell-wide">
-      <aside className="doc-toc" aria-label="Guide sections">
-        <div className="label-micro">Guide</div>
-        {toc.map(([href, label]) => (
-          <a key={href} href={href}>
-            {label}
+      <aside className="doc-toc" aria-label="Documentation sections">
+        <div className="label-micro">Docs</div>
+        {TOC.map((entry) => (
+          <a key={entry.href} href={entry.href}>
+            {entry.label}
           </a>
         ))}
       </aside>
 
       <main className="doc doc-guide">
-        <section id="start" className="doc-hero" aria-labelledby="guide-title">
+        <section id="overview" className="doc-hero" aria-labelledby="docs-title">
           <div>
-            <p className="doc-kicker">Uniqus Code user guide</p>
-            <h1 id="guide-title">Build, inspect, run, and ship from one workspace.</h1>
+            <p className="doc-kicker">Uniqus Code documentation</p>
+            <h1 id="docs-title">Build, inspect, run, and ship from one workspace.</h1>
             <p className="doc-lede">
-              Uniqus Code is an AI engineering workbench. You describe the outcome, the
+              Uniqus Code is an AI engineering workbench. You describe the outcome; the
               agent edits real files in an isolated sandbox, runs commands, starts
-              previews, and reports back through chat.
+              previews, and reports back through chat. This guide walks the loop end to
+              end — from a first prompt to a deployed app.
             </p>
           </div>
           <div className="doc-hero-panel" aria-label="Common workflow">
@@ -189,7 +242,7 @@ export default function GuidePage() {
         </section>
 
         <div className="doc-quick-grid" aria-label="Fast paths">
-          {quickPaths.map((item) => (
+          {QUICK_PATHS.map((item) => (
             <article key={item.title} className="doc-card doc-card-accent">
               <div className="doc-card-label">{item.label}</div>
               <h2>{item.title}</h2>
@@ -208,7 +261,7 @@ export default function GuidePage() {
             </p>
           </div>
           <div className="doc-grid two">
-            {projectModes.map((mode) => (
+            {PROJECT_MODES.map((mode) => (
               <article key={mode.title} className="doc-card">
                 <h3>{mode.title}</h3>
                 <p className="doc-card-sub">{mode.bestFor}</p>
@@ -234,7 +287,7 @@ export default function GuidePage() {
             </p>
           </div>
           <div className="doc-grid three">
-            {workspaceAreas.map((area) => (
+            {WORKSPACE_AREAS.map((area) => (
               <article key={area.title} className="doc-card compact">
                 <h3>{area.title}</h3>
                 <p>{area.body}</p>
@@ -248,12 +301,12 @@ export default function GuidePage() {
             <p className="doc-kicker">03</p>
             <h2 id="chat-title">Work with the agent</h2>
             <p>
-              Chat is where intent becomes code. The best turns tell Uniqus what
-              outcome matters, what evidence to inspect, and how to verify the result.
+              Chat is where intent becomes code. The best turns tell Uniqus what outcome
+              matters, what evidence to inspect, and how to verify the result.
             </p>
           </div>
           <div className="doc-command-list">
-            {agentControls.map(([label, body]) => (
+            {AGENT_CONTROLS.map(([label, body]) => (
               <div key={label} className="doc-command-row">
                 <code>{label}</code>
                 <span>{body}</span>
@@ -306,8 +359,9 @@ export default function GuidePage() {
             <li>
               <strong>Ask for verification.</strong>
               <span>
-                For UI work, ask Uniqus to verify desktop and mobile states. For backend
-                work, ask it to run focused tests or exercise the relevant endpoint.
+                For UI work, ask Uniqus to verify desktop and mobile states and drive the
+                real flow. For backend work, ask it to run focused tests or exercise the
+                relevant endpoint.
               </span>
             </li>
           </ol>
@@ -352,7 +406,7 @@ export default function GuidePage() {
             </p>
           </div>
           <div className="doc-grid two">
-            {configItems.map((item) => (
+            {CONFIG_ITEMS.map((item) => (
               <article key={item.title} className="doc-card">
                 <h3>{item.title}</h3>
                 <p>{item.body}</p>
@@ -391,8 +445,8 @@ export default function GuidePage() {
             </article>
           </div>
           <div className="doc-callout neutral">
-            Guest work is saved on this device. Sign in with Google to keep it
-            permanently across devices and to unlock GitHub and publishing.
+            Guest work is saved on this device. Sign in with Google to keep it permanently
+            across devices and to unlock GitHub and publishing.
           </div>
         </section>
 
@@ -427,17 +481,19 @@ export default function GuidePage() {
             <h2 id="prompting-title">Prompt the agent well</h2>
             <p>
               Strong prompts are specific enough to act on and small enough to verify.
-              Treat each turn like a useful ticket for a careful engineer.
+              Treat each turn like a useful ticket for a careful engineer — and know how
+              the agent already works so you can lean on it.
             </p>
           </div>
+
           <div className="doc-grid two">
             <article className="doc-example good">
               <div className="doc-card-label">Better first prompt</div>
               <p>
-                Build a billing dashboard for a small SaaS founder so they can spot
-                failed payments quickly. Use Next.js and the existing design tokens.
-                Start with the overview screen, seed realistic mock data, run the app,
-                and verify desktop and mobile layouts.
+                Build a billing dashboard for a small SaaS founder so they can spot failed
+                payments quickly. Use Next.js and the existing design tokens. Start with
+                the overview screen, seed realistic mock data, run the app, and verify
+                desktop and mobile layouts.
               </p>
             </article>
             <article className="doc-example">
@@ -445,32 +501,39 @@ export default function GuidePage() {
               <p>Make me a dashboard.</p>
             </article>
           </div>
+
           <div className="doc-command-list">
-            <div className="doc-command-row">
-              <code>Goal</code>
-              <span>Say who it is for and what success looks like.</span>
-            </div>
-            <div className="doc-command-row">
-              <code>Context</code>
-              <span>Name stack, files, data shape, screenshots, constraints, and examples.</span>
-            </div>
-            <div className="doc-command-row">
-              <code>Scope</code>
-              <span>Ask for one coherent slice, then iterate after you see it.</span>
-            </div>
-            <div className="doc-command-row">
-              <code>Proof</code>
-              <span>Ask for tests, preview checks, screenshots, or command output.</span>
-            </div>
+            {PROMPT_PARTS.map(([label, body]) => (
+              <div key={label} className="doc-command-row">
+                <code>{label}</code>
+                <span>{body}</span>
+              </div>
+            ))}
           </div>
+
           <div className="doc-template">
             <div className="label-micro">Copyable template</div>
             <p>
-              Build [what] for [who] so they can [goal]. Use [stack or
-              constraints]. Start with [first screen or workflow]. Use
-              [attached files or @file references] as source material. Run [tests or
-              preview] and tell me what you verified.
+              Build [what] for [who] so they can [goal]. Use [stack or constraints]. Start
+              with [first screen or workflow]. Use [attached files or @file references] as
+              source material. Run [tests or preview] and tell me what you verified.
             </p>
+          </div>
+
+          <div className="doc-section-head">
+            <h3>How the agent works — so you can prompt for it</h3>
+            <p>
+              These are the working principles the Uniqus agent already follows. Knowing
+              them tells you what to ask for and what you can trust it to do on its own.
+            </p>
+          </div>
+          <div className="doc-grid two">
+            {PROMPTING_PRINCIPLES.map((p) => (
+              <article key={p.title} className="doc-card">
+                <h3>{p.title}</h3>
+                <p>{p.body}</p>
+              </article>
+            ))}
           </div>
         </section>
 
@@ -478,15 +541,22 @@ export default function GuidePage() {
           <div className="doc-section-head">
             <p className="doc-kicker">10</p>
             <h2 id="troubleshoot-title">Troubleshooting</h2>
-            <p>Most problems get easier when you give the agent the exact symptom and the evidence.</p>
+            <p>
+              Most problems get easier when you hand the agent the exact symptom and the
+              evidence. These are the gotchas that come up most.
+            </p>
           </div>
           <div className="doc-grid two">
-            {troubleshooting.map((item) => (
+            {TROUBLESHOOTING.map((item) => (
               <article key={item.title} className="doc-card compact">
                 <h3>{item.title}</h3>
                 <p>{item.body}</p>
               </article>
             ))}
+          </div>
+          <div className="doc-callout neutral">
+            Still stuck? Head to <Link href="/support">Support</Link> or ask in the{" "}
+            <Link href="/community">community</Link>.
           </div>
         </section>
       </main>

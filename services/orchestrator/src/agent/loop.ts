@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { TOOLS } from "./tools.js";
 import * as sb from "./sandbox.js";
-import type { Sandbox } from "./sandbox.js";
+import type { Sandbox, ServerInfo } from "./sandbox.js";
 import { ensureProjectDeps } from "../ensureDeps.js";
 import {
   normalizeMessageHistoryInPlace,
@@ -23,11 +23,20 @@ import {
   killJob,
 } from "./background.js";
 import { takeScreenshot } from "./screenshot.js";
-import { runInteractPreview, type InteractAction } from "./interact.js";
+import { runInteractPreview, type InteractAction, type InteractFrame } from "./interact.js";
+import { generateImage } from "./imagegen.js";
 import { recordArtifact } from "../db/artifacts.js";
+import { recordUsageEvent } from "../db/usage.js";
+import { upsertFlow, listFlows, getFlowByName, getFlow, setFlowRunResult } from "../db/flows.js";
 import { resolveModel } from "./router.js";
 import { getProvider, providerKeysFromEnv, type ProviderKeys, type StreamTurnResult, type TokenUsage } from "./providers/index.js";
-import type { ChangedFile, DesignTokens, ModelChoice, ThinkingEffort } from "@uniqus/api-types";
+import type {
+  ChangedFile,
+  DesignTokens,
+  FlowStep,
+  ModelChoice,
+  ThinkingEffort,
+} from "@uniqus/api-types";
 import { setTodos, type TodoItem } from "./todos.js";
 import { listProjectSecrets, plumbSecretToEnvFile } from "../secrets.js";
 import { callConnector, listProjectConnectors } from "../connectors/index.js";
@@ -53,9 +62,24 @@ function buildSystemPrompt(
   designTokens: DesignTokens | null,
   librarySkills: { name: string; body: string }[],
   knowledgeDocs: { id: string; title: string; description: string | null }[],
+  runningServers: ServerInfo[],
 ): string {
   const { name: shellName, isUnixLike } = sb.shellInfo();
   const platform = process.platform;
+
+  // GRIPE-9: the live set of dev servers running RIGHT NOW, injected every turn
+  // as ground truth. Reopening a project tears down its servers, but earlier
+  // turns in the replayed history still say "server running at ...". Without a
+  // per-turn snapshot the agent trusts that stale history and tries to
+  // screenshot / read the log of a server that no longer exists. This line is
+  // the authoritative current state — it overrides anything earlier in the
+  // conversation.
+  const runningServersSection =
+    runningServers.length === 0
+      ? `Running dev servers: none right now. Any server mentioned earlier in this conversation has been stopped (e.g. the project was reopened) — do NOT assume it is still up. If you need a preview, start one with start_server; do not screenshot, read_server_log, or interact_preview against a server id from an earlier turn without first confirming it via list_servers.`
+      : `Running dev servers (live, this turn — treat as ground truth over anything said earlier):\n${runningServers
+          .map((s) => `  • id ${s.id} — port ${s.port} — \`${s.command}\``)
+          .join("\n")}`;
 
   // Web search is only wired on the Anthropic path (server-side web_search);
   // the OpenAI/Gemini adapters run function-calling only. Advertising a tool
@@ -135,13 +159,16 @@ Product and design quality:
 - Build responsive layouts deliberately: stable dimensions, no text overlap, usable touch targets on mobile, and no viewport-width font scaling.
 - Include accessible semantics, labels, keyboard reachability, visible focus states, sufficient contrast, and reduced-motion-friendly animation.
 - Use visual assets when a site, app, or game needs them. Prefer uploaded assets, local assets, generated bitmap assets, or relevant public assets over generic placeholder blocks.
+- generate_image: create REAL raster images (hero images, logos, illustrations, backgrounds, icons, OG/social images, product mockups) with Nano Banana instead of placeholder boxes — pass a specific prompt (subject, style, colours, composition) and optional aspect_ratio. It saves into assets/generated/ and returns the path; reference it from your code (copy into the app's public/ or static folder and use the URL). Edit an existing image by passing input_image. Default model nano-banana-2 (fast); use nano-banana-pro when fidelity or in-image text matters. It needs a Google API key and costs money per image, so generate deliberately — not for every decorative element.
 - After meaningful frontend work, start or reuse a preview server and inspect it with screenshot_preview at desktop and mobile sizes. Fix obvious layout, contrast, or rendering issues before reporting completion.
 - Screenshot viewport: keep viewport dimensions reasonable (max ~1920x1080). Do NOT use full_page=true on pages with very long scroll — the resulting image may exceed the 8000px dimension limit and fail. For long pages, take multiple viewport-sized screenshots at different scroll positions instead.
-- When you change something interactive — a form, login/signup, routing, data entry, checkout, a dashboard action — don't just screenshot it: drive it with interact_preview. Click through the real flow (fill fields, submit, navigate) and assert the outcome (assert_text / assert_url / assert_visible). It returns console errors, failed requests, and an accessibility scan alongside a final screenshot; fix anything it surfaces BEFORE telling the user the feature works. Treat this as quiet QA you do for yourself, not a stage you make the user run.
+- When you change something interactive — a form, login/signup, routing, data entry, checkout, a dashboard action — don't just screenshot it: drive it with interact_preview. Click through the real flow (fill fields, submit, navigate) and assert the outcome (assert_text / assert_url / assert_visible). It returns console errors, failed requests, and an accessibility scan alongside a final screenshot; fix anything it surfaces BEFORE telling the user the feature works. The user watches each step live in a "Preview (Agent)" tab, so this doubles as showing your work — treat it as quiet QA you do for yourself, not a stage you make the user run.
+- Reusable smoke-flows (save_flow / run_flow / list_flows): once a multi-step flow works (e.g. "create an invoice and mark it paid"), call save_flow({ name, description, actions }) with the interact_preview steps so it becomes a replayable checklist. After later changes that could affect it, run_flow({ name, server_id }) re-drives it and reports pass/fail — a cheap regression check. Use list_flows to see what's saved. Save a flow once a feature is solid; don't re-save it every turn.
 
 Backend data & end-user login (Supabase rails):
 - The supabase connector (call_connector connector:"supabase") is the backend substrate: provision_database, get_schema (inspect tables/columns before you change them), run_sql, get_database. Provisioning stores SUPABASE_URL / SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY / DATABASE_URL as project secrets — read public values with get_secret; the service-role key stays server-only and must NEVER be written into client code.
 - "Add login" recipe (end-user auth for the GENERATED app — distinct from the workspace's own Supabase connection): (1) ensure a linked Supabase project (provision_database if missing); (2) detect the stack — Next.js is first-class; (3) install deps (@supabase/supabase-js, plus @supabase/ssr for Next.js so sessions live in cookies and reach server components/route handlers); (4) write env (NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY for Next.js client code — only the public URL + anon key, never the service role key); (5) generate /login, /signup, /forgot-password, /auth/callback, /account screens + a browser client, an SSR/server client, and a getCurrentUser()/requireUser() helper; (6) protect routes with middleware/guards (signed-out → /login; signed-in away from /login); (7) run_sql for a profiles table keyed to auth.users.id, user-owned columns (user_id uuid not null default auth.uid()), RLS enabled, and policies ("users can read/write only rows where user_id = auth.uid()"); (8) verify the whole flow with interact_preview (signup → login → logout → protected route); (9) hand back a short review card: screens added, protected pages, tables/policies created, and any manual Supabase dashboard steps. V1 default is email+password (+ reset); offer magic link/OTP; defer social OAuth (needs provider setup).
+- Payments (Stripe): take payments via call_connector connector:"stripe" — create checkout sessions, billing customer-portal sessions, and customers. Requires a STRIPE_API_KEY project secret; the key resolves server-side and never enters client code. Call list_connectors for the exact methods.
 - Safe data changes: run_sql refuses destructive statements (DROP/TRUNCATE/DELETE/ALTER…DROP/REVOKE) unless you pass confirm:true. On the first (blocked) call it returns an impact preview — tell the user in plain language what will be permanently lost, get approval, THEN re-run with confirm:true. Prefer reversible changes (add a column with a default, archive instead of delete) and always scope DELETE/UPDATE with a WHERE clause.
 
 Secrets & env vars (the user's "set it like in Vercel" expectation):
@@ -166,6 +193,8 @@ Tools you have:
 ${webSearchToolLine}${knowledgeToolLine}
 - enter_plan_mode — when the user requests a large or risky change (new app, multi-file feature, big refactor, schema/data migration) WITHOUT having turned plan mode on, call this BEFORE editing anything. It drafts a plan, shows it to the user to edit/approve, and returns the approved plan for you to execute. Skip it for small, well-understood edits — just make those. Never call it if plan mode is already active.
 - ask_user — pause and ask the user a question when you need their input to proceed. Use it when: you're unsure which technology/framework to use, the user's request is ambiguous enough that two reasonable interpretations would produce very different results, you need a credential or API key, or the user asked you to check with them before a major decision. The user sees the question inline in the chat and can respond with buttons or free text.
+
+${runningServersSection}
 
 User uploads:
 - Files uploaded through Uniqus Code are saved under assets/uploads/. To discover and read them, use the list_assets and read_asset tools (NOT read_file). read_asset works for text assets (CSV, JSON, etc.) and returns their content. For images, reference them by their sandbox-relative path (e.g. assets/uploads/abc12345-logo.png) in generated code — do not ask the user to upload them again.
@@ -244,6 +273,14 @@ export interface LoopHooks {
   requestPlan?: (reason: string) => Promise<string>;
   /** Fires when the agent calls `todo_write`. UI rerenders the Tasks pane. */
   onTodoWrite?: (items: TodoItem[]) => void;
+  /**
+   * P2 live "Preview (Agent)" view: fires for each screenshot frame as the agent
+   * drives the running app via `interact_preview` (or replays a saved flow via
+   * `run_flow`). The server broadcasts it as an `agent_preview_frame` so the web
+   * renders the interaction live. `callId` ties the frame stream together;
+   * `flowName` is set when replaying a saved smoke-flow.
+   */
+  onPreviewFrame?: (callId: string, frame: InteractFrame, flowName?: string) => void;
   /**
    * Fires as token usage accrues, with the CUMULATIVE totals for the whole
    * turn so far (summed across every iteration of the loop). The server
@@ -366,6 +403,14 @@ export interface LoopOptions extends LoopHooks {
    * ⇒ nothing appended.
    */
   selectedElement?: SelectedElement | null;
+  /**
+   * The dev servers running RIGHT NOW for this project (GRIPE-9). Resolved by
+   * the caller per turn from the live server registry (sb.listServers) and
+   * rendered into the system prompt as ground truth, so the agent doesn't try
+   * to screenshot / read the log of a server that was torn down when the
+   * project was reopened. Empty/undefined ⇒ "Running dev servers: none".
+   */
+  runningServers?: ServerInfo[];
 }
 
 export interface LoopResult {
@@ -501,6 +546,7 @@ export async function runAgentLoop(
     opts.designSystem ?? null,
     opts.librarySkills ?? [],
     opts.knowledgeDocs ?? [],
+    opts.runningServers ?? [],
   );
   const messages = opts.messages ?? [];
   // Append every message this turn produces to both the live history AND the
@@ -690,6 +736,8 @@ export async function runAgentLoop(
           (added, removed) => {
             editStats = { linesAdded: added, linesRemoved: removed };
           },
+          opts.onPreviewFrame,
+          keys.google ?? null,
         );
         // Multimodal results (e.g. screenshots) include image content blocks.
         if (result && typeof result === "object" && (result as any).__multimodal) {
@@ -819,6 +867,51 @@ function lineDiffStats(oldText: string, newText: string): { added: number; remov
   return { added: n - lcs, removed: m - lcs };
 }
 
+/**
+ * Format an `interact_preview` / `run_flow` result as the agent's multimodal
+ * tool result: the final-state screenshot (best-effort) plus a structured text
+ * summary of steps, assertion failures, console errors, failed requests, and
+ * a11y findings. Shared so a saved-flow replay returns identical evidence to a
+ * live interaction.
+ */
+async function buildInteractToolResult(
+  sandboxRoot: string,
+  result: Awaited<ReturnType<typeof runInteractPreview>>,
+  header: string,
+): Promise<{ __multimodal: true; content: unknown[] }> {
+  const imgData = await readAssetBase64(sandboxRoot, result.asset_path).catch(() => null);
+  const stepLines = result.steps
+    .map((s) => `  ${s.ok ? "✓" : "✗"} [${s.index}] ${s.action}${s.detail ? ` — ${s.detail}` : ""}`)
+    .join("\n");
+  const section = (title: string, items: string[]): string =>
+    items.length ? `\n\n${title}:\n${items.map((x) => `  - ${x}`).join("\n")}` : "";
+  const a11yLines = result.a11y_issues.map((a) => `${a.help} (${a.nodes})`);
+  const text =
+    `${header}\n` +
+    `Steps:\n${stepLines || "  (none)"}` +
+    section("Assertion failures", result.assertion_failures) +
+    section("Console errors", result.console_errors) +
+    section("Failed requests", result.failed_requests) +
+    section("Accessibility findings", a11yLines) +
+    (imgData
+      ? `\n\nFinal-state screenshot saved to ${result.asset_path}.`
+      : `\n\n(No final-state screenshot — capture failed, e.g. the page closed or crashed mid-run.)`);
+  return {
+    __multimodal: true,
+    content: [
+      ...(imgData
+        ? [
+            {
+              type: "image" as const,
+              source: { type: "base64" as const, media_type: imgData.mime, data: imgData.base64 },
+            },
+          ]
+        : []),
+      { type: "text" as const, text },
+    ],
+  };
+}
+
 export async function executeTool(
   sandbox: Sandbox,
   name: string,
@@ -834,6 +927,10 @@ export async function executeTool(
   userId: string | null,
   /** Fires once with per-file line stats for write_file/edit_file (UI diff badge). */
   onEditStats?: (added: number, removed: number) => void,
+  /** P2: streams live interaction frames for interact_preview / run_flow. */
+  onPreviewFrame?: LoopHooks["onPreviewFrame"],
+  /** Resolved Google API key (BYOK or env) for generate_image. */
+  googleApiKey?: string | null,
 ): Promise<string | { __multimodal: true; content: unknown[] }> {
   const args = input as Record<string, any>;
   switch (name) {
@@ -1017,6 +1114,9 @@ export async function executeTool(
         viewport,
         a11y: args.a11y !== false,
         actions: args.actions as InteractAction[],
+        // P2 live view: stream each step's screenshot to the "Preview (Agent)"
+        // tab so the user watches the agent operate the browser as it happens.
+        onFrame: onPreviewFrame ? (frame) => onPreviewFrame(callId, frame) : undefined,
       });
       // P2.3: persist this interaction run as checkpoint evidence so the
       // checkpoint can be reopened with its proof, and PR bundles / review
@@ -1044,40 +1144,176 @@ export async function executeTool(
       }
       // The final screenshot is best-effort: interact.ts swallows a capture
       // failure (page closed/crashed or navigated mid-run) yet still returns an
-      // asset_path. Tolerate a missing file so the structured step/console/
-      // assertion/a11y evidence still reaches the agent instead of throwing
-      // ENOENT and discarding the whole run.
-      const imgData = await readAssetBase64(sandbox.rootDir, result.asset_path).catch(() => null);
-      const stepLines = result.steps
-        .map((s) => `  ${s.ok ? "✓" : "✗"} [${s.index}] ${s.action}${s.detail ? ` — ${s.detail}` : ""}`)
-        .join("\n");
-      const section = (title: string, items: string[]): string =>
-        items.length ? `\n\n${title}:\n${items.map((x) => `  - ${x}`).join("\n")}` : "";
-      const a11yLines = result.a11y_issues.map((a) => `${a.help} (${a.nodes})`);
+      // asset_path. buildInteractToolResult tolerates a missing file so the
+      // structured step/console/assertion/a11y evidence still reaches the agent.
+      return buildInteractToolResult(
+        sandbox.rootDir,
+        result,
+        `interact_preview on ${result.final_url} — "${result.page_title}"`,
+      );
+    }
+    case "generate_image": {
+      if (typeof args.prompt !== "string" || !args.prompt.trim()) {
+        throw new Error("generate_image requires 'prompt' as a non-empty string");
+      }
+      const gen = await generateImage({
+        apiKey: googleApiKey ?? "",
+        sandbox,
+        prompt: args.prompt,
+        model: typeof args.model === "string" ? args.model : undefined,
+        aspectRatio: typeof args.aspect_ratio === "string" ? args.aspect_ratio : undefined,
+        inputImagePath: typeof args.input_image === "string" ? args.input_image : undefined,
+      });
+      // Image output is billed per image — record it as its own usage event so
+      // the dashboard reflects the spend (separate from the turn's token usage).
+      if (projectId && userId) {
+        void recordUsageEvent({
+          projectId,
+          userId,
+          provider: "google",
+          model: gen.model,
+          inputTokens: 0,
+          outputTokens: 0,
+          costUsd: gen.estimated_cost_usd,
+          elapsedMs: 0,
+        }).catch(() => {});
+      }
+      // Hand the FIRST image back as a preview the agent can SEE (so it can judge
+      // the result) plus the path(s) to reference from the app's code.
+      const previewImg = await readAssetBase64(sandbox.rootDir, gen.images[0].asset_path).catch(
+        () => null,
+      );
+      const pathLines = gen.images.map((im) => `  - ${im.asset_path}`).join("\n");
       const text =
-        `interact_preview on ${result.final_url} — "${result.page_title}"\n` +
-        `Steps:\n${stepLines || "  (none)"}` +
-        section("Assertion failures", result.assertion_failures) +
-        section("Console errors", result.console_errors) +
-        section("Failed requests", result.failed_requests) +
-        section("Accessibility findings", a11yLines) +
-        (imgData
-          ? `\n\nFinal-state screenshot saved to ${result.asset_path}.`
-          : `\n\n(No final-state screenshot — capture failed, e.g. the page closed or crashed mid-run.)`);
+        `Generated ${gen.images.length} image${gen.images.length === 1 ? "" : "s"} with ${
+          gen.model
+        } (~$${gen.estimated_cost_usd.toFixed(3)} est.):\n${pathLines}\n\n` +
+        `Reference these from the app's code — e.g. copy into the project's public/ (or static asset) folder and use the URL, or import the path directly.` +
+        (gen.note ? `\n\nModel note: ${gen.note}` : "");
       return {
         __multimodal: true,
         content: [
-          ...(imgData
+          ...(previewImg
             ? [
                 {
                   type: "image" as const,
-                  source: { type: "base64" as const, media_type: imgData.mime, data: imgData.base64 },
+                  source: {
+                    type: "base64" as const,
+                    media_type: previewImg.mime,
+                    data: previewImg.base64,
+                  },
                 },
               ]
             : []),
           { type: "text" as const, text },
         ],
       };
+    }
+    case "list_flows": {
+      if (!projectId) return "No saved flows (this run has no project).";
+      const flows = await listFlows(projectId);
+      if (!flows.length) {
+        return 'No saved smoke-flows yet. After you verify a feature with interact_preview, call save_flow({ name, actions }) so you can replay the same flow after later changes.';
+      }
+      return flows
+        .map((f) => {
+          const last = f.last_status
+            ? ` [last run: ${f.last_status}${f.last_run_at ? ` @ ${f.last_run_at}` : ""}]`
+            : "";
+          return `• ${f.name} (${(f.steps as unknown[]).length} steps)${last}${
+            f.description ? ` — ${f.description}` : ""
+          }`;
+        })
+        .join("\n");
+    }
+    case "save_flow": {
+      if (!projectId) throw new Error("save_flow requires a project (none in this run)");
+      const flowName = typeof args.name === "string" ? args.name.trim() : "";
+      if (!flowName) throw new Error("save_flow requires 'name' as a non-empty string");
+      if (!Array.isArray(args.actions) || args.actions.length === 0) {
+        throw new Error(
+          "save_flow requires 'actions' as a non-empty array of interact_preview steps (the flow to replay)",
+        );
+      }
+      const flow = await upsertFlow({
+        projectId,
+        createdBy: userId,
+        name: flowName,
+        description: typeof args.description === "string" ? args.description : null,
+        steps: args.actions as FlowStep[],
+        startPath:
+          typeof args.start_path === "string"
+            ? args.start_path
+            : typeof args.path === "string"
+              ? args.path
+              : null,
+      });
+      return `Saved smoke-flow "${flow.name}" (${
+        (flow.steps as unknown[]).length
+      } steps). Replay it after later changes with run_flow({ name: "${flow.name}", server_id }).`;
+    }
+    case "run_flow": {
+      if (!projectId) throw new Error("run_flow requires a project (none in this run)");
+      const flowRef = typeof args.flow_id === "string" ? args.flow_id : null;
+      const flowName = typeof args.name === "string" ? args.name.trim() : "";
+      const flow = flowRef
+        ? await getFlow(projectId, flowRef)
+        : flowName
+          ? await getFlowByName(projectId, flowName)
+          : null;
+      if (!flow) {
+        throw new Error(
+          `run_flow: no saved flow ${
+            flowRef ? `with id ${flowRef}` : flowName ? `named "${flowName}"` : "(pass name or flow_id)"
+          }. Use list_flows to see saved flows.`,
+        );
+      }
+      const fvp =
+        args.viewport_width && args.viewport_height
+          ? { width: Number(args.viewport_width), height: Number(args.viewport_height) }
+          : undefined;
+      const result = await runInteractPreview({
+        sandboxRoot: sandbox.rootDir,
+        serverId: typeof args.server_id === "string" ? args.server_id : undefined,
+        url: typeof args.url === "string" ? args.url : undefined,
+        pathSuffix: typeof args.path === "string" ? args.path : (flow.start_path ?? undefined),
+        viewport: fvp,
+        a11y: args.a11y !== false,
+        actions: flow.steps as unknown as InteractAction[],
+        onFrame: onPreviewFrame ? (frame) => onPreviewFrame(callId, frame, flow.name) : undefined,
+      });
+      const status: "pass" | "fail" =
+        result.assertion_failures.length > 0 || result.steps.some((s) => !s.ok) ? "fail" : "pass";
+      const summary = `${result.steps.length} step(s), ${result.assertion_failures.length} assertion failure(s), ${result.console_errors.length} console error(s)`;
+      void setFlowRunResult(projectId, flow.id, {
+        status,
+        summary,
+        ranAt: new Date().toISOString(),
+      });
+      void recordArtifact({
+        projectId,
+        sessionId,
+        kind: "flow",
+        summary: `flow "${flow.name}" — ${status} — ${summary}`,
+        data: {
+          flow_id: flow.id,
+          flow_name: flow.name,
+          status,
+          final_url: result.final_url,
+          page_title: result.page_title,
+          screenshot: result.asset_path,
+          steps: result.steps,
+          assertion_failures: result.assertion_failures,
+          console_errors: result.console_errors,
+          failed_requests: result.failed_requests,
+          a11y_issues: result.a11y_issues,
+        },
+      });
+      return buildInteractToolResult(
+        sandbox.rootDir,
+        result,
+        `run_flow "${flow.name}" — ${status.toUpperCase()} on ${result.final_url}`,
+      );
     }
     case "run_in_background": {
       if (typeof args.command !== "string" || !args.command.trim()) {

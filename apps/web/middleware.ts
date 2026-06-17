@@ -22,7 +22,7 @@ const PUBLIC_PATHS = [
   "/",
   "/login",
   "/callback",
-  "/guide",
+  "/docs",
   "/pricing",
   "/enterprise",
   "/security",
@@ -89,7 +89,7 @@ export default async function middleware(
 export const config = {
   // The guide used to be excluded here (it was a standalone static page). It now
   // lives in the `(marketing)` group, whose layout calls withAuth() — which
-  // throws unless the AuthKit middleware has stamped the request — so /guide
+  // throws unless the AuthKit middleware has stamped the request — so /docs
   // must run through middleware like every other marketing page. It stays
   // publicly reachable via PUBLIC_PATHS above.
   matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\\.png$).*)"],

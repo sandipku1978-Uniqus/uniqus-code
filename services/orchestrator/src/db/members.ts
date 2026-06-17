@@ -297,3 +297,19 @@ export async function getOrganization(orgId: string): Promise<Organization | nul
   if (error) return null;
   return (data as Organization | null) ?? null;
 }
+
+/**
+ * The org a project belongs to, or null (no org, or the org_id column hasn't
+ * been migrated yet). Cheap single-column read for the budget gate (P3.5), which
+ * doesn't want the whole owner-scoped ProjectRecord. Degrades to null on any
+ * error so the caller's budget check fails open.
+ */
+export async function getProjectOrgId(projectId: string): Promise<string | null> {
+  const { data, error } = await db()
+    .from("projects")
+    .select("org_id")
+    .eq("id", projectId)
+    .maybeSingle();
+  if (error || !data) return null;
+  return (data as { org_id: string | null }).org_id ?? null;
+}

@@ -13,7 +13,7 @@ const NAV_LINKS: { label: string; href: string }[] = [
   { label: "AI models", href: "/models" },
   { label: "Workspaces", href: "/workspaces" },
   { label: "Enterprise", href: "/enterprise" },
-  { label: "Guide", href: "/guide" },
+  { label: "Docs", href: "/docs" },
 ];
 
 export default function MarketingNav({

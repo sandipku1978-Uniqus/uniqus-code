@@ -11,8 +11,8 @@ import { getSecretValue } from "../db/secrets.js";
  * name; the registry resolves and uses them server-side.
  *
  * Shipped connectors today (each a self-contained file in this folder):
- * generic HTTP, Slack, Postgres, GitHub, and Supabase. Additional sources
- * in Plan §5 (Stripe, Salesforce, Notion, Airtable, etc.) plug into the same
+ * generic HTTP, Slack, Postgres, GitHub, Supabase, and Stripe. Additional
+ * sources in Plan §5 (Salesforce, Notion, Airtable, etc.) plug into the same
  * registry the same way — add a file, export a ConnectorDefinition, register
  * it in REGISTRY below. Do not advertise a connector here (or in the agent's
  * tool descriptions) before its file exists.

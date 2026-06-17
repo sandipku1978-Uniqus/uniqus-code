@@ -48,6 +48,30 @@ export interface InteractAction {
   timeout_ms?: number;
 }
 
+/**
+ * One streamed frame of a live interaction (P2 "Preview (Agent)"). The agent
+ * captures a screenshot after each step and hands it to `onFrame` as it happens,
+ * so the web can render the agent driving the browser in near-real-time instead
+ * of a single opaque tool row. The orchestrator wraps this with a `call_id`
+ * (and, on a saved-flow replay, the flow name) before broadcasting it as an
+ * `agent_preview_frame` ServerEvent.
+ */
+export interface InteractFrame {
+  /** 0-based frame index within this run. */
+  seq: number;
+  /** Human caption: "Opened /login", "click #submit", "Final state", … */
+  label: string;
+  ok: boolean;
+  detail?: string;
+  url: string;
+  /** base64-encoded image (no `data:` prefix). */
+  image: string;
+  mime: string;
+  title?: string;
+  /** True on the last frame of the run. */
+  done?: boolean;
+}
+
 export interface InteractOpts {
   sandboxRoot: string;
   serverId?: string;
@@ -57,6 +81,13 @@ export interface InteractOpts {
   actions: InteractAction[];
   /** Run the lightweight a11y pass on the final state (default true). */
   a11y?: boolean;
+  /**
+   * P2 live streaming: invoked with a screenshot frame after the initial load
+   * and after every action (plus a final `done` frame). When omitted (CLI /
+   * tests) no per-step frames are captured, so there's zero added latency for
+   * non-streamed runs — only the single final screenshot is taken, as before.
+   */
+  onFrame?: (frame: InteractFrame) => void;
 }
 
 interface InteractStep {
@@ -65,6 +96,8 @@ interface InteractStep {
   ok: boolean;
   detail?: string;
   url: string;
+  /** Per-step screenshot path (relative to sandbox root), when frames captured. */
+  shot?: string;
 }
 
 export interface InteractResult {
@@ -137,33 +170,88 @@ export async function runInteractPreview(opts: InteractOpts): Promise<InteractRe
       }
     });
 
+    // Per-step frame capture for the live "Preview (Agent)" view. Each frame is
+    // a small JPEG (fast + light over the wire) written to disk AND streamed via
+    // onFrame. Only runs when a listener is attached so non-streamed callers pay
+    // no extra screenshot cost. `frameSeq` is shared with the final done-frame.
+    const dir = path.resolve(opts.sandboxRoot, SHOT_DIR);
+    let dirReady = false;
+    const ensureDir = async (): Promise<void> => {
+      if (!dirReady) {
+        await fs.mkdir(dir, { recursive: true });
+        dirReady = true;
+      }
+    };
+    const runPrefix = randomUUID().slice(0, 8);
+    let frameSeq = 0;
+    const captureFrame = async (
+      label: string,
+      ok: boolean,
+      detail?: string,
+    ): Promise<string | undefined> => {
+      if (!opts.onFrame) return undefined;
+      try {
+        const buf = await page.screenshot({ type: "jpeg", quality: 55 });
+        await ensureDir();
+        const file = `${runPrefix}-${frameSeq}.jpg`;
+        await fs.writeFile(path.join(dir, file), buf).catch(() => {});
+        opts.onFrame({
+          seq: frameSeq,
+          label,
+          ok,
+          detail,
+          url: page.url(),
+          image: buf.toString("base64"),
+          mime: "image/jpeg",
+          title: (await page.title().catch(() => "")) || undefined,
+        });
+        frameSeq++;
+        return `${SHOT_DIR}/${file}`;
+      } catch {
+        return undefined;
+      }
+    };
+
     await gotoWithFallback(page, targetUrl);
+    await captureFrame("Opened the app", true);
 
     for (let i = 0; i < opts.actions.length; i++) {
       const a = opts.actions[i];
       const label = describeAction(a);
+      let ok = true;
+      let detail: string | undefined;
       try {
         await runAction(page, a, targetUrl, assertionFailures, i);
-        steps.push({ index: i, action: label, ok: true, url: page.url() });
       } catch (err) {
-        steps.push({
-          index: i,
-          action: label,
-          ok: false,
-          detail: err instanceof Error ? err.message.slice(0, 300) : String(err),
-          url: page.url(),
-        });
+        ok = false;
+        detail = err instanceof Error ? err.message.slice(0, 300) : String(err);
       }
+      const shot = await captureFrame(label, ok, detail);
+      steps.push({ index: i, action: label, ok, detail, url: page.url(), shot });
     }
 
     const a11yIssues = opts.a11y === false ? [] : await runA11yPass(page).catch(() => []);
 
-    const dir = path.resolve(opts.sandboxRoot, SHOT_DIR);
-    await fs.mkdir(dir, { recursive: true });
+    await ensureDir();
     const file = `${randomUUID().slice(0, 8)}.png`;
-    await page.screenshot({ path: path.join(dir, file) }).catch(() => {});
+    const finalBuf = await page.screenshot().catch(() => null);
+    if (finalBuf) await fs.writeFile(path.join(dir, file), finalBuf).catch(() => {});
 
     const pageTitle = await page.title().catch(() => "");
+    // Final done-frame: settles the live view on the end state and clears the
+    // "LIVE" indicator. Reuses the PNG just captured (no extra screenshot).
+    if (opts.onFrame) {
+      opts.onFrame({
+        seq: frameSeq,
+        label: "Final state",
+        ok: assertionFailures.length === 0,
+        url: page.url(),
+        image: finalBuf ? finalBuf.toString("base64") : "",
+        mime: "image/png",
+        title: pageTitle || undefined,
+        done: true,
+      });
+    }
     return {
       asset_path: `${SHOT_DIR}/${file}`,
       resolved_url: targetUrl,
