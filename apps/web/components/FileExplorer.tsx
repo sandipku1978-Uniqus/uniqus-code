@@ -2,15 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TreeEntry } from "@uniqus/api-types";
-import { FileIcon, defaultStyles } from "react-file-icon";
 import { useStore } from "@/lib/store";
 import { send } from "@/lib/ws-client";
 import { fileOpApi } from "@/lib/api";
 import { toast } from "@/lib/toast";
-
-// react-file-icon@1.6.0 ships no types; the ambient module declaration lives in
-// apps/web/react-file-icon.d.ts. `FileIcon` renders a colored VSCode/Atom-style
-// SVG file glyph; `defaultStyles` is the per-extension preset map.
+import { resolveSetiIcon } from "@/lib/seti-icons";
 
 interface TreeNode {
   name: string;
@@ -48,102 +44,6 @@ function buildTree(entries: TreeEntry[]): TreeNode[] {
   }
   sortRec(root);
   return root.children;
-}
-
-type FileIconStyle = import("react-file-icon").FileIconProps;
-
-/**
- * Resolve react-file-icon `<FileIcon>` props for a filename — the colored,
- * VSCode/Atom-style glyph. Single source of truth: the tree, the filtered
- * search, the inline-create preview, and the Cmd-P palette all read from here.
- *
- * Strategy:
- *  1. Special-case whole filenames (Dockerfile, .env, package.json, …) and a
- *     few extensions react-file-icon doesn't curate (tsx/go/rs/sh/vue/…), so
- *     they still get a sensible `type` archetype + label.
- *  2. Otherwise spread the library's own `defaultStyles[ext]` preset.
- *  3. Fall back to a generic document for unknown extensions.
- *
- * Every result carries an `extension` so the fold always shows a label.
- */
-function getFileIcon(name: string): FileIconStyle {
-  const lower = name.toLowerCase();
-  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
-
-  // 1a. Whole-filename matches (no extension, or a distinctive identity).
-  const byName: Record<string, FileIconStyle> = {
-    dockerfile: { extension: "docker", type: "settings", labelColor: "#2496ed", glyphColor: "#2496ed" },
-    "dockerfile.dev": { extension: "docker", type: "settings", labelColor: "#2496ed", glyphColor: "#2496ed" },
-    ".gitignore": { extension: "git", type: "settings", labelColor: "#f05033", glyphColor: "#f05033" },
-    ".gitattributes": { extension: "git", type: "settings", labelColor: "#f05033", glyphColor: "#f05033" },
-    ".dockerignore": { extension: "docker", type: "settings", labelColor: "#2496ed", glyphColor: "#2496ed" },
-    "cargo.toml": { extension: "toml", type: "settings", labelColor: "#dea584", glyphColor: "#dea584" },
-    "cargo.lock": { extension: "lock", type: "binary", labelColor: "#8b949e", glyphColor: "#8b949e" },
-    "go.mod": { extension: "mod", type: "settings", labelColor: "#00add8", glyphColor: "#00add8" },
-    "go.sum": { extension: "sum", type: "settings", labelColor: "#00add8", glyphColor: "#00add8" },
-    "fly.toml": { extension: "fly", type: "settings", labelColor: "#824ff1", glyphColor: "#824ff1" },
-    "nixpacks.toml": { extension: "nix", type: "settings", labelColor: "#7e7eff", glyphColor: "#7e7eff" },
-    license: { extension: "lic", type: "document", labelColor: "#a3a3a3", glyphColor: "#a3a3a3" },
-    "license.md": { extension: "lic", type: "document", labelColor: "#a3a3a3", glyphColor: "#a3a3a3" },
-    readme: { extension: "md", type: "document", labelColor: "#519aba", glyphColor: "#519aba" },
-  };
-  if (byName[lower]) return byName[lower];
-  // Any dotenv-family file (.env, .env.local, .env.production, …).
-  if (lower === ".env" || lower.startsWith(".env.")) {
-    return { extension: "env", type: "settings", labelColor: "#ecd06f", glyphColor: "#ecd06f" };
-  }
-  // package.json / -lock.json get the npm-red treatment; tsconfig the TS blue.
-  if (lower === "package.json") return { extension: "json", type: "code", labelColor: "#cb3837", glyphColor: "#cb3837" };
-  if (lower === "package-lock.json") return { extension: "lock", type: "binary", labelColor: "#8b949e", glyphColor: "#8b949e" };
-  if (lower === "tsconfig.json") return { extension: "json", type: "code", labelColor: "#3178c6", glyphColor: "#3178c6" };
-
-  // 1b. Extensions react-file-icon doesn't curate (or we want a nicer color).
-  const byExt: Record<string, FileIconStyle> = {
-    tsx: { extension: "tsx", type: "code", labelColor: "#3178c6", glyphColor: "#3178c6" },
-    mjs: { extension: "mjs", type: "code", labelColor: "#f0db4f", glyphColor: "#f0db4f" },
-    cjs: { extension: "cjs", type: "code", labelColor: "#f0db4f", glyphColor: "#f0db4f" },
-    mdx: { extension: "mdx", type: "document", labelColor: "#519aba", glyphColor: "#519aba" },
-    go: { extension: "go", type: "code", labelColor: "#00add8", glyphColor: "#00add8" },
-    rs: { extension: "rs", type: "code", labelColor: "#dea584", glyphColor: "#dea584" },
-    toml: { extension: "toml", type: "settings", labelColor: "#9c4221", glyphColor: "#9c4221" },
-    lock: { extension: "lock", type: "binary", labelColor: "#8b949e", glyphColor: "#8b949e" },
-    env: { extension: "env", type: "settings", labelColor: "#ecd06f", glyphColor: "#ecd06f" },
-    sh: { extension: "sh", type: "code", labelColor: "#4eaa25", glyphColor: "#4eaa25" },
-    bash: { extension: "bash", type: "code", labelColor: "#4eaa25", glyphColor: "#4eaa25" },
-    zsh: { extension: "zsh", type: "code", labelColor: "#4eaa25", glyphColor: "#4eaa25" },
-    fish: { extension: "fish", type: "code", labelColor: "#4eaa25", glyphColor: "#4eaa25" },
-    sql: { extension: "sql", type: "settings", labelColor: "#336791", glyphColor: "#336791" },
-    vue: { extension: "vue", type: "code", labelColor: "#42b883", glyphColor: "#42b883" },
-    svelte: { extension: "svelte", type: "code", labelColor: "#ff3e00", glyphColor: "#ff3e00" },
-    kt: { extension: "kt", type: "code", labelColor: "#a97bff", glyphColor: "#a97bff" },
-    kts: { extension: "kts", type: "code", labelColor: "#a97bff", glyphColor: "#a97bff" },
-    swift: { extension: "swift", type: "code", labelColor: "#fa7343", glyphColor: "#fa7343" },
-    h: { extension: "h", type: "code", labelColor: "#a8b9cc", glyphColor: "#a8b9cc" },
-    cc: { extension: "cc", type: "code", labelColor: "#00599c", glyphColor: "#00599c" },
-    cxx: { extension: "cxx", type: "code", labelColor: "#00599c", glyphColor: "#00599c" },
-    hpp: { extension: "hpp", type: "code", labelColor: "#00599c", glyphColor: "#00599c" },
-    htm: { extension: "htm", type: "code", labelColor: "#e34c26", glyphColor: "#e34c26" },
-    sass: { extension: "sass", type: "code", labelColor: "#cf649a", glyphColor: "#cf649a" },
-    less: { extension: "less", type: "code", labelColor: "#1d365d", glyphColor: "#2a4d80" },
-    xml: { extension: "xml", type: "code", labelColor: "#fb923c", glyphColor: "#fb923c" },
-    yaml: { extension: "yaml", type: "settings", labelColor: "#cb171e", glyphColor: "#cb171e" },
-    webp: { extension: "webp", type: "image", labelColor: "#ad7bd6", glyphColor: "#ad7bd6" },
-    ico: { extension: "ico", type: "image", labelColor: "#ad7bd6", glyphColor: "#ad7bd6" },
-  };
-  if (byExt[ext]) return byExt[ext];
-
-  // 2. The library's own curated preset (js/ts/json/css/scss/md/py/rb/php/java/
-  //    c/cpp/html/yml/svg/png/jpg/gif/pdf/txt/csv/… are all covered here).
-  const preset = ext ? defaultStyles[ext] : undefined;
-  if (preset) return { ...preset, extension: ext };
-
-  // 3. Generic fallback for unknown extensions / extensionless files.
-  return {
-    extension: ext || "",
-    type: "document",
-    labelColor: "#9ca3af",
-    glyphColor: "#9ca3af",
-  };
 }
 
 export default function FileExplorer({
@@ -572,19 +472,18 @@ function highlightMatch(path: string, query: string): React.ReactNode {
 }
 
 /**
- * Colored, VSCode/Atom-style file icon (react-file-icon — the react-file-icon
- * look). The library's SVG renders at width:100% inside its 40×48 viewBox; we
- * constrain it to a fixed ~16px box via the wrapper so every row's glyph lines
- * up. Sizing lives in inline styles (we don't own globals.css). The `.file-glyph`
- * class is shared with `FolderGlyph` for consistent layout/flex/centering.
+ * VS Code "Seti" file icon — the exact glyph + color VS Code's built-in default
+ * file icon theme renders. The glyph is a character in the `seti` font (loaded
+ * via @font-face in globals.css); `resolveSetiIcon` maps the filename to the
+ * right codepoint + color using VS Code's own Seti theme data. The `.file-glyph`
+ * wrapper is shared with `FolderGlyph` for consistent layout/centering.
  */
 function FileGlyph({ name }: { name: string }) {
-  const iconProps = getFileIcon(name);
+  const { char, color } = resolveSetiIcon(name);
   return (
     <span className="file-glyph" aria-hidden="true">
-      {/* 40×48 viewBox → at 13.3px wide the icon is ~16px tall, filling the box. */}
-      <span style={{ width: 13.3, display: "inline-flex", lineHeight: 0 }}>
-        <FileIcon {...iconProps} />
+      <span className="seti-icon" style={{ color }}>
+        {char}
       </span>
     </span>
   );

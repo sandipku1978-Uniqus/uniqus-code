@@ -1021,7 +1021,7 @@ export default function ChatPanel() {
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
-        <div className="field">
+        <div className="composer-field">
           {slashMatches.length > 0 && (
             <div
               role="menu"
