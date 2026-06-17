@@ -1617,9 +1617,10 @@ section.band .sub {
 }
 
 /* GRIPE 4 — busy/"Working…" indicator: a small spinning Uniqus mark + label,
-   left-aligned with the agent rows. The spin is ease-in-out with a brief hold
-   at each full turn (Claude-Code-style) rather than a constant linear spin, so
-   it accelerates, levels, pauses, then goes again. */
+   left-aligned with the agent rows. The spin EASES via keyframe spacing (the
+   timing-function is linear): slowest at the upright top, quickest through the
+   bottom, and it never fully stops — it slows into the top, then smoothly
+   speeds up again. */
 .working-row {
   display: flex;
   align-items: center;
@@ -1632,7 +1633,7 @@ section.band .sub {
   display: block;
   object-fit: contain;
   transform-origin: 50% 50%;
-  animation: working-spin 1.6s ease-in-out infinite;
+  animation: working-spin 1.6s linear infinite;
 }
 .working-label {
   font-size: 12px;
@@ -1640,12 +1641,21 @@ section.band .sub {
   animation: pulse-dim 1.6s ease-in-out infinite;
 }
 @keyframes working-spin {
-  /* One full turn over the first ~70% (ease-in-out via the keyframe spacing),
-     then a brief hold at 360° before the next revolution. */
-  0% { transform: rotate(0deg); }
-  10% { transform: rotate(0deg); }
-  45% { transform: rotate(180deg); }
-  80% { transform: rotate(360deg); }
+  /* Velocity is encoded by keyframe spacing (timing-function is linear): small
+     angular steps near the upright top (0°/360°), large steps through the
+     bottom (180°). The result eases — slowest into the top, fastest at the
+     bottom — and stays continuous across the 360°→0° wrap, so it never fully
+     stops. Angles follow θ = 360·t − 50·sin(2π·t). */
+  0%   { transform: rotate(0deg); }
+  10%  { transform: rotate(6.6deg); }
+  20%  { transform: rotate(24.5deg); }
+  30%  { transform: rotate(60.5deg); }
+  40%  { transform: rotate(114.6deg); }
+  50%  { transform: rotate(180deg); }
+  60%  { transform: rotate(245.4deg); }
+  70%  { transform: rotate(299.5deg); }
+  80%  { transform: rotate(335.5deg); }
+  90%  { transform: rotate(353.4deg); }
   100% { transform: rotate(360deg); }
 }
 /* Reduced motion: the global reduce rule already neutralizes the spin (it caps
@@ -1655,6 +1665,40 @@ section.band .sub {
 @media (prefers-reduced-motion: reduce) {
   .working-spinner { animation: none; transform: none; }
   .working-label { animation: pulse-dim 1.5s ease-in-out infinite; }
+  .composer-working,
+  .composer-working-label { animation: none; }
+}
+
+/* Pinned composer "working" strip — a small spinning Uniqus mark plus a status
+   word sitting just above the input while a turn runs (Claude-Code style).
+   Reuses .working-spinner for the eased spin, just a touch smaller here. The
+   strip slides in when it appears; .composer-working-label is re-keyed on each
+   word so the fade replays on every swap. */
+.composer-working {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 2px 6px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-muted);
+  animation: composer-working-in var(--dur-base, 200ms) var(--ease-out, ease);
+}
+.composer-working .working-spinner {
+  width: 16px;
+  height: 16px;
+}
+.composer-working-label {
+  display: inline-block;
+  animation: working-word-in 260ms var(--ease-out, cubic-bezier(0.22, 1, 0.36, 1));
+}
+@keyframes composer-working-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes working-word-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 .msg-body {
   font-size: 13px;
@@ -2544,6 +2588,16 @@ section.band .sub {
 }
 .proj-menu button.danger:hover {
   background: rgba(220, 60, 80, 0.12);
+}
+.proj-menu-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  padding: 8px 10px 4px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border-light);
 }
 
 /* ── Project dialogs (rename / icon / delete) ────────────────────────────── */
@@ -7897,6 +7951,235 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+/* ── Docs (/docs) ──────────────────────────────────────────────────────────
+   The docs page reuses the marketing primitives above (mk-hero, mk-card,
+   mk-rows, stat-grid, label-eyebrow, grad). These add only what's docs-specific:
+   an asymmetric sticky table-of-contents rail and a few editorial content
+   blocks (keyword rows, numbered steps, callouts, a copyable template). All
+   token-based so they track the marketing ramp and the light theme.       */
+
+/* Asymmetric split: sticky TOC rail (narrow) + content column (wide). */
+.mk-docs {
+  width: min(100% - 40px, 1180px);
+  margin: 0 auto;
+  padding: 8px 0 24px;
+  display: grid;
+  grid-template-columns: minmax(0, 0.26fr) minmax(0, 1fr);
+  gap: 56px;
+  align-items: start;
+}
+.mk-docs-toc {
+  position: sticky;
+  top: 96px;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.mk-docs-toc .label-eyebrow { margin-bottom: 10px; }
+.mk-docs-toc a {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  border-left: 2px solid transparent;
+  color: var(--mk-muted);
+  font-size: 13px;
+  line-height: 1.3;
+  text-decoration: none;
+  transition: color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+.mk-docs-toc a .n {
+  flex: 0 0 auto;
+  width: 18px;
+  font-family: var(--font-mono-stack);
+  font-size: 11px;
+  color: var(--mk-dim);
+  font-variant-numeric: tabular-nums;
+}
+.mk-docs-toc a:hover {
+  color: var(--mk-text);
+  background: color-mix(in srgb, var(--mk-panel-solid) 60%, transparent);
+}
+.mk-docs-toc a.active {
+  color: var(--mk-text);
+  border-left-color: var(--brand-magenta);
+  background: color-mix(in srgb, var(--brand-magenta) 9%, transparent);
+}
+.mk-docs-toc a.active .n { color: var(--brand-magenta); }
+
+.mk-docs-body { min-width: 0; display: flex; flex-direction: column; gap: 64px; }
+.docs-sec { scroll-margin-top: 96px; }
+.docs-sec-head { margin-bottom: 24px; max-width: 64ch; }
+.docs-index {
+  font-family: var(--font-mono-stack);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--brand-magenta);
+}
+.docs-sec-head h2 {
+  margin: 10px 0 0;
+  font-size: clamp(24px, 3vw, 36px);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.08;
+  color: var(--mk-text);
+  text-wrap: balance;
+}
+.docs-sec-head p { margin: 14px 0 0; color: var(--mk-muted); font-size: 16px; line-height: 1.65; }
+.docs-subhead { margin: 8px 0 18px; }
+.docs-subhead h3 { margin: 0; font-size: 19px; font-weight: 650; color: var(--mk-text); }
+.docs-subhead p { margin: 10px 0 0; color: var(--mk-muted); font-size: 15px; line-height: 1.6; max-width: 64ch; }
+.docs-stack { display: grid; gap: 18px; }
+
+/* Typical-loop strip in the hero — numbered chips, hairline-bordered. */
+.docs-loop {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 30px;
+}
+.docs-loop .step {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 15px;
+  border: 1px solid var(--mk-line);
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--mk-panel-solid) 56%, transparent);
+  color: var(--mk-muted);
+  font-size: 13px;
+}
+.docs-loop .step .n {
+  font-family: var(--font-mono-stack);
+  font-size: 11px;
+  color: var(--brand-magenta);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Lead line inside a card (e.g. "best for …"). */
+.docs-lead { color: var(--mk-text); font-size: 14px; font-weight: 550; margin: 0 0 8px; }
+
+/* Keyword/definition rows — a mono chip + description, hairline-divided. */
+.docs-kv {
+  border: 1px solid var(--mk-line);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: color-mix(in srgb, var(--mk-panel-solid) 60%, transparent);
+}
+.docs-kv-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.18fr) 1fr;
+  gap: 20px;
+  padding: 15px 20px;
+  border-top: 1px solid var(--mk-line);
+}
+.docs-kv-row:first-child { border-top: none; }
+.docs-kv-row code {
+  justify-self: start;
+  align-self: start;
+  white-space: nowrap;
+  font-family: var(--font-mono-stack);
+  font-size: 12px;
+  color: var(--mk-text);
+  background: color-mix(in srgb, var(--brand-magenta) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--brand-magenta) 26%, transparent);
+  border-radius: var(--radius-sm);
+  padding: 3px 9px;
+}
+.docs-kv-row span { color: var(--mk-muted); font-size: 14px; line-height: 1.6; }
+
+/* Numbered step list. */
+.docs-steps { list-style: none; counter-reset: s; margin: 0; padding: 0; display: grid; gap: 16px; }
+.docs-steps li { position: relative; counter-increment: s; padding-left: 46px; }
+.docs-steps li::before {
+  content: counter(s, decimal-leading-zero);
+  position: absolute;
+  left: 0; top: 0;
+  width: 30px; height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--mk-line-strong);
+  background: color-mix(in srgb, var(--mk-panel-solid) 60%, transparent);
+  font-family: var(--font-mono-stack);
+  font-size: 11px;
+  color: var(--mk-text);
+}
+.docs-steps strong { display: block; color: var(--mk-text); font-size: 15px; font-weight: 600; }
+.docs-steps span { display: block; margin-top: 4px; color: var(--mk-muted); font-size: 14px; line-height: 1.6; }
+
+/* Callout / note. */
+.docs-callout {
+  border: 1px solid var(--mk-line);
+  border-left: 2px solid var(--brand-magenta);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--brand-magenta) 6%, transparent);
+  padding: 16px 20px;
+  color: var(--mk-muted);
+  font-size: 14px;
+  line-height: 1.65;
+}
+.docs-callout.neutral {
+  border-left-color: var(--mk-line-strong);
+  background: color-mix(in srgb, var(--mk-panel-solid) 50%, transparent);
+}
+.docs-callout strong, .docs-callout em { color: var(--mk-text); font-style: normal; }
+.docs-callout a { color: var(--mk-text); text-decoration: underline; text-underline-offset: 2px; }
+
+/* Copyable prompt template. */
+.docs-template {
+  border: 1px dashed var(--mk-line-strong);
+  border-radius: var(--radius-lg);
+  padding: 18px 22px;
+  background: color-mix(in srgb, var(--mk-bg) 40%, transparent);
+}
+.docs-template p {
+  margin: 10px 0 0;
+  font-family: var(--font-mono-stack);
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--mk-text);
+}
+
+/* Prompt example cards — reuse mk-card; .is-good gets a magenta rail. */
+.mk-card.is-good { border-left: 2px solid var(--brand-magenta); }
+.mk-card .docs-quote { color: var(--mk-text); font-size: 14px; line-height: 1.6; }
+
+/* Inline action link. */
+.docs-inline-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--brand-magenta);
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.docs-inline-link:hover { text-decoration: underline; text-underline-offset: 2px; }
+
+@media (max-width: 980px) {
+  .mk-docs { grid-template-columns: 1fr; gap: 28px; }
+  .mk-docs-toc {
+    position: static;
+    top: auto;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .mk-docs-toc .label-eyebrow { width: 100%; margin-bottom: 4px; }
+  .mk-docs-toc a { border-left: none; border: 1px solid var(--mk-line); border-radius: var(--radius-full); }
+  .mk-docs-toc a.active { border-color: color-mix(in srgb, var(--brand-magenta) 50%, var(--mk-line)); }
+}
+@media (max-width: 620px) {
+  .docs-kv-row { grid-template-columns: 1fr; gap: 8px; }
 }
 
 /* ── Pricing ───────────────────────────────────────────────────────────── */

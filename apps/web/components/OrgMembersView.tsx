@@ -62,7 +62,7 @@ export default function OrgMembersView({ orgId }: { orgId: string }) {
     try {
       await addOrgMemberApi(orgId, addr, inviteRole);
       setEmail("");
-      toast.success(`Invited ${addr} as ${inviteRole}`);
+      toast.success(`Added ${addr} as ${inviteRole}`);
       await load();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Couldn't invite");
@@ -143,8 +143,11 @@ export default function OrgMembersView({ orgId }: { orgId: string }) {
           ))}
         </select>
         <button type="button" className="btn-primary" onClick={() => void invite()} disabled={busy || !email.trim()}>
-          {busy ? "Inviting…" : "Invite"}
+          {busy ? "Adding…" : "Add"}
         </button>
+      </div>
+      <div style={{ color: "var(--text-dim)", fontSize: "var(--fs-xs)", marginTop: -8 }}>
+        Teammates must already have a Uniqus account — add them by the email they signed up with.
       </div>
 
       {/* Member list — hairline-divided editorial rows */}

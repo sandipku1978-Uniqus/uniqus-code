@@ -79,14 +79,13 @@ function CompactPicker() {
         type="button"
         onClick={() => setOpen((o) => !o)}
         className="model-picker-trigger"
-        title="Model + thinking effort"
+        title="Model & thinking effort"
         aria-haspopup="true"
         aria-expanded={open ? "true" : "false"}
       >
-        <span style={{ fontWeight: 600 }}>
-          {curModel === "auto" ? "⚡ Auto" : modelChoiceLabel(curModel)}
-        </span>
-        <span style={{ opacity: 0.55 }}>· {curThinking}</span>
+        {/* Collapsed trigger: just a "Model" button — the chosen model and
+            thinking effort live inside the popover, not on the composer. */}
+        <span style={{ fontWeight: 600 }}>Model</span>
         <span style={{ opacity: 0.55, fontSize: 9 }}>▾</span>
       </button>
 

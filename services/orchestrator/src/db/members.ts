@@ -284,6 +284,45 @@ export async function removeOrgMember(orgId: string, userId: string): Promise<vo
   if (error) throw new Error(`removeOrgMember failed: ${error.message}`);
 }
 
+export async function renameOrganization(orgId: string, name: string): Promise<void> {
+  const { error } = await db().from("organizations").update({ name }).eq("id", orgId);
+  if (error) throw new Error(`renameOrganization failed: ${error.message}`);
+}
+
+/**
+ * Delete an org. `org_members` cascade-delete with it; `projects.org_id` is ON
+ * DELETE SET NULL, so the org's projects fall back to their owners' personal
+ * workspace rather than being destroyed.
+ */
+export async function deleteOrganization(orgId: string): Promise<void> {
+  const { error } = await db().from("organizations").delete().eq("id", orgId);
+  if (error) throw new Error(`deleteOrganization failed: ${error.message}`);
+}
+
+/** How many members hold the `owner` role on an org — guards the last-owner case. */
+export async function countOrgOwners(orgId: string): Promise<number> {
+  const { count, error } = await db()
+    .from("org_members")
+    .select("id", { count: "exact", head: true })
+    .eq("org_id", orgId)
+    .eq("role", "owner");
+  if (error) throw new Error(`countOrgOwners failed: ${error.message}`);
+  return count ?? 0;
+}
+
+/** How many projects currently live in an org (for the Usage card). */
+export async function countOrgProjects(orgId: string): Promise<number> {
+  const { count, error } = await db()
+    .from("projects")
+    .select("id", { count: "exact", head: true })
+    .eq("org_id", orgId);
+  if (error) {
+    if (isMissingTable(error) || /org_id/.test(error.message ?? "")) return 0;
+    throw new Error(`countOrgProjects failed: ${error.message}`);
+  }
+  return count ?? 0;
+}
+
 export async function setOrgBudget(orgId: string, monthlyBudgetUsd: number | null): Promise<void> {
   const { error } = await db()
     .from("organizations")

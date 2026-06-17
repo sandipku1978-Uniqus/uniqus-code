@@ -91,7 +91,7 @@ export async function recordUsageEvent(input: RecordUsageInput): Promise<void> {
  * timezone, as a UTC ISO string. usage_events.created_at is `timestamptz`
  * (stored UTC); comparing against this local-month boundary keeps "this month"
  * consistent with how the dashboard buckets days (localDayKey / B-15). */
-function startOfMonthIso(): string {
+export function startOfMonthIso(): string {
   const now = new Date();
   return new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0).toISOString();
 }

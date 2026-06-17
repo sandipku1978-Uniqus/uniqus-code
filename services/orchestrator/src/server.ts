@@ -38,6 +38,7 @@ import {
   estimateCostUsd,
   estimateTurnCostUsd,
   DEFAULT_DESIGN_TOKENS,
+  roleAtLeast,
 } from "@uniqus/api-types";
 import { runAgentLoop } from "./agent/loop.js";
 import { runInteractPreview, type InteractAction } from "./agent/interact.js";
@@ -116,6 +117,9 @@ import {
 import {
   listProjects,
   listAccessibleProjects,
+  listPersonalProjects,
+  listOrgProjects,
+  setProjectOrg,
   createProject,
   getProject,
   getProjectForUser,
@@ -167,7 +171,7 @@ import {
   getUsageByProjectByModel,
   orgMonthToDateSpendUsd,
 } from "./db/usage.js";
-import { getOrganization, getProjectOrgId } from "./db/members.js";
+import { getOrganization, getProjectOrgId, getOrgRole, getProjectRole } from "./db/members.js";
 import {
   ensureDefaultSession,
   listSessions,
@@ -1075,7 +1079,22 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return json(res, 200, await handleGuestRecoveryCode(user));
   }
 
-  if (req.url === "/api/projects" && req.method === "GET") {
+  if ((req.url ?? "").split("?")[0] === "/api/projects" && req.method === "GET") {
+    // Workspace scoping (P3.1): ?workspace=personal lists the user's un-orged
+    // projects; ?workspace=<orgId> lists that org's projects (membership-checked);
+    // omitted / "all" keeps the legacy aggregate (owned + every shared project),
+    // which the workspace switcher never requests but other callers may.
+    const workspace = new URL(req.url ?? "", "http://x").searchParams.get("workspace");
+    if (workspace === "personal") {
+      const rows = await listPersonalProjects(user.id);
+      return json(res, 200, { projects: rows.map(toProjectSummary) });
+    }
+    if (workspace && workspace !== "all") {
+      const role = await getOrgRole(workspace, user.id);
+      if (!role) return json(res, 403, { error: "you are not a member of that organization" });
+      const rows = await listOrgProjects(workspace);
+      return json(res, 200, { projects: rows.map(toProjectSummary) });
+    }
     // Owned projects PLUS those shared with the user via membership (P3.2), so
     // an invited collaborator can actually discover and open shared projects.
     const rows = await listAccessibleProjects(user.id);
@@ -1083,15 +1102,18 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   }
 
   if (req.url === "/api/projects" && req.method === "POST") {
-    const body = await readJsonBody<{ name?: string; description?: string; design_system_id?: string | null; skill_library_ids?: string[] }>(req);
+    const body = await readJsonBody<{ name?: string; description?: string; design_system_id?: string | null; skill_library_ids?: string[]; org_id?: string | null }>(req);
     const name = (body.name ?? "").trim();
     if (!name) return json(res, 400, { error: "name is required" });
+    const ws = await resolveCreateOrgId(user.id, body.org_id);
+    if (!ws.ok) return json(res, 403, { error: ws.error });
     const project = await createProject({
       owner_id: user.id,
       name,
       description: body.description ?? null,
       design_system_id: await resolveDesignSystemId(user.id, body.design_system_id),
       skill_library_ids: await resolveOwnedSkillIds(user.id, body.skill_library_ids),
+      org_id: ws.orgId,
     });
     const sandboxDir = sandboxDirFor(project.id);
     await fs.mkdir(sandboxDir, { recursive: true });
@@ -1111,12 +1133,16 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (!rateLimitOk(`from-brief:${user.id}:${clientIp(req)}`, 20, 5 * 60 * 1000)) {
       return json(res, 429, { error: "too many projects created — please wait a moment and try again" });
     }
-    const body = await readJsonBody<{ brief?: string; description?: string; design_system_id?: string | null; skill_library_ids?: string[] }>(req);
+    const body = await readJsonBody<{ brief?: string; description?: string; design_system_id?: string | null; skill_library_ids?: string[]; org_id?: string | null }>(req);
     const brief = (body.brief ?? "").trim();
     if (!brief) return json(res, 400, { error: "brief is required" });
     if (brief.length > 4000) {
       return json(res, 400, { error: "brief exceeds 4 KB cap" });
     }
+    // Validate the target workspace BEFORE the billed Haiku call, so a viewer who
+    // can't create in the org gets a clean 403 instead of paying for refinement.
+    const ws = await resolveCreateOrgId(user.id, body.org_id);
+    if (!ws.ok) return json(res, 403, { error: ws.error });
     let refined: { name: string; first_message: string };
     try {
       refined = await refineBrief(brief);
@@ -1131,6 +1157,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       description: body.description ?? brief.slice(0, 200),
       design_system_id: await resolveDesignSystemId(user.id, body.design_system_id),
       skill_library_ids: await resolveOwnedSkillIds(user.id, body.skill_library_ids),
+      org_id: ws.orgId,
     });
     const sandboxDir = sandboxDirFor(project.id);
     await fs.mkdir(sandboxDir, { recursive: true });
@@ -1158,11 +1185,15 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       repo_full_name?: string;
       /** P1.1: keep .git + record branch/remote instead of stripping history. */
       preserve_git?: boolean;
+      /** Workspace to import into (org_id); null/omitted = personal. */
+      org_id?: string | null;
     }>(req);
     const name = (body.name ?? "").trim();
     const repoUrl = (body.repo_url ?? "").trim();
     if (!name) return json(res, 400, { error: "name is required" });
     if (!repoUrl) return json(res, 400, { error: "repo_url is required" });
+    const ws = await resolveCreateOrgId(user.id, body.org_id);
+    if (!ws.ok) return json(res, 403, { error: ws.error });
 
     // Reject obviously unsafe URLs before creating the project. Without this,
     // the clone tool happily accepts file:// and arbitrary http(s) hosts,
@@ -1190,6 +1221,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       owner_id: user.id,
       name,
       description: body.description ?? null,
+      org_id: ws.orgId,
     });
     const dest = sandboxDirFor(project.id);
     await fs.mkdir(dest, { recursive: true });
@@ -1311,6 +1343,28 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   }
   if (projectIdMatch && req.method === "DELETE") {
     return await handleProjectDelete(res, user, projectIdMatch[1]);
+  }
+
+  // Move a project between workspaces (P3.1): personal ⇄ org. Owner-only (the
+  // project owner decides where it lives); moving INTO an org additionally
+  // requires ≥editor on that org. org_id: null moves it back to personal.
+  const projectOrgMatch = req.url?.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/org$/);
+  if (projectOrgMatch && req.method === "PATCH") {
+    const projectId = projectOrgMatch[1];
+    const owned = await getProject(projectId, user.id);
+    if (!owned) {
+      // Either it doesn't exist or the caller isn't the owner. A shared member
+      // can't reassign someone else's project, so this is a flat 404/403.
+      const role = await getProjectRole(projectId, user.id);
+      return json(res, role ? 403 : 404, { error: role ? "only the project owner can move it" : "project not found" });
+    }
+    const body = await readJsonBody<{ org_id?: string | null }>(req);
+    const ws = await resolveCreateOrgId(user.id, body.org_id);
+    if (!ws.ok) return json(res, 403, { error: ws.error });
+    await setProjectOrg(projectId, user.id, ws.orgId);
+    void audit({ project_id: projectId, user_id: user.id, kind: "project_update", target: "move_workspace", metadata: { org_id: ws.orgId } });
+    const updated = await getProject(projectId, user.id);
+    return json(res, 200, { project: updated ? toProjectSummary(updated) : null });
   }
 
   const fileOpMatch = req.url?.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/files$/);
@@ -2630,6 +2684,7 @@ async function handleZipImport(
   let zipBuffer: Buffer | null = null;
   let projectName = "";
   let description: string | null = null;
+  let orgIdField: string | null = null;
   let parseError: string | null = null;
 
   try {
@@ -2656,6 +2711,7 @@ async function handleZipImport(
       bb.on("field", (name, value) => {
         if (name === "name") projectName = value.trim();
         else if (name === "description") description = value.trim() || null;
+        else if (name === "org_id") orgIdField = value.trim() || null;
       });
       bb.on("finish", () => resolve());
       bb.on("error", (err) => reject(err));
@@ -2671,10 +2727,14 @@ async function handleZipImport(
   if (!projectName) return json(res, 400, { error: "name is required" });
   if (!zipBuffer) return json(res, 400, { error: "no zip file uploaded" });
 
+  const ws = await resolveCreateOrgId(ownerId, orgIdField);
+  if (!ws.ok) return json(res, 403, { error: ws.error });
+
   const project = await createProject({
     owner_id: ownerId,
     name: projectName,
     description,
+    org_id: ws.orgId,
   });
   const dest = sandboxDirFor(project.id);
   await fs.mkdir(dest, { recursive: true });
@@ -3605,6 +3665,7 @@ function toProjectSummary(p: {
   latest_deploy_at?: string | null;
   design_system_id?: string | null;
   skill_library_ids?: string[] | null;
+  org_id?: string | null;
 }): ProjectSummary {
   return {
     id: p.id,
@@ -3621,7 +3682,28 @@ function toProjectSummary(p: {
     latest_deploy_at: p.latest_deploy_at ?? null,
     design_system_id: p.design_system_id ?? null,
     skill_library_ids: p.skill_library_ids ?? [],
+    org_id: p.org_id ?? null,
   };
+}
+
+/**
+ * Validate the workspace a new project is being created in (P3.1). A null/empty
+ * org_id means the personal workspace. Any other value must be an org the caller
+ * is at least an `editor` on — viewers can browse an org's projects but can't add
+ * to it. Returns the org_id to stamp, or a user-facing error to 4xx with.
+ */
+async function resolveCreateOrgId(
+  userId: string,
+  orgId: unknown,
+): Promise<{ ok: true; orgId: string | null } | { ok: false; error: string }> {
+  if (orgId == null || orgId === "") return { ok: true, orgId: null };
+  if (typeof orgId !== "string") return { ok: false, error: "org_id must be a string" };
+  const role = await getOrgRole(orgId, userId);
+  if (!role) return { ok: false, error: "you are not a member of that organization" };
+  if (!roleAtLeast(role, "editor")) {
+    return { ok: false, error: "you need at least the editor role to create projects in this organization" };
+  }
+  return { ok: true, orgId };
 }
 
 // ── WebSocket upgrade ─────────────────────────────────────────────────────────

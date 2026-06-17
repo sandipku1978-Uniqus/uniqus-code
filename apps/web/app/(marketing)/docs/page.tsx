@@ -1,4 +1,5 @@
 import Link from "next/link";
+import DocsToc, { type DocsTocEntry } from "@/components/DocsToc";
 
 export const metadata = {
   title: "Documentation - Uniqus Code",
@@ -8,34 +9,39 @@ export const metadata = {
 
 /**
  * Product documentation. Lives inside the `(marketing)` route group so it
- * inherits the shared chrome — `MarketingNav` (which links back to the landing
- * page and every marketing/resource page) and the `SiteFooter` + "Ready to
- * build?" composer. That's deliberate: a visitor who opens the docs from the
- * marketing site must be able to get back without hitting a sign-in wall, and
- * the page should read as the same product. The URL is `/docs` (route groups
- * don't affect it). NOTE: `/docs` must be present in PUBLIC_PATHS in
- * apps/web/middleware.ts or the `(marketing)` layout's withAuth() bounces
- * visitors to sign-in.
+ * inherits the shared chrome — `MarketingNav` and the `SiteFooter` + "Ready to
+ * build?" composer — and, crucially, the marketing DESIGN LANGUAGE: it is built
+ * from the same primitives as every other public page (`mk-hero`, `mk-card`,
+ * `mk-grid`, `label-eyebrow`, the gradient accent word) rather than the app's
+ * Settings `.doc-*` styles it used before, which made it read as a different
+ * product. The only docs-specific layer is the sticky table-of-contents rail
+ * (an asymmetric split) and a few editorial blocks (`.docs-*` in globals.css).
  *
- * The page renders the docs body using the shared `.doc-*` styles (the same
- * ones Settings uses) so the type and surfaces match the app rather than
- * inventing a parallel look.
+ * The URL is `/docs` (route groups don't affect it). NOTE: `/docs` must stay in
+ * the marketing layout's public paths or `withAuth()` bounces visitors to
+ * sign-in before they can read it.
  */
 
-type TocEntry = { href: string; label: string; index: string };
+const TOC: DocsTocEntry[] = [
+  { href: "#overview", label: "Overview", n: "00" },
+  { href: "#create", label: "Create or import", n: "01" },
+  { href: "#workspace", label: "The workspace", n: "02" },
+  { href: "#chat", label: "Work with the agent", n: "03" },
+  { href: "#run", label: "Run & preview", n: "04" },
+  { href: "#files", label: "Files, editor, logs", n: "05" },
+  { href: "#configure", label: "Configure", n: "06" },
+  { href: "#ship", label: "Ship", n: "07" },
+  { href: "#recover", label: "Recover safely", n: "08" },
+  { href: "#prompting", label: "Prompting", n: "09" },
+  { href: "#troubleshoot", label: "Troubleshooting", n: "10" },
+];
 
-const TOC: TocEntry[] = [
-  { href: "#overview", label: "Overview", index: "" },
-  { href: "#create", label: "Create a project", index: "01" },
-  { href: "#workspace", label: "The workspace", index: "02" },
-  { href: "#chat", label: "Work with the agent", index: "03" },
-  { href: "#run", label: "Run and preview", index: "04" },
-  { href: "#files", label: "Files, editor, logs", index: "05" },
-  { href: "#configure", label: "Configure", index: "06" },
-  { href: "#ship", label: "Ship", index: "07" },
-  { href: "#recover", label: "Recover safely", index: "08" },
-  { href: "#prompting", label: "Prompting", index: "09" },
-  { href: "#troubleshoot", label: "Troubleshooting", index: "10" },
+const LOOP = [
+  "Describe the goal",
+  "Review the plan",
+  "Let Uniqus edit files",
+  "Run and preview",
+  "Ask for the next change",
 ];
 
 const QUICK_PATHS = [
@@ -59,19 +65,19 @@ const QUICK_PATHS = [
 const PROJECT_MODES = [
   {
     title: "Describe your idea",
-    bestFor: "A new app, website, tool, automation, or prototype.",
+    bestFor: "Best for a new app, website, tool, automation, or prototype.",
     detail:
       "Write the project in plain English. Uniqus names it in about 200ms and the workspace opens with your brief forwarded to the agent verbatim — new projects start with a plan first. The fastest path when you can describe the shape.",
   },
   {
     title: "Upload .zip",
-    bestFor: "Existing source code on your machine.",
+    bestFor: "Best for existing source code on your machine.",
     detail:
       "Imports archives up to 250 MB compressed. The importer skips .git/, node_modules/, and build output (.next/, dist/, build/) so the sandbox starts clean.",
   },
   {
     title: "Clone GitHub",
-    bestFor: "Repos you want to edit, run, and optionally push back.",
+    bestFor: "Best for repos you want to edit, run, and optionally push back.",
     detail:
       "Connect GitHub to pick from your repos, or paste a URL and personal access token for private one-off imports. Guest accounts need to sign in before using GitHub.",
   },
@@ -114,6 +120,12 @@ const AGENT_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ["Stop", "Cancel the current turn. Work already written to disk is kept, so you can redirect from there."],
 ];
 
+const RUN_STEPS: ReadonlyArray<readonly [string, string]> = [
+  ["Start the server.", "Run stops any existing project server, starts the app again, and streams the command result into chat and Logs."],
+  ["Inspect the preview.", "Use preview tabs to check the live app. Markdown files can also switch between source and rendered preview in the editor."],
+  ["Ask for verification.", "For UI work, ask Uniqus to verify desktop and mobile states and drive the real flow. For backend work, ask it to run focused tests or exercise the relevant endpoint."],
+];
+
 const CONFIG_ITEMS = [
   {
     title: "Skills",
@@ -137,13 +149,19 @@ const CONFIG_ITEMS = [
   },
 ] as const;
 
-// Prompting principles excerpted and reworded for users from the agent's
-// system prompt (services/orchestrator/src/agent/loop.ts, buildSystemPrompt).
-// Only the user-relevant parts — not the whole prompt.
+const RECOVER = [
+  { title: "Stop", body: "Interrupt the active turn and redirect from the current files." },
+  { title: "Rewind", body: "Browse checkpoints and restore an earlier project state when a direction goes sideways." },
+  { title: "Synced status", body: "Use the status bar to see whether files have been saved recently before you act." },
+] as const;
+
+// Prompting principles excerpted and reworded for users from the agent's system
+// prompt (services/orchestrator/src/agent/loop.ts, buildSystemPrompt). Only the
+// user-relevant parts — not the whole prompt.
 const PROMPTING_PRINCIPLES = [
   {
     title: "The agent verifies UI by interacting with it",
-    body: "After meaningful frontend work, Uniqus starts a preview and drives it — clicking through real flows, filling forms, submitting, navigating — then checks desktop and mobile, console errors, and accessibility before reporting done. You can ask for this explicitly: \"run the signup flow and confirm it lands on the dashboard.\" You'll watch each step live in a Preview (Agent) tab.",
+    body: "After meaningful frontend work, Uniqus starts a preview and drives it — clicking through real flows, filling forms, submitting, navigating — then checks desktop and mobile, console errors, and accessibility before reporting done. You can ask for this explicitly: “run the signup flow and confirm it lands on the dashboard.” You'll watch each step live in a Preview (Agent) tab.",
   },
   {
     title: "Secrets stay server-side",
@@ -155,11 +173,11 @@ const PROMPTING_PRINCIPLES = [
   },
   {
     title: "Dev servers bind to 0.0.0.0, not localhost",
-    body: "The preview reaches your dev server across a network boundary, so a server bound to 127.0.0.1 shows up as a blank 502. The agent binds to 0.0.0.0 for you. If you bring your own start script or run command, make sure it passes the framework's host flag (next dev -H 0.0.0.0, vite --host 0.0.0.0, flask run --host=0.0.0.0, and so on).",
+    body: "The preview reaches your dev server across a network boundary, so a server bound to 127.0.0.1 shows up as a blank 502. The agent binds to 0.0.0.0 for you. If you bring your own start script, make sure it passes the framework's host flag (next dev -H 0.0.0.0, vite --host 0.0.0.0, flask run --host=0.0.0.0, and so on).",
   },
   {
     title: "Ask for current facts when they matter",
-    body: "Training data lags reality by months, especially for AI model names, library versions, and prices. When your task depends on the current lineup — a model picker, a \"compare the latest\" page, a freshly released API — say so. The agent can web-search to confirm before it writes code instead of trusting a stale memory.",
+    body: "Training data lags reality by months, especially for AI model names, library versions, and prices. When your task depends on the current lineup — a model picker, a “compare the latest” page, a freshly released API — say so. The agent can web-search to confirm before it writes code instead of trusting a stale memory.",
   },
 ] as const;
 
@@ -170,17 +188,23 @@ const PROMPT_PARTS: ReadonlyArray<readonly [string, string]> = [
   ["Proof", "Ask for tests, preview checks, screenshots, or command output."],
 ];
 
+const BETTER_PROMPT =
+  "Build a billing dashboard for a small SaaS founder so they can spot failed payments quickly. Use Next.js and the existing design tokens. Start with the overview screen, seed realistic mock data, run the app, and verify desktop and mobile layouts.";
+const WEAK_PROMPT = "Make me a dashboard.";
+const PROMPT_TEMPLATE =
+  "Build [what] for [who] so they can [goal]. Use [stack or constraints]. Start with [first screen or workflow]. Use [attached files or @file references] as source material. Run [tests or preview] and tell me what you verified.";
+
 const TROUBLESHOOTING = [
   {
     title: "Preview shows a 502 with an empty log",
-    body: "Almost always a dev server bound to localhost instead of 0.0.0.0 — the preview proxy can't reach it across the sandbox boundary. The agent binds correctly by default; if you supplied a custom command, tell Uniqus \"the preview is 502, rebind the server to 0.0.0.0 and restart.\" An empty server log with a 502 is the tell.",
+    body: "Almost always a dev server bound to localhost instead of 0.0.0.0 — the preview proxy can't reach it across the sandbox boundary. The agent binds correctly by default; if you supplied a custom command, tell Uniqus the preview is 502 and to rebind the server to 0.0.0.0 and restart. An empty server log with a 502 is the tell.",
   },
   {
     title: "The preview won't start at all",
     body: "Open Logs and ask Uniqus to read the failing command output, fix the root cause, and rerun the app. Common culprits are a wrong port, a project in a subdirectory, or a syntax error surfaced in the log. Paste the exact error if you see one.",
   },
   {
-    title: "Dependencies look corrupted or modules \"disappear\"",
+    title: "Dependencies look corrupted or modules disappear",
     body: "This is a dependency-install race — two installs running in the same folder at once. Let the agent handle installs; it auto-installs at the sandbox root and won't run a second install on top. If you see missing-module errors after a manual install, ask Uniqus to reinstall cleanly and restart the server.",
   },
   {
@@ -201,365 +225,372 @@ const TROUBLESHOOTING = [
   },
   {
     title: "The design is close but not right",
-    body: "Attach screenshots, name the target screen size, and ask Uniqus to verify with the preview. Concrete, specific visual feedback lands far better than \"make it nicer.\"",
+    body: "Attach screenshots, name the target screen size, and ask Uniqus to verify with the preview. Concrete, specific visual feedback lands far better than asking it to make it nicer.",
   },
 ] as const;
 
 export default function DocsPage() {
   return (
-    <div className="doc-shell doc-shell-wide">
-      <aside className="doc-toc" aria-label="Documentation sections">
-        <div className="label-micro">Docs</div>
-        {TOC.map((entry) => (
-          <a key={entry.href} href={entry.href}>
-            {entry.label}
-          </a>
-        ))}
-      </aside>
-
-      <main className="doc doc-guide">
-        <section id="overview" className="doc-hero" aria-labelledby="docs-title">
-          <div>
-            <p className="doc-kicker">Uniqus Code documentation</p>
-            <h1 id="docs-title">Build, inspect, run, and ship from one workspace.</h1>
-            <p className="doc-lede">
-              Uniqus Code is an AI engineering workbench. You describe the outcome; the
-              agent edits real files in an isolated sandbox, runs commands, starts
-              previews, and reports back through chat. This guide walks the loop end to
-              end — from a first prompt to a deployed app.
-            </p>
+    <>
+      <section className="mk-hero" id="overview" aria-labelledby="docs-title">
+        <div className="mk-hero-inner">
+          <span className="mk-eyebrow">
+            <span className="dot" /> Documentation
+          </span>
+          <h1 id="docs-title">
+            Build, inspect, run, and ship from{" "}
+            <span className="grad">one workspace</span>.
+          </h1>
+          <p className="mk-lede">
+            Uniqus Code is an AI engineering workbench. You describe the outcome; the
+            agent edits real files in an isolated sandbox, runs commands, starts
+            previews, and reports back in chat. This guide walks the loop end to end —
+            from a first prompt to a deployed app.
+          </p>
+          <div className="mk-hero-cta">
+            <a href="#create" className="btn-primary btn-lg">
+              Start the quickstart
+            </a>
+            <Link href="/templates" className="btn-secondary btn-lg">
+              Browse templates
+            </Link>
           </div>
-          <div className="doc-hero-panel" aria-label="Common workflow">
-            <div className="label-micro">Typical loop</div>
-            <ol className="doc-mini-steps">
-              <li>Describe the goal</li>
-              <li>Review the plan</li>
-              <li>Let Uniqus edit files</li>
-              <li>Run and preview</li>
-              <li>Ask for the next change</li>
-            </ol>
+          <div className="docs-loop" aria-label="The typical build loop">
+            {LOOP.map((label, i) => (
+              <span className="step" key={label}>
+                <span className="n">{String(i + 1).padStart(2, "0")}</span>
+                {label}
+              </span>
+            ))}
           </div>
-        </section>
+        </div>
+      </section>
 
-        <div className="doc-quick-grid" aria-label="Fast paths">
+      <section className="mk-page">
+        <div className="mk-section-head center">
+          <span className="label-eyebrow">Three ways in</span>
+          <h2>Start from an idea, or bring your code.</h2>
+          <p>
+            However you begin, projects reopen with their sandbox, chat sessions,
+            previews, skills, secrets, and checkpoints intact.
+          </p>
+        </div>
+        <div className="mk-grid cols-3">
           {QUICK_PATHS.map((item) => (
-            <article key={item.title} className="doc-card doc-card-accent">
-              <div className="doc-card-label">{item.label}</div>
-              <h2>{item.title}</h2>
+            <article className="mk-card hover" key={item.title}>
+              <span className="mk-card-num">{item.label}</span>
+              <h3>{item.title}</h3>
               <p>{item.body}</p>
             </article>
           ))}
         </div>
+      </section>
 
-        <section id="create" className="doc-section" aria-labelledby="create-title">
-          <div className="doc-section-head">
-            <p className="doc-kicker">01</p>
-            <h2 id="create-title">Create or import a project</h2>
-            <p>
-              The new-project card on the dashboard has three tabs. Pick the one that
-              matches how much source material you already have.
-            </p>
-          </div>
-          <div className="doc-grid two">
-            {PROJECT_MODES.map((mode) => (
-              <article key={mode.title} className="doc-card">
-                <h3>{mode.title}</h3>
-                <p className="doc-card-sub">{mode.bestFor}</p>
-                <p>{mode.detail}</p>
-              </article>
-            ))}
-          </div>
-          <div className="doc-callout">
-            <strong>Describe vs. import:</strong> <em>Describe your idea</em> is the
-            fastest start for something new — Uniqus names it and forwards your brief
-            straight to the agent. Use <em>Upload .zip</em> or <em>Clone GitHub</em> when
-            you already have code to edit, run, and (for GitHub) push back.
-          </div>
-        </section>
+      <div className="mk-docs">
+        <DocsToc entries={TOC} />
 
-        <section id="workspace" className="doc-section" aria-labelledby="workspace-title">
-          <div className="doc-section-head">
-            <p className="doc-kicker">02</p>
-            <h2 id="workspace-title">Know the workspace</h2>
-            <p>
-              The workspace is split like a lightweight IDE: conversation on the left,
-              project files beside it, and the editor, preview, and logs on the right.
-            </p>
-          </div>
-          <div className="doc-grid three">
-            {WORKSPACE_AREAS.map((area) => (
-              <article key={area.title} className="doc-card compact">
-                <h3>{area.title}</h3>
-                <p>{area.body}</p>
-              </article>
-            ))}
-          </div>
-        </section>
-
-        <section id="chat" className="doc-section" aria-labelledby="chat-title">
-          <div className="doc-section-head">
-            <p className="doc-kicker">03</p>
-            <h2 id="chat-title">Work with the agent</h2>
-            <p>
-              Chat is where intent becomes code. The best turns tell Uniqus what outcome
-              matters, what evidence to inspect, and how to verify the result.
-            </p>
-          </div>
-          <div className="doc-command-list">
-            {AGENT_CONTROLS.map(([label, body]) => (
-              <div key={label} className="doc-command-row">
-                <code>{label}</code>
-                <span>{body}</span>
+        <div className="mk-docs-body">
+          {/* 01 — Create */}
+          <section className="docs-sec" id="create" aria-labelledby="create-title">
+            <div className="docs-sec-head">
+              <span className="docs-index">01 · Create</span>
+              <h2 id="create-title">Create or import a project</h2>
+              <p>
+                The new-project card on the dashboard has three tabs. Pick the one that
+                matches how much source material you already have.
+              </p>
+            </div>
+            <div className="docs-stack">
+              <div className="mk-grid cols-3">
+                {PROJECT_MODES.map((mode) => (
+                  <article className="mk-card" key={mode.title}>
+                    <h3>{mode.title}</h3>
+                    <p className="docs-lead">{mode.bestFor}</p>
+                    <p>{mode.detail}</p>
+                  </article>
+                ))}
               </div>
-            ))}
-          </div>
-          <div className="doc-note-grid">
-            <div className="doc-note">
-              <h3>Chat sessions</h3>
-              <p>
-                Use the session dropdown to create a separate thread for a new
-                investigation. Sessions keep their own conversation history while sharing
-                the same project files and configuration.
-              </p>
-            </div>
-            <div className="doc-note">
-              <h3>Clearing chat</h3>
-              <p>
-                Clear removes the conversation history for that session. It does not
-                delete sandbox files, so the code remains available.
-              </p>
-            </div>
-          </div>
-        </section>
-
-        <section id="run" className="doc-section" aria-labelledby="run-title">
-          <div className="doc-section-head">
-            <p className="doc-kicker">04</p>
-            <h2 id="run-title">Run, preview, and verify</h2>
-            <p>
-              Click <strong>Run</strong> to start or restart the project dev server. The
-              first run installs dependencies when needed, then opens a preview tab.
-            </p>
-          </div>
-          <ol className="doc-step-list">
-            <li>
-              <strong>Start the server.</strong>
-              <span>
-                Run stops any existing project server, starts the app again, and streams
-                the command result into chat and Logs.
-              </span>
-            </li>
-            <li>
-              <strong>Inspect the preview.</strong>
-              <span>
-                Use preview tabs to check the live app. Markdown files can also switch
-                between source and rendered preview in the editor.
-              </span>
-            </li>
-            <li>
-              <strong>Ask for verification.</strong>
-              <span>
-                For UI work, ask Uniqus to verify desktop and mobile states and drive the
-                real flow. For backend work, ask it to run focused tests or exercise the
-                relevant endpoint.
-              </span>
-            </li>
-          </ol>
-        </section>
-
-        <section id="files" className="doc-section" aria-labelledby="files-title">
-          <div className="doc-section-head">
-            <p className="doc-kicker">05</p>
-            <h2 id="files-title">Use files, editor, and logs</h2>
-            <p>
-              You and the agent share the same sandbox. Direct edits, agent edits, file
-              opens, and command output all stay in sync.
-            </p>
-          </div>
-          <div className="doc-grid two">
-            <article className="doc-card">
-              <h3>When to edit yourself</h3>
-              <p>
-                Use the editor for tiny text tweaks, quick copy changes, or inspecting a
-                file while the agent works. Save is automatic through the workspace sync.
-              </p>
-            </article>
-            <article className="doc-card">
-              <h3>When to point the agent</h3>
-              <p>
-                Use <code>@</code>-mentions when you want Uniqus to follow an existing
-                pattern, patch a specific file, or explain why a piece of code behaves a
-                certain way.
-              </p>
-            </article>
-          </div>
-        </section>
-
-        <section id="configure" className="doc-section" aria-labelledby="configure-title">
-          <div className="doc-section-head">
-            <p className="doc-kicker">06</p>
-            <h2 id="configure-title">Configure how Uniqus works</h2>
-            <p>
-              Some settings belong to a project, and others apply account-wide. Use
-              project tools for instructions and secrets; use Settings for defaults and
-              appearance.
-            </p>
-          </div>
-          <div className="doc-grid two">
-            {CONFIG_ITEMS.map((item) => (
-              <article key={item.title} className="doc-card">
-                <h3>{item.title}</h3>
-                <p>{item.body}</p>
-              </article>
-            ))}
-          </div>
-          <p className="doc-inline-action">
-            <Link href="/settings">Open Settings</Link>
-          </p>
-        </section>
-
-        <section id="ship" className="doc-section" aria-labelledby="ship-title">
-          <div className="doc-section-head">
-            <p className="doc-kicker">07</p>
-            <h2 id="ship-title">Ship with GitHub and deploys</h2>
-            <p>
-              Signed-in accounts can connect GitHub, create private repos from workspace
-              projects, and deploy apps to Vercel from the topbar.
-            </p>
-          </div>
-          <div className="doc-grid two">
-            <article className="doc-card">
-              <h3>Create a GitHub repo</h3>
-              <p>
-                Use <strong>Create GitHub repo</strong> in the workspace topbar to create
-                a fresh private repo and push the initial project state.
-              </p>
-            </article>
-            <article className="doc-card">
-              <h3>Deploy</h3>
-              <p>
-                Use <strong>Deploy</strong> to publish through Vercel. Set any environment
-                variables in the deploy modal, then watch status and history in the same
-                flow.
-              </p>
-            </article>
-          </div>
-          <div className="doc-callout neutral">
-            Guest work is saved on this device. Sign in with Google to keep it permanently
-            across devices and to unlock GitHub and publishing.
-          </div>
-        </section>
-
-        <section id="recover" className="doc-section" aria-labelledby="recover-title">
-          <div className="doc-section-head">
-            <p className="doc-kicker">08</p>
-            <h2 id="recover-title">Recover safely</h2>
-            <p>
-              The workspace is built for iteration. You can stop an agent turn, start a
-              cleaner chat, or restore a checkpoint when a direction goes sideways.
-            </p>
-          </div>
-          <div className="doc-safety-strip">
-            <div>
-              <strong>Stop</strong>
-              <span>Interrupt the active turn and redirect from the current files.</span>
-            </div>
-            <div>
-              <strong>Rewind</strong>
-              <span>Browse checkpoints and restore an earlier project state.</span>
-            </div>
-            <div>
-              <strong>Synced status</strong>
-              <span>Use the status bar to see whether files have been saved recently.</span>
-            </div>
-          </div>
-        </section>
-
-        <section id="prompting" className="doc-section" aria-labelledby="prompting-title">
-          <div className="doc-section-head">
-            <p className="doc-kicker">09</p>
-            <h2 id="prompting-title">Prompt the agent well</h2>
-            <p>
-              Strong prompts are specific enough to act on and small enough to verify.
-              Treat each turn like a useful ticket for a careful engineer — and know how
-              the agent already works so you can lean on it.
-            </p>
-          </div>
-
-          <div className="doc-grid two">
-            <article className="doc-example good">
-              <div className="doc-card-label">Better first prompt</div>
-              <p>
-                Build a billing dashboard for a small SaaS founder so they can spot failed
-                payments quickly. Use Next.js and the existing design tokens. Start with
-                the overview screen, seed realistic mock data, run the app, and verify
-                desktop and mobile layouts.
-              </p>
-            </article>
-            <article className="doc-example">
-              <div className="doc-card-label">Less useful</div>
-              <p>Make me a dashboard.</p>
-            </article>
-          </div>
-
-          <div className="doc-command-list">
-            {PROMPT_PARTS.map(([label, body]) => (
-              <div key={label} className="doc-command-row">
-                <code>{label}</code>
-                <span>{body}</span>
+              <div className="docs-callout">
+                <strong>Describe vs. import:</strong> <em>Describe your idea</em> is the
+                fastest start for something new — Uniqus names it and forwards your brief
+                straight to the agent. Use <em>Upload .zip</em> or <em>Clone GitHub</em>{" "}
+                when you already have code to edit, run, and (for GitHub) push back.
               </div>
-            ))}
-          </div>
+            </div>
+          </section>
 
-          <div className="doc-template">
-            <div className="label-micro">Copyable template</div>
-            <p>
-              Build [what] for [who] so they can [goal]. Use [stack or constraints]. Start
-              with [first screen or workflow]. Use [attached files or @file references] as
-              source material. Run [tests or preview] and tell me what you verified.
-            </p>
-          </div>
+          {/* 02 — Workspace */}
+          <section className="docs-sec" id="workspace" aria-labelledby="workspace-title">
+            <div className="docs-sec-head">
+              <span className="docs-index">02 · Workspace</span>
+              <h2 id="workspace-title">Know the workspace</h2>
+              <p>
+                The workspace is split like a lightweight IDE: conversation on the left,
+                project files beside it, and the editor, preview, and logs on the right.
+              </p>
+            </div>
+            <div className="mk-grid cols-3">
+              {WORKSPACE_AREAS.map((area) => (
+                <article className="mk-card" key={area.title}>
+                  <h3>{area.title}</h3>
+                  <p>{area.body}</p>
+                </article>
+              ))}
+            </div>
+          </section>
 
-          <div className="doc-section-head">
-            <h3>How the agent works — so you can prompt for it</h3>
-            <p>
-              These are the working principles the Uniqus agent already follows. Knowing
-              them tells you what to ask for and what you can trust it to do on its own.
-            </p>
-          </div>
-          <div className="doc-grid two">
-            {PROMPTING_PRINCIPLES.map((p) => (
-              <article key={p.title} className="doc-card">
-                <h3>{p.title}</h3>
-                <p>{p.body}</p>
+          {/* 03 — Agent */}
+          <section className="docs-sec" id="chat" aria-labelledby="chat-title">
+            <div className="docs-sec-head">
+              <span className="docs-index">03 · Agent</span>
+              <h2 id="chat-title">Work with the agent</h2>
+              <p>
+                Chat is where intent becomes code. The best turns tell Uniqus what outcome
+                matters, what evidence to inspect, and how to verify the result.
+              </p>
+            </div>
+            <div className="docs-stack">
+              <div className="docs-kv">
+                {AGENT_CONTROLS.map(([label, body]) => (
+                  <div className="docs-kv-row" key={label}>
+                    <code>{label}</code>
+                    <span>{body}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="mk-grid cols-2">
+                <article className="mk-card">
+                  <h3>Chat sessions</h3>
+                  <p>
+                    Use the session dropdown to create a separate thread for a new
+                    investigation. Sessions keep their own conversation history while
+                    sharing the same project files and configuration.
+                  </p>
+                </article>
+                <article className="mk-card">
+                  <h3>Clearing chat</h3>
+                  <p>
+                    Clear removes the conversation history for that session. It does not
+                    delete sandbox files, so the code remains available.
+                  </p>
+                </article>
+              </div>
+            </div>
+          </section>
+
+          {/* 04 — Run */}
+          <section className="docs-sec" id="run" aria-labelledby="run-title">
+            <div className="docs-sec-head">
+              <span className="docs-index">04 · Run</span>
+              <h2 id="run-title">Run, preview, and verify</h2>
+              <p>
+                Click <strong>Run</strong> to start or restart the project dev server. The
+                first run installs dependencies when needed, then opens a preview tab.
+              </p>
+            </div>
+            <ol className="docs-steps">
+              {RUN_STEPS.map(([strong, body]) => (
+                <li key={strong}>
+                  <strong>{strong}</strong>
+                  <span>{body}</span>
+                </li>
+              ))}
+            </ol>
+          </section>
+
+          {/* 05 — Files */}
+          <section className="docs-sec" id="files" aria-labelledby="files-title">
+            <div className="docs-sec-head">
+              <span className="docs-index">05 · Files</span>
+              <h2 id="files-title">Use files, editor, and logs</h2>
+              <p>
+                You and the agent share the same sandbox. Direct edits, agent edits, file
+                opens, and command output all stay in sync.
+              </p>
+            </div>
+            <div className="mk-grid cols-2">
+              <article className="mk-card">
+                <h3>When to edit yourself</h3>
+                <p>
+                  Use the editor for tiny text tweaks, quick copy changes, or inspecting a
+                  file while the agent works. Save is automatic through the workspace sync.
+                </p>
               </article>
-            ))}
-          </div>
-        </section>
-
-        <section id="troubleshoot" className="doc-section" aria-labelledby="troubleshoot-title">
-          <div className="doc-section-head">
-            <p className="doc-kicker">10</p>
-            <h2 id="troubleshoot-title">Troubleshooting</h2>
-            <p>
-              Most problems get easier when you hand the agent the exact symptom and the
-              evidence. These are the gotchas that come up most.
-            </p>
-          </div>
-          <div className="doc-grid two">
-            {TROUBLESHOOTING.map((item) => (
-              <article key={item.title} className="doc-card compact">
-                <h3>{item.title}</h3>
-                <p>{item.body}</p>
+              <article className="mk-card">
+                <h3>When to point the agent</h3>
+                <p>
+                  Use <code>@</code>-mentions when you want Uniqus to follow an existing
+                  pattern, patch a specific file, or explain why a piece of code behaves a
+                  certain way.
+                </p>
               </article>
-            ))}
-          </div>
-          <div className="doc-callout neutral">
-            Still stuck? Head to <Link href="/support">Support</Link> or ask in the{" "}
-            <Link href="/community">community</Link>.
-          </div>
-        </section>
-      </main>
-    </div>
+            </div>
+          </section>
+
+          {/* 06 — Configure */}
+          <section className="docs-sec" id="configure" aria-labelledby="configure-title">
+            <div className="docs-sec-head">
+              <span className="docs-index">06 · Configure</span>
+              <h2 id="configure-title">Configure how Uniqus works</h2>
+              <p>
+                Some settings belong to a project, and others apply account-wide. Use
+                project tools for instructions and secrets; use Settings for defaults and
+                appearance.
+              </p>
+            </div>
+            <div className="docs-stack">
+              <div className="mk-grid cols-2">
+                {CONFIG_ITEMS.map((item) => (
+                  <article className="mk-card" key={item.title}>
+                    <h3>{item.title}</h3>
+                    <p>{item.body}</p>
+                  </article>
+                ))}
+              </div>
+              <Link href="/settings" className="docs-inline-link">
+                Open Settings →
+              </Link>
+            </div>
+          </section>
+
+          {/* 07 — Ship */}
+          <section className="docs-sec" id="ship" aria-labelledby="ship-title">
+            <div className="docs-sec-head">
+              <span className="docs-index">07 · Ship</span>
+              <h2 id="ship-title">Ship with GitHub and deploys</h2>
+              <p>
+                Signed-in accounts can connect GitHub, create private repos from workspace
+                projects, and deploy apps to Vercel from the topbar.
+              </p>
+            </div>
+            <div className="docs-stack">
+              <div className="mk-grid cols-2">
+                <article className="mk-card">
+                  <h3>Create a GitHub repo</h3>
+                  <p>
+                    Use <strong>Create GitHub repo</strong> in the workspace topbar to
+                    create a fresh private repo and push the initial project state.
+                  </p>
+                </article>
+                <article className="mk-card">
+                  <h3>Deploy</h3>
+                  <p>
+                    Use <strong>Deploy</strong> to publish through Vercel. Set any
+                    environment variables in the deploy modal, then watch status and history
+                    in the same flow.
+                  </p>
+                </article>
+              </div>
+              <div className="docs-callout neutral">
+                Guest work is saved on this device. Sign in with Google to keep it
+                permanently across devices and to unlock GitHub and publishing.
+              </div>
+            </div>
+          </section>
+
+          {/* 08 — Recover */}
+          <section className="docs-sec" id="recover" aria-labelledby="recover-title">
+            <div className="docs-sec-head">
+              <span className="docs-index">08 · Recover</span>
+              <h2 id="recover-title">Recover safely</h2>
+              <p>
+                The workspace is built for iteration. You can stop an agent turn, start a
+                cleaner chat, or restore a checkpoint when a direction goes sideways.
+              </p>
+            </div>
+            <div className="mk-grid cols-3">
+              {RECOVER.map((item) => (
+                <article className="mk-card" key={item.title}>
+                  <h3>{item.title}</h3>
+                  <p>{item.body}</p>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          {/* 09 — Prompting */}
+          <section className="docs-sec" id="prompting" aria-labelledby="prompting-title">
+            <div className="docs-sec-head">
+              <span className="docs-index">09 · Prompting</span>
+              <h2 id="prompting-title">Prompt the agent well</h2>
+              <p>
+                Strong prompts are specific enough to act on and small enough to verify.
+                Treat each turn like a useful ticket for a careful engineer — and know how
+                the agent already works so you can lean on it.
+              </p>
+            </div>
+            <div className="docs-stack">
+              <div className="mk-grid cols-2">
+                <article className="mk-card is-good">
+                  <span className="mk-card-num">Better first prompt</span>
+                  <p className="docs-quote">{BETTER_PROMPT}</p>
+                </article>
+                <article className="mk-card">
+                  <span className="mk-card-num">Less useful</span>
+                  <p className="docs-quote">{WEAK_PROMPT}</p>
+                </article>
+              </div>
+
+              <div className="docs-kv">
+                {PROMPT_PARTS.map(([label, body]) => (
+                  <div className="docs-kv-row" key={label}>
+                    <code>{label}</code>
+                    <span>{body}</span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="docs-template">
+                <span className="label-eyebrow">Copyable template</span>
+                <p>{PROMPT_TEMPLATE}</p>
+              </div>
+
+              <div className="docs-subhead">
+                <h3>How the agent works — so you can prompt for it</h3>
+                <p>
+                  These are the working principles the Uniqus agent already follows.
+                  Knowing them tells you what to ask for and what you can trust it to do on
+                  its own.
+                </p>
+              </div>
+              <div className="mk-grid cols-2">
+                {PROMPTING_PRINCIPLES.map((p) => (
+                  <article className="mk-card" key={p.title}>
+                    <h3>{p.title}</h3>
+                    <p>{p.body}</p>
+                  </article>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          {/* 10 — Troubleshooting */}
+          <section className="docs-sec" id="troubleshoot" aria-labelledby="troubleshoot-title">
+            <div className="docs-sec-head">
+              <span className="docs-index">10 · Troubleshooting</span>
+              <h2 id="troubleshoot-title">Troubleshooting</h2>
+              <p>
+                Most problems get easier when you hand the agent the exact symptom and the
+                evidence. These are the gotchas that come up most.
+              </p>
+            </div>
+            <div className="docs-stack">
+              <div className="mk-grid cols-2">
+                {TROUBLESHOOTING.map((item) => (
+                  <article className="mk-card" key={item.title}>
+                    <h3>{item.title}</h3>
+                    <p>{item.body}</p>
+                  </article>
+                ))}
+              </div>
+              <div className="docs-callout neutral">
+                Still stuck? Head to <Link href="/support">Support</Link> or ask in the{" "}
+                <Link href="/community">community</Link>.
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </>
   );
 }

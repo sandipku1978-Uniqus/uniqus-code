@@ -9,14 +9,17 @@ import {
 } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import type { DeploymentState, ProjectSummary } from "@uniqus/api-types";
+import type { DeploymentState, ProjectSummary, Organization } from "@uniqus/api-types";
 import BrandLockup from "./BrandLockup";
 import GuestBanner from "./GuestBanner";
 import DatabasesView from "./DatabasesView";
 import DesignSystemsView from "./DesignSystemsView";
 import SkillsView from "./SkillsView";
 import KnowledgeView from "./KnowledgeView";
-import OrganizationsView from "./OrganizationsView";
+import WorkspaceSwitcher from "./WorkspaceSwitcher";
+import OrgMembersView from "./OrgMembersView";
+import OrgSettingsView from "./OrgSettingsView";
+import OrgUsageView from "./OrgUsageView";
 import TemplatesView from "./TemplatesView";
 import { ProjectPreview } from "./UiPreview";
 import Popover from "./Popover";
@@ -37,6 +40,9 @@ import {
   importZipApi,
   updateProjectApi,
   deleteProjectApi,
+  fetchOrgsApi,
+  createOrgApi,
+  setProjectOrgApi,
   fetchGithubStatus,
   fetchGithubRepos,
   disconnectGithubApi,
@@ -317,8 +323,32 @@ export default function ProjectPicker({
   // recent tiles). "all" shows every project as a richer card with URL +
   // repo + status; "recent" shows the same data sorted by activity with
   // more verbose timestamps.
-  type View = "home" | "templates" | "all" | "recent" | "databases" | "design-systems" | "skills" | "knowledge" | "teams";
+  // "members" | "usage" | "settings" are the org-context views, only reachable
+  // (and only shown in the nav) while an organization workspace is active.
+  type View =
+    | "home"
+    | "templates"
+    | "all"
+    | "recent"
+    | "databases"
+    | "design-systems"
+    | "skills"
+    | "knowledge"
+    | "members"
+    | "usage"
+    | "settings";
   const [view, setView] = useState<View>("home");
+
+  // Active dashboard workspace (P3.1): null = Personal, else an org id. Persisted
+  // account-wide in the store; the project list + new-project target follow it.
+  const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
+  const setActiveWorkspace = useStore((s) => s.setActiveWorkspace);
+  const [orgs, setOrgs] = useState<Organization[]>([]);
+  const [createOrgOpen, setCreateOrgOpen] = useState(false);
+  const [orgName, setOrgName] = useState("");
+  const [creatingOrg, setCreatingOrg] = useState(false);
+  const activeOrg = activeWorkspaceId ? orgs.find((o) => o.id === activeWorkspaceId) ?? null : null;
+  const ORG_VIEWS = new Set<View>(["members", "usage", "settings"]);
 
   const [editing, setEditing] = useState<{
     project: ProjectSummary;
@@ -359,10 +389,20 @@ export default function ProjectPicker({
   const loadProjects = useCallback(() => {
     setProjectsError(null);
     setProjects(null);
-    fetchProjects()
+    // Scope to the active workspace: "personal" lists un-orged projects; an org
+    // id lists that org's projects (membership-checked server-side). Guests have
+    // no org concept, so they always read Personal regardless of any stale id.
+    const ws = isGuest ? "personal" : activeWorkspaceId ?? "personal";
+    fetchProjects(ws)
       .then((r) => setProjects(r.projects))
       .catch((e) => setProjectsError(e instanceof Error ? e.message : String(e)));
-  }, []);
+  }, [activeWorkspaceId, isGuest]);
+
+  // A guest should never carry an org workspace (e.g. a stale id left in
+  // localStorage by a prior signed-in session) — force back to Personal.
+  useEffect(() => {
+    if (isGuest && activeWorkspaceId) setActiveWorkspace(null);
+  }, [isGuest, activeWorkspaceId, setActiveWorkspace]);
 
   useEffect(() => {
     loadProjects();
@@ -372,6 +412,64 @@ export default function ProjectPicker({
       .then((r) => setUsage(r.stats))
       .catch(() => {});
   }, [loadProjects]);
+
+  // Load the user's organizations for the workspace switcher, and reconcile a
+  // persisted active workspace against reality: if the stored org id is no
+  // longer one the user belongs to (left/deleted), fall back to Personal.
+  const loadOrgs = useCallback(async () => {
+    try {
+      const { orgs } = await fetchOrgsApi();
+      setOrgs(orgs);
+      if (activeWorkspaceId && !orgs.some((o) => o.id === activeWorkspaceId)) {
+        setActiveWorkspace(null);
+      }
+    } catch {
+      setOrgs([]);
+    }
+    // activeWorkspaceId intentionally omitted: this is a mount-time load +
+    // reconcile; switching workspaces doesn't need to refetch the org list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (isGuest) return; // guests have no org/workspace concept
+    void loadOrgs();
+  }, [isGuest, loadOrgs]);
+
+  // When the active workspace changes to Personal, leave any org-only view
+  // (Members/Usage/Settings) — they have no meaning without an org.
+  function switchWorkspace(id: string | null) {
+    if (id === activeWorkspaceId) return;
+    setActiveWorkspace(id);
+    setMenuFor(null);
+    if (id === null && ORG_VIEWS.has(view)) setView("home");
+  }
+
+  async function createOrg() {
+    const name = orgName.trim();
+    if (!name || creatingOrg) return;
+    setCreatingOrg(true);
+    try {
+      const { org } = await createOrgApi(name);
+      setOrgs((prev) => [...prev, org]);
+      setOrgName("");
+      setCreateOrgOpen(false);
+      setActiveWorkspace(org.id);
+      setView("members"); // land in the new org ready to invite teammates
+      toast.success(`Created ${org.name}`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Couldn't create organization");
+    } finally {
+      setCreatingOrg(false);
+    }
+  }
+
+  function handleOrgRemoved() {
+    // After leaving/deleting the active org: drop back to Personal and refresh.
+    setActiveWorkspace(null);
+    setView("home");
+    void loadOrgs();
+  }
 
   // A logged-out visitor who typed an idea into the landing-page composer is
   // bounced here through sign-in. Their idea was parked in sessionStorage so it
@@ -481,6 +579,7 @@ export default function ProjectPicker({
       const { project, first_message } = await createProjectFromBriefApi(
         brief,
         designSystemId || null,
+        activeWorkspaceId, // create inside the active workspace (null = personal)
       );
       if (describeFiles.length > 0) {
         // Stage the attachments + refined first message so the user lands in the
@@ -591,6 +690,7 @@ export default function ProjectPicker({
         const { project } = await importZipApi({
           name: name.trim(),
           file: zipFile,
+          orgId: activeWorkspaceId ?? undefined,
         });
         router.push(`/projects/${project.id}`);
         return;
@@ -618,11 +718,34 @@ export default function ProjectPicker({
         use_oauth: useOauth || undefined,
         link_repo: linkRepo || undefined,
         repo_full_name: linkRepo && fullName ? fullName : undefined,
+        org_id: activeWorkspaceId ?? undefined,
       });
       router.push(`/projects/${project.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setCreating(false);
+    }
+  }
+
+  // Move a project between workspaces (personal ⇄ org). The moved project leaves
+  // the current workspace's list, so drop it locally for an instant update; a
+  // reload would also work but this avoids the flash.
+  async function handleMoveProject(
+    project: ProjectSummary,
+    targetOrgId: string | null,
+  ): Promise<void> {
+    if ((project.org_id ?? null) === targetOrgId) {
+      setMenuFor(null);
+      return;
+    }
+    try {
+      await setProjectOrgApi(project.id, targetOrgId);
+      setMenuFor(null);
+      setProjects((current) => (current ?? []).filter((p) => p.id !== project.id));
+      const dest = targetOrgId ? orgs.find((o) => o.id === targetOrgId)?.name ?? "the organization" : "Personal";
+      toast.success(`Moved “${project.name}” to ${dest}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't move project");
     }
   }
 
@@ -738,6 +861,20 @@ export default function ProjectPicker({
 
       <div className="dash-shell">
         <aside className="dash-side">
+          {!isGuest && (
+            <div className="group" style={{ paddingBottom: 4 }}>
+              <WorkspaceSwitcher
+                orgs={orgs}
+                activeWorkspaceId={activeWorkspaceId}
+                personalLabel={displayLabel}
+                onSelect={switchWorkspace}
+                onCreate={() => {
+                  setOrgName("");
+                  setCreateOrgOpen(true);
+                }}
+              />
+            </div>
+          )}
           <div className="group">
             <button
               type="button"
@@ -909,31 +1046,56 @@ export default function ProjectPicker({
               </span>
               Knowledge
             </button>
-            <button
-              type="button"
-              onClick={() => setView("teams")}
-              className={`nav-item${view === "teams" ? " active" : ""}`}
-            >
-              <span className="ic">
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-                  <circle cx="9" cy="7" r="4" />
-                  <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-                  <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-                </svg>
-              </span>
-              Teams
-            </button>
           </div>
+
+          {/* Organization context: only meaningful while an org workspace is active. */}
+          {activeOrg && (
+            <div className="group">
+              <div className="label-micro">{activeOrg.name}</div>
+              <button
+                type="button"
+                onClick={() => setView("members")}
+                className={`nav-item${view === "members" ? " active" : ""}`}
+              >
+                <span className="ic">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                    <circle cx="9" cy="7" r="4" />
+                    <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                  </svg>
+                </span>
+                Members
+              </button>
+              <button
+                type="button"
+                onClick={() => setView("usage")}
+                className={`nav-item${view === "usage" ? " active" : ""}`}
+              >
+                <span className="ic">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="20" x2="18" y2="10" />
+                    <line x1="12" y1="20" x2="12" y2="4" />
+                    <line x1="6" y1="20" x2="6" y2="14" />
+                  </svg>
+                </span>
+                Usage
+              </button>
+              <button
+                type="button"
+                onClick={() => setView("settings")}
+                className={`nav-item${view === "settings" ? " active" : ""}`}
+              >
+                <span className="ic">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                  </svg>
+                </span>
+                Settings
+              </button>
+            </div>
+          )}
 
 
           <div className="group">
@@ -999,13 +1161,27 @@ export default function ProjectPicker({
             <SkillsView isGuest={isGuest} />
           ) : view === "knowledge" ? (
             <KnowledgeView isGuest={isGuest} />
-          ) : view === "teams" ? (
-            <OrganizationsView />
+          ) : view === "members" && activeWorkspaceId ? (
+            <OrgMembersView orgId={activeWorkspaceId} />
+          ) : view === "usage" && activeWorkspaceId ? (
+            <OrgUsageView orgId={activeWorkspaceId} />
+          ) : view === "settings" && activeWorkspaceId ? (
+            <OrgSettingsView
+              orgId={activeWorkspaceId}
+              onRenamed={(name) =>
+                setOrgs((prev) =>
+                  prev.map((o) => (o.id === activeWorkspaceId ? { ...o, name } : o)),
+                )
+              }
+              onRemoved={handleOrgRemoved}
+            />
           ) : view === "all" || view === "recent" ? (
             <ProjectListView
               view={view}
               projects={projects}
+              orgs={orgs}
               onEdit={(field, project) => setEditing({ project, field })}
+              onMove={handleMoveProject}
               menuFor={menuFor}
               onOpenMenu={(id, open) => setMenuFor(open ? id : null)}
             />
@@ -1018,6 +1194,14 @@ export default function ProjectPicker({
             </h1>
             <p className="lede">
               Describe what you want to build, or bring an existing codebase.
+              {activeOrg && (
+                <>
+                  {" "}
+                  <span style={{ color: "var(--text-muted)" }}>
+                    New projects are created in <strong>{activeOrg.name}</strong>.
+                  </span>
+                </>
+              )}
             </p>
 
             <div className="dash-hero-card">
@@ -1565,6 +1749,8 @@ export default function ProjectPicker({
                   menuOpen={menuFor === p.id}
                   onOpenMenu={(open) => setMenuFor(open ? p.id : null)}
                   onEdit={(field) => setEditing({ project: p, field })}
+                  orgs={orgs}
+                  onMove={handleMoveProject}
                 />
               ))}
             </div>
@@ -1608,6 +1794,75 @@ export default function ProjectPicker({
               onChoice={(link) => void doGithubImport(link)}
               onCancel={() => setLinkPrompt(null)}
             />
+          )}
+
+          {createOrgOpen && (
+            <Modal
+              title="Create an organization"
+              subtitle="A shared workspace for your team's projects, members, and budget."
+              width={460}
+              onClose={() => {
+                if (!creatingOrg) setCreateOrgOpen(false);
+              }}
+              footer={
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    onClick={() => setCreateOrgOpen(false)}
+                    disabled={creatingOrg}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={() => void createOrg()}
+                    disabled={creatingOrg || !orgName.trim()}
+                  >
+                    {creatingOrg ? "Creating…" : "Create organization"}
+                  </button>
+                </div>
+              }
+            >
+              <label
+                htmlFor="new-org-name"
+                style={{
+                  display: "block",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: "var(--fs-2xs)",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.08em",
+                  color: "var(--text-dim)",
+                  marginBottom: 6,
+                }}
+              >
+                Organization name
+              </label>
+              <input
+                id="new-org-name"
+                className="ui-input"
+                autoFocus
+                placeholder="Acme Inc"
+                value={orgName}
+                onChange={(e) => setOrgName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void createOrg();
+                }}
+                style={{
+                  width: "100%",
+                  background: "var(--bg-elev)",
+                  border: "1px solid var(--border-default)",
+                  borderRadius: "var(--radius-md)",
+                  color: "var(--text-primary)",
+                  padding: "9px 11px",
+                  fontSize: "var(--fs-md)",
+                }}
+              />
+              <p style={{ color: "var(--text-dim)", fontSize: "var(--fs-xs)", marginTop: 10 }}>
+                You&apos;ll be the owner. Invite teammates and create projects inside it once it&apos;s set up.
+              </p>
+            </Modal>
           )}
         </main>
       </div>
@@ -1768,11 +2023,27 @@ function ProjectActionsMenu({
   anchorRef,
   onEdit,
   onClose,
+  orgs,
+  currentOrgId,
+  onMove,
 }: {
   anchorRef: RefObject<HTMLButtonElement | null>;
   onEdit: (field: "rename" | "icon" | "delete") => void;
   onClose: () => void;
+  /** Workspaces this project can be moved to. Omitted/empty hides the section. */
+  orgs?: Organization[];
+  /** The project's current org (null = personal), so the menu omits it as a target. */
+  currentOrgId?: string | null;
+  onMove?: (orgId: string | null) => void;
 }) {
+  // Move targets = Personal + every org, minus where it already lives. Only
+  // shown when the user actually has an org to move between.
+  const moveTargets =
+    orgs && orgs.length > 0 && onMove
+      ? [{ id: null as string | null, name: "Personal" }, ...orgs.map((o) => ({ id: o.id as string | null, name: o.name }))].filter(
+          (t) => t.id !== (currentOrgId ?? null),
+        )
+      : [];
   const menuRef = useRef<HTMLDivElement>(null);
 
   // Focus the first item when the menu opens so keyboard users land inside it.
@@ -1843,6 +2114,26 @@ function ProjectActionsMenu({
       >
         Change icon
       </button>
+      {moveTargets.length > 0 && onMove && (
+        <>
+          <div className="proj-menu-label" role="presentation">
+            Move to
+          </div>
+          {moveTargets.map((t) => (
+            <button
+              key={t.id ?? "personal"}
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                onClose();
+                onMove(t.id);
+              }}
+            >
+              {t.name}
+            </button>
+          ))}
+        </>
+      )}
       <button
         type="button"
         role="menuitem"
@@ -1863,11 +2154,15 @@ function ProjectTile({
   menuOpen,
   onOpenMenu,
   onEdit,
+  orgs,
+  onMove,
 }: {
   project: ProjectSummary;
   menuOpen: boolean;
   onOpenMenu: (open: boolean) => void;
   onEdit: (field: "rename" | "icon" | "delete") => void;
+  orgs?: Organization[];
+  onMove?: (project: ProjectSummary, orgId: string | null) => void;
 }) {
   const tileRef = useRef<HTMLDivElement>(null);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
@@ -1903,6 +2198,9 @@ function ProjectTile({
             anchorRef={menuBtnRef}
             onEdit={onEdit}
             onClose={() => onOpenMenu(false)}
+            orgs={orgs}
+            currentOrgId={project.org_id ?? null}
+            onMove={onMove ? (orgId) => onMove(project, orgId) : undefined}
           />
         )}
       </div>
@@ -2327,12 +2625,16 @@ function MetricCell({
  */
 function AllProjectsView({
   projects,
+  orgs,
   onEdit,
+  onMove,
   menuFor,
   onOpenMenu,
 }: {
   projects: ProjectSummary[] | null;
+  orgs?: Organization[];
   onEdit: (field: "rename" | "icon" | "delete", project: ProjectSummary) => void;
+  onMove?: (project: ProjectSummary, orgId: string | null) => void;
   menuFor: string | null;
   onOpenMenu: (id: string, open: boolean) => void;
 }) {
@@ -2365,7 +2667,7 @@ function AllProjectsView({
             All <span className="grad">projects</span>
           </>
         }
-        lede="Every project you own, sorted by name. Open one to jump into its workspace, or use the ⋯ menu to rename, re-icon, or remove it."
+        lede="Every project in this workspace, sorted by name. Open one to jump in, or use the ⋯ menu to rename, re-icon, move, or remove it."
       />
 
       <div className="metric-strip">
@@ -2424,6 +2726,8 @@ function AllProjectsView({
               menuOpen={menuFor === p.id}
               onOpenMenu={(open) => onOpenMenu(p.id, open)}
               onEdit={(field) => onEdit(field, p)}
+              orgs={orgs}
+              onMove={onMove}
             />
           ))}
         </div>
@@ -2467,12 +2771,16 @@ const RECENCY_ORDER = [
  */
 function RecentView({
   projects,
+  orgs,
   onEdit,
+  onMove,
   menuFor,
   onOpenMenu,
 }: {
   projects: ProjectSummary[] | null;
+  orgs?: Organization[];
   onEdit: (field: "rename" | "icon" | "delete", project: ProjectSummary) => void;
+  onMove?: (project: ProjectSummary, orgId: string | null) => void;
   menuFor: string | null;
   onOpenMenu: (id: string, open: boolean) => void;
 }) {
@@ -2527,6 +2835,8 @@ function RecentView({
                     menuOpen={menuFor === p.id}
                     onOpenMenu={(open) => onOpenMenu(p.id, open)}
                     onEdit={(field) => onEdit(field, p)}
+                    orgs={orgs}
+                    onMove={onMove}
                   />
                 ))}
               </div>
@@ -2542,17 +2852,21 @@ function RecentView({
 function ProjectListView({
   view,
   projects,
+  orgs,
   onEdit,
+  onMove,
   menuFor,
   onOpenMenu,
 }: {
   view: "all" | "recent";
   projects: ProjectSummary[] | null;
+  orgs?: Organization[];
   onEdit: (field: "rename" | "icon" | "delete", project: ProjectSummary) => void;
+  onMove?: (project: ProjectSummary, orgId: string | null) => void;
   menuFor: string | null;
   onOpenMenu: (id: string, open: boolean) => void;
 }) {
-  const props = { projects, onEdit, menuFor, onOpenMenu };
+  const props = { projects, orgs, onEdit, onMove, menuFor, onOpenMenu };
   return view === "all" ? <AllProjectsView {...props} /> : <RecentView {...props} />;
 }
 
@@ -2568,11 +2882,15 @@ function TimelineRow({
   menuOpen,
   onOpenMenu,
   onEdit,
+  orgs,
+  onMove,
 }: {
   project: ProjectSummary;
   menuOpen: boolean;
   onOpenMenu: (open: boolean) => void;
   onEdit: (field: "rename" | "icon" | "delete") => void;
+  orgs?: Organization[];
+  onMove?: (project: ProjectSummary, orgId: string | null) => void;
 }) {
   const rowRef = useRef<HTMLDivElement>(null);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
@@ -2675,6 +2993,9 @@ function TimelineRow({
             anchorRef={menuBtnRef}
             onEdit={onEdit}
             onClose={() => onOpenMenu(false)}
+            orgs={orgs}
+            currentOrgId={project.org_id ?? null}
+            onMove={onMove ? (orgId) => onMove(project, orgId) : undefined}
           />
         )}
       </div>

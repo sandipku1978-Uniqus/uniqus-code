@@ -112,14 +112,6 @@ export const MODEL_CATALOG: ReadonlyArray<ModelOption> = [
     tier: "frontier",
   },
   {
-    id: "openai:gpt-5.5-pro",
-    provider: "openai",
-    model: "gpt-5.5-pro",
-    label: "GPT-5.5 Pro",
-    description: "Highest-accuracy GPT-5.5 — slower, for hard problems.",
-    tier: "frontier",
-  },
-  {
     id: "openai:gpt-5.3-codex",
     provider: "openai",
     model: "gpt-5.3-codex",
@@ -436,6 +428,8 @@ export interface ProjectSummary {
   design_system_id?: string | null;
   /** Attached reusable library skills (ids; empty/undefined = none). */
   skill_library_ids?: string[] | null;
+  /** Organization (workspace) the project belongs to. Null = the owner's personal workspace. */
+  org_id?: string | null;
 }
 
 // ── Design systems ──────────────────────────────────────────────────────────
@@ -1084,6 +1078,18 @@ export interface Organization {
   monthly_budget_usd: number | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Org-scoped month-to-date spend vs. cap, for the org Usage card (P3.5). */
+export interface OrgUsageSummary {
+  /** Σ snapshotted agent spend (USD) across the org's projects this calendar month. */
+  spend_usd: number;
+  /** The org's monthly cap (USD), or null when uncapped. */
+  budget_usd: number | null;
+  /** How many projects currently live in the org. */
+  project_count: number;
+  /** ISO timestamp of the start of the current calendar month the spend covers. */
+  month_start: string;
 }
 
 export interface OrgMember {

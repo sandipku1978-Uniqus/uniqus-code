@@ -16,6 +16,7 @@ import type {
   ProjectFlow,
   OrgMember,
   Organization,
+  OrgUsageSummary,
   ProjectMember,
   ProjectSummary,
   Role,
@@ -103,8 +104,15 @@ export const deleteAccountProviderKeyApi = (
     body: JSON.stringify({ provider }),
   });
 
-export const fetchProjects = (): Promise<{ projects: ProjectSummary[] }> =>
-  api("/api/projects");
+/**
+ * List the projects in a workspace (P3.1). `workspace` is "personal" (the
+ * user's un-orged projects), an org id, or omitted/"all" for the legacy
+ * aggregate of every project the user can reach.
+ */
+export const fetchProjects = (
+  workspace?: string | null,
+): Promise<{ projects: ProjectSummary[] }> =>
+  api(`/api/projects${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`);
 
 // ── Account usage rollup (dashboard widgets) ──────────────────────────────────
 
@@ -116,24 +124,27 @@ export const fetchUsageStatsApi = (): Promise<{ stats: AccountUsageStats }> =>
 export const createProjectApi = (
   name: string,
   description?: string,
+  orgId?: string | null,
 ): Promise<{ project: ProjectSummary }> =>
   api("/api/projects", {
     method: "POST",
-    body: JSON.stringify({ name, description }),
+    body: JSON.stringify({ name, description, org_id: orgId ?? null }),
   });
 
 /**
  * NL project creation: hand the orchestrator a free-form brief, get back
  * a created project plus a refined first message ready to fire as the
  * agent's opening turn. Costs one Haiku call (~$0.0003, ~200ms).
+ * `orgId` creates the project inside that org workspace (null = personal).
  */
 export const createProjectFromBriefApi = (
   brief: string,
   designSystemId?: string | null,
+  orgId?: string | null,
 ): Promise<{ project: ProjectSummary; first_message: string }> =>
   api("/api/projects/from-brief", {
     method: "POST",
-    body: JSON.stringify({ brief, design_system_id: designSystemId ?? null }),
+    body: JSON.stringify({ brief, design_system_id: designSystemId ?? null, org_id: orgId ?? null }),
   });
 
 // ── Design systems (global, per-user) ─────────────────────────────────────────
@@ -518,6 +529,8 @@ export const importGithubApi = (input: {
   link_repo?: boolean;
   /** owner/repo, when known (OAuth repo picker). */
   repo_full_name?: string;
+  /** Workspace to import into (org id); null/omitted = personal. */
+  org_id?: string | null;
 }): Promise<{ project: ProjectSummary; import: ImportResultMeta }> =>
   api("/api/projects/import-github", {
     method: "POST",
@@ -706,10 +719,13 @@ export async function importZipApi(input: {
   name: string;
   description?: string;
   file: File;
+  /** Workspace to import into (org id); null/omitted = personal. */
+  orgId?: string | null;
 }): Promise<{ project: ProjectSummary; import: ImportResultMeta }> {
   const fd = new FormData();
   fd.append("name", input.name);
   if (input.description) fd.append("description", input.description);
+  if (input.orgId) fd.append("org_id", input.orgId);
   fd.append("file", input.file);
 
   const res = await fetch(`${API_BASE}/api/projects/import-zip`, {
@@ -1103,6 +1119,31 @@ export const fetchOrgsApi = (): Promise<{ orgs: Organization[] }> => api("/api/o
 
 export const createOrgApi = (name: string): Promise<{ org: Organization }> =>
   api("/api/orgs", { method: "POST", body: JSON.stringify({ name }) });
+
+/** Org detail + the caller's role on it. */
+export const fetchOrgApi = (orgId: string): Promise<{ org: Organization; role: Role }> =>
+  api(`/api/orgs/${orgId}`);
+
+export const renameOrgApi = (orgId: string, name: string): Promise<{ ok: true }> =>
+  api(`/api/orgs/${orgId}`, { method: "PATCH", body: JSON.stringify({ name }) });
+
+export const deleteOrgApi = (orgId: string): Promise<{ ok: true }> =>
+  api(`/api/orgs/${orgId}`, { method: "DELETE" });
+
+/** Leave an org (remove yourself). The sole owner can't — they must transfer or delete. */
+export const leaveOrgApi = (orgId: string): Promise<{ ok: true }> =>
+  api(`/api/orgs/${orgId}/leave`, { method: "POST" });
+
+/** Org month-to-date spend vs. cap, for the Usage card. */
+export const fetchOrgUsageApi = (orgId: string): Promise<{ usage: OrgUsageSummary }> =>
+  api(`/api/orgs/${orgId}/usage`);
+
+/** Move a project into an org workspace (orgId) or back to personal (null). */
+export const setProjectOrgApi = (
+  projectId: string,
+  orgId: string | null,
+): Promise<{ project: ProjectSummary | null }> =>
+  api(`/api/projects/${projectId}/org`, { method: "PATCH", body: JSON.stringify({ org_id: orgId }) });
 
 export const fetchOrgMembersApi = (orgId: string): Promise<{ members: OrgMember[] }> =>
   api(`/api/orgs/${orgId}/members`);

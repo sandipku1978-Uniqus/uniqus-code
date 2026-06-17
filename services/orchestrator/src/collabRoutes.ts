@@ -5,7 +5,10 @@ import * as members from "./db/members.js";
 import * as comments from "./db/comments.js";
 import * as tasks from "./db/agentTasks.js";
 import * as flows from "./db/flows.js";
-import type { FlowStep } from "@uniqus/api-types";
+import { orgMonthToDateSpendUsd, startOfMonthIso } from "./db/usage.js";
+import type { FlowStep, OrgUsageSummary } from "@uniqus/api-types";
+
+const MAX_ORG_NAME = 60;
 
 /**
  * Collaboration, org/RBAC, comments, and durable-task routes (P3.1/P3.2/P3.4/
@@ -245,11 +248,92 @@ export async function handleCollabRoute(
       const body = await readJsonBody<{ name?: string }>(req);
       const name = (body.name ?? "").trim();
       if (!name) return (json(res, 400, { error: "name is required" }), true);
+      if (name.length > MAX_ORG_NAME) {
+        return (json(res, 400, { error: `name must be ${MAX_ORG_NAME} chars or fewer` }), true);
+      }
       const org = await members.createOrganization(name, user.id);
       void audit({ project_id: null, user_id: user.id, kind: "org_create", target: org.id, metadata: { name } });
       json(res, 200, { org });
       return true;
     }
+  }
+
+  // ── Single org: detail / rename / delete (P3.1) ──────────────────────────
+  const orgIdM = url.match(/^\/api\/orgs\/([0-9a-fA-F-]{8,})$/);
+  if (orgIdM) {
+    const orgId = orgIdM[1];
+    const role = await members.getOrgRole(orgId, user.id);
+    if (method === "GET") {
+      if (!role) return (json(res, 404, { error: "org not found" }), true);
+      const org = await members.getOrganization(orgId);
+      if (!org) return (json(res, 404, { error: "org not found" }), true);
+      json(res, 200, { org, role });
+      return true;
+    }
+    if (method === "PATCH") {
+      if (!roleAtLeast(role, "admin")) {
+        return (json(res, role ? 403 : 404, { error: role ? "insufficient role" : "org not found" }), true);
+      }
+      const body = await readJsonBody<{ name?: string }>(req);
+      const name = (body.name ?? "").trim();
+      if (!name) return (json(res, 400, { error: "name is required" }), true);
+      if (name.length > MAX_ORG_NAME) {
+        return (json(res, 400, { error: `name must be ${MAX_ORG_NAME} chars or fewer` }), true);
+      }
+      await members.renameOrganization(orgId, name);
+      void audit({ project_id: null, user_id: user.id, kind: "org_update", target: orgId, metadata: { name } });
+      json(res, 200, { ok: true });
+      return true;
+    }
+    if (method === "DELETE") {
+      // Only an owner can dissolve the org. Projects fall back to personal
+      // (projects.org_id is ON DELETE SET NULL), they aren't destroyed.
+      if (role !== "owner") {
+        return (json(res, role ? 403 : 404, { error: role ? "only an owner can delete the org" : "org not found" }), true);
+      }
+      await members.deleteOrganization(orgId);
+      void audit({ project_id: null, user_id: user.id, kind: "org_update", target: orgId, metadata: { deleted: true } });
+      json(res, 200, { ok: true });
+      return true;
+    }
+  }
+
+  // ── Leave an org (any member removes themselves) ─────────────────────────
+  const orgLeaveM = url.match(/^\/api\/orgs\/([0-9a-fA-F-]{8,})\/leave$/);
+  if (orgLeaveM && method === "POST") {
+    const orgId = orgLeaveM[1];
+    const role = await members.getOrgRole(orgId, user.id);
+    if (!role) return (json(res, 404, { error: "org not found" }), true);
+    // The last owner can't abandon the org — they'd orphan it. Make someone
+    // else an owner, or delete the org instead.
+    if (role === "owner" && (await members.countOrgOwners(orgId)) <= 1) {
+      return (json(res, 409, { error: "you're the only owner — promote another owner or delete the org first" }), true);
+    }
+    await members.removeOrgMember(orgId, user.id);
+    void audit({ project_id: null, user_id: user.id, kind: "member_remove", target: user.id, metadata: { org: orgId, left: true } });
+    json(res, 200, { ok: true });
+    return true;
+  }
+
+  // ── Org usage: month-to-date spend vs. cap (P3.5) ────────────────────────
+  const orgUsageM = url.match(/^\/api\/orgs\/([0-9a-fA-F-]{8,})\/usage$/);
+  if (orgUsageM && method === "GET") {
+    const orgId = orgUsageM[1];
+    const role = await members.getOrgRole(orgId, user.id);
+    if (!role) return (json(res, 404, { error: "org not found" }), true);
+    const org = await members.getOrganization(orgId);
+    const [spend, projectCount] = await Promise.all([
+      orgMonthToDateSpendUsd(orgId).catch(() => 0),
+      members.countOrgProjects(orgId).catch(() => 0),
+    ]);
+    const usage: OrgUsageSummary = {
+      spend_usd: spend,
+      budget_usd: org?.monthly_budget_usd ?? null,
+      project_count: projectCount,
+      month_start: startOfMonthIso(),
+    };
+    json(res, 200, { usage });
+    return true;
   }
 
   const orgM = url.match(/^\/api\/orgs\/([0-9a-fA-F-]{8,})\/(members|budget)(?:\/([0-9a-fA-F-]{8,}))?$/);

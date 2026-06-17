@@ -76,6 +76,36 @@ function persistThinking(thinking: ThinkingEffort): void {
 }
 
 /**
+ * Active dashboard workspace (P3.1): `null` = the user's Personal workspace,
+ * otherwise an organization id. Like the model default it's an account-wide
+ * client preference persisted to localStorage, so the workspace you were last
+ * looking at survives reloads. Only the dashboard (ProjectPicker) reads it; the
+ * id is reconciled against the user's actual org list on load (a stale id from a
+ * left/deleted org falls back to Personal).
+ */
+const WORKSPACE_STORAGE_KEY = "uniqus.workspace";
+
+function readStoredWorkspace(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const stored = window.localStorage.getItem(WORKSPACE_STORAGE_KEY);
+    return stored && stored !== "personal" ? stored : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistWorkspace(id: string | null): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (id) window.localStorage.setItem(WORKSPACE_STORAGE_KEY, id);
+    else window.localStorage.removeItem(WORKSPACE_STORAGE_KEY);
+  } catch {
+    /* private mode / quota — non-fatal, the choice just won't persist */
+  }
+}
+
+/**
  * Appearance preferences (Settings → Appearance). Like the model default,
  * these are account-wide client preferences persisted to localStorage. They
  * are applied to <html> via `data-theme` / `data-density` attributes — the
@@ -463,6 +493,12 @@ interface State {
    * reasoning control. Edited from the composer's thinking picker.
    */
   thinking: ThinkingEffort;
+  /**
+   * Active dashboard workspace (P3.1): null = Personal, else an org id.
+   * Account-wide, localStorage-backed; read by the ProjectPicker to scope its
+   * project list + new-project creation.
+   */
+  activeWorkspaceId: string | null;
   chat: ChatItem[];
   tree: TreeEntry[];
   /**
@@ -577,6 +613,8 @@ interface State {
   setDensity(d: DensityChoice): void;
   /** Set the agent reasoning effort and persist it as the account-wide default. */
   setThinking(t: ThinkingEffort): void;
+  /** Switch the active dashboard workspace (null = Personal); persists account-wide. */
+  setActiveWorkspace(id: string | null): void;
   addUserMessage(
     content: string,
     attachments?: UploadedFileSummary[],
@@ -743,6 +781,7 @@ export const useStore = create<State>((set, get) => ({
   theme: "dark",
   density: "comfortable",
   thinking: readStoredThinking(),
+  activeWorkspaceId: readStoredWorkspace(),
   chat: [],
   tree: [],
   treeLoaded: false,
@@ -809,6 +848,10 @@ export const useStore = create<State>((set, get) => ({
   setThinking: (t) => {
     persistThinking(t);
     set({ thinking: t });
+  },
+  setActiveWorkspace: (id) => {
+    persistWorkspace(id);
+    set({ activeWorkspaceId: id });
   },
 
   addUserMessage: (content, attachments, fileRefs, selectedElement, at) =>

@@ -33,6 +33,70 @@ const EXAMPLE_PROMPTS = [
   "Create a budget vs. actuals dashboard by department with variance highlights and a month filter.",
 ];
 
+/**
+ * Whimsical "working" words cycled in the composer status strip while a turn
+ * runs — mimics Claude Code's rotating gerunds. Kept on the professional side
+ * of cute. A real server progress note (e.g. "Installing dependencies…")
+ * overrides the cycling when one is present (see ChatPanel's inFlightProgress).
+ */
+const WORKING_WORDS = [
+  "Working",
+  "Thinking",
+  "Cooking",
+  "Crafting",
+  "Brewing",
+  "Pondering",
+  "Computing",
+  "Conjuring",
+  "Tinkering",
+  "Composing",
+  "Noodling",
+  "Synthesizing",
+  "Assembling",
+  "Percolating",
+];
+
+/**
+ * The pinned "agent working" strip shown just above the composer: a small
+ * Uniqus mark that eases through each spin (slow at the upright top, quick
+ * through the bottom — see `.working-spinner` / `working-spin` in globals.css)
+ * plus a status word. When `label` is null the whimsical words cycle every
+ * ~2.4s; otherwise the (informative) server label is shown verbatim. Mounting
+ * resets to the first word, so each new turn opens on "Working…".
+ */
+const WorkingStatus = memo(function WorkingStatus({
+  label,
+}: {
+  label: string | null;
+}) {
+  const [i, setI] = useState(0);
+  useEffect(() => {
+    if (label) return; // real progress shown — don't cycle over it
+    const id = setInterval(
+      () => setI((n) => (n + 1) % WORKING_WORDS.length),
+      2400,
+    );
+    return () => clearInterval(id);
+  }, [label]);
+  const text = label ?? `${WORKING_WORDS[i]}…`;
+  return (
+    <div className="composer-working" role="status" aria-live="polite">
+      <img
+        className="working-spinner"
+        src="/brand/uniqus-small-logo-color.png"
+        alt=""
+        aria-hidden="true"
+        width={16}
+        height={16}
+      />
+      {/* keyed on the text so each swap re-triggers the subtle fade-in */}
+      <span className="composer-working-label" key={text}>
+        {text}
+      </span>
+    </div>
+  );
+});
+
 export default function ChatPanel() {
   const chat = useStore((s) => s.chat);
   const busy = useStore((s) => s.busy);
@@ -340,6 +404,20 @@ export default function ChatPanel() {
   }, []);
 
   const turns = useMemo(() => buildTurns(chat), [chat]);
+
+  // Label for the composer "working" strip: the most recent server `system`
+  // progress note of the in-flight turn (e.g. "Starting sandbox…", "Installing
+  // dependencies…"), surfaced ONLY before any real output has streamed. Once
+  // assistant text / tool cards land, that note is stale, so we return null and
+  // the strip falls back to its cycling whimsical words. (Mirrors the guard the
+  // old in-stream thinking pill used.)
+  const inFlightProgress = useMemo<string | null>(() => {
+    const last = turns[turns.length - 1];
+    if (!last || last.complete) return null;
+    if (last.body.some((i) => i.kind !== "system")) return null;
+    const sys = [...last.body].reverse().find((i) => i.kind === "system");
+    return sys && sys.kind === "system" ? sys.content : null;
+  }, [turns]);
 
   // GRIPE 10 — single ghost-text follow-up suggestion (replaces the old
   // follow-up chips). The first suggestion of the most-recently completed turn
@@ -816,47 +894,9 @@ export default function ChatPanel() {
             </ErrorBoundary>
           );
         })}
-        {busy && (() => {
-          // Show a thinking indicator when the agent is working but no tool
-          // calls or text have streamed yet (e.g. planning, booting VM).
-          const lastTurn = turns[turns.length - 1];
-          const inFlight = lastTurn && !lastTurn.complete ? lastTurn : null;
-          // Real streamed output (assistant text, tool cards) renders its own
-          // rows, so the pill is redundant once any non-system item lands. A
-          // `system` progress note (rendered muted in-line) does NOT count as
-          // visible activity — it instead becomes the pill's label below.
-          const hasVisibleActivity =
-            !!inFlight && inFlight.body.some((i) => i.kind !== "system");
-          if (hasVisibleActivity) return null;
-          // Surface server progress (e.g. "Starting sandbox…", "Installing
-          // dependencies…"): the most recent `system` item of the in-flight
-          // turn, if any, takes precedence over the generic "Thinking…".
-          const lastSystem = inFlight
-            ? [...inFlight.body].reverse().find((i) => i.kind === "system")
-            : undefined;
-          const progress =
-            lastSystem && lastSystem.kind === "system" ? lastSystem.content : null;
-          const label =
-            progress ??
-            (mode === "plan-then-execute" ? "Thinking about a plan…" : "Thinking…");
-          return (
-            <div className="msg">
-              <div className="head working-row">
-                <img
-                  className="working-spinner"
-                  src="/brand/uniqus-small-logo-color.png"
-                  alt=""
-                  aria-hidden="true"
-                  width={18}
-                  height={18}
-                />
-                <span className="working-label" role="status" aria-live="polite">
-                  {label}
-                </span>
-              </div>
-            </div>
-          );
-        })()}
+        {/* The "agent working" indicator now lives as a pinned strip just
+            above the composer (see <WorkingStatus/> below) — Claude-Code style —
+            instead of an in-stream pill, so it stays put while output scrolls. */}
       </div>
 
       {/* Inline tasks bar — collapsible, above the composer */}
@@ -1013,6 +1053,12 @@ export default function ChatPanel() {
             {installInProgress.command}
           </code>
         </div>
+      )}
+
+      {/* Pinned "working" strip — shown for the whole turn, but yields the
+          spotlight to the dedicated install / reattach banners above. */}
+      {busy && !installInProgress && !runReattaching && (
+        <WorkingStatus label={inFlightProgress} />
       )}
 
       <div

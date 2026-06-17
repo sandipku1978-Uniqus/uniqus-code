@@ -29,6 +29,8 @@ export interface ProjectRecord {
   skill_library_ids?: string[] | null;
   /** Supabase project ref linked to this project, if provisioned. */
   supabase_project_ref?: string | null;
+  /** Organization (workspace) the project lives in. Null = the owner's personal workspace. */
+  org_id?: string | null;
 }
 
 /**
@@ -109,20 +111,72 @@ export async function createProject(input: {
   description?: string | null;
   design_system_id?: string | null;
   skill_library_ids?: string[] | null;
+  /** Workspace the project is created in. Null/undefined = the owner's personal workspace. */
+  org_id?: string | null;
 }): Promise<ProjectRecord> {
-  const { data, error } = await db()
-    .from("projects")
-    .insert({
-      owner_id: input.owner_id,
-      name: input.name,
-      description: input.description ?? null,
-      design_system_id: input.design_system_id ?? null,
-      skill_library_ids: input.skill_library_ids ?? [],
-    })
-    .select("*")
-    .single();
+  // org_id is included only when set so the insert still works against a DB
+  // where the column hasn't been migrated yet (personal projects keep working).
+  const row: Record<string, unknown> = {
+    owner_id: input.owner_id,
+    name: input.name,
+    description: input.description ?? null,
+    design_system_id: input.design_system_id ?? null,
+    skill_library_ids: input.skill_library_ids ?? [],
+  };
+  if (input.org_id) row.org_id = input.org_id;
+  const { data, error } = await db().from("projects").insert(row).select("*").single();
   if (error || !data) throw new Error(`createProject failed: ${error?.message}`);
   return data as ProjectRecord;
+}
+
+/**
+ * Projects in the user's PERSONAL workspace: every project they can reach that
+ * isn't in an org. That's their own un-orged projects PLUS any project shared
+ * directly with them (P3.2 project_members) that isn't org-scoped — org projects
+ * live under their org workspace instead. Built on listAccessibleProjects so the
+ * P3.2 sharing path keeps working; org_id rides on each record (select *).
+ */
+export async function listPersonalProjects(userId: string): Promise<ProjectRecord[]> {
+  const all = await listAccessibleProjects(userId);
+  return all.filter((p) => !p.org_id);
+}
+
+/**
+ * Every project belonging to an org (the org workspace view). NOT owner-scoped —
+ * the caller must already have verified org membership (collabRoutes does). Newest
+ * first. Returns [] if the org_id column isn't migrated yet.
+ */
+export async function listOrgProjects(orgId: string): Promise<ProjectRecord[]> {
+  const { data, error } = await db()
+    .from("projects")
+    .select("*, deployments(state, created_at)")
+    .eq("org_id", orgId)
+    .order("updated_at", { ascending: false });
+  if (error) {
+    if (/org_id/.test(error.message ?? "")) return [];
+    throw new Error(`listOrgProjects failed: ${error.message}`);
+  }
+  return (data ?? []).map((row) =>
+    withLatestDeploy(row as Record<string, unknown> & { deployments?: EmbeddedDeploymentRow[] | null }),
+  );
+}
+
+/**
+ * Move a project into an org workspace (orgId) or back to personal (null).
+ * Owner-scoped: only the project owner can move it. The route additionally
+ * checks the caller is at least an editor on the TARGET org before calling this.
+ */
+export async function setProjectOrg(
+  id: string,
+  ownerId: string,
+  orgId: string | null,
+): Promise<void> {
+  const { error } = await db()
+    .from("projects")
+    .update({ org_id: orgId })
+    .eq("id", id)
+    .eq("owner_id", ownerId);
+  if (error) throw new Error(`setProjectOrg failed: ${error.message}`);
 }
 
 /** Attach (or detach with null) a design system to a project. Owner-scoped. */
