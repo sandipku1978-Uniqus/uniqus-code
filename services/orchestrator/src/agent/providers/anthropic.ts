@@ -27,18 +27,20 @@ function applyEffort(
   params.output_config = { effort };
 }
 
-// Non-standard fields other adapters stamp onto tool_use blocks for their own
-// round-tripping: Gemini's `thought_signature` (3.x multi-turn function calling)
-// and OpenAI's `openai_reasoning` (encrypted reasoning replay). The Messages API
-// 400s on unknown block fields ("Extra inputs are not permitted"), so they must
-// be removed before a conversation that switched to Claude reaches the API.
-const FOREIGN_TOOL_USE_FIELDS = ["thought_signature", "openai_reasoning"] as const;
+// Non-standard fields other adapters stamp onto content blocks for their own
+// round-tripping: Gemini's `thought_signature` (3.x multi-turn reasoning — now
+// on BOTH tool_use AND text blocks) and OpenAI's `openai_reasoning` (encrypted
+// reasoning replay, on tool_use). The Messages API 400s on unknown block fields
+// ("Extra inputs are not permitted"), so they must be removed before a
+// conversation that switched to Claude reaches the API.
+const FOREIGN_BLOCK_FIELDS = ["thought_signature", "openai_reasoning"] as const;
 
 /**
  * Strip provider-specific extras the canonical history may carry that the
- * Anthropic API rejects (see FOREIGN_TOOL_USE_FIELDS). We send a shallow-cleaned
+ * Anthropic API rejects (see FOREIGN_BLOCK_FIELDS). We send a shallow-cleaned
  * copy and leave the stored history untouched (the other providers still need
- * their fields). Only clones messages/blocks that actually carry one.
+ * their fields). Only clones messages/blocks that actually carry one — and
+ * checks every block type, since a Gemini text block can carry a signature too.
  */
 function stripForeignFields(
   messages: Anthropic.MessageParam[],
@@ -51,12 +53,11 @@ function stripForeignFields(
       if (
         block &&
         typeof block === "object" &&
-        rec.type === "tool_use" &&
-        FOREIGN_TOOL_USE_FIELDS.some((f) => f in rec)
+        FOREIGN_BLOCK_FIELDS.some((f) => f in rec)
       ) {
         touched = true;
         const rest = { ...rec };
-        for (const f of FOREIGN_TOOL_USE_FIELDS) delete rest[f];
+        for (const f of FOREIGN_BLOCK_FIELDS) delete rest[f];
         return rest as unknown as Anthropic.ContentBlockParam;
       }
       return block;

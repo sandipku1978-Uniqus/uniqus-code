@@ -9,6 +9,7 @@ import {
 import {
   mapStopReason,
   sanitizeSchema,
+  thinkingConfigFor,
   toGeminiContents,
   toGeminiFunctionDeclarations,
 } from "./google.js";
@@ -455,5 +456,64 @@ describe("google · mapStopReason", () => {
   it("defaults to end_turn", () => {
     expect(mapStopReason("STOP", false)).toBe("end_turn");
     expect(mapStopReason(undefined, false)).toBe("end_turn");
+  });
+});
+
+describe("google · thinkingConfigFor", () => {
+  // Regression for the empty-/one-word-answer bug: Gemini 3.x's thinkingLevel
+  // is an UPPERCASE enum on the wire. A lowercase value is silently dropped and
+  // the model falls back to its empty-prone HIGH default, so these MUST be
+  // uppercase — never our lowercase ThinkingEffort.
+  it("maps 3.x effort to the UPPERCASE thinkingLevel enum", () => {
+    expect(thinkingConfigFor("gemini-3.5-flash", "low")).toEqual({
+      includeThoughts: true,
+      thinkingLevel: "LOW",
+    });
+    expect(thinkingConfigFor("gemini-3.1-pro-preview-customtools", "medium")).toEqual({
+      includeThoughts: true,
+      thinkingLevel: "MEDIUM",
+    });
+    expect(thinkingConfigFor("gemini-3.5-flash", "high")).toEqual({
+      includeThoughts: true,
+      thinkingLevel: "HIGH",
+    });
+  });
+
+  it("defaults 3.x to MEDIUM (never the empty-prone HIGH default) when no effort is set", () => {
+    expect(thinkingConfigFor("gemini-3.5-flash", undefined)).toEqual({
+      includeThoughts: true,
+      thinkingLevel: "MEDIUM",
+    });
+  });
+
+  it("uses a token budget for 2.5, and the provider default when no effort is set", () => {
+    expect(thinkingConfigFor("gemini-2.5-pro", "medium")).toEqual({
+      includeThoughts: true,
+      thinkingBudget: 8192,
+    });
+    expect(thinkingConfigFor("gemini-2.5-pro", undefined)).toBeUndefined();
+  });
+});
+
+describe("google · text thought signature round-trip", () => {
+  it("re-attaches a thought signature captured on an assistant TEXT block", () => {
+    const block = {
+      type: "text",
+      text: "All done.",
+      thought_signature: "TXTSIG",
+    } as unknown as Anthropic.ContentBlockParam;
+
+    const contents = toGeminiContents([{ role: "assistant", content: [block] }]);
+    const part = (contents[0].parts as Array<Record<string, unknown>>)[0];
+    expect(part).toEqual({ text: "All done.", thoughtSignature: "TXTSIG" });
+  });
+
+  it("omits thoughtSignature on a plain text block that has none", () => {
+    const contents = toGeminiContents([
+      { role: "assistant", content: [{ type: "text", text: "hi" }] },
+    ]);
+    const part = (contents[0].parts as Array<Record<string, unknown>>)[0];
+    expect(part).toEqual({ text: "hi" });
+    expect("thoughtSignature" in part).toBe(false);
   });
 });

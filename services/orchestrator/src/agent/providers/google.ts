@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { FunctionCallingConfigMode, GoogleGenAI } from "@google/genai";
+import { FunctionCallingConfigMode, GoogleGenAI, ThinkingLevel } from "@google/genai";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { ThinkingEffort } from "@uniqus/api-types";
 import type {
@@ -46,19 +46,39 @@ const GEMINI_2_5_BUDGET: Record<ThinkingEffort, number> = {
 };
 
 /**
- * The right thinkingConfig for this model: Gemini 3.x takes a semantic
- * `thinkingLevel`; 2.5 takes a `thinkingBudget` token count. Returns undefined
- * when no effort was requested (provider default).
+ * Our lowercase `ThinkingEffort` → the SDK's `ThinkingLevel` enum, whose wire
+ * values are UPPERCASE ("LOW"/"MEDIUM"/"HIGH"). This mapping is load-bearing:
+ * the SDK forwards `thinkingConfig` verbatim, so passing a lowercase string is
+ * an invalid enum the API silently drops — and Gemini 3 then falls back to its
+ * default of HIGH. At HIGH the 3.x models routinely return empty or one-/two-
+ * word answer text (all the content goes to the reasoning trace, the final
+ * answer comes back blank — finishReason STOP, not MAX_TOKENS). Sending the
+ * correct enum is what actually applies the requested level.
  */
-function thinkingConfigFor(
+const GEMINI_3_LEVEL: Record<ThinkingEffort, ThinkingLevel> = {
+  low: ThinkingLevel.LOW,
+  medium: ThinkingLevel.MEDIUM,
+  high: ThinkingLevel.HIGH,
+};
+
+/**
+ * The right thinkingConfig for this model: Gemini 3.x takes a semantic
+ * `thinkingLevel` (see GEMINI_3_LEVEL); 2.5 takes a `thinkingBudget` token
+ * count. For 3.x we ALWAYS return a level — defaulting to medium when the user
+ * didn't pick one — so we never inherit 3.x's empty-prone HIGH default. For 2.5
+ * we return undefined (provider default) when no effort was requested.
+ */
+export function thinkingConfigFor(
   model: string,
   effort: ThinkingEffort | undefined,
 ): Record<string, unknown> | undefined {
-  if (!effort) return undefined;
   // includeThoughts returns thought-summary parts we surface as the live
   // reasoning trace (see the `part.thought` handling in streamAgentTurn).
   const base = { includeThoughts: true };
-  if (/^gemini-3/.test(model)) return { ...base, thinkingLevel: effort };
+  if (/^gemini-3/.test(model)) {
+    return { ...base, thinkingLevel: GEMINI_3_LEVEL[effort ?? "medium"] };
+  }
+  if (!effort) return undefined;
   return { ...base, thinkingBudget: GEMINI_2_5_BUDGET[effort] };
 }
 
@@ -110,6 +130,10 @@ export class GoogleAdapter implements ModelProviderAdapter {
     });
 
     let text = "";
+    // Thought signature riding the answer text (3.x attaches it to a text part,
+    // often a trailing empty-text one at end-of-stream). Echoed back next turn
+    // to preserve reasoning/answer quality across the agent loop — see below.
+    let textSignature: string | undefined;
     let finishReason: string | undefined;
     // Gemini reports usage as cumulative `usageMetadata` on (typically the
     // final) chunks. Track the latest and surface it as it updates.
@@ -152,11 +176,19 @@ export class GoogleAdapter implements ModelProviderAdapter {
             else {
               text += part.text;
               p.onText?.(part.text);
+              // Capture the answer's thought signature when it rides a text part.
+              if (part.thoughtSignature) textSignature = part.thoughtSignature;
             }
             continue;
           }
           const fc = part.functionCall;
-          if (!fc) continue;
+          if (!fc) {
+            // 3.x may deliver the answer's signature on a part with EMPTY text
+            // at end-of-stream — keep it for the text block even though there's
+            // nothing to display here. (Thought parts keep their own signature.)
+            if (part.thoughtSignature && !part.thought) textSignature = part.thoughtSignature;
+            continue;
+          }
           const name = fc.name ?? "";
           // A functionCall whose name isn't one of ours is a server-side tool
           // (googleSearch, included via includeServerSideToolInvocations). Show
@@ -198,7 +230,14 @@ export class GoogleAdapter implements ModelProviderAdapter {
     }
 
     const content: Anthropic.ContentBlockParam[] = [];
-    if (text) content.push({ type: "text", text });
+    if (text) {
+      const textBlock: Record<string, unknown> = { type: "text", text };
+      // Non-standard field, preserved verbatim through history and re-attached
+      // to the Gemini text part next turn (toGeminiContents); stripped before
+      // other providers' APIs (see anthropic.ts stripForeignFields).
+      if (textSignature) textBlock.thought_signature = textSignature;
+      content.push(textBlock as unknown as Anthropic.TextBlockParam);
+    }
     const toolCalls: StreamTurnResult["toolCalls"] = [];
     for (const c of calls) {
       const block = { type: "tool_use", id: c.id, name: c.name, input: c.args } as Record<
@@ -298,8 +337,14 @@ export function toGeminiContents(messages: Anthropic.MessageParam[]): Array<Reco
         if (msg.content) parts.push({ text: msg.content });
       } else {
         for (const b of msg.content) {
-          if (b.type === "text") parts.push({ text: b.text });
-          else if (b.type === "tool_use") {
+          if (b.type === "text") {
+            const part: Record<string, unknown> = { text: b.text };
+            // Echo back the answer's thought signature captured on the way out,
+            // so 3.x keeps its reasoning context across the multi-turn loop.
+            const sig = (b as { thought_signature?: string }).thought_signature;
+            if (sig) part.thoughtSignature = sig;
+            parts.push(part);
+          } else if (b.type === "tool_use") {
             const part: Record<string, unknown> = {
               functionCall: { name: b.name, args: (b.input ?? {}) as object },
             };
