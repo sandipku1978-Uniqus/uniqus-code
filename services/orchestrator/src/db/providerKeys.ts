@@ -98,5 +98,10 @@ export async function resolveProviderKeysForUser(userId: string): Promise<Provid
     anthropic: account.anthropic ?? env.anthropic,
     openai: account.openai ?? env.openai,
     google: account.google ?? env.google,
+    // Z.ai (GLM) is platform-env only — it's not in the BYOK `PROVIDERS` list,
+    // so there's never an account key to prefer. Must still be threaded through
+    // here, or every GLM/Auto-→-GLM turn throws MissingProviderKeyError("zai")
+    // despite ZAI_API_KEY being set.
+    zai: env.zai,
   };
 }
