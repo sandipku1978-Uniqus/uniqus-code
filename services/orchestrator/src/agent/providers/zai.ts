@@ -108,6 +108,14 @@ export class ZaiAdapter implements ModelProviderAdapter {
     this.client = new OpenAI({
       apiKey,
       baseURL: opts?.baseURL || ZAI_BASE_URL,
+      // Force an UNCOMPRESSED response stream. The SDK's fetch otherwise sends
+      // `Accept-Encoding: gzip`, and Z.ai's gzipped SSE is held in the
+      // decompression window and delivered in bursts: the reasoning phase emits
+      // enough `reasoning_content` to keep flushing (thinking looks live), but
+      // the sparser answer-text and tool_call deltas sit buffered and arrive in
+      // large chunks with multi-second gaps. `identity` makes each SSE event
+      // flush as it's written, so onText/onToolCallStarted fire in real time.
+      defaultHeaders: { "Accept-Encoding": "identity" },
       ...(opts?.timeout ? { timeout: opts.timeout } : {}),
     });
   }
