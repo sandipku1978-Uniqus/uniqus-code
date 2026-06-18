@@ -467,9 +467,9 @@ export default function SettingsView({
               Choose which model the coding agent runs on. <strong>Auto</strong>{" "}
               lets Uniqus pick the strongest model for each task. Under{" "}
               <strong>Advanced</strong>, override it with a specific model from
-              Anthropic (Claude), OpenAI (ChatGPT), or Google (Gemini). This is
-              your account-wide default; you can also change it per turn from the
-              chat composer.
+              Anthropic (Claude), Z.ai (GLM), OpenAI (ChatGPT), or Google
+              (Gemini). This is your account-wide default; you can also change it
+              per turn from the chat composer.
             </p>
             <div style={{ marginTop: 12 }}>
               <ModelPicker variant="settings" />

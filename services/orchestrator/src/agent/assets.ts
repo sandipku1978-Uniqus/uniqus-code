@@ -175,3 +175,34 @@ export async function readAssetBase64(
   const buf = await fs.readFile(full);
   return { base64: buf.toString("base64"), mime: mimeFromExt(name) };
 }
+
+/** Max image size the vision bridge will read (keeps a stray huge file from OOMing). */
+const MAX_VISION_IMAGE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Read ANY sandbox-relative image for the vision bridge (analyze_image). Unlike
+ * readAssetBase64 (uploads/screenshots only), this allows any image path under
+ * the sandbox root — screenshots, uploads, generated images, or images the
+ * project produced (e.g. public/hero.png) — with a path-traversal guard, an
+ * image-extension check, and a size cap. Same trust level as read_file.
+ */
+export async function readImageBase64(
+  sandboxDir: string,
+  relPath: string,
+): Promise<{ base64: string; mime: string }> {
+  const cleaned = relPath.replace(/^\/+/, "");
+  if (path.isAbsolute(cleaned)) throw new Error("image path must be sandbox-relative");
+  if (cleaned.split(/[\\/]+/).includes("..")) throw new Error(`invalid image path: ${relPath}`);
+  const full = path.resolve(sandboxDir, cleaned);
+  const root = path.resolve(sandboxDir);
+  if (full !== root && !full.startsWith(root + path.sep)) {
+    throw new Error("image path escapes the sandbox");
+  }
+  if (!isImageAsset(cleaned)) throw new Error(`not an image file: ${relPath}`);
+  const stat = await fs.stat(full);
+  if (stat.size > MAX_VISION_IMAGE_BYTES) {
+    throw new Error(`image too large for the vision model (${stat.size} bytes, max ${MAX_VISION_IMAGE_BYTES})`);
+  }
+  const buf = await fs.readFile(full);
+  return { base64: buf.toString("base64"), mime: mimeFromExt(cleaned) };
+}

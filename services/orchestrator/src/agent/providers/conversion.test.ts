@@ -13,6 +13,7 @@ import {
   toGeminiContents,
   toGeminiFunctionDeclarations,
 } from "./google.js";
+import { mapZaiFinish, toChatMessages, toChatTools, zaiTokenUsage } from "./zai.js";
 
 // These tests pin the canonical (Anthropic-shaped) ↔ provider-shape message and
 // tool conversions. They run purely on the helper functions — no SDK client, no
@@ -492,6 +493,168 @@ describe("google · thinkingConfigFor", () => {
       thinkingBudget: 8192,
     });
     expect(thinkingConfigFor("gemini-2.5-pro", undefined)).toBeUndefined();
+  });
+});
+
+// =============================================================================
+// Z.ai (GLM, Chat Completions) conversions
+// =============================================================================
+
+describe("zai · toChatTools", () => {
+  it("maps Anthropic tools to Chat Completions function tools", () => {
+    const tools = toChatTools([TOOL], false);
+    expect(tools).toHaveLength(1);
+    const fn = tools[0] as Extract<(typeof tools)[number], { type: "function" }>;
+    expect(fn.type).toBe("function");
+    expect(fn.function.name).toBe("read_file");
+    expect(fn.function.description).toBe("Read a file");
+    expect(fn.function.parameters).toBe(TOOL.input_schema);
+  });
+
+  it("prepends GLM's built-in web_search tool when requested", () => {
+    const tools = toChatTools([TOOL], true);
+    expect(tools).toHaveLength(2);
+    expect((tools[0] as { type: string }).type).toBe("web_search");
+    expect((tools[1] as { type: string }).type).toBe("function");
+  });
+
+  it("omits web_search for forced-tool (plan) calls", () => {
+    const tools = toChatTools([TOOL], false);
+    expect(tools.some((t) => (t as { type: string }).type === "web_search")).toBe(false);
+  });
+});
+
+describe("zai · toChatMessages", () => {
+  it("prepends the system message and converts a basic user turn", () => {
+    const msgs = toChatMessages("SYS", [{ role: "user", content: "hello" }]);
+    expect(msgs).toEqual([
+      { role: "system", content: "SYS" },
+      { role: "user", content: "hello" },
+    ]);
+  });
+
+  it("omits the system message when empty", () => {
+    const msgs = toChatMessages("", [
+      { role: "assistant", content: [{ type: "text", text: "hi" }] },
+    ]);
+    expect(msgs).toEqual([{ role: "assistant", content: "hi" }]);
+  });
+
+  it("round-trips tool_use → assistant tool_calls + a tool message", () => {
+    const messages: Anthropic.MessageParam[] = [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "let me read it" },
+          { type: "tool_use", id: "call_1", name: "read_file", input: { path: "a.txt" } },
+        ],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "call_1", content: "file contents" }],
+      },
+    ];
+
+    expect(toChatMessages("", messages)).toEqual([
+      {
+        role: "assistant",
+        content: "let me read it",
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: { name: "read_file", arguments: JSON.stringify({ path: "a.txt" }) },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "file contents" },
+    ]);
+  });
+
+  it("replaces a tool_result image with an analyze_image note (GLM is text-only)", () => {
+    const messages: Anthropic.MessageParam[] = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call_3",
+            content: [
+              { type: "text", text: "Screenshot saved to assets/screenshots/x.png" },
+              { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+            ],
+          },
+        ],
+      },
+    ];
+
+    const msgs = toChatMessages("", messages);
+    // One tool message; the image is dropped and the text steers GLM to the bridge.
+    expect(msgs).toHaveLength(1);
+    const tool = msgs[0] as { role: string; tool_call_id: string; content: string };
+    expect(tool.role).toBe("tool");
+    expect(tool.tool_call_id).toBe("call_3");
+    expect(tool.content).toContain("Screenshot saved to assets/screenshots/x.png");
+    expect(tool.content).toContain("analyze_image");
+    // A text-only model must never be sent image bytes.
+    expect(JSON.stringify(msgs)).not.toContain("image_url");
+    expect(JSON.stringify(msgs)).not.toContain("AAAA");
+  });
+
+  it("replaces a user-attached image with a text placeholder", () => {
+    const msgs = toChatMessages("", [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "make it look like this" },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "ZZZ" } },
+        ],
+      },
+    ]);
+    const user = msgs[0] as { role: string; content: Array<{ type: string; text?: string }> };
+    expect(user.role).toBe("user");
+    expect(user.content[0]).toEqual({ type: "text", text: "make it look like this" });
+    expect(user.content[1].type).toBe("text");
+    expect(user.content[1].text).toContain("analyze_image");
+    expect(JSON.stringify(msgs)).not.toContain("image_url");
+    expect(JSON.stringify(msgs)).not.toContain("ZZZ");
+  });
+});
+
+describe("zai · zaiTokenUsage", () => {
+  it("subtracts the cached subset from the total prompt tokens", () => {
+    expect(
+      zaiTokenUsage({
+        prompt_tokens: 1000,
+        completion_tokens: 200,
+        prompt_tokens_details: { cached_tokens: 750 },
+      }),
+    ).toEqual({
+      inputTokens: 250,
+      outputTokens: 200,
+      cacheReadTokens: 750,
+      cacheCreationTokens: 0,
+    });
+  });
+
+  it("floors fresh input at zero and treats missing details as no cache", () => {
+    const usage = zaiTokenUsage({ prompt_tokens: 0, completion_tokens: 10 });
+    expect(usage.inputTokens).toBe(0);
+    expect(usage.cacheReadTokens).toBe(0);
+    expect(usage.cacheCreationTokens).toBe(0);
+  });
+});
+
+describe("zai · mapZaiFinish", () => {
+  it("returns tool_use whenever there were tool calls", () => {
+    expect(mapZaiFinish(null, true)).toBe("tool_use");
+    expect(mapZaiFinish("tool_calls", false)).toBe("tool_use");
+  });
+
+  it("maps length to max_tokens and stop to end_turn", () => {
+    expect(mapZaiFinish("length", false)).toBe("max_tokens");
+    expect(mapZaiFinish("stop", false)).toBe("end_turn");
+    expect(mapZaiFinish(null, false)).toBe("end_turn");
   });
 });
 

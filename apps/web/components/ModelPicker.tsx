@@ -11,11 +11,12 @@ import Popover from "./Popover";
 
 const PROVIDER_LABEL: Record<ModelProvider, string> = {
   anthropic: "Anthropic — Claude",
+  zai: "Z.ai — GLM",
   openai: "OpenAI — ChatGPT",
   google: "Google — Gemini",
 };
 
-const PROVIDER_ORDER: ModelProvider[] = ["anthropic", "openai", "google"];
+const PROVIDER_ORDER: ModelProvider[] = ["anthropic", "zai", "openai", "google"];
 
 const THINKING_OPTIONS: { value: ThinkingEffort; label: string }[] = [
   { value: "low", label: "Low" },

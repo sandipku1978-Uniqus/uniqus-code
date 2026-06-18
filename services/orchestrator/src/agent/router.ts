@@ -40,12 +40,14 @@ export interface ResolvedModel {
 }
 
 /**
- * "auto" defaults. The user-facing roles default to Claude's flagship — the
- * strongest coding model and the product's native provider. The lightweight
- * internal roles (compact/classify) use Haiku: they summarize / classify, never
- * write code, so the "no low tiers for the agent" rule doesn't apply. `design`
- * is internal but quality-sensitive (it designs a whole system from a brief), so
- * it runs on Sonnet — a clear step up from Haiku without the flagship's cost.
+ * "auto" fallbacks. The user-facing roles (agent/plan) prefer GLM-5.2 when a
+ * Z.ai key is configured (see resolveModel) and fall back to this map — Claude's
+ * flagship — otherwise. The lightweight internal roles (compact/classify) use
+ * Haiku: they summarize / classify, never write code, so the "no low tiers for
+ * the agent" rule doesn't apply, and they always stay on Claude (compaction
+ * speaks the Anthropic shape). `design` is internal but quality-sensitive (it
+ * designs a whole system from a brief), so it runs on Sonnet — a clear step up
+ * from Haiku without the flagship's cost.
  */
 const AUTO: Record<ModelRole, ResolvedModel> = {
   agent: { provider: "anthropic", model: "claude-opus-4-8", overridden: false },
@@ -59,7 +61,13 @@ const PROVIDERS: ReadonlySet<string> = new Set<ModelProvider>([
   "anthropic",
   "openai",
   "google",
+  "zai",
 ]);
+
+/** True when a Z.ai (GLM) key is configured on the orchestrator. */
+function hasZaiKey(): boolean {
+  return Boolean(process.env.ZAI_API_KEY || process.env.GLM_API_KEY);
+}
 
 /** Resolve a curated catalog id ("<provider>:<model>") to a concrete model. */
 function fromCatalog(choice: string): ResolvedModel | null {
@@ -112,7 +120,18 @@ export function resolveModel(role: ModelRole, choice?: ModelChoice): ResolvedMod
     if (picked) return picked;
     // Unknown/invalid id: fall through to env/auto rather than crash the turn.
   }
-  return fromEnv(role) ?? AUTO[role];
+  const fromOps = fromEnv(role);
+  if (fromOps) return fromOps;
+  // "auto" for the user-facing roles: GLM-5.2 is the default when its key is
+  // configured (near-Opus coding quality at a fraction of the cost). When no
+  // Z.ai key is set we fall back to AUTO (Claude), so Auto is never broken on an
+  // orchestrator that hasn't been given the key — the switch flips on the moment
+  // ZAI_API_KEY is deployed. Internal roles (compact/classify/design) are
+  // unaffected and stay on Claude.
+  if ((role === "agent" || role === "plan") && hasZaiKey()) {
+    return { provider: "zai", model: "glm-5.2", overridden: false };
+  }
+  return AUTO[role];
 }
 
 /**

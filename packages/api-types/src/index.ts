@@ -44,7 +44,7 @@ export interface ChangedFile {
 export type RunMode = "plan-then-execute" | "execute-only";
 
 /** LLM providers the coding agent can run on. */
-export type ModelProvider = "anthropic" | "openai" | "google";
+export type ModelProvider = "anthropic" | "openai" | "google" | "zai";
 
 /**
  * What model the coding agent should use for a turn.
@@ -101,6 +101,15 @@ export const MODEL_CATALOG: ReadonlyArray<ModelOption> = [
     label: "Claude Sonnet 4.6",
     description: "Fast, strong general coding — great cost/quality balance.",
     tier: "high",
+  },
+  // ── Z.ai (GLM) ──
+  {
+    id: "zai:glm-5.2",
+    provider: "zai",
+    model: "glm-5.2",
+    label: "GLM-5.2",
+    description: "Near-Opus coding quality at a fraction of the cost; 1M context.",
+    tier: "frontier",
   },
   // ── OpenAI ──
   {
@@ -207,6 +216,10 @@ export const MODEL_PRICING: Record<string, ModelPrice> = {
     output: 15,
     longContext: { thresholdTokens: 200_000, above: { input: 6, output: 22.5 } },
   },
+  // Z.ai (GLM) — source: z.ai published API rates as of 2026-06-18. Cached input
+  // is ~0.26 (not the 0.1× default), so set it explicitly; GLM has no separate
+  // cache-write line. Flat-priced (no long-context band) despite the 1M window.
+  "glm-5.2": { input: 1.4, output: 4.4, cacheRead: 0.26 },
   // OpenAI
   "gpt-5.5": {
     input: 1.25,

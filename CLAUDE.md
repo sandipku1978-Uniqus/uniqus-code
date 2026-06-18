@@ -46,14 +46,44 @@
 
 ## Model providers (multi-provider agent)
 - The coding agent runs on a model resolved by `services/orchestrator/src/agent/router.ts`.
-  Default is **Auto** (Claude Opus). Users override per-turn / as an account
-  default via the composer + Settings "Default model" picker (Anthropic,
-  OpenAI, Google). The curated, selectable list is `MODEL_CATALOG` in
-  `packages/api-types` — the single source of truth shared by the UI and the
-  router. Low tiers (Haiku, Flash-Lite, mini/nano) are intentionally excluded.
+  Default is **Auto**, which resolves to **GLM-5.2** when a Z.ai key is set on
+  the orchestrator and falls back to **Claude Opus** otherwise (so Auto is never
+  broken on an orchestrator without the key — the switch flips on the moment
+  `ZAI_API_KEY` is deployed). Users override per-turn / as an account default via
+  the composer + Settings "Default model" picker (Anthropic, Z.ai, OpenAI,
+  Google). The curated, selectable list is `MODEL_CATALOG` in `packages/api-types`
+  — the single source of truth shared by the UI and the router. Low tiers (Haiku,
+  Flash-Lite, mini/nano) are intentionally excluded.
 - Provider adapters live in `services/orchestrator/src/agent/providers/`.
   Canonical message shape is Anthropic's; the OpenAI/Gemini adapters translate
   in/out.
+- **Z.ai (GLM) runs on the OpenAI-style Chat Completions endpoint**, not GLM's
+  Anthropic-compatible Messages endpoint. Why: web search is only available as a
+  tool on Chat Completions (`/paas/v4`) — the Anthropic/Claude-Code path gets
+  search via a separate Search MCP server, coding-plan only. So `ZaiAdapter`
+  (`providers/zai.ts`) reuses the `openai` SDK pointed at `https://api.z.ai/api/paas/v4`
+  (override via `ZAI_BASE_URL`; long client timeout for GLM's 1M context). It
+  translates the canonical Anthropic message shape ↔ Chat Completions (tool_use →
+  `tool_calls`, tool_result → a `tool` message, images on a trailing user message
+  as `image_url` parts), and attaches GLM's built-in `web_search` tool alongside
+  our function tools. GLM thinking is the top-level `reasoning_effort`
+  (`"high"`/`"max"`, mapped from our low→high, medium/high→max) plus
+  `thinking:{type:"enabled"}`; the reasoning trace streams as
+  `delta.reasoning_content`. Z.ai takes the `web_search` sub-fields as STRINGS
+  (`enable:"True"`, `count:"5"`). Internal roles (compact/classify/design) stay
+  on Claude regardless.
+- **GLM-5.2 is TEXT-ONLY → vision bridge.** It can't take image input, so the
+  product's screenshot-verify loop is preserved via an `analyze_image(path,
+  question)` tool that's added to the tool list ONLY when the active model lacks
+  vision (`hasVision = provider !== "zai"` in loop.ts). The handler reads the
+  image and forwards it + GLM's targeted question to **GLM-5V-Turbo** (Z.ai's
+  VLM, same key/endpoint — `describeImage` in `providers/zai.ts`; model overridable
+  via `ZAI_VISION_MODEL`) and returns the analysis as text. The `ZaiAdapter` never
+  sends `image_url` (it replaces image blocks — screenshots, uploads — with a text
+  note pointing at `analyze_image`; the asset path is already in the tool-result
+  text). Vision-capable providers are unchanged and get images natively. New
+  general image reader for the bridge: `readImageBase64` in `agent/assets.ts`
+  (any sandbox image path, not just uploads/screenshots).
 - **Built-in web search: all three providers.** Anthropic server-side
   `web_search`; OpenAI via the **Responses API** built-in `{type:"web_search"}`
   tool (Chat Completions can't mix `web_search_options`/`reasoning_effort` with
@@ -85,11 +115,17 @@
     3.x model degrades it. Thought signatures on function-call parts are
     preserved across turns (`tool_use.thought_signature`), required for 3.x
     multi-turn function calling.
+  - **Z.ai (GLM)** → top-level `reasoning_effort` (`"high"`/`"max"`) +
+    `thinking:{type:"enabled"}` on Chat Completions; see the Z.ai bullet above.
   - Not applied to forced-tool (plan) calls.
 - **Env keys on the orchestrator (Hetzner):** `ANTHROPIC_API_KEY` (required,
-  also used for compaction). `OPENAI_API_KEY` and `GOOGLE_API_KEY`
-  (or `GEMINI_API_KEY`) are **optional** — only needed when a user picks an
-  OpenAI/Gemini model. Missing key ⇒ a clear "set X" error for that turn only.
+  also used for compaction and the internal compact/classify/design roles).
+  `ZAI_API_KEY` (or `GLM_API_KEY`), `OPENAI_API_KEY`, and `GOOGLE_API_KEY`
+  (or `GEMINI_API_KEY`) are **optional** — only needed when a user picks that
+  provider's model. Note `ZAI_API_KEY` is special: setting it also flips the
+  **Auto** default for the agent/plan roles to GLM-5.2 (get the key from the Z.ai
+  Open Platform → API Keys; per-token pricing ≈ $1.40/$4.40 per Mtok in/out).
+  Missing key ⇒ a clear "set X" error for that turn only.
 
 ## Monorepo
 - Workspaces: `apps/*`, `services/*`, `packages/*`. Typecheck with

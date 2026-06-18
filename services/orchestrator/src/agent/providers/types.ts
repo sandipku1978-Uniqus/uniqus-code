@@ -17,9 +17,11 @@ export interface ProviderKeys {
   anthropic?: string;
   openai?: string;
   google?: string;
+  /** Z.ai (GLM). Runs through the Anthropic-compatible endpoint. */
+  zai?: string;
 }
 
-export type ProviderName = "anthropic" | "openai" | "google";
+export type ProviderName = "anthropic" | "openai" | "google" | "zai";
 
 /** A client tool call the loop must execute (read_file, run_command, …). */
 export interface AgentToolCall {
@@ -136,17 +138,20 @@ export interface ModelProviderAdapter {
   callForcedTool(p: ForcedToolParams): Promise<unknown>;
 }
 
+/** The env var(s) that configure each provider's key (for error messages). */
+const PROVIDER_ENV_HINT: Record<ProviderName, string> = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  google: "GOOGLE_API_KEY (or GEMINI_API_KEY)",
+  zai: "ZAI_API_KEY (or GLM_API_KEY)",
+};
+
 /** Thrown when a turn is requested for a provider with no configured API key. */
 export class MissingProviderKeyError extends Error {
   constructor(public readonly provider: ProviderName) {
     super(
-      `No API key configured for provider '${provider}'. Set ${
-        provider === "anthropic"
-          ? "ANTHROPIC_API_KEY"
-          : provider === "openai"
-            ? "OPENAI_API_KEY"
-            : "GOOGLE_API_KEY (or GEMINI_API_KEY)"
-      } on the orchestrator, or pick a different model.`,
+      `No API key configured for provider '${provider}'. Set ${PROVIDER_ENV_HINT[provider]} ` +
+        `on the orchestrator, or pick a different model.`,
     );
     this.name = "MissingProviderKeyError";
   }

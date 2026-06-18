@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { TOOLS } from "./tools.js";
+import { TOOLS, ANALYZE_IMAGE_TOOL } from "./tools.js";
 import * as sb from "./sandbox.js";
 import type { Sandbox, ServerInfo } from "./sandbox.js";
 import { ensureProjectDeps } from "../ensureDeps.js";
@@ -15,7 +15,7 @@ import {
   formatSkillsForPrompt,
   readSkills,
 } from "./skills.js";
-import { isImageAsset, listAssets, readAssetBase64, readAssetText } from "./assets.js";
+import { isImageAsset, listAssets, readAssetBase64, readAssetText, readImageBase64 } from "./assets.js";
 import {
   startBackgroundJob,
   readJobLog,
@@ -30,11 +30,13 @@ import { recordUsageEvent } from "../db/usage.js";
 import { upsertFlow, listFlows, getFlowByName, getFlow, setFlowRunResult } from "../db/flows.js";
 import { resolveModel } from "./router.js";
 import { getProvider, providerKeysFromEnv, type ProviderKeys, type StreamTurnResult, type TokenUsage } from "./providers/index.js";
+import { describeImage } from "./providers/zai.js";
 import type {
   ChangedFile,
   DesignTokens,
   FlowStep,
   ModelChoice,
+  ModelProvider,
   ThinkingEffort,
 } from "@uniqus/api-types";
 import { setTodos, type TodoItem } from "./todos.js";
@@ -58,6 +60,7 @@ function buildSystemPrompt(
   skillsBody: string | null,
   accountPrompt: string | null,
   hasWebSearch: boolean,
+  hasVision: boolean,
   repo: { fullName: string; url: string } | null,
   designTokens: DesignTokens | null,
   librarySkills: { name: string; body: string }[],
@@ -93,6 +96,15 @@ function buildSystemPrompt(
     knowledgeDocs.length > 0
       ? `\n- knowledge_search — search the user's own uploaded documents (their Knowledge library; see the "Knowledge library" section below for what's in it). Prefer it over guessing or web_search when the answer should come from the user's material.`
       : "";
+
+  // Truth-in-advertising for vision: when the active model is text-only (GLM),
+  // it never receives image pixels — screenshots/uploads arrive as a text note.
+  // Advertise the analyze_image bridge so it inspects images via a vision model
+  // instead of either hallucinating what a screenshot shows or assuming it's
+  // blind. Vision-capable models get images natively and don't see this line.
+  const visionToolLine = hasVision
+    ? ""
+    : `\n- analyze_image — IMPORTANT: you are a TEXT-ONLY model and cannot see images. Screenshots and uploaded images reach you as a text note, NOT pixels. To actually inspect any image (a screenshot from screenshot_preview/interact_preview — use its asset_path; an uploaded asset; a generated image), call analyze_image(path, question) with a SPECIFIC question; a vision model answers in text. This is how you VERIFY UI: after every screenshot, analyze_image it (layout, alignment, spacing, contrast, overlaps, truncation, breakage) and fix what it surfaces BEFORE telling the user it works. Never claim a screenshot looks right without analyzing it.`;
 
   const currencyGuidance = hasWebSearch
     ? `web_search the newest model names and version numbers FIRST, then write those into the code.`
@@ -190,7 +202,7 @@ Tools you have:
 - run_command — short-lived shell commands (default timeout 60s; use 120000–300000 ms for installs/builds). stdin is closed.
 - start_server / stop_server / list_servers / read_server_log — long-running dev servers (Next.js, Flask, Express, etc.). The user sees a live preview when you start one. The tool result includes a "public_url" — quote that exact URL to the user. Do not tell them to use a raw dev-server localhost URL.
 - wait_for_port — wait for a TCP port on localhost.
-${webSearchToolLine}${knowledgeToolLine}
+${webSearchToolLine}${visionToolLine}${knowledgeToolLine}
 - enter_plan_mode — when the user requests a large or risky change (new app, multi-file feature, big refactor, schema/data migration) WITHOUT having turned plan mode on, call this BEFORE editing anything. It drafts a plan, shows it to the user to edit/approve, and returns the approved plan for you to execute. Skip it for small, well-understood edits — just make those. Never call it if plan mode is already active.
 - ask_user — pause and ask the user a question when you need their input to proceed. Use it when: you're unsure which technology/framework to use, the user's request is ambiguous enough that two reasonable interpretations would produce very different results, you need a credential or API key, or the user asked you to check with them before a major decision. The user sees the question inline in the chat and can respond with buttons or free text.
 
@@ -430,7 +442,7 @@ export interface LoopResult {
   /** The provider-native model id the turn actually ran on (for usage records). */
   model: string;
   /** The provider that served the turn. */
-  provider: "anthropic" | "openai" | "google";
+  provider: ModelProvider;
   /**
    * Deterministic, tool-derived list of files this turn created/edited (C6
    * Tier-1). Accumulated from write_file/edit_file editStats — git/tool truth,
@@ -532,16 +544,25 @@ export async function runAgentLoop(
   let pauseTurnRetries = 0;
   const skillsBody =
     opts.skills !== undefined ? opts.skills : await readSkills(opts.sandbox.rootDir);
-  // Web search is wired on Anthropic, OpenAI (Responses built-in), and Gemini
-  // 3.x (googleSearch); Gemini 2.5 can't combine search with function calling.
-  // Tell the prompt the truth for the resolved model so the agent neither
-  // reasons about a missing tool nor skips a search it could have run.
+  // Web search is wired on Anthropic, OpenAI (Responses built-in), Z.ai (GLM's
+  // Chat Completions web_search tool), and Gemini 3.x (googleSearch); Gemini 2.5
+  // can't combine search with function calling. Tell the prompt the truth for
+  // the resolved model so the agent neither reasons about a missing tool nor
+  // skips a search it could have run.
   const hasWebSearch =
-    resolved.provider !== "google" || /^gemini-3/.test(resolved.model);
+    resolved.provider === "anthropic" ||
+    resolved.provider === "openai" ||
+    resolved.provider === "zai" ||
+    (resolved.provider === "google" && /^gemini-3/.test(resolved.model));
+  // Vision: every provider here is multimodal EXCEPT Z.ai — our only zai model,
+  // glm-5.2, is text-only. A text-only model gets the analyze_image bridge
+  // (added to the tool list below) instead of native image input.
+  const hasVision = resolved.provider !== "zai";
   const systemPrompt = buildSystemPrompt(
     skillsBody,
     opts.accountPrompt ?? null,
     hasWebSearch,
+    hasVision,
     opts.repo ?? null,
     opts.designSystem ?? null,
     opts.librarySkills ?? [],
@@ -602,7 +623,9 @@ export async function runAgentLoop(
       turn = await provider.streamAgentTurn({
         model: resolved.model,
         system: systemPrompt,
-        tools: TOOLS as Anthropic.Tool[],
+        // Text-only models get the analyze_image vision bridge appended; vision
+        // models see images natively and don't need it.
+        tools: (hasVision ? TOOLS : [...TOOLS, ANALYZE_IMAGE_TOOL]) as Anthropic.Tool[],
         messages,
         maxTokens: MAX_TOKENS,
         thinkingEffort: opts.thinkingEffort,
@@ -738,6 +761,7 @@ export async function runAgentLoop(
           },
           opts.onPreviewFrame,
           keys.google ?? null,
+          keys.zai ?? null,
         );
         // Multimodal results (e.g. screenshots) include image content blocks.
         if (result && typeof result === "object" && (result as any).__multimodal) {
@@ -931,6 +955,8 @@ export async function executeTool(
   onPreviewFrame?: LoopHooks["onPreviewFrame"],
   /** Resolved Google API key (BYOK or env) for generate_image. */
   googleApiKey?: string | null,
+  /** Z.ai key for the analyze_image vision bridge (GLM-5V-Turbo). */
+  zaiApiKey?: string | null,
 ): Promise<string | { __multimodal: true; content: unknown[] }> {
   const args = input as Record<string, any>;
   switch (name) {
@@ -1473,6 +1499,30 @@ export async function executeTool(
           `read_asset failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
+    }
+    case "analyze_image": {
+      if (typeof args.path !== "string" || !args.path.trim()) {
+        throw new Error("analyze_image requires 'path' (a sandbox-relative image path) as a string");
+      }
+      if (typeof args.question !== "string" || !args.question.trim()) {
+        throw new Error("analyze_image requires 'question' (what to look for) as a string");
+      }
+      if (!zaiApiKey) {
+        throw new Error(
+          "analyze_image needs a Z.ai key for the vision model — set ZAI_API_KEY on the orchestrator.",
+        );
+      }
+      // Read the image fresh from the sandbox and send it + the question to
+      // GLM-5V-Turbo; return its analysis as text the (text-only) model can use.
+      const img = await readImageBase64(sandbox.rootDir, args.path);
+      const analysis = await describeImage({
+        apiKey: zaiApiKey,
+        baseURL: process.env.ZAI_BASE_URL || undefined,
+        dataUrl: `data:${img.mime};base64,${img.base64}`,
+        question: args.question,
+        signal,
+      });
+      return `Vision analysis of ${args.path} — "${args.question}":\n\n${analysis}`;
     }
     case "enter_plan_mode": {
       if (!requestPlan) {

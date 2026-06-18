@@ -11,6 +11,34 @@ export const WEB_SEARCH_TOOL = {
   max_uses: 10,
 } as const;
 
+/**
+ * Vision bridge for text-only models (e.g. GLM-5.2). Only added to the tool list
+ * when the active model can't see images natively (loop.ts gates it on
+ * `hasVision`); vision-capable models receive image content blocks directly and
+ * don't need it. The handler reads the image and sends it + the question to a
+ * vision model (GLM-5V-Turbo), returning the analysis as text.
+ */
+export const ANALYZE_IMAGE_TOOL: Anthropic.Tool = {
+  name: "analyze_image",
+  description:
+    "Inspect an image you cannot see directly — you are a TEXT-ONLY model and never receive image pixels. Pass the sandbox-relative path of an image (a screenshot from screenshot_preview/interact_preview — its asset_path is in the tool result; an uploaded asset under assets/uploads/; a generated image under assets/generated/; or any image in the project) plus a SPECIFIC question. The image and your question are sent to a vision model, which replies with a text analysis. This is how you VERIFY UI you built: after taking a screenshot, call analyze_image to check layout, alignment, spacing, color/contrast, overlaps, truncation, and anything broken. Ask targeted questions ('Does the header overlap the hero? Is the CTA legible on its background? List any misaligned or overflowing elements.') rather than 'describe this image'.",
+  input_schema: {
+    type: "object",
+    properties: {
+      path: {
+        type: "string",
+        description:
+          "Sandbox-relative path to the image (e.g. the asset_path returned by screenshot_preview, or assets/uploads/logo.png).",
+      },
+      question: {
+        type: "string",
+        description: "A specific question about the image for the vision model to answer.",
+      },
+    },
+    required: ["path", "question"],
+  },
+};
+
 export const TOOLS: Anthropic.Tool[] = [
   {
     name: "read_file",
