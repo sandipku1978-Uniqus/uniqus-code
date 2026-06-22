@@ -7,6 +7,7 @@ import remarkGfm from "remark-gfm";
 import type { ClientEvent, UploadedFileSummary } from "@uniqus/api-types";
 import {
   fetchSlashCommandsApi,
+  getApiBase,
   uploadProjectFilesApi,
   type SlashCommandSummary,
 } from "@/lib/api";
@@ -1504,7 +1505,7 @@ function itemSig(it: ChatItem): string {
     case "system":
       return `${it.id}:${it.content.length}`;
     case "tool":
-      return `${it.id}:${it.result === undefined ? "p" : it.is_error ? "e" : "r"}:${it.lines_added ?? ""}/${it.lines_removed ?? ""}`;
+      return `${it.id}:${it.result === undefined ? "p" : it.is_error ? "e" : "r"}:${it.lines_added ?? ""}/${it.lines_removed ?? ""}:${it.imagePaths?.length ?? 0}`;
     case "user_question":
       return `${it.id}:${it.answer ?? ""}`;
     case "plan_proposal":
@@ -2347,6 +2348,10 @@ function ToolCard({
   // offer a jump so the user can watch it instead of reading the text result.
   const isInteraction = item.name === "interact_preview" || item.name === "run_flow";
   const setEditorTab = useStore((s) => s.setEditorTab);
+  const projectId = useStore((s) => s.project?.id);
+  // Inline screenshot thumbnails: only for the deliberate capture / vision tools
+  // (interact_preview has its own live "Preview (Agent)" tab, so it's excluded).
+  const thumbs = THUMBNAIL_TOOLS.has(item.name) ? item.imagePaths : undefined;
   // First non-empty line of the error, shown inline in the collapsed card so a
   // failure isn't just a bare red badge.
   const errorPreview =
@@ -2395,7 +2400,80 @@ function ToolCard({
           Open Preview (Agent) ↗
         </button>
       )}
+      {thumbs && thumbs.length > 0 && projectId && (
+        <div className="tool-shots">
+          {thumbs.map((p) => (
+            <ToolShot key={p} projectId={projectId} path={p} />
+          ))}
+        </div>
+      )}
     </>
+  );
+}
+
+/** Tools whose result carries an image worth previewing inline (NOT interact_preview). */
+const THUMBNAIL_TOOLS = new Set<string>([
+  "screenshot_preview",
+  "analyze_image",
+  "extract_text_from_image",
+  "ui_screenshot_to_code",
+  "diagnose_screenshot",
+  "understand_diagram",
+  "analyze_chart",
+  "compare_ui",
+]);
+
+/**
+ * A small rounded inline thumbnail of a screenshot/analyzed image. Loads the
+ * sandbox file through the project's authenticated /raw/ endpoint (same path the
+ * editor's image viewer uses) into an object URL, and renders nothing if the file
+ * is gone (e.g. pruned by the screenshot-retention cap) — so a stale path degrades
+ * quietly instead of showing a broken-image icon. Click opens the full image.
+ */
+function ToolShot({ projectId, path }: { projectId: string; path: string }) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    const controller = new AbortController();
+    setUrl(null);
+    setFailed(false);
+    fetch(`${getApiBase()}/api/projects/${projectId}/raw/${encodeURIComponent(path)}`, {
+      credentials: "include",
+      signal: controller.signal,
+    })
+      .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
+      .then((blob) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        setUrl(objectUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [projectId, path]);
+  if (failed) return null;
+  return (
+    <a
+      className="tool-shot"
+      href={url ?? undefined}
+      target="_blank"
+      rel="noreferrer"
+      title={`${path} — open full size`}
+    >
+      {url ? (
+        // eslint-disable-next-line @next/next/no-img-element -- blob: object URL, not a static asset
+        <img src={url} alt="screenshot preview" loading="lazy" />
+      ) : (
+        <span className="tool-shot-ph" aria-hidden="true" />
+      )}
+    </a>
   );
 }
 

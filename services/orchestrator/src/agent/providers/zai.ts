@@ -199,6 +199,15 @@ export class ZaiAdapter implements ModelProviderAdapter {
       stream_options: { include_usage: true },
     } as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
     applyThinking(body as unknown as Record<string, unknown>, p.thinkingEffort);
+    // Stream function-call arguments incrementally (GLM-4.6+). WITHOUT this GLM
+    // buffers each tool call and emits its whole `arguments` JSON in one burst at
+    // the end — so on a coding turn (mostly large write_file/edit_file calls) the
+    // "running…" row appears, then a long silence, then everything lands at once:
+    // the lumpy streaming the user sees. With it, `delta.tool_calls[*].function
+    // .arguments` fragments stream live (we already stitch them per-index below),
+    // so onToolCallStarted fires the moment the name arrives and the call fills in
+    // smoothly. https://docs.z.ai/guides/tools/stream-tool
+    (body as unknown as Record<string, unknown>).tool_stream = true;
 
     const stream = await this.client.chat.completions.create(
       body,
@@ -295,11 +304,22 @@ export class ZaiAdapter implements ModelProviderAdapter {
 /** Map GLM's thinking-effort control onto the Chat Completions request body. */
 function applyThinking(body: Record<string, unknown>, effort: ThinkingEffort | undefined): void {
   if (!effort) return;
-  // GLM: thinking is an enabled/disabled switch; depth is the top-level
-  // `reasoning_effort` ("high"|"max"; "max" is GLM's default + recommended for
-  // coding). Our three levels collapse onto GLM's two: low ⇒ "high", else "max".
+  // GLM-5.2's `reasoning_effort` accepts max/xhigh/high/medium/low/minimal/none,
+  // but with thinking ON the server COLLAPSES them to two working tiers:
+  // low/medium → "high" (enhanced reasoning) and xhigh/max → "max" (deepest,
+  // GLM's recommended coding default). So our three UI levels map onto those two:
+  //   high       ⇒ "max"   — GLM's deepest reasoning, for the hardest turns
+  //   low/medium ⇒ "high"  — enhanced but BOUNDED reasoning
+  // CRITICAL: medium must NOT map to "max". It used to (`effort === "low" ? high
+  // : max`), which silently promoted a *medium* request to GLM's deepest tier and
+  // let GLM-5.2 spiral in thinking for minutes — repeatedly "deciding" to start
+  // implementing, then re-deliberating — with no tool call ever emitted. Only an
+  // explicit "high" should opt into max. We send the already-resolved tier
+  // ("high"/"max") rather than leaning on the server-side collapse, so the request
+  // is explicit and robust if that mapping ever changes.
+  // https://docs.z.ai/api-reference/llm/chat-completion (reasoning_effort)
   body.thinking = { type: "enabled" };
-  body.reasoning_effort = effort === "low" ? "high" : "max";
+  body.reasoning_effort = effort === "high" ? "max" : "high";
 }
 
 /** "tool_calls"/"length"/"stop" → our canonical stop reason. */

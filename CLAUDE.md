@@ -71,11 +71,17 @@
   `tool_calls`, tool_result → a `tool` message, images on a trailing user message
   as `image_url` parts), and attaches GLM's built-in `web_search` tool alongside
   our function tools. GLM thinking is the top-level `reasoning_effort`
-  (`"high"`/`"max"`, mapped from our low→high, medium/high→max) plus
+  (`"high"`/`"max"`, mapped from our **low/medium→"high", high→"max"**) plus
   `thinking:{type:"enabled"}`; the reasoning trace streams as
-  `delta.reasoning_content`. Z.ai takes the `web_search` sub-fields as STRINGS
-  (`enable:"True"`, `count:"5"`). Internal roles (compact/classify/design) stay
-  on Claude regardless.
+  `delta.reasoning_content`. **Do NOT map medium→"max":** GLM-5.2 collapses
+  reasoning_effort to two real tiers (low/medium→high, xhigh/max→max), so mapping
+  medium to "max" silently ran the deepest tier and let GLM spiral in thinking for
+  minutes — only an explicit "high" should opt into "max". GLM also needs
+  `tool_stream:true` on the streaming call (GLM-4.6+) or it buffers each tool
+  call's whole `arguments` JSON into one end-of-turn burst (lumpy streaming); with
+  it the `delta.tool_calls[*].function.arguments` fragments stream live. Z.ai takes
+  the `web_search` sub-fields as STRINGS (`enable:"True"`, `count:"5"`). Internal
+  roles (compact/classify/design) stay on Claude regardless.
 - **GLM-5.2 is TEXT-ONLY → vision bridge.** It can't take image input, so the
   product's screenshot-verify loop is preserved via an `analyze_image(path,
   question)` tool that's added to the tool list ONLY when the active model lacks
@@ -119,8 +125,9 @@
     3.x model degrades it. Thought signatures on function-call parts are
     preserved across turns (`tool_use.thought_signature`), required for 3.x
     multi-turn function calling.
-  - **Z.ai (GLM)** → top-level `reasoning_effort` (`"high"`/`"max"`) +
-    `thinking:{type:"enabled"}` on Chat Completions; see the Z.ai bullet above.
+  - **Z.ai (GLM)** → top-level `reasoning_effort` (low/medium→`"high"`,
+    high→`"max"`; medium must NOT be "max") + `thinking:{type:"enabled"}` on Chat
+    Completions; see the Z.ai bullet above.
   - Not applied to forced-tool (plan) calls.
 - **Env keys on the orchestrator (Hetzner):** `ANTHROPIC_API_KEY` (required,
   also used for compaction and the internal compact/classify/design roles).

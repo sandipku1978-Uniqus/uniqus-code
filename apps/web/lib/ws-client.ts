@@ -351,10 +351,13 @@ function handleEvent(event: ServerEvent): void {
       s.addToolCall(event.call_id, event.name, event.input);
       break;
     case "tool_result":
-      s.setToolResult(event.call_id, event.result, event.is_error, {
-        lines_added: event.lines_added,
-        lines_removed: event.lines_removed,
-      });
+      s.setToolResult(
+        event.call_id,
+        event.result,
+        event.is_error,
+        { lines_added: event.lines_added, lines_removed: event.lines_removed },
+        event.image_paths,
+      );
       break;
     case "agent_preview_frame":
       // P2 live "Preview (Agent)" view — one screenshot frame per interaction

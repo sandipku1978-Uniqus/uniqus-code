@@ -18,6 +18,68 @@ import { assertPublicHost } from "../connectors/ssrfGuard.js";
 
 const SHOT_DIR = "assets/screenshots";
 
+/**
+ * How many screenshots to keep in assets/screenshots/. The agent can take a LOT
+ * (it screenshots after most UI work, sometimes many times a turn), and an
+ * unbounded folder is what the user actually hit — 50+ files they couldn't sort
+ * through. We keep the most recent N and prune the oldest on each new capture.
+ * Override via SCREENSHOT_RETENTION; default 40 (generous, but bounded).
+ */
+const SHOT_RETENTION = (() => {
+  const n = Number(process.env.SCREENSHOT_RETENTION);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 40;
+})();
+
+/**
+ * A chronologically SORTABLE, human-readable screenshot filename:
+ * `shot-YYYYMMDD-HHMMSS-mmm-<rand>.<ext>`. The old `<uuid8>.png` names were
+ * random, so the file explorer couldn't order them and the user couldn't tell
+ * which was the latest. A timestamp prefix sorts newest-last by name. (Older
+ * random/`-N.jpg` files sort BEFORE the `shot-` prefix, so they're also the
+ * first to be pruned — the legacy clutter clears itself over time.)
+ */
+function screenshotName(ext: string): string {
+  const d = new Date();
+  const p = (n: number, w = 2): string => String(n).padStart(w, "0");
+  const ts =
+    `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
+    `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}-${p(d.getMilliseconds(), 3)}`;
+  return `shot-${ts}-${randomUUID().slice(0, 4)}.${ext}`;
+}
+
+/** Prune assets/screenshots/ down to the most recent SHOT_RETENTION images. Best-effort. */
+async function pruneScreenshots(dir: string): Promise<void> {
+  const entries = await fs.readdir(dir).catch(() => [] as string[]);
+  // Sortable names ⇒ lexical sort is chronological; oldest first.
+  const shots = entries.filter((f) => /\.(png|jpe?g)$/i.test(f)).sort();
+  const excess = shots.length - SHOT_RETENTION;
+  if (excess <= 0) return;
+  await Promise.all(
+    shots.slice(0, excess).map((f) => fs.unlink(path.join(dir, f)).catch(() => {})),
+  );
+}
+
+/**
+ * Write a screenshot buffer to assets/screenshots/ under a sortable name, then
+ * prune the folder to SHOT_RETENTION. Returns the sandbox-relative asset path.
+ * Shared by screenshot_preview (here) and interact_preview's FINAL frame so all
+ * persisted screenshots are named + capped the same way. Per-step interaction
+ * frames are NOT persisted (they stream to the live view as base64 and nothing
+ * reads them back) — that was the main source of the folder bloat.
+ */
+export async function persistScreenshot(
+  sandboxRoot: string,
+  buf: Buffer,
+  ext: "png" | "jpg" = "png",
+): Promise<string> {
+  const dir = path.resolve(sandboxRoot, SHOT_DIR);
+  await fs.mkdir(dir, { recursive: true });
+  const file = screenshotName(ext);
+  await fs.writeFile(path.join(dir, file), buf);
+  await pruneScreenshots(dir).catch(() => {});
+  return `${SHOT_DIR}/${file}`;
+}
+
 interface ShotOpts {
   sandboxRoot: string;
   serverId?: string;
@@ -81,17 +143,14 @@ export async function takeScreenshot(opts: ShotOpts): Promise<ShotResult> {
     if (opts.wait_ms && opts.wait_ms > 0) {
       await page.waitForTimeout(Math.min(opts.wait_ms, 10_000));
     }
-    const dir = path.resolve(opts.sandboxRoot, SHOT_DIR);
-    await fs.mkdir(dir, { recursive: true });
-    const file = `${randomUUID().slice(0, 8)}.png`;
-    const full = path.join(dir, file);
     // Limit full-page screenshots to 8000px height (Claude API limit).
     const clip = opts.full_page
       ? { x: 0, y: 0, width: viewport.width, height: Math.min(await page.evaluate("document.body.scrollHeight") as number, 7800) }
       : undefined;
-    await page.screenshot({ path: full, fullPage: !clip && !!opts.full_page, clip });
+    const buf = await page.screenshot({ fullPage: !clip && !!opts.full_page, clip });
+    const asset_path = await persistScreenshot(opts.sandboxRoot, buf, "png");
     return {
-      asset_path: `${SHOT_DIR}/${file}`,
+      asset_path,
       resolved_url: targetUrl,
       width: viewport.width,
       height: clip ? clip.height : viewport.height,

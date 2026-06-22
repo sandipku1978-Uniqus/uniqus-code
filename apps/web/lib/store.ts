@@ -238,6 +238,9 @@ export type ChatItem =
       /** Lines added/removed for write_file/edit_file — rendered as a "+A −R" badge. */
       lines_added?: number;
       lines_removed?: number;
+      /** Sandbox-relative image paths to show as inline thumbnails (screenshot_preview
+       *  / vision tools only). Loaded via the project's /raw/ endpoint. */
+      imagePaths?: string[];
     }
   | {
       /**
@@ -637,6 +640,7 @@ interface State {
     result: string,
     isError: boolean,
     stats?: { lines_added?: number; lines_removed?: number },
+    imagePaths?: string[],
   ): void;
   addUserQuestion(
     callId: string,
@@ -887,6 +891,23 @@ export const useStore = create<State>((set, get) => ({
           chat: [...s.chat.slice(0, -1), { ...last, content: last.content + content }],
         };
       }
+      // Reasoning models (GLM-5.2 especially) can re-enter thinking MID-answer:
+      // text → reasoning → text. Naively the trailing reasoning block makes the
+      // resumed text open a SECOND assistant_text bubble, splitting one reply in
+      // two — even mid-word ("…the two \"fail" | Thought | "ures\" are actually…").
+      // If the only thing between us and the previous answer bubble is reasoning
+      // block(s) — no tool call or other item, which ARE real turn boundaries —
+      // continue that bubble so the answer stays one continuous block with the
+      // interleaved thought kept alongside. On replay the provider coalesces all
+      // content into a single block anyway, so this just matches the live stream
+      // to the persisted form.
+      let i = s.chat.length - 1;
+      while (i >= 0 && s.chat[i].kind === "reasoning") i--;
+      const target = i >= 0 ? s.chat[i] : undefined;
+      if (target && target.kind === "assistant_text") {
+        const merged = { ...target, content: target.content + content };
+        return { chat: [...s.chat.slice(0, i), merged, ...s.chat.slice(i + 1)] };
+      }
       return { chat: [...s.chat, { kind: "assistant_text", id: id(), content }] };
     }),
 
@@ -923,7 +944,7 @@ export const useStore = create<State>((set, get) => ({
       };
     }),
 
-  setToolResult: (callId, result, isError, stats) => {
+  setToolResult: (callId, result, isError, stats, imagePaths) => {
     set((s) => ({
       chat: s.chat.map((item) =>
         item.kind === "tool" && item.call_id === callId
@@ -933,6 +954,7 @@ export const useStore = create<State>((set, get) => ({
               is_error: isError,
               lines_added: stats?.lines_added,
               lines_removed: stats?.lines_removed,
+              imagePaths: imagePaths && imagePaths.length > 0 ? imagePaths : item.imagePaths,
             }
           : item,
       ),

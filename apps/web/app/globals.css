@@ -147,6 +147,10 @@
    plain .proj cards in compact mode. */
 :root[data-density="compact"] .proj:not(.proj-tile) { padding: 14px; }
 :root[data-density="compact"] .msg { margin-bottom: 12px; }
+/* Same tool-card grouping as default density, tightened for compact (see the
+   .msg:has(+ .tool-card) note near .tool-card). */
+:root[data-density="compact"] .msg:has(+ .tool-card) { margin-bottom: 4px; }
+:root[data-density="compact"] .tool-card:has(+ .msg) { margin-bottom: 10px; }
 :root[data-density="compact"] .tool-card { padding: 1px 6px; }
 :root[data-density="compact"] .chat-scroll { padding: 12px 12px 6px; }
 :root[data-density="compact"] .composer { padding: 8px 10px 10px; }
@@ -1737,6 +1741,15 @@ section.band .sub {
   transition: background var(--dur-fast) ease, color var(--dur-fast) ease;
 }
 .tool-card:hover { background: var(--bg-surface); color: var(--text-muted); }
+/* Tool-call spacing: a tool card belongs with the prose ABOVE it — the agent
+   says what it's about to do, then the card shows it doing it. The default 18px
+   .msg bottom-margin pushed the card ~19px below that intro line while leaving it
+   only 1px above the NEXT message — a big gap above the card, none below (the
+   lopsided spacing). Pull the card up under its intro and give it a real gap
+   before the following message instead. A run of cards stays tight: only the last
+   one (the card directly before a .msg) gets the trailing gap. */
+.msg:has(+ .tool-card) { margin-bottom: 6px; }
+.tool-card:has(+ .msg) { margin-bottom: 16px; }
 /* Error rows: faint tint + left accent rather than a loud full box. */
 .tool-card:has(.name.error) {
   border-left-color: var(--conf-low);
@@ -7616,6 +7629,56 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   border-color: color-mix(in srgb, var(--brand-magenta) 50%, var(--border-default));
   background: color-mix(in srgb, var(--brand-magenta) 8%, transparent);
 }
+/* Inline screenshot thumbnails under a screenshot_preview / analyze_image tool
+   row — a small rounded preview of what the agent captured or inspected. Indented
+   to line up under the tool card (which sits 28px in). Click opens the full image. */
+.tool-shots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 6px 0 10px 28px;
+}
+.tool-shot {
+  display: block;
+  width: 132px;
+  height: 84px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  cursor: pointer;
+  transition: border-color var(--dur-fast, 0.12s) ease, transform var(--dur-fast, 0.12s) ease;
+}
+.tool-shot:hover {
+  border-color: color-mix(in srgb, var(--brand-magenta) 50%, var(--border-default));
+  transform: translateY(-1px);
+}
+.tool-shot img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top center;
+  display: block;
+}
+/* Shimmer placeholder while the image blob loads. */
+.tool-shot-ph {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    100deg,
+    var(--bg-surface) 30%,
+    var(--bg-surface-active) 50%,
+    var(--bg-surface) 70%
+  );
+  background-size: 200% 100%;
+  animation: tool-shot-shimmer 1.2s ease-in-out infinite;
+}
+@keyframes tool-shot-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+:root[data-density="compact"] .tool-shot { width: 112px; height: 70px; }
 .chat-offline-pill {
   display: flex;
   align-items: center;

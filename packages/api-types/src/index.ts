@@ -759,6 +759,13 @@ export type ServerEvent =
       /** Lines added/removed for write_file/edit_file, for the "+A −R" diff badge. */
       lines_added?: number;
       lines_removed?: number;
+      /**
+       * Sandbox-relative image paths to show as inline thumbnails under the tool
+       * row — set for screenshot_preview and the vision-bridge tools (analyze_image
+       * etc.), never interact_preview. The web loads each via the project's /raw/
+       * endpoint; a path whose file was pruned just renders nothing.
+       */
+      image_paths?: string[];
     }
   | {
       /**

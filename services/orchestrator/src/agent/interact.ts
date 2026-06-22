@@ -1,8 +1,5 @@
-import { promises as fs } from "node:fs";
-import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { chromium, type Page } from "playwright";
-import { resolvePreviewUrl } from "./screenshot.js";
+import { persistScreenshot, resolvePreviewUrl } from "./screenshot.js";
 
 /**
  * `interact_preview` (P2.1/P2.2) — the agent operates the running preview like a
@@ -104,8 +101,6 @@ interface InteractStep {
   ok: boolean;
   detail?: string;
   url: string;
-  /** Per-step screenshot path (relative to sandbox root), when frames captured. */
-  shot?: string;
 }
 
 export interface InteractResult {
@@ -227,30 +222,21 @@ export async function runInteractPreview(opts: InteractOpts): Promise<InteractRe
     });
 
     // Per-step frame capture for the live "Preview (Agent)" view. Each frame is
-    // a small JPEG (fast + light over the wire) written to disk AND streamed via
-    // onFrame. Only runs when a listener is attached so non-streamed callers pay
-    // no extra screenshot cost. `frameSeq` is shared with the final done-frame.
-    const dir = path.resolve(opts.sandboxRoot, SHOT_DIR);
-    let dirReady = false;
-    const ensureDir = async (): Promise<void> => {
-      if (!dirReady) {
-        await fs.mkdir(dir, { recursive: true });
-        dirReady = true;
-      }
-    };
-    const runPrefix = randomUUID().slice(0, 8);
+    // a small JPEG streamed via onFrame as base64 — NOT written to disk. We used
+    // to persist every frame to assets/screenshots/ too, but nothing ever read
+    // those files back, and a multi-step run dumped a dozen throwaway `.jpg`s per
+    // call; that pile (across many interact runs) is what buried the screenshots
+    // folder. Only runs when a listener is attached, so non-streamed callers pay
+    // nothing. `frameSeq` is shared with the final done-frame.
     let frameSeq = 0;
     const captureFrame = async (
       label: string,
       ok: boolean,
       detail?: string,
-    ): Promise<string | undefined> => {
-      if (!opts.onFrame) return undefined;
+    ): Promise<void> => {
+      if (!opts.onFrame) return;
       try {
         const buf = await page.screenshot({ type: "jpeg", quality: 55 });
-        await ensureDir();
-        const file = `${runPrefix}-${frameSeq}.jpg`;
-        await fs.writeFile(path.join(dir, file), buf).catch(() => {});
         opts.onFrame({
           seq: frameSeq,
           label,
@@ -262,9 +248,8 @@ export async function runInteractPreview(opts: InteractOpts): Promise<InteractRe
           title: (await page.title().catch(() => "")) || undefined,
         });
         frameSeq++;
-        return `${SHOT_DIR}/${file}`;
       } catch {
-        return undefined;
+        // best-effort — a dropped live frame just isn't shown; the run continues
       }
     };
 
@@ -282,17 +267,19 @@ export async function runInteractPreview(opts: InteractOpts): Promise<InteractRe
         ok = false;
         detail = err instanceof Error ? err.message.slice(0, 300) : String(err);
       }
-      const shot = await captureFrame(label, ok, detail);
-      steps.push({ index: i, action: label, ok, detail, url: page.url(), shot });
+      await captureFrame(label, ok, detail);
+      steps.push({ index: i, action: label, ok, detail, url: page.url() });
     }
 
     const a11yIssues = opts.a11y === false ? [] : await runA11yPass(page).catch(() => []);
     const layoutIssues = opts.layoutChecks ? await runLayoutPass(page).catch(() => []) : [];
 
-    await ensureDir();
-    const file = `${randomUUID().slice(0, 8)}.png`;
+    // The final-state screenshot IS persisted (it's the asset_path the agent and
+    // tool result reference) — named + retention-capped like every other shot.
     const finalBuf = await page.screenshot().catch(() => null);
-    if (finalBuf) await fs.writeFile(path.join(dir, file), finalBuf).catch(() => {});
+    const finalAssetPath = finalBuf
+      ? await persistScreenshot(opts.sandboxRoot, finalBuf, "png").catch(() => `${SHOT_DIR}/missing.png`)
+      : `${SHOT_DIR}/missing.png`;
 
     const pageTitle = await page.title().catch(() => "");
     // Console errors that should BLOCK an "it works" verdict (real errors minus
@@ -314,7 +301,7 @@ export async function runInteractPreview(opts: InteractOpts): Promise<InteractRe
       });
     }
     return {
-      asset_path: `${SHOT_DIR}/${file}`,
+      asset_path: finalAssetPath,
       resolved_url: targetUrl,
       final_url: page.url(),
       page_title: pageTitle,

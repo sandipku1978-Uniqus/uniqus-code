@@ -34,11 +34,14 @@
       "WebFetch(domain:jimmy-claw.github.io)",
       "WebFetch(domain:e2b.dev)",
       "WebFetch(domain:guacamole.apache.org)",
-      "mcp__claude_ai_Tiny_Fish__search"
+      "mcp__claude_ai_Tiny_Fish__search",
+      "Read(//c/Users/Aarav/Downloads/**)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ],
     "additionalDirectories": [
       "c:\\Users\\thech\\AppData\\Local\\Temp\\uniqus-shot",
       "C:\\Users\\thech\\AppData\\Local\\Temp"
     ]
-  }
+  },
+  "prefersReducedMotion": false
 }

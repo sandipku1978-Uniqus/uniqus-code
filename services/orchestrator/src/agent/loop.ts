@@ -320,6 +320,13 @@ export interface LoopHooks {
     isError: boolean,
     /** Per-file line stats for write_file/edit_file, for the UI diff badge. */
     editStats?: { linesAdded: number; linesRemoved: number },
+    /**
+     * Sandbox-relative image paths to render as inline thumbnails under the tool
+     * card — set for screenshot_preview (the captured shot) and the vision-bridge
+     * tools (the image being analyzed), NOT interact_preview. The web fetches each
+     * via the project's /raw/ endpoint and shows a small rounded preview.
+     */
+    imagePaths?: string[],
   ) => void;
   onIteration?: (iter: number) => void;
   /**
@@ -962,9 +969,20 @@ export async function runAgentLoop(
         );
         // Multimodal results (e.g. screenshots) include image content blocks.
         if (result && typeof result === "object" && (result as any).__multimodal) {
-          const mm = result as { content: Array<{ type: string; [k: string]: unknown }> };
+          const mm = result as {
+            content: Array<{ type: string; [k: string]: unknown }>;
+            __imagePaths?: string[];
+          };
           const textSummary = mm.content.find((b) => b.type === "text") as { text: string } | undefined;
-          opts.onToolResult?.(call.id, call.name, call.input, textSummary?.text ?? "(image)", false);
+          opts.onToolResult?.(
+            call.id,
+            call.name,
+            call.input,
+            textSummary?.text ?? "(image)",
+            false,
+            undefined,
+            mm.__imagePaths,
+          );
           toolResults.push({
             type: "tool_result",
             tool_use_id: call.id,
@@ -998,7 +1016,15 @@ export async function runAgentLoop(
               });
             }
           }
-          opts.onToolResult?.(call.id, call.name, call.input, text, false, editStats);
+          opts.onToolResult?.(
+            call.id,
+            call.name,
+            call.input,
+            text,
+            false,
+            editStats,
+            visionToolImagePaths(call.name, call.input),
+          );
           toolResults.push({
             type: "tool_result",
             tool_use_id: call.id,
@@ -1086,6 +1112,37 @@ function lineDiffStats(oldText: string, newText: string): { added: number; remov
   }
   const lcs = prev[n];
   return { added: n - lcs, removed: m - lcs };
+}
+
+/**
+ * Sandbox-relative image paths a tool's chat row should show as inline
+ * thumbnails — the image a vision-bridge tool actually inspected, so the user
+ * SEES what (e.g.) GLM's analyze_image looked at. screenshot_preview is handled
+ * separately (its captured shot rides on the __multimodal result's __imagePaths);
+ * interact_preview is intentionally excluded (it has its own live Preview tab).
+ * Returns undefined when there's nothing to show, so the row stays text-only.
+ */
+function visionToolImagePaths(name: string, input: unknown): string[] | undefined {
+  const a = (input ?? {}) as Record<string, unknown>;
+  const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
+  let paths: (string | null)[];
+  switch (name) {
+    case "analyze_image":
+    case "extract_text_from_image":
+    case "ui_screenshot_to_code":
+    case "diagnose_screenshot":
+    case "understand_diagram":
+    case "analyze_chart":
+      paths = [str(a.path)];
+      break;
+    case "compare_ui":
+      paths = [str(a.path_a), str(a.path_b)];
+      break;
+    default:
+      return undefined;
+  }
+  const out = paths.filter((p): p is string => p !== null);
+  return out.length ? out : undefined;
 }
 
 /**
@@ -1376,7 +1433,7 @@ export async function executeTool(
    * tool from its schema and makes a stray call here a clear error (depth cap=1).
    */
   runSubAgents?: (specs: SubAgentSpec[]) => Promise<string>,
-): Promise<string | { __multimodal: true; content: unknown[] }> {
+): Promise<string | { __multimodal: true; content: unknown[]; __imagePaths?: string[] }> {
   const args = input as Record<string, any>;
   switch (name) {
     case "read_file":
@@ -1536,6 +1593,10 @@ export async function executeTool(
       const imgData = await readAssetBase64(sandbox.rootDir, result.asset_path);
       return {
         __multimodal: true,
+        // Surfaced to the chat as an inline thumbnail (screenshot_preview only —
+        // interact_preview is also __multimodal but intentionally has no
+        // __imagePaths, so its tool row stays text-only).
+        __imagePaths: [result.asset_path],
         content: [
           {
             type: "image" as const,

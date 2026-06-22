@@ -4329,6 +4329,22 @@ function replayToolResultText(content: Anthropic.ToolResultBlockParam["content"]
 }
 
 /**
+ * Recover sandbox-relative image paths from a persisted tool-result text so inline
+ * thumbnails can reappear on reload. screenshot_preview writes "Screenshot saved
+ * to assets/screenshots/…png" and the vision tools write "… of <path>:"; both land
+ * the asset path in the text. Scans for image paths under the agent's asset dirs
+ * only (keeps it tight); de-duped; undefined when none. The web gates rendering by
+ * tool name, so a match on an unrelated tool's text is harmless.
+ */
+function extractReplayImagePaths(text: string): string[] | undefined {
+  const re = /\bassets\/(?:screenshots|uploads|generated)\/[^\s)"'`]+\.(?:png|jpe?g|gif|webp|bmp)\b/gi;
+  const found = text.match(re);
+  if (!found) return undefined;
+  const unique = [...new Set(found)];
+  return unique.length ? unique : undefined;
+}
+
+/**
  * Reconstruct the chat UI from persisted history when a project/session loads.
  *
  * Emits the SAME event sequence the live agent loop does — a `replay_user_message`
@@ -4366,11 +4382,18 @@ function replayHistory(send: Sender, history: Anthropic.MessageParam[]): void {
         for (const block of msg.content) {
           if (block && typeof block === "object" && (block as { type?: string }).type === "tool_result") {
             const tr = block as Anthropic.ToolResultBlockParam;
+            const resultText = replayToolResultText(tr.content);
             send({
               type: "tool_result",
               call_id: tr.tool_use_id,
-              result: replayToolResultText(tr.content),
+              result: resultText,
               is_error: tr.is_error === true,
+              // Best-effort: recover the screenshot/analyzed-image path from the
+              // persisted result text so inline thumbnails reappear on reload. The
+              // web only renders these for screenshot_preview / vision tools (by
+              // tool name), so a recovered path on any other tool is ignored; a
+              // path whose file was pruned just renders nothing.
+              image_paths: extractReplayImagePaths(resultText),
             });
           }
         }
@@ -4837,7 +4860,7 @@ async function runSession(
         });
       }
     },
-    onToolResult: (callId, name, input, toolResult, isError, editStats) => {
+    onToolResult: (callId, name, input, toolResult, isError, editStats, imagePaths) => {
       send({
         type: "tool_result",
         call_id: callId,
@@ -4845,6 +4868,7 @@ async function runSession(
         is_error: isError,
         lines_added: editStats?.linesAdded,
         lines_removed: editStats?.linesRemoved,
+        image_paths: imagePaths,
       });
       // A4: clear the install banner whether the install succeeded or failed —
       // before the isError early-return below.

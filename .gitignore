@@ -14,3 +14,8 @@ setup-files/
 /notes/
 .claude/scheduled_tasks.lock
 forensics-ae492a23/
+
+# Local preview / screenshot & audit tooling — not for git
+/shot.mjs
+/shot-*.png
+/audit-harness/
