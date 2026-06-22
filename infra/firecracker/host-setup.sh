@@ -23,7 +23,11 @@ set -euo pipefail
 EXT_IFACE="${EXT_IFACE:-eth0}"
 STATE_DIR="/var/lib/uniqus/firecracker"
 KERNEL_URL="${KERNEL_URL:-}"
-FIRECRACKER_VERSION="${FIRECRACKER_VERSION:-v1.10.1}"
+# Golden base snapshots restore with `network_overrides` on PUT /snapshot/load,
+# which Firecracker only added in v1.12.0. On anything older (we shipped v1.10.1
+# originally) every golden restore 400s and silently falls back to cold boot —
+# so this MUST stay >= v1.12.0. v1.12.1 is the latest v1.12 patch.
+FIRECRACKER_VERSION="${FIRECRACKER_VERSION:-v1.12.1}"
 FIRECRACKER_URL="https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-x86_64.tgz"
 
 if [[ "$(id -u)" != "0" ]]; then
@@ -44,13 +48,23 @@ apt-get install -y --no-install-recommends \
   socat netcat-openbsd
 
 echo "[2/6] Installing Firecracker ${FIRECRACKER_VERSION}…"
-if ! command -v firecracker >/dev/null 2>&1; then
+# Re-install when missing OR when the installed version != the pinned one, so a
+# version bump (e.g. the v1.10.1 → v1.12.1 network_overrides fix) actually takes
+# on an already-provisioned host instead of being skipped.
+installed_fc_version=""
+if command -v firecracker >/dev/null 2>&1; then
+  installed_fc_version="$(firecracker --version 2>/dev/null | head -1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' || true)"
+fi
+if [[ "${installed_fc_version}" != "${FIRECRACKER_VERSION}" ]]; then
+  echo "  installing ${FIRECRACKER_VERSION} (current: ${installed_fc_version:-none})"
   tmp="$(mktemp -d)"
   curl -fSL "${FIRECRACKER_URL}" -o "${tmp}/firecracker.tgz"
   tar -xf "${tmp}/firecracker.tgz" -C "${tmp}"
   install -m 0755 "${tmp}"/release-*/firecracker-*-x86_64 /usr/local/bin/firecracker
   install -m 0755 "${tmp}"/release-*/jailer-*-x86_64    /usr/local/bin/jailer
   rm -rf "${tmp}"
+else
+  echo "  ${FIRECRACKER_VERSION} already installed"
 fi
 firecracker --version
 

@@ -100,6 +100,12 @@ the only path that governs new-project latency. Two changes attack it:
    can't reconfigure the link it's answering over). On ANY failure the fleet
    falls back to the cold-boot path, so the flag is safe to ship dark.
 
+   > **Requires Firecracker ≥ v1.12.0.** `network_overrides` on `PUT
+   > /snapshot/load` was added in v1.12.0. On older binaries (we originally
+   > shipped v1.10.1) every restore 400s — `unknown field network_overrides` —
+   > and silently cold-boots, so the flag looks enabled but never restores.
+   > `host-setup.sh` pins v1.12.1; check the box with `firecracker --version`.
+
 ### Enabling + validating the golden snapshot
 
 ```sh

@@ -39,11 +39,35 @@ describe("injectPreviewScripts", () => {
   });
 
   it("emits JS that actually parses (guards against escape/quote breakage)", () => {
-    const bodies = scriptBodies(injectPreviewScripts(HTML, "srv_x"));
-    expect(bodies.length).toBe(3);
+    const html = injectPreviewScripts(HTML, "srv_x");
+    const bodies = scriptBodies(html);
+    expect(bodies.length).toBe(4); // api-rewrite + nav + element-picker + error-reporter
     for (const body of bodies) {
       // new Function only PARSES the body; it never runs (so window/document
       // refs are fine). A SyntaxError here means the stringified JS is broken.
+      expect(() => new Function(body)).not.toThrow();
+    }
+    // The api-rewrite shim prefixes the app's root-relative requests with the
+    // preview base, so a plain fetch("/api/...") works behind the proxy.
+    expect(html).toContain('"/preview/srv_x"');
+  });
+
+  it("api-rewrite shim uses the explicit base prefix (share path)", () => {
+    const html = injectPreviewScripts(HTML, "tok", "/preview/share/tok");
+    expect(html).toContain('"/preview/share/tok"');
+    // Still 4 valid scripts.
+    for (const body of scriptBodies(html)) {
+      expect(() => new Function(body)).not.toThrow();
+    }
+  });
+
+  it("escapes a hostile base prefix so it can't break out of the <script>", () => {
+    const html = injectPreviewScripts(HTML, "srv_x", '/preview/share/a"</script><x>');
+    // `<` is <-escaped, so no premature </script> close and no <x> tag leak.
+    expect(html).not.toContain("</script><x>");
+    const bodies = scriptBodies(html);
+    expect(bodies.length).toBe(4);
+    for (const body of bodies) {
       expect(() => new Function(body)).not.toThrow();
     }
   });

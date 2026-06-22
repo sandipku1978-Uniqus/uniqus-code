@@ -309,7 +309,11 @@ export function proxyHttp(
         // tag uniqus:* messages to the parent window; embedding the real serverId
         // let a recipient read it from page source and hit the unauthenticated
         // bare /preview/<serverId>/ tier, surviving share DELETE/expiry (C-14).
-        const injected = injectPreviewScripts(original, target.shareToken ?? target.serverId);
+        const injected = injectPreviewScripts(
+          original,
+          target.shareToken ?? target.serverId,
+          target.shareToken ? `/preview/share/${target.shareToken}` : `/preview/${target.serverId}`,
+        );
         res.writeHead(upRes.statusCode ?? 502, outHeaders);
         res.end(injected);
       });
@@ -468,8 +472,16 @@ const HOP_BY_HOP = new Set([
  * Exported for unit testing — the injected payload is stringified JS that the
  * compiler can't validate, so a test parses it to catch escape/quote breakage.
  */
-export function injectPreviewScripts(html: string, serverId: string): string {
+export function injectPreviewScripts(
+  html: string,
+  serverId: string,
+  // The path the document is actually served under, so the api-rewrite shim
+  // prefixes the app's root-relative requests correctly. Owner: /preview/<id>;
+  // share: /preview/share/<token>. Defaults from serverId for unit tests.
+  basePrefix: string = `/preview/${serverId}`,
+): string {
   const script =
+    apiRewriteScript(basePrefix) +
     navReporterScript(serverId) +
     elementPickerScript(serverId) +
     errorReporterScript(serverId);
@@ -486,6 +498,66 @@ export function injectPreviewScripts(html: string, serverId: string): string {
     return html.slice(0, insertAt) + script + html.slice(insertAt);
   }
   return script + html;
+}
+
+/**
+ * Make plain root-relative requests from the preview app route correctly WITHOUT
+ * the app needing to know it's behind the `/preview/<id>/` proxy. The orchestrator
+ * reserves `/api/*` for its own API (shouldProxy excludes it), so a bare
+ * `fetch("/api/...")` from the iframe would hit the orchestrator and be rejected
+ * "origin not allowed" — which is why apps used to hand-roll a brittle
+ * window.location prefix hack. Instead we transparently prefix the app's own
+ * root-relative fetch/XHR calls with the preview base here. The app writes plain
+ * `/api/*` (correct after a real deploy, where this shim isn't injected and the
+ * path is same-origin), and it just works in the preview too. Idempotent IIFE,
+ * runs before app code (injected at <head> start). Leaves absolute, protocol-
+ * relative, relative, and already-prefixed URLs untouched.
+ *
+ * SECURITY: basePrefix is embedded via JSON.stringify with `<` further escaped to
+ * \\u003c, so it can never break out of the <script> or the JS string even if it
+ * contained `</script>` or a quote — the only safe form; never build it from raw,
+ * unescaped input. (It's derived from the serverId / share token, both constrained
+ * capability strings.) LIMITATION: covers string fetches, Request(string-url), and
+ * XHR.open(string). `fetch(new URL(...))` (already absolute) and streamed/duplex
+ * Request bodies are left as-is; the system prompt steers apps to plain relative
+ * `/api/*`, which this handles.
+ */
+function apiRewriteScript(basePrefix: string): string {
+  return `<script>(function(){
+  if (window.__uniqusApiRewriteInstalled) return;
+  window.__uniqusApiRewriteInstalled = true;
+  var base = ${JSON.stringify(basePrefix).replace(/</g, "\\u003c")};
+  function rw(u) {
+    if (typeof u !== "string" || u.length === 0) return u;
+    if (u.charCodeAt(0) !== 47) return u;               // not root-relative ("/")
+    if (u.charCodeAt(1) === 47) return u;               // protocol-relative "//"
+    if (u === base || u.indexOf(base + "/") === 0) return u; // already prefixed
+    if (u.indexOf("/preview/") === 0) return u;         // any preview path (keep soft-nav/Referer chains)
+    return base + u;
+  }
+  var of = window.fetch;
+  if (typeof of === "function") {
+    window.fetch = function(input, init) {
+      try {
+        if (typeof input === "string") input = rw(input);
+        else if (input && typeof input.url === "string") {
+          var nu = rw(input.url);
+          if (nu !== input.url) input = new Request(nu, input);
+        }
+      } catch (e) {}
+      return of.call(this, input, init);
+    };
+  }
+  var XHR = window.XMLHttpRequest;
+  if (XHR && XHR.prototype && typeof XHR.prototype.open === "function") {
+    var oo = XHR.prototype.open;
+    XHR.prototype.open = function() {
+      var args = Array.prototype.slice.call(arguments);
+      try { if (typeof args[1] === "string") args[1] = rw(args[1]); } catch (e) {}
+      return oo.apply(this, args);
+    };
+  }
+})();</script>`;
 }
 
 /**

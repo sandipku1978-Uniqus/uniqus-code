@@ -760,27 +760,6 @@ export const stopServerApi = (
 ): Promise<{ ok: true }> =>
   api(`/api/projects/${projectId}/servers/${serverId}`, { method: "DELETE" });
 
-// ── Fly.io deploy ─────────────────────────────────────────────────────────────
-
-export interface DeployTargetSummary {
-  shape: "node" | "python" | "go" | "static" | "unknown";
-  recommended: "vercel" | "fly" | null;
-}
-
-export const fetchDeployTargetApi = (
-  projectId: string,
-): Promise<DeployTargetSummary> =>
-  api(`/api/projects/${projectId}/deploy-target`);
-
-export const flyDeployApi = (
-  projectId: string,
-  body: { app_name: string; region?: string; env_vars?: Record<string, string> },
-): Promise<{ ok: boolean; app: string; url: string; log: string }> =>
-  api(`/api/projects/${projectId}/fly-deploy`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
-
 // ── Preview share (C3) ─────────────────────────────────────────────────────────
 
 /** Mint a revocable, expiring share link for a running preview server. */

@@ -45,31 +45,38 @@ const ZAI_VISION_MODEL = "glm-5v-turbo";
  * its analysis as text, which GLM then reads. A small system steer keeps the
  * answer concrete and UI-aware.
  */
+/** Default system steer for the GLM-V bridge (overridden by task-specialized tools). */
+const DEFAULT_VISION_SYSTEM =
+  "You are a precise visual-analysis assistant. Examine the image and answer the question factually and specifically. For UI screenshots, report layout, alignment, spacing, color/contrast, overlaps, truncation, legibility, and anything visibly broken or off. Be concrete; do not speculate beyond what's visible.";
+
 export async function describeImage(opts: {
   apiKey: string;
   baseURL?: string;
   model?: string;
-  /** A full data: URL (data:<mime>;base64,<…>). */
-  dataUrl: string;
+  /** One or more images (each becomes an image_url data: URL part). */
+  media: { base64: string; mimeType: string }[];
   question: string;
+  /** Override the default UI-analysis system steer (task-specialized tools do). */
+  system?: string;
+  maxTokens?: number;
   signal?: AbortSignal;
-}): Promise<string> {
+}): Promise<{ text: string; model: string; usage?: TokenUsage }> {
   const client = new OpenAI({ apiKey: opts.apiKey, baseURL: opts.baseURL || ZAI_BASE_URL });
+  const model = opts.model || process.env.ZAI_VISION_MODEL || ZAI_VISION_MODEL;
   const response = await client.chat.completions.create(
     {
-      model: opts.model || process.env.ZAI_VISION_MODEL || ZAI_VISION_MODEL,
-      max_tokens: 2048,
+      model,
+      max_tokens: opts.maxTokens ?? 4096,
       messages: [
-        {
-          role: "system",
-          content:
-            "You are a precise visual-analysis assistant. Examine the image and answer the question factually and specifically. For UI screenshots, report layout, alignment, spacing, color/contrast, overlaps, truncation, legibility, and anything visibly broken or off. Be concrete; do not speculate beyond what's visible.",
-        },
+        { role: "system", content: opts.system || DEFAULT_VISION_SYSTEM },
         {
           role: "user",
           content: [
             { type: "text", text: opts.question },
-            { type: "image_url", image_url: { url: opts.dataUrl } },
+            ...opts.media.map((m) => ({
+              type: "image_url" as const,
+              image_url: { url: `data:${m.mimeType};base64,${m.base64}` },
+            })),
           ],
         },
       ],
@@ -77,9 +84,71 @@ export async function describeImage(opts: {
     opts.signal ? { signal: opts.signal } : undefined,
   );
   const text = response.choices?.[0]?.message?.content;
-  return typeof text === "string" && text.trim()
-    ? text
-    : "(the vision model returned no description)";
+  const usage = toTokenUsage(response.usage);
+  return {
+    text:
+      typeof text === "string" && text.trim()
+        ? text
+        : "(the vision model returned no description)",
+    model,
+    usage,
+  };
+}
+
+/**
+ * GLM-OCR document/image OCR via Z.ai's layout_parsing endpoint
+ * (POST /paas/v4/layout_parsing, model "glm-ocr"). Reads scanned/image-only PDFs
+ * (and images) that have no extractable text layer and returns the recognized
+ * text as Markdown. This is Z.ai's own answer for the document case. `file`
+ * accepts a URL or base64; we pass a data: URL (GLM's inline-binary convention).
+ * Synchronous — md_results comes back in the same response. Returns usage so the
+ * caller meters it (glm-ocr is in MODEL_PRICING at $0.03/Mtok).
+ */
+export async function layoutParse(opts: {
+  apiKey: string;
+  baseURL?: string;
+  /** A data: URL (data:<mime>;base64,<…>) or an https URL to a PDF/image. */
+  file: string;
+  signal?: AbortSignal;
+}): Promise<{ markdown: string; usage?: TokenUsage }> {
+  const base = opts.baseURL || ZAI_BASE_URL;
+  const res = await fetch(`${base}/layout_parsing`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${opts.apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ model: "glm-ocr", file: opts.file }),
+    signal: opts.signal,
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`GLM-OCR layout_parsing failed: ${res.status} ${detail.slice(0, 300)}`);
+  }
+  const data = (await res.json()) as { md_results?: string; usage?: OpenAIUsage };
+  return { markdown: (data.md_results ?? "").trim(), usage: toTokenUsage(data.usage) };
+}
+
+type OpenAIUsage = {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+};
+
+/**
+ * Normalize an OpenAI-style usage object to our TokenUsage. prompt_tokens
+ * INCLUDES any cached prefix (prompt_tokens_details), so subtract it to land on
+ * the fresh-input meaning TokenUsage expects — lets the caller meter precisely.
+ */
+function toTokenUsage(u: OpenAIUsage | undefined | null): TokenUsage | undefined {
+  if (!u) return undefined;
+  const cached = u.prompt_tokens_details?.cached_tokens ?? 0;
+  return {
+    inputTokens: Math.max(0, (u.prompt_tokens ?? 0) - cached),
+    outputTokens: u.completion_tokens ?? 0,
+    cacheReadTokens: cached,
+    cacheCreationTokens: 0,
+  };
 }
 
 /**

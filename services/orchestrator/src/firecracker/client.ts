@@ -86,7 +86,8 @@ export class FirecrackerClient {
      * Remap a network interface's host-side TAP at restore time. The guest-side
      * config (IP/MAC) is frozen in the snapshot, so when restoring MANY clones
      * from one base snapshot we point each clone's eth0 at its own host tap.
-     * (Firecracker v1.6+ SnapshotLoadParams.network_overrides.)
+     * (Firecracker v1.12.0+ SnapshotLoadParams.network_overrides — older
+     * builds 400 on this field and the golden restore falls back to cold boot.)
      */
     network_overrides?: { iface_id: string; host_dev_name: string }[];
   }): Promise<void> {

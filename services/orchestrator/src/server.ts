@@ -41,6 +41,7 @@ import {
   roleAtLeast,
 } from "@uniqus/api-types";
 import { runAgentLoop } from "./agent/loop.js";
+import { detectActiveConnectors } from "./connectors/detector.js";
 import { runInteractPreview, type InteractAction } from "./agent/interact.js";
 import { getFlow, setFlowRunResult } from "./db/flows.js";
 import { recordArtifact } from "./db/artifacts.js";
@@ -72,7 +73,6 @@ import {
   restoreCheckpoint,
   getCheckpointDiff,
 } from "./agent/checkpoints.js";
-import { detectShape, flyDeploy } from "./flyDeploy.js";
 import {
   isFirecrackerEnabled,
   ensureVm,
@@ -729,7 +729,7 @@ async function authenticate(req: IncomingMessage): Promise<{
 }
 
 /**
- * Block git/Vercel/Fly capabilities for guest accounts. Guests have full
+ * Block git/Vercel deploy capabilities for guest accounts. Guests have full
  * parity with standard accounts except they can't touch GitHub or deploy —
  * those need a real identity. Returns true (and sends the 403) when blocked,
  * so callers do `if (guestForbidden(res, user)) return;`.
@@ -950,8 +950,12 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
           }),
       });
       const status: "pass" | "fail" =
-        result.assertion_failures.length > 0 || result.steps.some((s) => !s.ok) ? "fail" : "pass";
-      const summary = `${result.steps.length} step(s), ${result.assertion_failures.length} assertion failure(s), ${result.console_errors.length} console error(s)`;
+        result.assertion_failures.length > 0 ||
+        result.blocking_console_errors.length > 0 ||
+        result.steps.some((s) => !s.ok)
+          ? "fail"
+          : "pass";
+      const summary = `${result.steps.length} step(s), ${result.assertion_failures.length} assertion failure(s), ${result.blocking_console_errors.length} blocking console error(s)`;
       const ranAt = new Date().toISOString();
       void setFlowRunResult(projectId, flow.id, { status, summary, ranAt });
       void recordArtifact({
@@ -971,6 +975,9 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
           console_errors: result.console_errors,
           failed_requests: result.failed_requests,
           a11y_issues: result.a11y_issues,
+          layout_issues: result.layout_issues,
+          blocking_console_errors: result.blocking_console_errors,
+          hydration_errors: result.hydration_errors,
         },
       });
       return json(res, 200, {
@@ -984,6 +991,9 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         console_errors: result.console_errors,
         failed_requests: result.failed_requests,
         a11y_issues: result.a11y_issues,
+        layout_issues: result.layout_issues,
+        blocking_console_errors: result.blocking_console_errors,
+        hydration_errors: result.hydration_errors,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1407,67 +1417,6 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // doesn't touch any per-project secrets.
   if (req.url === "/api/connectors" && req.method === "GET") {
     return json(res, 200, { connectors: listProjectConnectors() });
-  }
-
-  // ── Fly.io deploy (Plan §5 — multi-target deploy adapter) ──────────────
-  // Detect project shape so the deploy modal can recommend Vercel vs Fly.
-  const flyShapeMatch = req.url?.match(
-    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/deploy-target$/,
-  );
-  if (flyShapeMatch && req.method === "GET") {
-    const projectId = flyShapeMatch[1];
-    const project = await getProjectForUser(projectId, user.id, "viewer");
-    if (!project) return json(res, 404, { error: "project not found" });
-    const sandbox = sandboxDirFor(projectId);
-    const shape = await detectShape(sandbox);
-    // node-server (ws/socket.io/bullmq/etc.) needs a long-lived container —
-    // Vercel's serverless model would sever its sockets, so route to Fly.
-    const recommended =
-      shape === "node" || shape === "static"
-        ? "vercel"
-        : shape === "unknown"
-          ? null
-          : "fly";
-    return json(res, 200, { shape, recommended });
-  }
-  // POST /api/projects/:id/fly-deploy { app_name, region?, env_vars? }
-  const flyDeployMatch = req.url?.match(
-    /^\/api\/projects\/([0-9a-fA-F-]{8,})\/fly-deploy$/,
-  );
-  if (flyDeployMatch && req.method === "POST") {
-    if (guestForbidden(res, user)) return;
-    const projectId = flyDeployMatch[1];
-    const project = await getProjectForUser(projectId, user.id, "editor");
-    if (!project) return json(res, 404, { error: "project not found" });
-    const body = await readJsonBody<{
-      app_name?: string;
-      region?: string;
-      env_vars?: Record<string, string>;
-    }>(req);
-    const appName = (body.app_name ?? "").trim();
-    if (!/^[a-z0-9-]{2,30}$/.test(appName)) {
-      return json(res, 400, {
-        error: "app_name must be 2-30 chars, [a-z0-9-]",
-      });
-    }
-    try {
-      // Fly builds from the host mirror — pull VM-side command-created files
-      // first so the shipped tree is complete (C-18).
-      await pullVmChanges(projectId, sandboxDirFor(projectId));
-      const result = await flyDeploy({
-        sandboxDir: sandboxDirFor(projectId),
-        appName,
-        projectId,
-        region: body.region,
-        envVars: sanitizeEnv(body.env_vars),
-        onLog: (chunk) => broadcastToProject(projectId, { type: "text", content: chunk }),
-      });
-      return json(res, 200, result);
-    } catch (err) {
-      return json(res, 400, {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
   }
 
   // GET /api/projects/:id/export.zip — download the project's source as a zip
@@ -4826,6 +4775,10 @@ async function runSession(
     // the agent NOT to screenshot / read the log of a server it "remembers"
     // from an earlier turn.
     runningServers: listServers(projectId),
+    // Active connectors (DB, payments, …) for this project, resolved per turn so
+    // the prompt's "Available integrations" reflects what's actually connected —
+    // the agent then won't assume a DB exists or invent a file-based store.
+    activeConnectors: await detectActiveConnectors(projectId),
     // Per-session so a sibling chat session in the same project doesn't see this
     // turn's todos pop into its Tasks pane (B-11).
     onTodoWrite: (items) =>
@@ -4966,6 +4919,24 @@ async function runSession(
           })
           .then(() => emitSynced())
           .catch((err) => console.error("post-run_command sync failed:", err));
+        return;
+      }
+      if (name === "spawn_agents") {
+        // Sub-agents ran nested loops in THIS sandbox and may have written
+        // arbitrary files (their edits don't pass through this per-tool handler).
+        // Mirror run_command: pull VM changes, broadcast them to open Files
+        // panes, checkpoint, and do a full Storage sync so the delegated work is
+        // durable and visible. Background — never blocks the loop.
+        pullVmChanges(projectId, sandboxDir)
+          .then((pull) => {
+            for (const p of (pull?.pulled ?? []).slice(0, 50)) {
+              broadcastToProject(projectId, { type: "file_changed", path: p });
+            }
+            checkpointNow("spawn_agents: sub-agent file changes");
+            return getTracker(projectId, sandboxDir).syncChanges();
+          })
+          .then(() => emitSynced())
+          .catch((err) => console.error("post-spawn_agents sync failed:", err));
         return;
       }
       if (name === "start_server") {

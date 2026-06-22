@@ -176,6 +176,21 @@ export async function readAssetBase64(
   return { base64: buf.toString("base64"), mime: mimeFromExt(name) };
 }
 
+/**
+ * Read an asset as a raw Buffer (+ its mime), for binary parsers — the
+ * `read_asset` document path runs this through `extractText` (pdf-parse /
+ * mammoth / xlsx) so PDFs and Office docs come back as real text instead of the
+ * UTF-8 mojibake a plain {@link readAssetText} would produce on a binary file.
+ */
+export async function readAssetBuffer(
+  sandboxDir: string,
+  name: string,
+): Promise<{ buf: Buffer; mime: string }> {
+  const full = resolveAssetPath(sandboxDir, name);
+  const buf = await fs.readFile(full);
+  return { buf, mime: mimeFromExt(name) };
+}
+
 /** Max image size the vision bridge will read (keeps a stray huge file from OOMing). */
 const MAX_VISION_IMAGE_BYTES = 8 * 1024 * 1024;
 

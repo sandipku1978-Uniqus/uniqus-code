@@ -48,11 +48,12 @@ The same secret *name* can hold different values per environment
 
 ## Values are never returned to the model
 
-- `getSecretValue` returns the decrypted plaintext **only to server-side
-  callers** — the connector registry and the deploy adapters
-  (`flyDeploy.ts` resolves `FLY_API_TOKEN` this way). It is wired into the
-  connector `ctx.secret(name)` helper, which uses the value to build the
-  outbound request and returns only the request *result* to the agent. See
+- `getSecretValue` / `getProjectSecretsAsEnv` return the decrypted plaintext
+  **only to server-side callers** — the connector registry and the deploy
+  pipeline (which syncs the project's stored secrets into the Vercel deploy env;
+  see `deploy.ts`). It is wired into the connector `ctx.secret(name)` helper,
+  which uses the value to build the outbound request and returns only the
+  request *result* to the agent. See
   [`docs/connector-security.md`](./connector-security.md).
 - `listSecrets` and the `SecretRecord` shape expose only metadata — `id`,
   `name`, `env`, `description`, timestamps. **There is no `value` field** in

@@ -16,7 +16,8 @@ export const WEB_SEARCH_TOOL = {
  * when the active model can't see images natively (loop.ts gates it on
  * `hasVision`); vision-capable models receive image content blocks directly and
  * don't need it. The handler reads the image and sends it + the question to a
- * vision model (GLM-5V-Turbo), returning the analysis as text.
+ * vision model (Gemini 3.5 Flash, with GLM-5V-Turbo as fallback), returning the
+ * analysis as text. The sub-call's token usage is metered separately for cost.
  */
 export const ANALYZE_IMAGE_TOOL: Anthropic.Tool = {
   name: "analyze_image",
@@ -38,6 +39,101 @@ export const ANALYZE_IMAGE_TOOL: Anthropic.Tool = {
     required: ["path", "question"],
   },
 };
+
+/**
+ * Task-specialized vision-bridge tools (mirrors Z.ai's Vision MCP toolset:
+ * ui_to_artifact / extract_text / diagnose / diagram / chart / diff). Each is a
+ * purpose-built prompt to the same vision model behind analyze_image — sharper
+ * prompts give sharper answers, narrowing the quality gap vs native vision for
+ * text-only models. Added to the toolset only when the active model lacks vision
+ * (loop.ts gates on `hasVision`); the prompt for each lives in `visionBridgeSpec`.
+ */
+export const EXTRACT_TEXT_FROM_IMAGE_TOOL: Anthropic.Tool = {
+  name: "extract_text_from_image",
+  description:
+    "OCR an image you can't see (you are TEXT-ONLY): transcribe ALL text in a screenshot or image verbatim — terminal output, an error message, a code snippet, a document page, UI labels. Pass the sandbox-relative image path. Returns the text as Markdown. Use this instead of analyze_image when you need the exact text, not a description.",
+  input_schema: {
+    type: "object",
+    properties: { path: { type: "string", description: "Sandbox-relative path to the image." } },
+    required: ["path"],
+  },
+};
+
+export const UI_SCREENSHOT_TO_CODE_TOOL: Anthropic.Tool = {
+  name: "ui_screenshot_to_code",
+  description:
+    "Turn a UI screenshot or design mockup you can't see (you are TEXT-ONLY) into a precise, buildable implementation spec — layout, components, exact spacing/sizes, colors (hex), typography, and verbatim text. Pass the sandbox-relative image path (optionally a target framework). Use this when reproducing a design or mockup in code.",
+  input_schema: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "Sandbox-relative path to the UI screenshot/mockup." },
+      framework: { type: "string", description: "Optional target framework (e.g. 'React + Tailwind')." },
+    },
+    required: ["path"],
+  },
+};
+
+export const DIAGNOSE_SCREENSHOT_TOOL: Anthropic.Tool = {
+  name: "diagnose_screenshot",
+  description:
+    "Diagnose an error or broken-UI screenshot you can't see (you are TEXT-ONLY): get the exact error text, where it occurs, the likely cause, and concrete fixes. Pass the sandbox-relative image path (and optional context). Use for crash screens, stack traces, console errors, or visibly broken layouts.",
+  input_schema: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "Sandbox-relative path to the screenshot." },
+      context: { type: "string", description: "Optional: what you expected, or what you were doing." },
+    },
+    required: ["path"],
+  },
+};
+
+export const UNDERSTAND_DIAGRAM_TOOL: Anthropic.Tool = {
+  name: "understand_diagram",
+  description:
+    "Interpret a technical diagram you can't see (you are TEXT-ONLY) — architecture, flowchart, UML, ER, sequence, or network diagram. Returns every node, connection, label, and the overall structure/flow. Pass the sandbox-relative image path.",
+  input_schema: {
+    type: "object",
+    properties: { path: { type: "string", description: "Sandbox-relative path to the diagram image." } },
+    required: ["path"],
+  },
+};
+
+export const ANALYZE_CHART_TOOL: Anthropic.Tool = {
+  name: "analyze_chart",
+  description:
+    "Read a chart, graph, or dashboard you can't see (you are TEXT-ONLY): chart type, axes, series, the concrete values/trends, and the key insight. Pass the sandbox-relative image path.",
+  input_schema: {
+    type: "object",
+    properties: { path: { type: "string", description: "Sandbox-relative path to the chart/dashboard image." } },
+    required: ["path"],
+  },
+};
+
+export const COMPARE_UI_TOOL: Anthropic.Tool = {
+  name: "compare_ui",
+  description:
+    "Compare two UI screenshots you can't see (you are TEXT-ONLY) and get every visual/layout difference — position, size, color, spacing, text, missing/added elements. Pass two sandbox-relative image paths (e.g. an expected/reference shot and the current one). Use to check whether a change matched a target, or what drifted between two states.",
+  input_schema: {
+    type: "object",
+    properties: {
+      path_a: { type: "string", description: "First/reference image (sandbox-relative)." },
+      path_b: { type: "string", description: "Second image to compare against the first (sandbox-relative)." },
+      focus: { type: "string", description: "Optional: aspect to focus on (e.g. 'header alignment')." },
+    },
+    required: ["path_a", "path_b"],
+  },
+};
+
+/** All vision-bridge tools for text-only models (generic + task-specialized). */
+export const VISION_BRIDGE_TOOLS: Anthropic.Tool[] = [
+  ANALYZE_IMAGE_TOOL,
+  EXTRACT_TEXT_FROM_IMAGE_TOOL,
+  UI_SCREENSHOT_TO_CODE_TOOL,
+  DIAGNOSE_SCREENSHOT_TOOL,
+  UNDERSTAND_DIAGRAM_TOOL,
+  ANALYZE_CHART_TOOL,
+  COMPARE_UI_TOOL,
+];
 
 export const TOOLS: Anthropic.Tool[] = [
   {
@@ -526,6 +622,15 @@ export const TOOLS: Anthropic.Tool[] = [
         },
       },
       required: ["question"],
+    },
+  },
+  {
+    name: "predeploy_check",
+    description:
+      "Run a production build (npm run build, if there is one) plus a serverless-safety scan over the app's own source. Catches what the dev server hides: build-time errors AND patterns that compile fine but break once deployed to Vercel — filesystem/JSON/SQLite \"databases\", in-server file writes, WebSocket servers, module-scope timers, hardcoded localhost URLs. Returns a RESULT: PASSED/FAILED verdict with file:line blockers + warnings. Run it before telling the user a web app is ready to deploy or ship; a FAILED result is blocking — fix the root cause and re-run until it PASSES. No arguments.",
+    input_schema: {
+      type: "object",
+      properties: {},
     },
   },
 ];

@@ -82,6 +82,80 @@ export function thinkingConfigFor(
   return { ...base, thinkingBudget: GEMINI_2_5_BUDGET[effort] };
 }
 
+/** Default model backing the analyze_image vision bridge (override via env). */
+export const VISION_BRIDGE_MODEL = "gemini-3.5-flash";
+
+const VISION_BRIDGE_SYSTEM =
+  "You are a precise visual-analysis assistant. Examine the image and answer the question factually and specifically. For UI screenshots, report layout, alignment, spacing, color/contrast, overlaps, truncation, legibility, and anything visibly broken or off. Be concrete; do not speculate beyond what's visible.";
+
+/**
+ * Vision bridge for text-only models (e.g. GLM-5.2). The analyze_image tool
+ * sends an image + a targeted question here and Gemini 3.5 Flash answers in
+ * text. Flash is the bridge backend (not GLM-5V-Turbo) for two reasons: real
+ * throughput — no concurrency-1 wall that serializes every user's image — and
+ * near-Pro vision quality, so the text-only path loses little to nothing vs a
+ * natively-multimodal model. Thinking defaults to LOW (visual description isn't
+ * deep reasoning and LOW keeps the bridge fast); the caller can pass "medium".
+ * Returns the analysis AND token usage so the caller can meter the sub-call's
+ * cost precisely (gemini-3.5-flash is in MODEL_PRICING).
+ */
+export async function describeImage(opts: {
+  apiKey: string;
+  model?: string;
+  /** One or more media parts — images, or a PDF (Gemini reads PDFs natively). */
+  media: { base64: string; mimeType: string }[];
+  question: string;
+  /** Override the default UI-analysis system steer (task-specialized tools do). */
+  system?: string;
+  thinking?: ThinkingEffort;
+  maxOutputTokens?: number;
+  signal?: AbortSignal;
+}): Promise<{ text: string; model: string; usage?: TokenUsage }> {
+  const ai = new GoogleGenAI({ apiKey: opts.apiKey });
+  const model = opts.model || process.env.VISION_BRIDGE_MODEL || VISION_BRIDGE_MODEL;
+  // thinkingLevel only (no includeThoughts — we don't surface the trace for a
+  // one-shot sub-call). 3.x needs the UPPERCASE enum or it silently defaults to
+  // HIGH (see GEMINI_3_LEVEL). 2.5 ignores a level, so only send it to 3.x.
+  const isGemini3 = /^gemini-3/.test(model);
+  const response = await ai.models.generateContent({
+    model,
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { text: opts.question },
+          ...opts.media.map((m) => ({ inlineData: { mimeType: m.mimeType, data: m.base64 } })),
+        ],
+      },
+    ],
+    config: {
+      systemInstruction: opts.system || VISION_BRIDGE_SYSTEM,
+      maxOutputTokens: opts.maxOutputTokens ?? 4096,
+      ...(isGemini3 ? { thinkingConfig: { thinkingLevel: GEMINI_3_LEVEL[opts.thinking ?? "low"] } } : {}),
+      abortSignal: opts.signal,
+    },
+  });
+  // Concatenate non-thought answer parts (defensive — thoughts aren't requested).
+  let text = "";
+  for (const part of response.candidates?.[0]?.content?.parts ?? []) {
+    if (part.text && !part.thought) text += part.text;
+  }
+  text = text.trim();
+  const um = response.usageMetadata;
+  let usage: TokenUsage | undefined;
+  if (um) {
+    const cached = um.cachedContentTokenCount ?? 0;
+    usage = {
+      inputTokens: Math.max(0, (um.promptTokenCount ?? 0) - cached),
+      // Reasoning ("thoughts") tokens bill as output — include them.
+      outputTokens: (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0),
+      cacheReadTokens: cached,
+      cacheCreationTokens: 0,
+    };
+  }
+  return { text: text || "(the vision model returned no description)", model, usage };
+}
+
 // Module-level monotonic counter for synthetic Gemini tool ids. A fresh
 // GoogleAdapter is constructed every turn (loop.ts builds the adapter per
 // turn), so a per-instance counter resets to 0 each turn and re-issues

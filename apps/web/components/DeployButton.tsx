@@ -7,14 +7,11 @@ import {
   deployProjectApi,
   disconnectVercelApi,
   downloadProjectZipApi,
-  fetchDeployTargetApi,
   fetchSecretsApi,
   fetchVercelStatus,
-  flyDeployApi,
   listDeploymentsApi,
   vercelOauthStartUrl,
   type DeploymentSummary,
-  type DeployTargetSummary,
   type VercelStatus,
 } from "@/lib/api";
 import type { DeploymentState } from "@uniqus/api-types";
@@ -150,54 +147,6 @@ function DeployModal({
   // "Take your code with you" handoff (E2/E3).
   const [downloading, setDownloading] = useState(false);
   const [embedCopied, setEmbedCopied] = useState(false);
-  // Project shape → which deploy target fits (E1). When the shape needs a
-  // long-running container (python/go/node-server), surface the Fly.io path
-  // (the adapter + API already exist; only this UI was missing).
-  const [deployTarget, setDeployTarget] = useState<DeployTargetSummary | null>(null);
-  const [flyAppName, setFlyAppName] = useState("");
-  const [flyRegion, setFlyRegion] = useState("");
-  const [flyBusy, setFlyBusy] = useState(false);
-
-  useEffect(() => {
-    fetchDeployTargetApi(projectId)
-      .then(setDeployTarget)
-      .catch(() => setDeployTarget(null));
-  }, [projectId]);
-
-  async function deployFly(): Promise<void> {
-    const name = flyAppName.trim();
-    if (!/^[a-z0-9-]{2,30}$/.test(name)) {
-      setError("App name must be 2–30 chars: lowercase letters, numbers, dashes.");
-      return;
-    }
-    setError(null);
-    const env: Record<string, string> = {};
-    for (const r of envRows) {
-      const k = r.key.trim();
-      if (!k && !r.value) continue;
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
-        setError(`env key "${k || "(empty)"}" is invalid — must match [A-Za-z_][A-Za-z0-9_]*`);
-        return;
-      }
-      env[k] = r.value;
-    }
-    setFlyBusy(true);
-    try {
-      const r = await flyDeployApi(projectId, {
-        app_name: name,
-        region: flyRegion.trim() || undefined,
-        env_vars: env,
-      });
-      if (r.ok) toast.success(`Deployed to ${r.url}`);
-      else toast.error("Fly deploy did not complete");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setError(msg);
-      toast.error(`Fly deploy failed: ${msg}`);
-    } finally {
-      setFlyBusy(false);
-    }
-  }
 
   const downloadZip = async () => {
     setDownloading(true);
@@ -374,57 +323,6 @@ function DeployModal({
         </div>
       }
     >
-      {/* Fly.io branch (E1): the project shape needs a long-running container,
-          which Vercel's serverless model can't host. The adapter already
-          exists server-side — this surfaces it. */}
-      {deployTarget?.recommended === "fly" && (
-        <div
-          style={{
-            padding: "10px 12px",
-            border: "1px solid var(--brand-magenta, #c026d3)",
-            borderRadius: 6,
-            marginBottom: 12,
-            background: "color-mix(in srgb, var(--brand-magenta, #c026d3) 6%, transparent)",
-          }}
-        >
-          <div style={{ fontSize: 12, marginBottom: 8 }}>
-            This is a <strong>{deployTarget.shape}</strong> app — it needs a long-running
-            container, which Vercel can&apos;t host. Deploy it to <strong>Fly.io</strong> instead.
-          </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-            <input
-              type="text"
-              value={flyAppName}
-              onChange={(e) => setFlyAppName(e.target.value)}
-              placeholder="app-name (a–z, 0–9, -)"
-              aria-label="Fly app name"
-              style={{ flex: "1 1 180px", fontSize: 12, padding: "6px 8px" }}
-            />
-            <input
-              type="text"
-              value={flyRegion}
-              onChange={(e) => setFlyRegion(e.target.value)}
-              placeholder="region (optional, e.g. iad)"
-              aria-label="Fly region"
-              style={{ flex: "0 1 160px", fontSize: 12, padding: "6px 8px" }}
-            />
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={() => void deployFly()}
-              disabled={flyBusy}
-              style={{ fontSize: 12, padding: "6px 12px" }}
-            >
-              {flyBusy ? "Deploying…" : "Deploy to Fly"}
-            </button>
-          </div>
-          <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
-            Set a <code>FLY_API_TOKEN</code> in this project&apos;s Secrets first. Build logs
-            stream into the chat. Env vars added below are passed through.
-          </div>
-        </div>
-      )}
-
       {/* Vercel connection */}
       {vercel === null ? (
         <div style={{ fontSize: 12, color: "var(--text-muted)" }}>

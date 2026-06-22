@@ -23,7 +23,7 @@ const ENTRIES: {
       },
       {
         tag: "new",
-        text: "Take your code anywhere: download your whole project as a zip, deploy long-running apps to Fly.io, or drop your live app into any page with a ready-made embed snippet.",
+        text: "Take your code anywhere: download your whole project as a zip, or drop your live app into any page with a ready-made embed snippet.",
       },
       {
         tag: "new",

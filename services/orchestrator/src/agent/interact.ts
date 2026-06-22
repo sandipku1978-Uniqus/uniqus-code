@@ -82,6 +82,14 @@ export interface InteractOpts {
   /** Run the lightweight a11y pass on the final state (default true). */
   a11y?: boolean;
   /**
+   * Run the deterministic layout/contrast pass on the final state (overflow,
+   * off-screen elements, clipped text, low-contrast text). Default OFF — the
+   * loop enables it ONLY for text-only models, as a model-free substitute for
+   * "look at the screenshot and tell me if the UI is broken/legible". Vision
+   * models see the screenshot natively, so they don't need it.
+   */
+  layoutChecks?: boolean;
+  /**
    * P2 live streaming: invoked with a screenshot frame after the initial load
    * and after every action (plus a final `done` frame). When omitted (CLI /
    * tests) no per-step frames are captured, so there's zero added latency for
@@ -110,6 +118,13 @@ export interface InteractResult {
   failed_requests: string[];
   assertion_failures: string[];
   a11y_issues: { id: string; help: string; nodes: number }[];
+  /** Deterministic layout/contrast findings (empty unless opts.layoutChecks). */
+  layout_issues: { id: string; help: string; nodes: number }[];
+  /** Console errors that should BLOCK a "passing" verdict (real errors/pageerrors;
+   *  benign dev noise filtered out). Drives the RESULT: PASSED/FAILED verdict. */
+  blocking_console_errors: string[];
+  /** Subset that are React hydration mismatches — highest-priority, always blocking. */
+  hydration_errors: string[];
 }
 
 const cap = (ms: number | undefined, def: number): number =>
@@ -122,6 +137,47 @@ async function gotoWithFallback(page: Page, url: string): Promise<void> {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => {
       throw err;
     });
+  });
+}
+
+/** Benign console noise that must never block a preview verdict (dev-only chatter). */
+const BENIGN_CONSOLE = [
+  /favicon\.ico/i,
+  /Download the React DevTools/i,
+  /\[Fast Refresh\]/i,
+  /\[HMR\]/i,
+  /\[vite\]\s+(?:connect|hmr)/i,
+  /\[webpack(?:-dev-server)?\]/i,
+  // Only dev-tooling source-map chatter, not a real "SourceMap…error" in app code.
+  /(?:failed to (?:load|parse)|404).{0,40}(?:source[- ]?map|\.map\b)/i,
+  /Lighthouse/i,
+];
+
+/**
+ * React hydration mismatch — the exact error class that shipped a "verified"
+ * but broken app (the UI renders, then silently desyncs / loses interactivity).
+ * Deliberately specific so it doesn't fire on unrelated phrases like "cookie did
+ * not match policy" or "server rendered page in 250ms".
+ */
+export function isHydrationError(e: string): boolean {
+  return (
+    /\bhydrat(?:e|ed|es|ing|ion)\b/i.test(e) ||
+    /(?:text )?content (?:did|does) not match/i.test(e) ||
+    /did not match (?:the )?server[- ]?rendered/i.test(e)
+  );
+}
+
+/**
+ * Console messages that should BLOCK an "it works" verdict: real `[error]` /
+ * `[pageerror]` entries (warnings stay advisory), minus benign dev noise.
+ * Hydration errors always count, even if they arrived as a warning.
+ */
+export function blockingConsoleErrors(errors: string[]): string[] {
+  return errors.filter((e) => {
+    if (isHydrationError(e)) return true;
+    // Exact bracketed level marker, so "[errorinfo] …" can't match "[error]".
+    if (!/^\[(?:error|pageerror)\]/.test(e)) return false;
+    return !BENIGN_CONSOLE.some((rx) => rx.test(e));
   });
 }
 
@@ -231,6 +287,7 @@ export async function runInteractPreview(opts: InteractOpts): Promise<InteractRe
     }
 
     const a11yIssues = opts.a11y === false ? [] : await runA11yPass(page).catch(() => []);
+    const layoutIssues = opts.layoutChecks ? await runLayoutPass(page).catch(() => []) : [];
 
     await ensureDir();
     const file = `${randomUUID().slice(0, 8)}.png`;
@@ -238,13 +295,17 @@ export async function runInteractPreview(opts: InteractOpts): Promise<InteractRe
     if (finalBuf) await fs.writeFile(path.join(dir, file), finalBuf).catch(() => {});
 
     const pageTitle = await page.title().catch(() => "");
+    // Console errors that should BLOCK an "it works" verdict (real errors minus
+    // benign dev noise); hydration mismatches are called out specially.
+    const blockingErrors = blockingConsoleErrors(consoleErrors);
+    const hydrationErrors = consoleErrors.filter(isHydrationError);
     // Final done-frame: settles the live view on the end state and clears the
     // "LIVE" indicator. Reuses the PNG just captured (no extra screenshot).
     if (opts.onFrame) {
       opts.onFrame({
         seq: frameSeq,
         label: "Final state",
-        ok: assertionFailures.length === 0,
+        ok: assertionFailures.length === 0 && blockingErrors.length === 0,
         url: page.url(),
         image: finalBuf ? finalBuf.toString("base64") : "",
         mime: "image/png",
@@ -262,6 +323,9 @@ export async function runInteractPreview(opts: InteractOpts): Promise<InteractRe
       failed_requests: failedRequests,
       assertion_failures: assertionFailures,
       a11y_issues: a11yIssues,
+      layout_issues: layoutIssues,
+      blocking_console_errors: blockingErrors,
+      hydration_errors: hydrationErrors,
     };
   } finally {
     await browser.close().catch(() => {});
@@ -442,6 +506,90 @@ async function runA11yPass(page: Page): Promise<{ id: string; help: string; node
     });
     if (nameless.length) issues.push({ id: "control-name", help: "button(s)/link(s) without accessible text", nodes: nameless.length });
     if (!document.documentElement.getAttribute("lang")) issues.push({ id: "html-lang", help: "<html> has no lang attribute", nodes: 1 });
+    return issues;
+  })()`;
+  const result = await page.evaluate(script);
+  return Array.isArray(result) ? (result as { id: string; help: string; nodes: number }[]) : [];
+}
+
+/**
+ * Dependency-free layout + contrast pass — the model-free substitute for "look
+ * at the screenshot and tell me if it's broken/illegible", run for text-only
+ * models that can't see the screenshot. All geometry is computed from the live,
+ * post-interaction DOM (getBoundingClientRect / scrollWidth / getComputedStyle),
+ * so the findings are exact, not eyeballed. Deliberately conservative
+ * (high-confidence, low false-positive): page-level horizontal overflow,
+ * elements off the right edge, text clipped by an overflow box, and text below
+ * WCAG AA contrast. Returns the same {id,help,nodes} shape as the a11y pass.
+ */
+async function runLayoutPass(page: Page): Promise<{ id: string; help: string; nodes: number }[]> {
+  // Passed as a string (no DOM lib in the orchestrator tsconfig); runs in the
+  // page. Uses `+` concatenation, never ${…}, so the template literal doesn't
+  // interpolate. Regex parens are double-escaped to survive the literal.
+  const script = `(() => {
+    var issues = [];
+    var de = document.documentElement;
+    if (de && de.scrollWidth > de.clientWidth + 1) {
+      issues.push({ id: "page-overflow-x", help: "page scrolls horizontally — content wider than the viewport (" + de.scrollWidth + "px > " + de.clientWidth + "px); usually a fixed width or an unwrapped row", nodes: 1 });
+    }
+    var vw = de ? de.clientWidth : 0;
+    var nodes = document.body ? Array.prototype.slice.call(document.body.querySelectorAll("*")) : [];
+    if (nodes.length > 1200) nodes = nodes.slice(0, 1200);
+    function parseColor(c) {
+      var m = c && c.match(/rgba?\\(([^)]+)\\)/);
+      if (!m) return null;
+      var p = m[1].split(",").map(function (x) { return parseFloat(x); });
+      return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+    }
+    function lum(c) {
+      var ch = [c.r, c.g, c.b].map(function (v) {
+        v = v / 255;
+        return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      });
+      return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
+    }
+    function bgOf(el) {
+      var n = el;
+      while (n && n.nodeType === 1) {
+        var bg = parseColor(getComputedStyle(n).backgroundColor);
+        if (bg && bg.a > 0) return bg;
+        n = n.parentElement;
+      }
+      return { r: 255, g: 255, b: 255, a: 1 };
+    }
+    var offscreen = 0, clipped = 0, lowContrast = 0;
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      var r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) continue;
+      var st = getComputedStyle(el);
+      if (st.display === "none" || st.visibility === "hidden" || parseFloat(st.opacity) === 0) continue;
+      if (r.left > vw + 2) offscreen++;
+      if ((st.overflow === "hidden" || st.overflowX === "hidden" || st.textOverflow === "ellipsis") &&
+          el.scrollWidth > el.clientWidth + 2 && (el.textContent || "").trim().length > 0) {
+        clipped++;
+      }
+      var hasText = false;
+      for (var k = 0; k < el.childNodes.length; k++) {
+        var cn = el.childNodes[k];
+        if (cn.nodeType === 3 && cn.textContent && cn.textContent.trim()) { hasText = true; break; }
+      }
+      if (hasText) {
+        var fg = parseColor(st.color);
+        if (fg && fg.a > 0) {
+          var bg = bgOf(el);
+          var L1 = lum(fg) + 0.05, L2 = lum(bg) + 0.05;
+          var ratio = L1 > L2 ? L1 / L2 : L2 / L1;
+          var size = parseFloat(st.fontSize) || 16;
+          var bold = (parseInt(st.fontWeight, 10) || 400) >= 700;
+          var large = size >= 24 || (size >= 18.66 && bold);
+          if (ratio < (large ? 3 : 4.5)) lowContrast++;
+        }
+      }
+    }
+    if (offscreen > 0) issues.push({ id: "offscreen-x", help: "element(s) positioned beyond the right edge of the viewport (possible horizontal overflow / off-screen content)", nodes: offscreen });
+    if (clipped > 0) issues.push({ id: "clipped-text", help: "element(s) whose text is clipped/truncated by an overflow box", nodes: clipped });
+    if (lowContrast > 0) issues.push({ id: "low-contrast", help: "text element(s) below WCAG AA contrast (4.5:1 normal, 3:1 large) — may be hard to read", nodes: lowContrast });
     return issues;
   })()`;
   const result = await page.evaluate(script);

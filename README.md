@@ -34,7 +34,7 @@ live preview, then helps you ship it.
 - **Customization.** Per-project + account-wide **Skills** (`.uniqus/skills.md`),
   ~17 curated **design packs**, account-wide custom prompt + default skills,
   light/dark theme + density.
-- **Ship it.** Deploy to **Vercel** or **Fly.io**, create a GitHub repo, and
+- **Ship it.** Deploy to **Vercel**, create a GitHub repo, and
   rewind to **checkpoints**. Guest/education accounts work without a Google login.
 
 ## Monorepo layout

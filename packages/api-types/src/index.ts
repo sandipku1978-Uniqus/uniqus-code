@@ -244,6 +244,17 @@ export const MODEL_PRICING: Record<string, ModelPrice> = {
     output: 10,
     longContext: { thresholdTokens: 200_000, above: { input: 2.5, output: 15 } },
   },
+  // Vision-bridge models — NOT user-selectable (absent from MODEL_CATALOG, so the
+  // completeness test doesn't require them). The analyze_image bridge for
+  // text-only models routes to gemini-3.5-flash (priced above); these GLM VLMs
+  // are the fallback when no Google key is set. Priced explicitly so a metered
+  // bridge sub-call is precise and never falls through to DEFAULT_PRICE (5–40×
+  // off). Source: z.ai published vision rates as of 2026-06-19 (cached input set
+  // explicitly, like glm-5.2; no separate cache-write line; flat, no band).
+  "glm-5v-turbo": { input: 1.2, output: 4, cacheRead: 0.24 },
+  "glm-4.6v": { input: 0.3, output: 0.9, cacheRead: 0.05 },
+  // GLM-OCR (layout_parsing / document OCR) — uniform $0.03/Mtok input & output.
+  "glm-ocr": { input: 0.03, output: 0.03 },
 };
 
 /** Fallback $/1M when a model id isn't in MODEL_PRICING (mid-tier estimate). */

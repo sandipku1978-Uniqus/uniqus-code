@@ -42,7 +42,11 @@
   trusting it — see the README's "Enabling + validating" steps. Falls back to
   cold boot on any error, so shipping it dark is safe. The agent gained
   `POST /net/configure` (re-stamp IP/MAC + mount sandbox + reseed/clock on
-  restore) — mirrored in BOTH `main.rs` and the Node `agent.mjs`.
+  restore) — mirrored in BOTH `main.rs` and the Node `agent.mjs`. **Requires
+  Firecracker ≥ v1.12.0** (the `network_overrides` restore field; `host-setup.sh`
+  pins v1.12.1). On older binaries every restore 400s and silently cold-boots, so
+  the flag can read as "on" while never restoring — verify with `firecracker
+  --version` + a `restored from golden snapshot` log line, not just the env var.
 
 ## Model providers (multi-provider agent)
 - The coding agent runs on a model resolved by `services/orchestrator/src/agent/router.ts`.

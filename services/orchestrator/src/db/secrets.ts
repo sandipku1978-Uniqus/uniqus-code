@@ -114,6 +114,34 @@ export async function getSecretValue(
   }
 }
 
+/**
+ * All of a project's secrets (one env) as a decrypted name→value map, for
+ * syncing into a deploy's env so the live app has the SAME env it had in the
+ * preview. Skips any row that fails to decrypt (logs, never logs the value) so
+ * one bad secret can't block a deploy.
+ */
+export async function getProjectSecretsAsEnv(
+  projectId: string,
+  env?: string | null,
+): Promise<Record<string, string>> {
+  const e = normalizeEnv(env);
+  const { data, error } = await db()
+    .from("project_secrets")
+    .select("name, encrypted_value")
+    .eq("project_id", projectId)
+    .eq("env", e);
+  if (error) throw new Error(`getProjectSecretsAsEnv failed: ${error.message}`);
+  const out: Record<string, string> = {};
+  for (const row of (data ?? []) as { name: string; encrypted_value: string }[]) {
+    try {
+      out[row.name] = decryptToken(row.encrypted_value);
+    } catch (err) {
+      console.error(`getProjectSecretsAsEnv: skipping secret '${row.name}' (decrypt failed):`, err);
+    }
+  }
+  return out;
+}
+
 export async function deleteSecret(
   projectId: string,
   name: string,

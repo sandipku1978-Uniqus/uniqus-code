@@ -147,7 +147,7 @@
    plain .proj cards in compact mode. */
 :root[data-density="compact"] .proj:not(.proj-tile) { padding: 14px; }
 :root[data-density="compact"] .msg { margin-bottom: 12px; }
-:root[data-density="compact"] .tool-card { padding: 6px 8px; }
+:root[data-density="compact"] .tool-card { padding: 1px 6px; }
 :root[data-density="compact"] .chat-scroll { padding: 12px 12px 6px; }
 :root[data-density="compact"] .composer { padding: 8px 10px 10px; }
 
@@ -1717,28 +1717,38 @@ section.band .sub {
   padding: 4px 0;
 }
 
+/* A tool call is QUIET by default: a single dim line, no box/fill/border, so it
+   recedes beneath the agent's prose instead of dominating it. The bordered code
+   box only appears once you click to expand the result (the `pre` below). Errors
+   get a subtle left accent (see `:has` rule) so a failure still stands out. */
 .tool-card {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  padding: 8px 10px;
-  margin: 6px 0 6px 30px;
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent; /* reserves space so error accent doesn't shift the row */
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  margin: 1px 0 1px 28px;
   font-family: var(--font-mono-stack);
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--text-dim);
   cursor: pointer;
   text-align: left;
-  width: calc(100% - 30px);
-  transition: border-color var(--dur-base) ease;
+  width: calc(100% - 28px);
+  transition: background var(--dur-fast) ease, color var(--dur-fast) ease;
 }
-.tool-card:hover { border-color: var(--text-dim); }
+.tool-card:hover { background: var(--bg-surface); color: var(--text-muted); }
+/* Error rows: faint tint + left accent rather than a loud full box. */
+.tool-card:has(.name.error) {
+  border-left-color: var(--conf-low);
+  background: color-mix(in srgb, var(--conf-low) 7%, transparent);
+}
 .tool-card .row {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
 }
-.tool-card .name { color: var(--brand-magenta); font-weight: 600; flex-shrink: 0; }
+.tool-card .name { color: var(--text-muted); font-weight: 500; flex-shrink: 0; }
 .tool-card .name.error { color: var(--conf-low); }
 /* The summary (usually a file path) is the one shrinkable item in the row —
    it ellipsizes on narrow panes instead of forcing the row's min-content

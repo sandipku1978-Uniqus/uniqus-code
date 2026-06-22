@@ -6,7 +6,9 @@
  * auto-detects the framework from package.json — no manifest required.
  *
  * What's deliberately out of scope here (Phase 2):
- *   - Vault-backed secrets. Env vars are passed inline per deployment.
+ *   - Project-level env. We set per-deployment inline env, now MERGED with the
+ *     project's stored secrets (db/secrets) so the live app has the same env as
+ *     the preview; the deploy modal's env still overrides per-deploy.
  *   - Auto-provisioned database (Neon branch-per-project). User pastes their
  *     own DATABASE_URL in the deploy modal's env editor.
  *   - Custom domains / Vercel domain attachment.
@@ -23,6 +25,7 @@ import {
   type DeploymentState,
 } from "./db/deployments.js";
 import { setVercelProject } from "./db/projects.js";
+import { getProjectSecretsAsEnv } from "./db/secrets.js";
 
 // Files we never push. Re-derived on every deploy from the live sandbox.
 // Exported so the .zip export (export.ts) reuses the exact same exclusions —
@@ -266,6 +269,17 @@ export async function startDeploy(
     }),
   );
 
+  // Sync the project's stored secrets into the deploy env so the deployed app
+  // has the SAME env it had in the preview (the gap that made apps "work for the
+  // agent, break live"). Request env (the deploy modal) wins, so the user can
+  // override per-deploy. Secrets go as Vercel env vars, never as files
+  // (isSecretEnvFile keeps .env* out of the upload). Never logged.
+  const storedSecrets = await getProjectSecretsAsEnv(ctx.uniqusProjectId).catch((err) => {
+    console.error(`[deploy ${ctx.uniqusProjectId}] secret sync failed (deploying with request env only):`, err);
+    return {} as Record<string, string>;
+  });
+  const env = { ...storedSecrets, ...req.env };
+
   // /v13/deployments wants `env` and `build.env` as flat Record<string,string>.
   // The array-of-objects form is for project-level env (/v9/projects/.../env)
   // — using the wrong shape here gets you a 400 with a confusing message.
@@ -280,8 +294,8 @@ export async function startDeploy(
       // future phase.
       framework: null,
     },
-    env: req.env,
-    build: { env: req.env },
+    env,
+    build: { env },
   };
 
   const createRes = await fetch(
