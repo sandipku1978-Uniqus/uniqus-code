@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { ModelChoice, Plan } from "@uniqus/api-types";
+import type { ModelChoice, Plan, PlanStep } from "@uniqus/api-types";
 import { normalizeMessageHistory } from "./messageHistory.js";
 import { formatAccountPromptForPrompt, formatSkillsForPrompt } from "./skills.js";
 import { resolveModel } from "./router.js";
@@ -68,6 +68,77 @@ export interface PlanOptions {
 
 const MAX_PLAN_ITERATIONS = 16;
 const PLAN_MAX_TOKENS = 8192;
+
+/**
+ * The model fills in the submit_plan tool, but a model CAN return a malformed
+ * shape: a truncated GLM tool-call parses to `{}` (no `steps`), or `steps` comes
+ * back as a JSON string / single object instead of an array. We send the Plan
+ * straight to the UI, where `plan.steps.map(...)` then HARD-CRASHES the whole
+ * message ("steps.map is not a function") — and `formatPlanForExecution` below
+ * also assumes an array. Normalize defensively so we ALWAYS emit a well-formed
+ * Plan: `steps` is a PlanStep[] (possibly empty), text fields are strings. This
+ * matters more now that plan mode is task-routed and can land on GLM. Pairs with
+ * the UI's own array guard (belt and suspenders).
+ */
+export function normalizePlan(raw: unknown): Plan {
+  let obj: Record<string, unknown> = {};
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object") obj = parsed as Record<string, unknown>;
+    } catch {
+      /* whole plan wasn't JSON — leave obj empty */
+    }
+  } else if (raw && typeof raw === "object") {
+    obj = raw as Record<string, unknown>;
+  }
+
+  const toStep = (s: unknown): PlanStep | null => {
+    if (typeof s === "string") {
+      const description = s.trim();
+      return description ? { description } : null;
+    }
+    if (s && typeof s === "object") {
+      const o = s as Record<string, unknown>;
+      const description =
+        typeof o.description === "string" ? o.description : String(o.description ?? "").trim();
+      const files = Array.isArray(o.files)
+        ? o.files.filter((f): f is string => typeof f === "string")
+        : undefined;
+      const success_criteria =
+        typeof o.success_criteria === "string" ? o.success_criteria : undefined;
+      return {
+        description,
+        ...(files && files.length ? { files } : {}),
+        ...(success_criteria ? { success_criteria } : {}),
+      };
+    }
+    return null;
+  };
+
+  let rawSteps: unknown = obj.steps;
+  if (typeof rawSteps === "string") {
+    try {
+      rawSteps = JSON.parse(rawSteps) as unknown;
+    } catch {
+      /* steps wasn't a JSON array string */
+    }
+  }
+  const steps: PlanStep[] = Array.isArray(rawSteps)
+    ? rawSteps.map(toStep).filter((s): s is PlanStep => s !== null)
+    : [];
+
+  const summary = typeof obj.summary === "string" ? obj.summary : "";
+  const plain_summary = typeof obj.plain_summary === "string" ? obj.plain_summary : undefined;
+  const wireframe = typeof obj.wireframe === "string" ? obj.wireframe : undefined;
+
+  return {
+    summary: summary || plain_summary || "Proposed plan",
+    steps,
+    ...(plain_summary ? { plain_summary } : {}),
+    ...(wireframe ? { wireframe } : {}),
+  };
+}
 
 const SUBMIT_PLAN_TOOL: Anthropic.Tool = {
   name: "submit_plan",
@@ -187,7 +258,7 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
 
     // The model submitted its plan — done.
     const submitted = turn.toolCalls.find((c) => c.name === "submit_plan");
-    if (submitted) return submitted.input as Plan;
+    if (submitted) return normalizePlan(submitted.input);
 
     // No tools and no plan: it just talked. Force a plan to finish.
     if (turn.toolCalls.length === 0) break;
@@ -251,7 +322,7 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
     maxTokens: 4096,
     signal: opts.signal,
   });
-  return forced as Plan;
+  return normalizePlan(forced);
 }
 
 export function formatPlanForExecution(plan: Plan): string {

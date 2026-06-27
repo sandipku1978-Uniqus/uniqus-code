@@ -17,7 +17,14 @@ export default function PlanReview({ item }: { item: PlanItem }) {
   const rejectPendingPlan = useStore((s) => s.rejectPendingPlan);
   const setPendingComposerText = useStore((s) => s.setPendingComposerText);
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState<Plan>(item.plan);
+  // Guard the shape: a malformed plan (e.g. a truncated model tool-call with a
+  // missing/non-array `steps`) must never crash the whole message with
+  // "steps.map is not a function". Coerce `steps` to an array up front; the
+  // orchestrator also normalizes, so this is belt-and-suspenders for old plans.
+  const [draft, setDraft] = useState<Plan>(() => ({
+    ...item.plan,
+    steps: Array.isArray(item.plan?.steps) ? item.plan.steps : [],
+  }));
   // B3: pure-client "Simplify" — show only the plain summary + safety line,
   // hide the steps / success criteria / technical summary. Zero model cost.
   const [simplified, setSimplified] = useState(false);
