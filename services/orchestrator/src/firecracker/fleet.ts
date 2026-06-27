@@ -42,6 +42,19 @@ const KERNEL_PATH =
   process.env.FIRECRACKER_KERNEL ?? "/var/lib/uniqus/firecracker/vmlinux";
 const ROOTFS_BASE_PATH =
   process.env.FIRECRACKER_ROOTFS ?? "/var/lib/uniqus/firecracker/rootfs.ext4";
+/**
+ * Per-project /sandbox ext4 image size. The image is SPARSE, so a generous cap
+ * costs no host disk until actually written — 1 GiB was filling up on real
+ * projects (node_modules + build output + git), so the default is now 8 GiB.
+ * Tunable via FIRECRACKER_SANDBOX_SIZE (truncate-style size, e.g. "8G", "16G").
+ * CRITICAL: this is used for BOTH the golden placeholder disk AND each real
+ * per-project image, and they MUST match: a golden clone resumes with the
+ * placeholder's frozen /dev/vdb geometry, so a real backing image of a different
+ * size would mismatch the device (mount failure / out-of-bounds writes). Growing
+ * existing 1 GiB images therefore requires an offline host-side `truncate` +
+ * `resize2fs` AND a golden rebuild so the placeholder matches.
+ */
+const SANDBOX_IMAGE_SIZE = process.env.FIRECRACKER_SANDBOX_SIZE ?? "8G";
 const VM_VCPUS = Number(process.env.FIRECRACKER_VCPUS ?? 2);
 const VM_MEM_MIB = Number(process.env.FIRECRACKER_MEM_MIB ?? 1024);
 const IDLE_PAUSE_MS = Number(process.env.FIRECRACKER_IDLE_PAUSE_MS ?? 5 * 60_000);
@@ -500,13 +513,60 @@ let baseSnapshotBuild: Promise<void> | null = null;
  */
 export async function ensureBaseSnapshot(): Promise<void> {
   const p = baseSnapshotPaths();
-  if ((await pathExists(p.snapshot)) && (await pathExists(p.memory))) return;
+  if (
+    (await pathExists(p.snapshot)) &&
+    (await pathExists(p.memory)) &&
+    (await baseSnapshotMatchesRootfs(p.snapshot))
+  ) {
+    return;
+  }
   if (!baseSnapshotBuild) {
     baseSnapshotBuild = buildBaseSnapshot().finally(() => {
       baseSnapshotBuild = null;
     });
   }
   return baseSnapshotBuild;
+}
+
+/**
+ * Guard against a STALE golden snapshot after a rootfs rebuild.
+ *
+ * The golden snapshot freezes a guest kernel that had the base rootfs mounted —
+ * including its cached inode/block layout and the rootfs superblock UUID. If
+ * `rootfs.ext4` is later rebuilt (any deploy that touches `services/sandbox-agent`
+ * or `build-rootfs.sh`), those frozen blocks no longer line up with the new
+ * on-disk ext4: a restored clone reads the wrong blocks and ext4's metadata
+ * checksums reject them, surfacing IN-GUEST as `EBADMSG` ("Bad message") on the
+ * first read of anything not already in the snapshot's page cache — e.g. `npm`,
+ * which then "fails to install" with `/bin/sh: npm: Bad message` and an empty
+ * node_modules. The existence check alone can't see this (the files are there,
+ * just stale), so the orchestrator would keep serving the broken snapshot.
+ *
+ * Treat the snapshot as stale whenever the rootfs is NEWER than it, delete the
+ * stale artifacts, and force a rebuild from the CURRENT rootfs. Conservative: any
+ * stat failure falls back to "matches" so a flaky stat never blocks new projects.
+ */
+async function baseSnapshotMatchesRootfs(snapshotPath: string): Promise<boolean> {
+  try {
+    const [snap, rootfs] = await Promise.all([
+      fs.stat(snapshotPath),
+      fs.stat(ROOTFS_BASE_PATH),
+    ]);
+    if (rootfs.mtimeMs <= snap.mtimeMs) return true;
+    console.warn(
+      `[fleet base] golden snapshot predates ${ROOTFS_BASE_PATH} (rootfs was rebuilt) — ` +
+        `regenerating; a stale snapshot restores VMs whose npm reads fail as EBADMSG`,
+    );
+    const p = baseSnapshotPaths();
+    await Promise.all([
+      fs.rm(p.snapshot, { force: true }),
+      fs.rm(p.memory, { force: true }),
+      fs.rm(p.sandbox, { force: true }),
+    ]).catch(() => {});
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 async function buildBaseSnapshot(): Promise<void> {
@@ -518,8 +578,10 @@ async function buildBaseSnapshot(): Promise<void> {
   // each clone's firecracker resolves it against its own cwd → its own disk.
   // Never mounted in the golden (uniqus_golden=1 makes the in-guest sandbox-mount
   // service skip it), so a clone mounting its real disk after restore reads a
-  // fresh superblock with no stale page-cache from this placeholder.
-  await runCmd("truncate", ["-s", "1G", p.sandbox]);
+  // fresh superblock with no stale page-cache from this placeholder. Sized to
+  // SANDBOX_IMAGE_SIZE so the frozen /dev/vdb geometry matches the real
+  // per-project images every clone mounts after restore.
+  await runCmd("truncate", ["-s", SANDBOX_IMAGE_SIZE, p.sandbox]);
   await runCmd("mkfs.ext4", ["-F", "-q", p.sandbox]);
   await ensureBridge();
   await ensureTapDevice(BOOTSTRAP_TAP);
@@ -1208,9 +1270,10 @@ async function ensureSandboxImage(projectId: string, hostSandboxDir: string): Pr
     await fs.access(imagePath);
     return imagePath;
   } catch {
-    // Create a 1 GiB sparse ext4 image. Resize is on the user — Phase-3
-    // adds an automatic grow path when the in-VM agent reports >80% full.
-    await runCmd("truncate", ["-s", "1G", imagePath]);
+    // Create a sparse ext4 image at SANDBOX_IMAGE_SIZE (default 8 GiB). Sparse,
+    // so it only consumes host disk as the project writes into it. Existing
+    // smaller images are grown offline on the host (truncate + resize2fs).
+    await runCmd("truncate", ["-s", SANDBOX_IMAGE_SIZE, imagePath]);
     await runCmd("mkfs.ext4", ["-F", "-q", imagePath]);
   }
   // hostSandboxDir is what we hydrate from at boot — mention it for the

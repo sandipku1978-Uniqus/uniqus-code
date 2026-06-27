@@ -154,16 +154,25 @@ function toTokenUsage(u: OpenAIUsage | undefined | null): TokenUsage | undefined
 
 /**
  * GLM's built-in web search tool (Chat Completions). Z.ai runs it server-side
- * and folds the results into the answer; the loop never executes it. Z.ai's API
- * takes these sub-fields as STRINGS (per the docs' example), so they're strings
- * here on purpose. `search_engine` is left unset so GLM picks its default engine
- * (the documented engine names vary by plan; omitting avoids an invalid-enum
- * rejection). `search_result:"True"` returns the result list in the response.
+ * and folds the results into the answer (with `[n]` citations); the loop never
+ * executes it. Z.ai's API takes these sub-fields as STRINGS (per the docs'
+ * example), so they're strings here on purpose.
+ *
+ * `search_engine` is REQUIRED — NOT optional. With it omitted, glm-5.2 silently
+ * does NOT run the search: it answers from stale training data (or spends the
+ * whole token budget "thinking" and returns nothing), which reads to the user as
+ * "web search is broken". The documented default engine is `search-prime`.
+ * Verified end-to-end against glm-5.2 on /paas/v4 (streaming + non-streaming):
+ * omitting search_engine → no search; `search-prime` → live, cited results
+ * (e.g. correctly returns today's latest framework versions). `search-pro` did
+ * NOT trigger a search in testing, so stick with `search-prime`.
+ * `search_result:"True"` asks for the result list alongside the answer.
  */
 const GLM_WEB_SEARCH_TOOL = {
   type: "web_search",
   web_search: {
     enable: "True",
+    search_engine: "search-prime",
     search_result: "True",
     count: "5",
     content_size: "high",
