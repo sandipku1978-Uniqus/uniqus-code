@@ -138,11 +138,22 @@ export const VISION_BRIDGE_TOOLS: Anthropic.Tool[] = [
 export const TOOLS: Anthropic.Tool[] = [
   {
     name: "read_file",
-    description: "Read the contents of a file in the sandbox.",
+    description:
+      "Read the contents of a file in the sandbox. By default returns the whole file (capped). For large files (e.g. a multi-thousand-line CSS or generated file), pass offset/limit to read just a window — much cheaper than pulling the whole file into context. Line numbers in grep results (path:line:) tell you where to look; then read around that line.",
     input_schema: {
       type: "object",
       properties: {
         path: { type: "string", description: "Path relative to sandbox root." },
+        offset: {
+          type: "number",
+          description:
+            "Optional 1-based line number to start reading from. Use with limit to read a specific range of a large file.",
+        },
+        limit: {
+          type: "number",
+          description:
+            "Optional maximum number of lines to return starting at offset (default 2000 when offset/limit is set). The result is prefixed with a [lines X–Y of N] header so you know where you are.",
+        },
       },
       required: ["path"],
     },
@@ -204,12 +215,21 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "grep",
     description:
-      "Search for a regex pattern in files (skips node_modules and dot-dirs). Returns matching path:line: text triples.",
+      "Search files for a pattern (skips node_modules and dot-dirs). Returns matching path:line: text triples. The pattern is a regular expression (RE2/JS syntax: char classes, anchors, quantifiers, alternation — but NOT lookahead/lookbehind or backreferences). If the pattern isn't a valid regex (e.g. it contains literal parens/brackets like `useState(` or `arr[0]`), it is automatically retried as a plain substring search rather than failing — so you can usually just paste the literal text you're looking for. Set literal:true to force an exact substring match, or case_insensitive:true to ignore case.",
     input_schema: {
       type: "object",
       properties: {
-        pattern: { type: "string" },
+        pattern: { type: "string", description: "Regex (or literal substring — see literal) to search for." },
         path: { type: "string", description: "Optional sub-path to scope search." },
+        case_insensitive: {
+          type: "boolean",
+          description: "Optional, default false. Match case-insensitively.",
+        },
+        literal: {
+          type: "boolean",
+          description:
+            "Optional, default false. Treat pattern as a plain substring, not a regex (no metacharacter interpretation). Use when searching for code containing (, ), [, ], ., *, etc.",
+        },
       },
       required: ["pattern"],
     },

@@ -43,6 +43,40 @@ export interface ChangedFile {
 
 export type RunMode = "plan-then-execute" | "execute-only";
 
+/**
+ * How much the agent may do on its own before pausing for the user (the
+ * composer's mode dropdown, an extension of the old binary Plan toggle). The
+ * agent loop consults the CURRENT mode at every tool call, so the user can
+ * change it at any time — including mid-turn — and it takes effect immediately.
+ *
+ * - `"plan"` — read-only investigation, then propose a plan the user approves
+ *   before anything runs (the old `plan-then-execute`). Default on a brand-new
+ *   project's first turn.
+ * - `"default"` — "ask before edits": pause for approval before any file edit
+ *   OR shell command OR dangerous/expensive op; read-only tools run freely.
+ * - `"acceptEdits"` — "auto-accept edits": file edits and routine commands run
+ *   automatically; still pause for dangerous/expensive ops (rm -rf, git push,
+ *   deploys, DB writes, paid image/sub-agent calls). Default after the first turn.
+ * - `"bypass"` — never pause; every tool runs (the old `execute-only`).
+ */
+export type PermissionMode = "plan" | "default" | "acceptEdits" | "bypass";
+
+/** Map a PermissionMode to the coarse RunMode the plan-vs-execute path keys on. */
+export function runModeForPermission(mode: PermissionMode): RunMode {
+  return mode === "plan" ? "plan-then-execute" : "execute-only";
+}
+
+/**
+ * Risk class the orchestrator assigns a tool call, surfaced on a
+ * `tool_approval_requested` so the UI can label the prompt:
+ * - `edit` — a file write/edit.
+ * - `execute` — a routine shell command / server op.
+ * - `dangerous` — irreversible or money/data-spending (destructive shell,
+ *   DB writes, deploys, paid image/sub-agent calls).
+ * (`read`-class tools never prompt, so they never reach the client.)
+ */
+export type ToolRiskCategory = "edit" | "execute" | "dangerous";
+
 /** LLM providers the coding agent can run on. */
 export type ModelProvider = "anthropic" | "openai" | "google" | "zai";
 
@@ -401,6 +435,13 @@ export type ClientEvent =
       content: string;
       mode: RunMode;
       /**
+       * The permission mode for this turn (the composer's mode dropdown). The
+       * orchestrator prefers this over `mode` when present; `mode` is kept for
+       * back-compat (an older client that only sends plan-then-execute / execute-only
+       * still works). Mid-turn changes ride on `set_permission_mode`, not here.
+       */
+      permission_mode?: PermissionMode;
+      /**
        * Which model to run the agent (and plan step) on for this turn.
        * Omitted or `"auto"` ⇒ the orchestrator picks the best model per role.
        * A catalog id ("<provider>:<model>") ⇒ explicit Advanced override.
@@ -421,6 +462,25 @@ export type ClientEvent =
       file_refs?: string[];
     }
   | { type: "plan_approved"; plan: Plan }
+  /**
+   * Change the permission mode of the in-flight (or next) turn. The agent loop
+   * reads the live mode at every tool call, so switching mid-turn takes effect
+   * on the very next tool. Switching to a MORE permissive mode (e.g. bypass)
+   * auto-resolves any approval the run is currently paused on.
+   */
+  | { type: "set_permission_mode"; mode: PermissionMode }
+  /**
+   * The user's verdict on a paused tool call (`tool_approval_requested`).
+   * `decision`: run it once / run it and stop asking for this tool / decline it.
+   * On `deny`, `feedback` (if any) is fed back to the model as the tool result
+   * so it can adapt instead of just failing.
+   */
+  | {
+      type: "tool_approval_response";
+      call_id: string;
+      decision: "approve" | "approve_always" | "deny";
+      feedback?: string;
+    }
   | { type: "request_tree" }
   | { type: "request_file"; path: string }
   | { type: "reset_session" }
@@ -799,6 +859,29 @@ export type ServerEvent =
     }
   | { type: "plan_proposed"; plan: Plan }
   | { type: "plan_running" }
+  /**
+   * The agent loop paused on a tool call that the current permission mode gates
+   * (an edit in `default`, a dangerous op in `default`/`acceptEdits`). The UI
+   * renders an approval card; the user answers with `tool_approval_response`.
+   * `summary` is a one-line human description of the action; `reason` says why
+   * it's being gated. The matching `tool_result` lands afterward as usual (the
+   * tool ran on approve, or a "declined by user" note on deny).
+   */
+  | {
+      type: "tool_approval_requested";
+      call_id: string;
+      tool: string;
+      category: ToolRiskCategory;
+      summary: string;
+      reason: string;
+      input: unknown;
+    }
+  /**
+   * Echo of a permission-mode change (from `set_permission_mode`, or the server
+   * auto-resolving), so every socket bound to the session — and a reconnecting
+   * one replaying the buffer — keeps its mode dropdown in sync.
+   */
+  | { type: "permission_mode_changed"; mode: PermissionMode }
   | { type: "tree_listing"; entries: TreeEntry[] }
   | { type: "file_content"; path: string; content: string | null }
   | { type: "file_changed"; path: string }

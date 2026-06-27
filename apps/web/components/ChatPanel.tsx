@@ -18,6 +18,7 @@ import { connect, send } from "@/lib/ws-client";
 import PlanReview from "./PlanReview";
 import ChatSessionDropdown from "./ChatSessionDropdown";
 import ModelPicker from "./ModelPicker";
+import PermissionModePicker from "./PermissionModePicker";
 import MicButton from "./MicButton";
 import Modal from "./Modal";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -104,7 +105,7 @@ export default function ChatPanel() {
   const installInProgress = useStore((s) => s.installInProgress);
   const runReattaching = useStore((s) => s.runReattaching);
   const mode = useStore((s) => s.mode);
-  const setModeManual = useStore((s) => s.setModeManual);
+  const permissionMode = useStore((s) => s.permissionMode);
   const model = useStore((s) => s.model);
   const thinking = useStore((s) => s.thinking);
   const addUserMessage = useStore((s) => s.addUserMessage);
@@ -567,6 +568,7 @@ export default function ChatPanel() {
         type: "user_message",
         content: trimmed,
         mode,
+        permission_mode: permissionMode,
         model: model !== "auto" ? model : undefined,
         thinking: thinking !== "medium" ? thinking : undefined,
         file_refs: fileRefs.length > 0 ? fileRefs : undefined,
@@ -582,7 +584,7 @@ export default function ChatPanel() {
       setBusy(true);
       return true;
     },
-    [busy, uploading, project, connected, mode, model, thinking, validFilePaths, addSystem, addUserMessage, setBusy],
+    [busy, uploading, project, connected, mode, permissionMode, model, thinking, validFilePaths, addSystem, addUserMessage, setBusy],
   );
 
   // Load a previous user message back into the composer for editing.
@@ -666,6 +668,7 @@ export default function ChatPanel() {
       type: "user_message",
       content,
       mode,
+      permission_mode: permissionMode,
       model: model !== "auto" ? model : undefined,
       thinking: thinking !== "medium" ? thinking : undefined,
       attachments,
@@ -1332,19 +1335,7 @@ export default function ChatPanel() {
               </svg>
               Files
             </button>
-            <button
-              type="button"
-              onClick={() =>
-                setModeManual(mode === "plan-then-execute" ? "execute-only" : "plan-then-execute")
-              }
-              className={`plan-toggle ${mode === "plan-then-execute" ? "on" : ""}`}
-              title="Plan mode — Uniqus proposes a plan you can edit before it executes. On by default for a brand-new project's first turn."
-            >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
-              Plan
-            </button>
+            <PermissionModePicker />
             <ModelPicker variant="compact" />
             <MicButton
               className="mic-btn"
@@ -1508,6 +1499,8 @@ function itemSig(it: ChatItem): string {
       return `${it.id}:${it.result === undefined ? "p" : it.is_error ? "e" : "r"}:${it.lines_added ?? ""}/${it.lines_removed ?? ""}:${it.imagePaths?.length ?? 0}`;
     case "user_question":
       return `${it.id}:${it.answer ?? ""}`;
+    case "tool_approval":
+      return `${it.id}:${it.decision ?? "p"}`;
     case "plan_proposal":
       return `${it.id}:${it.status}`;
     case "user":
@@ -1873,6 +1866,9 @@ const ChatItemView = memo(function ChatItemView({
   if (item.kind === "user_question") {
     return <UserQuestionCard item={item} />;
   }
+  if (item.kind === "tool_approval") {
+    return <ToolApprovalCard item={item} />;
+  }
   if (item.kind === "plan_proposal") {
     return <PlanReview item={item} />;
   }
@@ -2050,6 +2046,117 @@ function UserQuestionCard({
                     color: "var(--conf-low, #c0392b)",
                   }}
                 >
+                  {sendError}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const APPROVAL_CATEGORY_LABEL: Record<string, string> = {
+  edit: "File change",
+  execute: "Command",
+  dangerous: "Dangerous / costly",
+};
+
+function ToolApprovalCard({
+  item,
+}: {
+  item: Extract<ChatItem, { kind: "tool_approval" }>;
+}) {
+  const resolveToolApproval = useStore((s) => s.resolveToolApproval);
+  const [reason, setReason] = useState("");
+  const [sendError, setSendError] = useState<string | null>(null);
+  const decided = item.decision !== undefined;
+
+  const respond = (decision: "approve" | "approve_always" | "deny"): void => {
+    if (decided) return;
+    const ok = send({
+      type: "tool_approval_response",
+      call_id: item.call_id,
+      decision,
+      feedback: decision === "deny" && reason.trim() ? reason.trim() : undefined,
+    });
+    if (ok) {
+      setSendError(null);
+      resolveToolApproval(item.call_id, decision);
+    } else {
+      setSendError("Couldn't send — reconnecting. Try again.");
+    }
+  };
+
+  const verdictText =
+    item.decision === "approve"
+      ? "Approved"
+      : item.decision === "approve_always"
+        ? `Approved — won't ask again for ${item.tool} this turn`
+        : item.decision === "deny"
+          ? "Declined"
+          : null;
+
+  return (
+    <div className="msg">
+      <div className="head">
+        <span className="av agent">!</span>
+        <span className="name">Permission needed</span>
+        <span className="frame">{APPROVAL_CATEGORY_LABEL[item.category] ?? "Action"}</span>
+      </div>
+      <div className="msg-body" style={{ paddingLeft: 30 }}>
+        <div className="ask-user-card">
+          <div className="ask-user-question" style={{ fontWeight: 600 }}>
+            {item.summary}
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4, lineHeight: 1.4 }}>
+            {item.reason}
+          </div>
+          {decided ? (
+            <div className="ask-user-answer" style={{ marginTop: 8 }}>
+              <span className="ask-user-answer-text">{verdictText}</span>
+            </div>
+          ) : (
+            <>
+              <div className="ask-user-options" style={{ marginTop: 10 }}>
+                <button type="button" onClick={() => respond("approve")} className="ask-user-option">
+                  Approve
+                </button>
+                <button
+                  type="button"
+                  onClick={() => respond("approve_always")}
+                  className="ask-user-option"
+                  title={`Run this and stop asking for ${item.tool} for the rest of this turn`}
+                >
+                  Approve, don't ask again
+                </button>
+                <button
+                  type="button"
+                  onClick={() => respond("deny")}
+                  className="ask-user-option"
+                  style={{ borderColor: "var(--conf-low, #c0392b)" }}
+                >
+                  Reject
+                </button>
+              </div>
+              <form
+                className="ask-user-free"
+                style={{ marginTop: 8 }}
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  respond("deny");
+                }}
+              >
+                <input
+                  type="text"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  placeholder="Optional: tell the agent why / what to do instead…"
+                />
+              </form>
+              {sendError && (
+                <div role="alert" style={{ marginTop: 8, fontSize: 12, color: "var(--conf-low, #c0392b)" }}>
                   {sendError}
                 </div>
               )}

@@ -32,8 +32,28 @@ interface CommandResult {
   exitCode: number | null;
 }
 
-export async function readFile(vm: VmHandle, p: string): Promise<string> {
-  const r = await rpc<{ content: string }>(vm, "GET", `/fs/file?path=${encodeURIComponent(p)}`);
+export async function readFile(
+  vm: VmHandle,
+  p: string,
+  opts?: { offset?: number; limit?: number },
+): Promise<string> {
+  let url = `/fs/file?path=${encodeURIComponent(p)}`;
+  const range = opts && (opts.offset !== undefined || opts.limit !== undefined);
+  if (range) {
+    if (opts!.offset !== undefined) url += `&offset=${Math.floor(opts!.offset)}`;
+    if (opts!.limit !== undefined) url += `&limit=${Math.floor(opts!.limit)}`;
+  }
+  const r = await rpc<{ content: string; total_lines?: number }>(vm, "GET", url);
+  // Range reads: the agent slices in-guest and reports total_lines so we can
+  // render an accurate [lines X–Y of N] header (mirrors sandbox.sliceLines).
+  if (range && typeof r.total_lines === "number") {
+    const start = Math.max(1, Math.floor(opts!.offset ?? 1));
+    const total = r.total_lines;
+    if (start > total) return `[file has ${total} line(s); offset ${start} is past the end]`;
+    const count = Math.max(1, Math.floor(opts!.limit ?? 2000));
+    const end = Math.min(total, start + count - 1);
+    return `[lines ${start}–${end} of ${total}]\n${r.content}`;
+  }
   return r.content;
 }
 
@@ -59,12 +79,22 @@ export async function listDir(vm: VmHandle, p?: string): Promise<string[]> {
   return r.entries;
 }
 
-export async function grep(vm: VmHandle, pattern: string, p?: string): Promise<string> {
+export async function grep(
+  vm: VmHandle,
+  pattern: string,
+  p?: string,
+  opts?: { caseInsensitive?: boolean; literal?: boolean },
+): Promise<string> {
   const r = await rpc<{ matches: string }>(
     vm,
     "POST",
     "/fs/grep",
-    { pattern, path: p ?? null },
+    {
+      pattern,
+      path: p ?? null,
+      case_insensitive: opts?.caseInsensitive === true,
+      literal: opts?.literal === true,
+    },
   );
   return r.matches;
 }

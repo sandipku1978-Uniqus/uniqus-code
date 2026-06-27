@@ -485,6 +485,22 @@ function handleEvent(event: ServerEvent): void {
         event.allow_free_text,
       );
       break;
+    case "tool_approval_requested":
+      s.addToolApproval({
+        callId: event.call_id,
+        tool: event.tool,
+        category: event.category,
+        summary: event.summary,
+        reason: event.reason,
+        input: event.input,
+      });
+      break;
+    case "permission_mode_changed":
+      // Server-driven mode change (another tab switched it, or the run dropped
+      // out of plan into acceptEdits after approval). Sync without marking it a
+      // manual choice so the per-project first-turn defaults still apply.
+      s.setPermissionMode(event.mode);
+      break;
     case "checkpoint_created":
       // Quietly track — surface only when the user opens the Rewind modal,
       // which fetches the full list. Suppress chat noise.

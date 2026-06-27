@@ -16,11 +16,12 @@
 #   - You'll be on a CX/AX dedicated box with KVM enabled in BIOS — most are by
 #     default. If `ls /dev/kvm` fails, request KVM enablement via the Hetzner
 #     Robot console (no charge, takes a few minutes on most boxes).
-#   - Set EXT_IFACE below to your public NIC (`eth0` on most Hetzner images,
-#     `enp0s31f6` on some AX boxes). Run `ip route get 1.1.1.1` to find it.
+#   - EXT_IFACE is auto-detected from the default route (`eth0` on most Hetzner
+#     images, `enp8s0` / `enp0s31f6` on some AX boxes). Override with
+#     EXT_IFACE=... if the box has an unusual routing setup.
 set -euo pipefail
 
-EXT_IFACE="${EXT_IFACE:-eth0}"
+EXT_IFACE="${EXT_IFACE:-$(ip -o -4 route show default | awk '{print $5; exit}')}"
 STATE_DIR="/var/lib/uniqus/firecracker"
 KERNEL_URL="${KERNEL_URL:-}"
 # Golden base snapshots restore with `network_overrides` on PUT /snapshot/load,
@@ -91,44 +92,30 @@ if [[ ! -f "${STATE_DIR}/vmlinux" ]]; then
 fi
 chmod 0644 "${STATE_DIR}/vmlinux"
 
-echo "[4/6] Bridge fcbr0 + masquerade on ${EXT_IFACE}…"
-if ! ip link show fcbr0 >/dev/null 2>&1; then
-  ip link add name fcbr0 type bridge
-  ip addr add 172.16.0.1/16 dev fcbr0
-  ip link set fcbr0 up
-fi
-echo 1 > /proc/sys/net/ipv4/ip_forward
-sysctl -w net.ipv4.ip_forward=1
-# Persist
+echo "[4/6] Firecracker host networking (bridge fcbr0 + masquerade, reboot-persistent)…"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The bridge, masquerade, and per-VM isolation now live in the idempotent
+# host-net.sh so the exact same logic runs here (first provision) AND on every
+# boot via the systemd unit. The bridge device is runtime-only state that does
+# NOT survive a reboot — without the boot unit, the orchestrator comes up before
+# the bridge exists and every sandbox start throws "bridge fcbr0 is missing".
+install -m 0755 "${HERE}/host-net.sh" /usr/local/sbin/uniqus-firecracker-net.sh
+# Persist the sysctls + module so a fresh boot is correct from t=0, even before
+# the unit runs (host-net.sh also asserts them at runtime).
 grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
-
-iptables -t nat -C POSTROUTING -o "${EXT_IFACE}" -s 172.16.0.0/16 -j MASQUERADE 2>/dev/null \
-  || iptables -t nat -A POSTROUTING -o "${EXT_IFACE}" -s 172.16.0.0/16 -j MASQUERADE
-iptables -C FORWARD -i fcbr0 -o "${EXT_IFACE}" -j ACCEPT 2>/dev/null \
-  || iptables -A FORWARD -i fcbr0 -o "${EXT_IFACE}" -j ACCEPT
-iptables -C FORWARD -o fcbr0 -i "${EXT_IFACE}" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
-  || iptables -A FORWARD -o fcbr0 -i "${EXT_IFACE}" -m state --state RELATED,ESTABLISHED -j ACCEPT
-# Block VM → host private services. Adjust as needed.
-iptables -C FORWARD -i fcbr0 -d 169.254.169.254 -j DROP 2>/dev/null \
-  || iptables -I FORWARD -i fcbr0 -d 169.254.169.254 -j DROP
-
-# Per-VM network isolation (P0.3). Every project VM shares the fcbr0 bridge, so
-# without this a compromised VM could reach a peer VM's 172.16.x.y directly at
-# L2 (the bridge forwards those frames without ever consulting iptables). Two
-# steps fix it: (a) make bridged IP traffic traverse the iptables FORWARD chain
-# (br_netfilter + bridge-nf-call-iptables), then (b) DROP any VM→VM hop
-# (fcbr0→fcbr0). VM→gateway (the host, delivered locally — not FORWARD) and
-# VM→internet (fcbr0→${EXT_IFACE}) are unaffected, so egress + the metadata
-# block above keep working; only peer-to-peer traffic is severed.
-modprobe br_netfilter 2>/dev/null || true
 grep -qx 'br_netfilter' /etc/modules 2>/dev/null || echo 'br_netfilter' >> /etc/modules
-sysctl -w net.bridge.bridge-nf-call-iptables=1 2>/dev/null || true
 grep -q '^net.bridge.bridge-nf-call-iptables=1' /etc/sysctl.conf \
   || echo 'net.bridge.bridge-nf-call-iptables=1' >> /etc/sysctl.conf
-iptables -C FORWARD -i fcbr0 -o fcbr0 -j DROP 2>/dev/null \
-  || iptables -I FORWARD -i fcbr0 -o fcbr0 -j DROP
-
+# Establish the bridge + iptables now.
+EXT_IFACE="${EXT_IFACE}" /usr/local/sbin/uniqus-firecracker-net.sh
+# Persist iptables so the rules are restored early at boot (the unit re-asserts
+# them too — belt and suspenders).
 netfilter-persistent save || iptables-save > /etc/iptables/rules.v4
+# Install + enable the boot unit so reboots self-heal (recreates the bridge
+# before uniqus-orchestrator.service starts).
+install -m 0644 "${HERE}/uniqus-firecracker-net.service" /etc/systemd/system/uniqus-firecracker-net.service
+systemctl daemon-reload
+systemctl enable uniqus-firecracker-net.service
 
 echo "[5/6] /dev/kvm group access…"
 if ! getent group kvm >/dev/null; then groupadd kvm; fi

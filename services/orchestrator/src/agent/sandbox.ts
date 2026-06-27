@@ -77,9 +77,53 @@ function resolvePath(sandbox: Sandbox, p: string): string {
 /** Cap a single read_file / grep result so one call can't flood the context. */
 const MAX_READ_BYTES = 256 * 1024;
 
-export async function readFile(sandbox: Sandbox, p: string): Promise<string> {
-  if (sandbox.vm) return await fcAgent.readFile(sandbox.vm, p);
+/** Default line window when a range read is requested without an explicit limit. */
+const DEFAULT_READ_LINE_LIMIT = 2000;
+
+export interface ReadFileOptions {
+  /** 1-based line to start reading from. */
+  offset?: number;
+  /** Maximum number of lines to return starting at offset. */
+  limit?: number;
+}
+
+/**
+ * Slice `content` to the requested 1-based [offset, offset+limit) line window and
+ * prefix a `[lines X–Y of N]` header so the model knows where it is. Shared by the
+ * host path and the VM path (which slices in-guest and reports total_lines).
+ */
+export function sliceLines(content: string, total: number, offset?: number, limit?: number): string {
+  const start = Math.max(1, offset ?? 1);
+  const count = Math.max(1, limit ?? DEFAULT_READ_LINE_LIMIT);
+  if (start > total) {
+    return `[file has ${total} line(s); offset ${start} is past the end]`;
+  }
+  const end = Math.min(total, start + count - 1);
+  return `[lines ${start}–${end} of ${total}]\n${content}`;
+}
+
+export async function readFile(
+  sandbox: Sandbox,
+  p: string,
+  opts?: ReadFileOptions,
+): Promise<string> {
+  if (sandbox.vm) return await fcAgent.readFile(sandbox.vm, p, opts);
   const full = resolvePath(sandbox, p);
+
+  // Range read: return just the requested line window (cheap for huge files).
+  if (opts && (opts.offset !== undefined || opts.limit !== undefined)) {
+    const content = await fs.readFile(full, "utf-8");
+    const lines = content.split("\n");
+    const total = lines.length;
+    const start = Math.max(1, Math.floor(opts.offset ?? 1));
+    const count = Math.max(1, Math.floor(opts.limit ?? DEFAULT_READ_LINE_LIMIT));
+    if (start > total) {
+      return `[file has ${total} line(s); offset ${start} is past the end]`;
+    }
+    const slice = lines.slice(start - 1, start - 1 + count).join("\n");
+    return sliceLines(slice, total, start, count);
+  }
+
   const stat = await fs.stat(full);
   if (stat.size > MAX_READ_BYTES) {
     // Read only the head rather than pulling a multi-MB file into memory.
@@ -89,7 +133,7 @@ export async function readFile(sandbox: Sandbox, p: string): Promise<string> {
       const { bytesRead } = await fh.read(buf, 0, MAX_READ_BYTES, 0);
       return (
         buf.subarray(0, bytesRead).toString("utf-8") +
-        `\n\n[... file truncated: ${stat.size} bytes total, showing the first ${MAX_READ_BYTES}. Read specific ranges if you need more. ...]`
+        `\n\n[... file truncated: ${stat.size} bytes total, showing the first ${MAX_READ_BYTES}. Pass offset/limit to read a specific line range. ...]`
       );
     } finally {
       await fh.close();
@@ -198,10 +242,40 @@ export async function listDir(sandbox: Sandbox, p?: string): Promise<string[]> {
   return entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name));
 }
 
-export async function grep(sandbox: Sandbox, pattern: string, p?: string): Promise<string> {
-  if (sandbox.vm) return await fcAgent.grep(sandbox.vm, pattern, p);
+export interface GrepOptions {
+  caseInsensitive?: boolean;
+  /** Treat pattern as a plain substring, not a regex. */
+  literal?: boolean;
+}
+
+export async function grep(
+  sandbox: Sandbox,
+  pattern: string,
+  p?: string,
+  opts?: GrepOptions,
+): Promise<string> {
+  if (sandbox.vm) return await fcAgent.grep(sandbox.vm, pattern, p, opts);
   const target = p ? resolvePath(sandbox, p) : path.resolve(sandbox.rootDir);
-  const regex = new RegExp(pattern);
+
+  // Build a matcher. A literal request — or a pattern that won't compile as a
+  // regex (e.g. it contains literal parens/brackets the model meant verbatim) —
+  // falls back to a case-aware substring test rather than erroring, so grep
+  // behaves like the model expects from shell grep.
+  const ci = opts?.caseInsensitive === true;
+  let fellBackToLiteral = false;
+  let regex: RegExp | null = null;
+  if (!opts?.literal) {
+    try {
+      regex = new RegExp(pattern, ci ? "i" : "");
+    } catch {
+      fellBackToLiteral = true;
+    }
+  }
+  const needle = ci ? pattern.toLowerCase() : pattern;
+  const test = regex
+    ? (line: string) => regex!.test(line)
+    : (line: string) => (ci ? line.toLowerCase() : line).includes(needle);
+
   const results: string[] = [];
   const root = path.resolve(sandbox.rootDir);
   // Stop once we've gathered enough — a broad pattern over a big tree can match
@@ -224,7 +298,7 @@ export async function grep(sandbox: Sandbox, pattern: string, p?: string): Promi
           const content = await fs.readFile(full, "utf-8");
           const lines = content.split("\n");
           for (let i = 0; i < lines.length; i++) {
-            if (regex.test(lines[i])) {
+            if (test(lines[i])) {
               const line = `${path.relative(root, full)}:${i + 1}: ${lines[i].trim()}`;
               results.push(line);
               bytes += line.length + 1;
@@ -242,11 +316,14 @@ export async function grep(sandbox: Sandbox, pattern: string, p?: string): Promi
   }
 
   await walk(target);
-  if (results.length === 0) return "(no matches)";
+  const note = fellBackToLiteral
+    ? "[pattern is not a valid regex — searched as a literal substring]\n"
+    : "";
+  if (results.length === 0) return `${note}(no matches)`;
   const out = results.join("\n");
   return capped
-    ? `${out}\n\n[... more matches omitted (hit ${MAX_READ_BYTES}-byte cap) — use a narrower pattern or path ...]`
-    : out;
+    ? `${note}${out}\n\n[... more matches omitted (hit ${MAX_READ_BYTES}-byte cap) — use a narrower pattern or path ...]`
+    : `${note}${out}`;
 }
 
 export interface CommandResult {
@@ -673,9 +750,35 @@ export async function readServerLogAsync(id: string, maxBytes = 8000): Promise<s
   const server = servers.get(id);
   if (!server) throw new Error(`No server with id ${id}`);
   if (server.vm) {
-    return await fcAgent.readServerLog(server.vm, server.vmServerId ?? id, maxBytes);
+    try {
+      return await fcAgent.readServerLog(server.vm, server.vmServerId ?? id, maxBytes);
+    } catch (err) {
+      // The in-VM agent prunes a server the instant its process exits, but never
+      // tells the host — so our entry lingers and the agent's id resolves to a
+      // vmServerId the VM no longer has. That surfaced as a cryptic
+      // "HTTP 404: no server <internal-id>" the model couldn't act on, sending it
+      // into a stop→edit→restart spiral. Detect the gone-server case, prune the
+      // stale host entry (so list_servers/the preview stop pointing at a corpse),
+      // and hand back an honest, actionable message instead of the raw 404.
+      if (isServerGoneError(err)) {
+        servers.delete(id);
+        sandboxEvents.emit("server_exit", id, server.project_id);
+        return `The dev server ${id} is no longer running — its process exited inside the sandbox (it most likely crashed on startup or after a code change). Its in-VM log was discarded when it died. Start it again with start_server and watch the new log; if it keeps dying, the crash is in the app, not the server — check the most recent edit.`;
+      }
+      throw err;
+    }
   }
   return server.log.value.slice(-maxBytes);
+}
+
+/**
+ * True when an in-VM RPC failed because the server no longer exists in the
+ * guest (its process exited and the in-VM reaper removed it). The agent replies
+ * `404 {"error":"no server <id>"}`, which our rpc() wraps into the Error message.
+ */
+function isServerGoneError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /HTTP 404/.test(msg) && /no server/.test(msg);
 }
 
 export function stopAllServers(): void {

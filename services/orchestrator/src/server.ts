@@ -32,6 +32,8 @@ import type {
   DesignFindings,
   DesignSystemDraft,
   ChangedFile,
+  PermissionMode,
+  ToolRiskCategory,
 } from "@uniqus/api-types";
 import {
   MODEL_CATALOG,
@@ -39,7 +41,9 @@ import {
   estimateTurnCostUsd,
   DEFAULT_DESIGN_TOKENS,
   roleAtLeast,
+  runModeForPermission,
 } from "@uniqus/api-types";
+import { decidePermission } from "./agent/permissions.js";
 import { runAgentLoop } from "./agent/loop.js";
 import { detectActiveConnectors } from "./connectors/detector.js";
 import { runInteractPreview, type InteractAction } from "./agent/interact.js";
@@ -72,11 +76,13 @@ import {
   listCheckpoints,
   restoreCheckpoint,
   getCheckpointDiff,
+  clearCheckpoints,
 } from "./agent/checkpoints.js";
 import {
   isFirecrackerEnabled,
   ensureVm,
   destroy as destroyVm,
+  syncRestoreToVm,
   listVms,
   startIdleSweeper,
   stopIdleSweeper,
@@ -318,9 +324,46 @@ interface RunHandle {
   resolvePlan: ((plan: Plan) => void) | null;
   /** Resolve/reject pending ask_user questions, keyed by tool call_id. */
   answerResolvers: Map<string, { resolve: (a: string) => void; reject: (e: Error) => void }>;
+  /**
+   * The LIVE permission mode for this run. Read by the loop before every tool
+   * call (via the getPermissionMode closure), so a `set_permission_mode` event
+   * — even mid-turn — takes effect on the next tool. Mutated in place here.
+   */
+  permissionMode: PermissionMode;
+  /**
+   * Resolve/reject pending tool-approval prompts, keyed by tool call_id. The
+   * `category` is kept so a switch to a more-permissive mode can auto-resolve a
+   * prompt that mode would no longer gate. Mirrors `answerResolvers`.
+   */
+  approvalResolvers: Map<
+    string,
+    {
+      resolve: (v: { decision: "approve" | "approve_always" | "deny"; feedback?: string }) => void;
+      reject: (e: Error) => void;
+      category: ToolRiskCategory;
+    }
+  >;
 }
 const runs = new Map<string, RunHandle>();
 const runKey = (projectId: string, sessionId: string): string => `${projectId}:${sessionId}`;
+
+// ── Session history revision (A1 follow-up: keep reconnected sockets honest) ──
+// The per-socket `history` array is a cache hydrated once at connect. A run that
+// detaches on disconnect finishes on its ORIGINAL socket's closure and persists
+// its messages to the DB — but a socket that reconnected mid-turn (a fresh
+// closure with its own `history`) never sees them, and a second tab on the same
+// session is just as stale. A "continue" on such a socket would replay
+// pre-divergence context and make the agent redo work that already ran. We stamp
+// a revision per session, bumped whenever a turn finishes persisting; a socket
+// reloads from the DB at turn start whenever the session's revision moved past
+// what it last synced. A single socket running its own turns keeps its rev in
+// sync, so the common path never reloads.
+const sessionHistoryRev = new Map<string, number>();
+function bumpSessionHistoryRev(key: string): number {
+  const next = (sessionHistoryRev.get(key) ?? 0) + 1;
+  sessionHistoryRev.set(key, next);
+  return next;
+}
 
 // Cap the coalesced replay log (entries, not tokens — text/thinking deltas are
 // merged on push, so a normal turn stays well under this).
@@ -344,6 +387,10 @@ function registerRun(
     wake: () => {},
     resolvePlan: null,
     answerResolvers: new Map(),
+    // Overwritten from the user_message's permission_mode before the loop runs;
+    // bypass is the safe back-compat default (old execute-only = run everything).
+    permissionMode: "bypass",
+    approvalResolvers: new Map(),
   };
   runs.set(key, handle);
   return handle;
@@ -1518,6 +1565,16 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const sandbox = sandboxDirFor(projectId);
     const result = await restoreCheckpoint(sandbox, projectId, sha);
     if (!result.ok) return json(res, 400, { error: result.error });
+    // restoreCheckpoint only rewound the HOST mirror. In Firecracker mode the VM
+    // owns the copy the agent reads, run_command runs against, and the dev server
+    // serves — so realign the guest with the rewound mirror, or the restore is
+    // invisible inside the VM (the rewind would change nothing the agent or the
+    // live preview can see). Awaited so a 200 means the running app is actually
+    // on the restored state; syncRestoreToVm is best-effort and never throws.
+    if (isFirecrackerEnabled()) {
+      const how = await syncRestoreToVm(projectId, sandbox);
+      console.log(`[checkpoints] restore ${projectId.slice(0, 8)} → vm realign: ${how}`);
+    }
     void audit({
       project_id: projectId,
       user_id: user.id,
@@ -3111,6 +3168,11 @@ async function handleProjectDelete(
   } catch (err) {
     console.error(`sandbox cleanup for ${projectId} failed:`, err);
   }
+  // The per-project checkpoint shadow repo lives at the SIBLING path
+  // `<id>.checkpoints/` (so its .git never collides with the user's repo), which
+  // is OUTSIDE sandboxDirFor(projectId) — the fs.rm above never touched it.
+  // Without this every deleted project leaks its shadow git repo on disk forever.
+  await clearCheckpoints(sandboxDirFor(projectId), projectId);
   clearTracker(projectId);
 
   // 3. Kick any live WS sessions on this project off so they don't
@@ -3778,6 +3840,10 @@ async function handleConnection(
   // Mutable history; populated after async hydrate below. Mutating in place
   // keeps the reference stable for runAgentLoop across many turns.
   const history: Anthropic.MessageParam[] = [];
+  // The session-history revision this socket's `history` is in sync with. Set at
+  // hydration; compared at turn start to detect history another socket/run
+  // advanced while we held a stale cache (see sessionHistoryRev).
+  let syncedHistoryRev = 0;
   // The pending-plan resolver and ask_user resolvers now live on the run
   // registry's RunHandle (A1), not in this per-socket closure, so a reconnected
   // socket can approve a plan / answer a question for a run that began on a
@@ -3847,6 +3913,49 @@ async function handleConnection(
         if (pending) {
           run!.answerResolvers.delete(event.call_id);
           pending.resolve(typeof event.answer === "string" ? event.answer : "");
+        }
+        return;
+      }
+
+      if (event.type === "set_permission_mode") {
+        // Change the live mode for the in-flight run (next tool honors it). If no
+        // run is active the client just changed its own next-turn default, which
+        // rides on the next user_message — nothing to do server-side.
+        const run = runs.get(runKey(project.id, sessionId));
+        if (run) {
+          run.permissionMode = event.mode;
+          // Auto-resolve any approval the new mode would no longer gate (e.g. the
+          // user hit a prompt, then switched to bypass) so the run isn't left
+          // waiting on a card the UI has effectively dismissed.
+          for (const [callId, p] of run.approvalResolvers) {
+            if (decidePermission(event.mode, p.category) === "allow") {
+              run.approvalResolvers.delete(callId);
+              p.resolve({ decision: "approve" });
+            }
+          }
+        }
+        // Echo to every socket on the session so all tabs' dropdowns stay in sync.
+        broadcastToSession(project.id, sessionId, {
+          type: "permission_mode_changed",
+          mode: event.mode,
+        });
+        return;
+      }
+
+      if (event.type === "tool_approval_response") {
+        const run = runs.get(runKey(project.id, sessionId));
+        const pending = run?.approvalResolvers.get(event.call_id);
+        if (pending) {
+          run!.approvalResolvers.delete(event.call_id);
+          pending.resolve({
+            decision:
+              event.decision === "approve_always"
+                ? "approve_always"
+                : event.decision === "deny"
+                  ? "deny"
+                  : "approve",
+            feedback: typeof event.feedback === "string" ? event.feedback : undefined,
+          });
         }
         return;
       }
@@ -3990,7 +4099,21 @@ async function handleConnection(
             p.reject(new Error("ask_user aborted by user"));
           }
           runHandle.answerResolvers.clear();
+          // Reject pending tool-approval waits too — the loop treats a rejected
+          // approval as a deny and synthesizes a well-formed tool_result, so a
+          // Stop during an approval prompt unwinds the turn instead of hanging.
+          for (const [, p] of runHandle.approvalResolvers) {
+            p.reject(new Error("tool approval aborted by user"));
+          }
+          runHandle.approvalResolvers.clear();
         };
+        // Effective permission mode for this turn. Prefer the new field; fall
+        // back to deriving it from the legacy `mode` so an older client still
+        // works (plan-then-execute → plan, execute-only → bypass = old behavior).
+        const permissionMode: PermissionMode =
+          event.permission_mode ??
+          (event.mode === "plan-then-execute" ? "plan" : "bypass");
+        runHandle.permissionMode = permissionMode;
         // Lazy VM boot. ensureVm is idempotent — same project id returns
         // the same VM (and resumes if it was paused).
         if (isFirecrackerEnabled() && !vmHandle) {
@@ -4075,12 +4198,37 @@ async function handleConnection(
         const selectedElement = parseSelectedElement(
           (event as { selected_element?: unknown }).selected_element,
         );
+        // Re-sync `history` from the DB if another socket/run advanced this
+        // session since we hydrated (reconnect-to-detached-run, or a second
+        // tab). Without this the loop replays a stale per-socket cache and the
+        // agent redoes work that already ran — and was persisted — elsewhere.
+        // The earlier run is unregistered (so we got past the busy gate) only
+        // after its finally persisted, so the DB is complete here. No-op for a
+        // single socket running its own turns.
+        {
+          const curRev = sessionHistoryRev.get(runK) ?? 0;
+          if (curRev !== syncedHistoryRev) {
+            try {
+              const fresh = await loadHistory(project.id, sessionId);
+              history.splice(0, history.length, ...fresh);
+              syncedHistoryRev = curRev;
+              console.log(
+                `[ws ${project.id}] re-synced history from DB (rev ${curRev}, ${fresh.length} msgs) before turn`,
+              );
+            } catch (err) {
+              console.error(`[ws ${project.id}] history re-sync failed:`, err);
+            }
+          }
+        }
         try {
           await runSession(
             event.content,
             event.attachments,
             event.file_refs,
-            event.mode,
+            // Derive the plan-vs-execute path from the permission mode (plan →
+            // plan-then-execute, everything else → execute-only). The finer
+            // gating happens inside the loop via getPermissionMode below.
+            runModeForPermission(permissionMode),
             event.model,
             event.thinking,
             selectedElement,
@@ -4107,6 +4255,41 @@ async function handleConnection(
                   allow_free_text: payload.allow_free_text,
                 });
               }),
+            // Live mode getter — the loop reads this fresh before every tool, so
+            // a `set_permission_mode` event mid-turn takes effect immediately.
+            () => runHandle.permissionMode,
+            // Setter — used after a plan is approved to drop out of plan mode
+            // into acceptEdits for the execution phase (and broadcast the change).
+            (m: PermissionMode) => {
+              runHandle.permissionMode = m;
+              broadcastToSession(project.id, sessionId, {
+                type: "permission_mode_changed",
+                mode: m,
+              });
+            },
+            // Approval-prompt closure — registers a resolver on the run and emits
+            // a tool_approval_requested; resolved by tool_approval_response (or a
+            // mode switch / abort). Mirrors the ask_user closure above.
+            (callId, info) =>
+              new Promise<{
+                decision: "approve" | "approve_always" | "deny";
+                feedback?: string;
+              }>((resolve, reject) => {
+                runHandle.approvalResolvers.set(callId, {
+                  resolve,
+                  reject,
+                  category: info.category,
+                });
+                runSend({
+                  type: "tool_approval_requested",
+                  call_id: callId,
+                  tool: info.tool,
+                  category: info.category,
+                  summary: info.summary,
+                  reason: info.reason,
+                  input: info.input,
+                });
+              }),
             currentAbort.signal,
           );
           await touchProject(project.id);
@@ -4116,6 +4299,11 @@ async function handleConnection(
           // unregisterRun also drops this run's ask_user resolvers so a
           // subsequent turn can't satisfy a stale call_id.
           unregisterRun(runK);
+          // runSession's own finally has persisted exactly this turn's messages
+          // by the time we get here. Bump the session revision so any OTHER
+          // socket bound to this session re-syncs from the DB before its next
+          // turn, and mark ourselves in sync so we don't reload before our own.
+          syncedHistoryRev = bumpSessionHistoryRev(runK);
         }
       }
     } catch (err) {
@@ -4149,6 +4337,9 @@ async function handleConnection(
   }
 
   try {
+    // Capture the revision BEFORE the read: if a turn persists between this
+    // line and the read, we may reload once redundantly next turn — never miss.
+    syncedHistoryRev = sessionHistoryRev.get(runKey(project.id, sessionId)) ?? 0;
     const loaded = await loadHistory(project.id, sessionId);
     history.push(...loaded);
   } catch (err) {
@@ -4549,6 +4740,21 @@ async function runSession(
     callId: string,
     payload: { question: string; options?: string[]; allow_free_text: boolean },
   ) => Promise<string>,
+  /** Reads the run's LIVE permission mode (changeable mid-turn). */
+  getPermissionMode: () => PermissionMode,
+  /** Sets the run's permission mode + broadcasts the change to all tabs. */
+  setPermissionMode: (mode: PermissionMode) => void,
+  /** Registers a tool-approval prompt and resolves with the user's verdict. */
+  registerToolApproval: (
+    callId: string,
+    info: {
+      tool: string;
+      category: ToolRiskCategory;
+      summary: string;
+      reason: string;
+      input: unknown;
+    },
+  ) => Promise<{ decision: "approve" | "approve_always" | "deny"; feedback?: string }>,
   signal: AbortSignal,
 ): Promise<void> {
   const start = Date.now();
@@ -4670,6 +4876,11 @@ async function runSession(
     }
     send({ type: "plan_running" });
     finalMessage = `${messageWithRefs}\n\n${formatPlanForExecution(approved)}`;
+    // The plan is approved — the execution phase should actually run, not prompt
+    // on every edit (mode "plan" gates everything). Drop into acceptEdits, which
+    // auto-accepts edits/commands but still guards dangerous ops. The setter
+    // broadcasts the change so the composer's dropdown follows.
+    setPermissionMode("acceptEdits");
   }
 
   // Agent-initiated plan mode (#2b / enter_plan_mode tool). Only offered when
@@ -4828,6 +5039,10 @@ async function runSession(
     onUsage: emitUsage,
     requestUserAnswer: registerUserAnswer,
     requestPlan,
+    // Permission gating (the composer's mode dropdown). The loop reads the live
+    // mode before each tool and pauses via requestToolApproval when gated.
+    getPermissionMode,
+    requestToolApproval: registerToolApproval,
     onCompacted: (info) =>
       send({
         type: "history_compacted",

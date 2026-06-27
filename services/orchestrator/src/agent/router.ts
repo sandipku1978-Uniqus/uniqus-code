@@ -122,7 +122,12 @@ export function resolveModel(role: ModelRole, choice?: ModelChoice): ResolvedMod
   }
   const fromOps = fromEnv(role);
   if (fromOps) return fromOps;
-  // "auto" for the user-facing roles: GLM-5.2 is the default when its key is
+  // "auto" for the user-facing roles returns a STATIC default here; the agent
+  // loop and plan mode then refine it per task via agent/autoRouter.ts (route
+  // routine work cheap, escalate hard/vision turns). This map is the floor Auto
+  // falls back to when task routing finds no signal or is unavailable.
+  //
+  // GLM-5.2 is the default when its key is
   // configured (near-Opus coding quality at a fraction of the cost). When no
   // Z.ai key is set we fall back to AUTO (Claude), so Auto is never broken on an
   // orchestrator that hasn't been given the key — the switch flips on the moment

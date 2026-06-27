@@ -201,6 +201,57 @@ export function resolveTarget(
 }
 
 /**
+ * First-load self-heal. A just-started dev server commonly isn't ready for the
+ * very first preview hit — it's still binding the port, or (Next.js/Turbopack,
+ * Vite) compiling the first route on demand, which can take far longer than a
+ * single request's patience. That surfaces as connect-refused, "socket hang up"
+ * (ECONNRESET), or a slow no-response that trips the upstream timeout — all of
+ * which used to dead-end at a hard 502 the user had to manually refresh past.
+ * Instead, for a top-level navigation we serve an auto-retrying "warming up"
+ * page that reloads itself until the server answers, bounded by this budget;
+ * past it the real error shows (the server is probably genuinely down).
+ */
+const PREVIEW_WARMUP_BUDGET_MS = 120_000;
+/** Internal query param carrying the warmup start time across reloads. */
+const WARM_PARAM = "__uniqus_warm";
+
+/** A GET for a top-level document (vs an asset / XHR / API call). */
+function isDocumentNavigation(req: IncomingMessage): boolean {
+  if ((req.method ?? "GET").toUpperCase() !== "GET") return false;
+  return String(req.headers["accept"] ?? "").includes("text/html");
+}
+
+/** The warmup start-timestamp the proxy embedded in the reload URL, or null. */
+export function readWarmStart(url: string): number | null {
+  const qi = url.indexOf("?");
+  if (qi < 0) return null;
+  const v = new URLSearchParams(url.slice(qi + 1)).get(WARM_PARAM);
+  if (!v) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Same URL with WARM_PARAM set to `start` — the page reloads to this. */
+export function withWarmParam(url: string, start: number): string {
+  const qi = url.indexOf("?");
+  const path = qi < 0 ? url : url.slice(0, qi);
+  const params = new URLSearchParams(qi < 0 ? "" : url.slice(qi + 1));
+  params.set(WARM_PARAM, String(start));
+  return `${path}?${params.toString()}`;
+}
+
+/** Drop our internal warmup param before forwarding upstream (the app never sees it). */
+export function stripWarmParam(innerPath: string): string {
+  const qi = innerPath.indexOf("?");
+  if (qi < 0) return innerPath;
+  const params = new URLSearchParams(innerPath.slice(qi + 1));
+  if (!params.has(WARM_PARAM)) return innerPath;
+  params.delete(WARM_PARAM);
+  const rest = params.toString();
+  return rest ? `${innerPath.slice(0, qi)}?${rest}` : innerPath.slice(0, qi);
+}
+
+/**
  * Forward an HTTP request to the in-sandbox dev server and stream the response back.
  *
  * For HTML responses we buffer + inject two tiny bridge scripts: a
@@ -234,13 +285,20 @@ export function proxyHttp(
       hostname: target.host,
       port: target.port,
       method: req.method,
-      path: target.innerPath,
+      // Strip our internal warmup param so the dev server only ever sees its own
+      // clean path (the param rides on the auto-retry reload URL, not the app).
+      path: stripWarmParam(target.innerPath),
       headers,
       // Bound the upstream. During a VM restart/migration the TAP IP can
       // black-hole packets (SYN dropped or accepted with no response), and
       // without a timeout the client + upstream sockets stay open indefinitely;
       // HMR reconnect storms then leak FDs on the orchestrator (C-103).
-      timeout: 30_000,
+      // 90s (up from 30s): a cold Next.js/Turbopack first-route compile routinely
+      // runs past 30s, and killing the request mid-compile was the #1 source of
+      // first-preview 502s ("upstream timed out") even though the server was fine.
+      // The warmup page below still bounds total retry time, so a genuinely dead
+      // upstream is surfaced quickly via connect-refused, not held for 90s.
+      timeout: 90_000,
     },
     (upRes) => {
       const outHeaders: Record<string, string | string[]> = {};
@@ -335,19 +393,34 @@ export function proxyHttp(
     upstream.destroy(new Error("upstream timed out"));
   });
   upstream.on("error", (err) => {
-    if (!res.headersSent) {
-      // Don't leak the upstream error text (Node connect errors embed the VM's
-      // internal IP:port) to a SHARE recipient — an untrusted party by design
-      // (C-102). Owners (no shareToken) still get the detailed message.
-      const detail = target.shareToken
-        ? "It may be offline. Please try again later."
-        : `Could not connect to the dev server: ${err.message}. It may have crashed or timed out. Ask the Uniqus agent to check the server logs and restart.`;
-      const html = previewErrorPage(502, "Oh no! The server seems to be down", detail);
-      res.writeHead(502, { "Content-Type": "text/html" });
-      res.end(html);
-    } else {
+    if (res.headersSent) {
       res.destroy();
+      return;
     }
+    // First-load self-heal: for a top-level navigation that failed to reach the
+    // dev server (connect-refused / "socket hang up" / timed-out compile), serve
+    // an auto-retrying "warming up" page instead of a terminal 502, so the iframe
+    // loads itself once the server is ready. Bounded by PREVIEW_WARMUP_BUDGET_MS:
+    // the first failure stamps a start time into the reload URL; once the budget
+    // elapses we fall through to the real error below.
+    if (isDocumentNavigation(req)) {
+      const start = readWarmStart(req.url ?? "") ?? Date.now();
+      if (Date.now() - start < PREVIEW_WARMUP_BUDGET_MS) {
+        const reloadUrl = withWarmParam(req.url ?? target.innerPath, start);
+        res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
+        res.end(previewWarmingPage(reloadUrl, start));
+        return;
+      }
+    }
+    // Don't leak the upstream error text (Node connect errors embed the VM's
+    // internal IP:port) to a SHARE recipient — an untrusted party by design
+    // (C-102). Owners (no shareToken) still get the detailed message.
+    const detail = target.shareToken
+      ? "It may be offline. Please try again later."
+      : `Could not connect to the dev server: ${err.message}. It may have crashed or timed out. Ask the Uniqus agent to check the server logs and restart.`;
+    const html = previewErrorPage(502, "Oh no! The server seems to be down", detail);
+    res.writeHead(502, { "Content-Type": "text/html" });
+    res.end(html);
   });
 
   req.pipe(upstream);
@@ -871,6 +944,63 @@ function escapeHtml(s: string): string {
     /[&<>"']/g,
     (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] ?? c,
   );
+}
+
+/**
+ * Auto-retrying "warming up" page served while a freshly-started dev server is
+ * still binding/compiling (see PREVIEW_WARMUP_BUDGET_MS). It reloads itself to
+ * `reloadUrl` (which carries the warmup start time) every ~2s; the moment the
+ * server answers, the reload gets the real app instead of this page. After the
+ * budget elapses it stops and offers a manual retry. Self-contained — no injected
+ * bridge scripts (this isn't the app's HTML). `reloadUrl`/`startMs` are
+ * server-controlled (a path + a number), but reloadUrl is still JSON-stringified
+ * with `<` escaped so it can never break out of the script string.
+ */
+export function previewWarmingPage(reloadUrl: string, startMs: number): string {
+  const safeUrl = JSON.stringify(reloadUrl).replace(/</g, "\\u003c");
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Starting preview…</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,"Segoe UI",Roboto,sans-serif;background:#0e0e14;color:#e4e2dc;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
+.card{text-align:center;max-width:360px}
+.spin{width:36px;height:36px;margin:0 auto 18px;border:3px solid #2a2a36;border-top-color:#a78bfa;border-radius:50%;animation:s .8s linear infinite}
+@keyframes s{to{transform:rotate(360deg)}}
+h1{font-size:16px;margin-bottom:8px;color:#e4e2dc}
+p{font-size:13px;color:#9ca3af;line-height:1.6}
+.track{height:4px;background:#1a1a24;border-radius:2px;margin-top:18px;overflow:hidden}
+.bar{height:100%;width:0;background:#a78bfa;transition:width .5s linear}
+#giveup{display:none}
+button{margin-top:14px;background:#a78bfa;color:#0e0e14;border:0;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer}
+</style></head><body>
+<div class="card">
+<div id="spin" class="spin"></div>
+<h1>Starting your app…</h1>
+<p id="msg">The first load compiles your project. This can take a few moments on a cold start.</p>
+<div class="track" id="track"><div id="bar" class="bar"></div></div>
+<div id="giveup">
+<p style="margin-top:14px">The dev server isn't responding yet — it may still be installing or it crashed on startup.</p>
+<button id="retry">Try again</button>
+</div>
+</div>
+<script>(function(){
+  var url=${safeUrl}, start=${startMs}, BUDGET=${PREVIEW_WARMUP_BUDGET_MS};
+  var elapsed=Date.now()-start;
+  var bar=document.getElementById('bar');
+  if(elapsed>=0 && elapsed<BUDGET){
+    if(bar) bar.style.width=Math.min(98,(elapsed/BUDGET)*100)+'%';
+    setTimeout(function(){ location.replace(url); }, 2000);
+  } else {
+    document.getElementById('spin').style.display='none';
+    document.getElementById('msg').style.display='none';
+    document.getElementById('track').style.display='none';
+    document.getElementById('giveup').style.display='block';
+  }
+  var b=document.getElementById('retry');
+  if(b) b.onclick=function(){ location.replace(url.replace(/__uniqus_warm=\\d+/, '__uniqus_warm='+Date.now())); };
+})();</script>
+</body></html>`;
 }
 
 /**

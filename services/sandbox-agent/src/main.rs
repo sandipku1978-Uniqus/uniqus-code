@@ -11,18 +11,19 @@
 //
 // Endpoints:
 //   GET  /health                     → { ok: true, kind: "rust" }
-//   GET  /fs/file?path=…             → { content } (+&encoding=base64 → { content, encoding: "base64" })
+//   GET  /fs/file?path=…             → { content } (+&encoding=base64 → { content, encoding: "base64" };
+//                                       +&offset=&limit= line range → { content, total_lines })
 //   PUT  /fs/file                    body: { path, content, encoding? }
 //   GET  /fs/manifest                → { files: [{ path, size, mtime_ms }] } (storage-sync exclusions applied)
 //   POST /fs/edit                    body: { path, old_string, new_string }
 //   GET  /fs/dir?path=…              → { entries }
-//   POST /fs/grep                    body: { pattern, path? } → { matches }
+//   POST /fs/grep                    body: { pattern, path?, case_insensitive?, literal? } → { matches }
 //   POST /exec/run                   body: { command, timeout_ms } → { stdout, stderr, exitCode }
 //   POST /exec/start-server          body: { command, port, ready_timeout_ms } → { id, pid, port }
 //   POST /exec/stop-server           body: { id }
 //   GET  /exec/server-log?id=…       → { log }
 
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -365,7 +366,30 @@ fn handle(
                 } else {
                     let content = fs::read_to_string(&full)
                         .map_err(|e| AgentError::Io(format!("read {}: {}", p, e)))?;
-                    Ok(json_response(200, &json!({ "content": content })))
+                    // Line-range read: slice in-guest so we don't ship a huge
+                    // file across RPC just to window it. We split on '\n' (a
+                    // trailing newline yields a phantom empty last line) so the
+                    // total_lines count matches the orchestrator/host counting.
+                    let offset = query.get("offset").and_then(|s| s.parse::<usize>().ok());
+                    let limit = query.get("limit").and_then(|s| s.parse::<usize>().ok());
+                    if offset.is_some() || limit.is_some() {
+                        let lines: Vec<&str> = content.split('\n').collect();
+                        let total = lines.len();
+                        let start = offset.unwrap_or(1).max(1);
+                        let count = limit.unwrap_or(2000).max(1);
+                        let sliced = if start > total {
+                            String::new()
+                        } else {
+                            let end = (start - 1 + count).min(total);
+                            lines[start - 1..end].join("\n")
+                        };
+                        Ok(json_response(
+                            200,
+                            &json!({ "content": sliced, "total_lines": total }),
+                        ))
+                    } else {
+                        Ok(json_response(200, &json!({ "content": content })))
+                    }
                 }
             }
             (Method::Get, "/fs/manifest") => {
@@ -432,7 +456,12 @@ fn handle(
                 let body = read_body(&mut req)?;
                 let pattern = require_str(&body, "pattern")?;
                 let sub = body.get("path").and_then(|v| v.as_str()).map(str::to_string);
-                let matches = grep_walk(&pattern, sub.as_deref())?;
+                let ci = body
+                    .get("case_insensitive")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let literal = body.get("literal").and_then(|v| v.as_bool()).unwrap_or(false);
+                let matches = grep_walk(&pattern, sub.as_deref(), ci, literal)?;
                 Ok(json_response(200, &json!({ "matches": matches })))
             }
             (Method::Post, "/exec/run") => {
@@ -770,24 +799,75 @@ fn manifest_walk(dir: &Path, root: &Path, out: &mut Vec<serde_json::Value>) {
     }
 }
 
-fn grep_walk(pattern: &str, sub: Option<&str>) -> Result<String, AgentError> {
-    let re = Regex::new(pattern)
-        .map_err(|e| AgentError::Bad(format!("invalid regex: {}", e)))?;
+/// A grep matcher: a compiled regex, or a (case-aware) literal substring. The
+/// literal arm is used when `literal` is requested OR when the pattern won't
+/// compile as a regex — so grep degrades to a substring search instead of
+/// erroring, matching what the model expects from shell grep.
+enum Matcher {
+    Re(Regex),
+    Literal { needle: String, ci: bool },
+}
+
+impl Matcher {
+    fn is_match(&self, line: &str) -> bool {
+        match self {
+            Matcher::Re(re) => re.is_match(line),
+            Matcher::Literal { needle, ci } => {
+                if *ci {
+                    line.to_lowercase().contains(needle)
+                } else {
+                    line.contains(needle)
+                }
+            }
+        }
+    }
+}
+
+fn literal_matcher(pattern: &str, ci: bool) -> Matcher {
+    Matcher::Literal {
+        needle: if ci { pattern.to_lowercase() } else { pattern.to_string() },
+        ci,
+    }
+}
+
+fn grep_walk(
+    pattern: &str,
+    sub: Option<&str>,
+    ci: bool,
+    literal: bool,
+) -> Result<String, AgentError> {
+    let mut fell_back = false;
+    let matcher = if literal {
+        literal_matcher(pattern, ci)
+    } else {
+        match RegexBuilder::new(pattern).case_insensitive(ci).build() {
+            Ok(re) => Matcher::Re(re),
+            Err(_) => {
+                fell_back = true;
+                literal_matcher(pattern, ci)
+            }
+        }
+    };
     let root = sandbox_dir();
     let target = match sub {
         Some(p) if !p.is_empty() => resolve_sandbox(p)?,
         _ => root.clone(),
     };
     let mut out: Vec<String> = Vec::new();
-    walk(&target, &root, &re, &mut out);
-    Ok(if out.is_empty() {
-        "(no matches)".to_string()
+    walk(&target, &root, &matcher, &mut out);
+    let note = if fell_back {
+        "[pattern is not a valid regex — searched as a literal substring]\n"
     } else {
-        out.join("\n")
+        ""
+    };
+    Ok(if out.is_empty() {
+        format!("{}(no matches)", note)
+    } else {
+        format!("{}{}", note, out.join("\n"))
     })
 }
 
-fn walk(dir: &Path, root: &Path, re: &Regex, out: &mut Vec<String>) {
+fn walk(dir: &Path, root: &Path, re: &Matcher, out: &mut Vec<String>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,

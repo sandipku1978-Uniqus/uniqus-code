@@ -6,15 +6,20 @@ import type {
   CurrentUser,
   DeploymentState,
   ModelChoice,
+  PermissionMode,
   Plan,
   PreviewServer,
   ProjectSummary,
   ThinkingEffort,
+  ToolRiskCategory,
   TodoItem,
   TreeEntry,
   UploadedFileSummary,
 } from "@uniqus/api-types";
-import { MODEL_CATALOG } from "@uniqus/api-types";
+import { MODEL_CATALOG, runModeForPermission } from "@uniqus/api-types";
+
+/** The mode a brand-new turn falls back to once the first (Plan) turn is past. */
+const DEFAULT_PERMISSION_MODE: PermissionMode = "acceptEdits";
 
 /**
  * The agent model choice is an account-wide default (the Settings "Default
@@ -263,6 +268,25 @@ export type ChatItem =
       plan: Plan;
       status: "pending" | "approved" | "rejected";
     }
+  | {
+      /**
+       * The agent paused on a tool call the current permission mode gates (an
+       * edit in `default`, a dangerous op in `default`/`acceptEdits`). Renders an
+       * approval card; resolved by a `tool_approval_response`. `decision` is set
+       * once answered so the card freezes its verdict. Auto-resolves to
+       * "approve" if the matching tool_result lands first (the user switched to a
+       * permissive mode, which auto-approved it server-side).
+       */
+      kind: "tool_approval";
+      id: string;
+      call_id: string;
+      tool: string;
+      category: ToolRiskCategory;
+      summary: string;
+      reason: string;
+      input: unknown;
+      decision?: "approve" | "approve_always" | "deny";
+    }
   | { kind: "system"; id: string; content: string }
   /**
    * A run-level failure (C7), rendered as a friendly card (title + plain-English
@@ -468,6 +492,12 @@ interface State {
    * "onboarded" marker (B6). Persisted to localStorage.
    */
   seenHints: Record<string, boolean>;
+  /**
+   * Coarse plan-vs-execute flag, kept in LOCKSTEP with `permissionMode` (plan →
+   * plan-then-execute, everything else → execute-only). Retained for the landing
+   * surfaces (LandingPrompt / ProjectPicker) that only toggle plan on/off; the
+   * Workspace composer drives the richer `permissionMode` instead.
+   */
   mode: "plan-then-execute" | "execute-only";
   /**
    * Whether the user has explicitly chosen a plan/execute mode this session
@@ -476,6 +506,15 @@ interface State {
    * override a deliberate choice. Reset per project in `reset()`.
    */
   modeTouched: boolean;
+  /**
+   * The permission mode for the next (or in-flight) turn — the composer's mode
+   * dropdown. Source of truth; `mode` above is derived from it. Plan is forced
+   * on a brand-new project's first turn; otherwise it falls back to
+   * acceptEdits. Changing it mid-turn sends `set_permission_mode` live.
+   */
+  permissionMode: PermissionMode;
+  /** Like `modeTouched`, but for the richer permission dropdown. */
+  permissionModeTouched: boolean;
   /**
    * Which model the agent runs on. `"auto"` lets the orchestrator pick the
    * best model per role; a catalog id ("<provider>:<model>") is an explicit
@@ -608,6 +647,10 @@ interface State {
   setMode(m: "plan-then-execute" | "execute-only"): void;
   /** Set mode from a user action (the Plan toggle). Marks modeTouched. */
   setModeManual(m: "plan-then-execute" | "execute-only"): void;
+  /** Set the permission mode programmatically (defaults / server echo). Does NOT mark touched. */
+  setPermissionMode(m: PermissionMode): void;
+  /** Set the permission mode from a user action (the dropdown). Marks touched. */
+  setPermissionModeManual(m: PermissionMode): void;
   /** Set the agent model choice and persist it as the account-wide default. */
   setModel(m: ModelChoice): void;
   /** Set the UI theme; persists + applies to <html data-theme>. */
@@ -649,6 +692,24 @@ interface State {
     allowFreeText: boolean,
   ): void;
   resolveUserQuestion(callId: string, answer: string): void;
+  /** Add a tool-approval card (the agent paused on a gated tool call). */
+  addToolApproval(info: {
+    callId: string;
+    tool: string;
+    category: ToolRiskCategory;
+    summary: string;
+    reason: string;
+    input: unknown;
+  }): void;
+  /** Freeze a tool-approval card with the user's verdict. */
+  resolveToolApproval(callId: string, decision: "approve" | "approve_always" | "deny"): void;
+  /**
+   * Auto-resolve a still-pending approval card whose tool result just arrived
+   * (the user switched to a permissive mode and the server auto-approved it), so
+   * the card doesn't keep live buttons after the action already ran. No-op if the
+   * card was already answered or doesn't exist.
+   */
+  autoResolveToolApproval(callId: string): void;
   addPlanProposal(plan: Plan): void;
   approvePendingPlan(plan: Plan): void;
   /** Mark the pending plan rejected (user chose "Reject & revise"). */
@@ -777,6 +838,8 @@ export const useStore = create<State>((set, get) => ({
   seenHints: readStoredHints(),
   mode: "execute-only",
   modeTouched: false,
+  permissionMode: DEFAULT_PERMISSION_MODE,
+  permissionModeTouched: false,
   model: readStoredModel(),
   // SSR-safe defaults: the persisted choice is applied to <html> before paint
   // by the layout bootstrap script, and hydrated into the store on mount via
@@ -833,8 +896,40 @@ export const useStore = create<State>((set, get) => ({
       persistHints(next);
       return { seenHints: next };
     }),
-  setMode: (m) => set({ mode: m }),
-  setModeManual: (m) => set({ mode: m, modeTouched: true }),
+  // Legacy plan-toggle setters (LandingPrompt / ProjectPicker). Kept in lockstep
+  // with permissionMode: turning plan ON ⇒ "plan"; turning it OFF ⇒ keep an
+  // already-chosen rich mode, else fall to the default. Never silently downgrade
+  // a bypass/default choice just because the binary toggle flicked off.
+  setMode: (m) =>
+    set((s) => ({
+      mode: m,
+      permissionMode:
+        m === "plan-then-execute"
+          ? "plan"
+          : s.permissionMode === "plan"
+            ? DEFAULT_PERMISSION_MODE
+            : s.permissionMode,
+    })),
+  setModeManual: (m) =>
+    set((s) => ({
+      mode: m,
+      modeTouched: true,
+      permissionModeTouched: true,
+      permissionMode:
+        m === "plan-then-execute"
+          ? "plan"
+          : s.permissionMode === "plan"
+            ? DEFAULT_PERMISSION_MODE
+            : s.permissionMode,
+    })),
+  setPermissionMode: (m) => set({ permissionMode: m, mode: runModeForPermission(m) }),
+  setPermissionModeManual: (m) =>
+    set({
+      permissionMode: m,
+      permissionModeTouched: true,
+      mode: runModeForPermission(m),
+      modeTouched: true,
+    }),
   setModel: (m) => {
     persistModel(m);
     set({ model: m });
@@ -946,18 +1041,29 @@ export const useStore = create<State>((set, get) => ({
 
   setToolResult: (callId, result, isError, stats, imagePaths) => {
     set((s) => ({
-      chat: s.chat.map((item) =>
-        item.kind === "tool" && item.call_id === callId
-          ? {
-              ...item,
-              result,
-              is_error: isError,
-              lines_added: stats?.lines_added,
-              lines_removed: stats?.lines_removed,
-              imagePaths: imagePaths && imagePaths.length > 0 ? imagePaths : item.imagePaths,
-            }
-          : item,
-      ),
+      chat: s.chat.map((item) => {
+        if (item.kind === "tool" && item.call_id === callId) {
+          return {
+            ...item,
+            result,
+            is_error: isError,
+            lines_added: stats?.lines_added,
+            lines_removed: stats?.lines_removed,
+            imagePaths: imagePaths && imagePaths.length > 0 ? imagePaths : item.imagePaths,
+          };
+        }
+        // The tool ran, so any still-open approval card for it is moot — freeze
+        // it as approved (covers the auto-approve-on-mode-switch path, where the
+        // user never clicked the card).
+        if (
+          item.kind === "tool_approval" &&
+          item.call_id === callId &&
+          item.decision === undefined
+        ) {
+          return { ...item, decision: "approve" as const };
+        }
+        return item;
+      }),
     }));
     const item = get().chat.find((i) => i.kind === "tool" && i.call_id === callId);
     // Only mirror to the terminal for an actual run_command whose input has the
@@ -1007,6 +1113,47 @@ export const useStore = create<State>((set, get) => ({
       chat: s.chat.map((item) =>
         item.kind === "user_question" && item.call_id === callId
           ? { ...item, answer }
+          : item,
+      ),
+    })),
+
+  addToolApproval: (info) =>
+    set((s) => {
+      // Dedupe on call_id (defensive against a replayed/duplicated event).
+      if (s.chat.some((i) => i.kind === "tool_approval" && i.call_id === info.callId)) {
+        return {};
+      }
+      return {
+        chat: [
+          ...s.chat,
+          {
+            kind: "tool_approval",
+            id: id(),
+            call_id: info.callId,
+            tool: info.tool,
+            category: info.category,
+            summary: info.summary,
+            reason: info.reason,
+            input: info.input,
+          },
+        ],
+      };
+    }),
+
+  resolveToolApproval: (callId, decision) =>
+    set((s) => ({
+      chat: s.chat.map((item) =>
+        item.kind === "tool_approval" && item.call_id === callId
+          ? { ...item, decision }
+          : item,
+      ),
+    })),
+
+  autoResolveToolApproval: (callId) =>
+    set((s) => ({
+      chat: s.chat.map((item) =>
+        item.kind === "tool_approval" && item.call_id === callId && item.decision === undefined
+          ? { ...item, decision: "approve" as const }
           : item,
       ),
     })),
@@ -1314,6 +1461,8 @@ export const useStore = create<State>((set, get) => ({
       // Per-project fresh start so the first-turn plan default re-evaluates.
       mode: "execute-only",
       modeTouched: false,
+      permissionMode: DEFAULT_PERMISSION_MODE,
+      permissionModeTouched: false,
       chat: [],
       tree: [],
       // treeLoaded resets to false so the explorer shows its loading skeleton

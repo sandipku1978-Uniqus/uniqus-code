@@ -1,0 +1,21 @@
+[Unit]
+Description=Uniqus Firecracker host networking (fcbr0 bridge + NAT)
+Documentation=https://github.com/uniqus/uniqus-code/blob/main/infra/firecracker/host-net.sh
+# The fcbr0 bridge is runtime-only state (created with `ip link add`) and does
+# NOT survive a reboot, so without this the orchestrator boots faster than the
+# bridge exists and every sandbox start throws "Firecracker bridge 'fcbr0' is
+# missing". Recreate it on every boot, after the network is up and BEFORE the
+# orchestrator so the first chat after a reboot just works.
+After=network-online.target
+Wants=network-online.target
+Before=uniqus-orchestrator.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Installed by host-setup.sh from infra/firecracker/host-net.sh. Lives outside
+# the git checkout so re-cloning / moving the repo can't break the boot path.
+ExecStart=/usr/local/sbin/uniqus-firecracker-net.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -11,6 +11,7 @@ export {
   pause,
   resume,
   destroy,
+  syncRestoreToVm,
   listVms,
   startIdleSweeper,
   stopIdleSweeper,

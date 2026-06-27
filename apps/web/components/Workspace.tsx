@@ -8,6 +8,7 @@ import {
   PanelGroup,
   PanelResizeHandle,
 } from "react-resizable-panels";
+import { type PermissionMode, runModeForPermission } from "@uniqus/api-types";
 import { connect, disconnect, send } from "@/lib/ws-client";
 import { useStore, previewTabId, fileTabId, AGENT_PREVIEW_TAB } from "@/lib/store";
 import { useIsMobile } from "@/lib/use-is-mobile";
@@ -61,6 +62,8 @@ export default function Workspace({
   const mode = useStore((s) => s.mode);
   const modeTouched = useStore((s) => s.modeTouched);
   const setMode = useStore((s) => s.setMode);
+  const permissionMode = useStore((s) => s.permissionMode);
+  const permissionModeTouched = useStore((s) => s.permissionModeTouched);
   // Model + thinking ride the auto-fired brief so a choice made in the
   // landing-page composer (persisted in the same store) applies to the very
   // first turn, not just to follow-ups typed in the workspace.
@@ -261,11 +264,15 @@ export default function Workspace({
     // flag already encodes the user's landing-page choice (default plan), so we
     // never need the round-tripped store value here. An explicit in-workspace
     // toggle (modeTouched) still wins.
-    const firstTurnMode = modeTouched
-      ? mode
+    // Mirror the mode decision in permission-mode terms (derived synchronously
+    // from the URL flag, same race-avoidance reasoning as below): a brand-new
+    // project briefs in Plan unless ?plan=0 opted out (→ the acceptEdits default).
+    const firstTurnPermissionMode: PermissionMode = permissionModeTouched
+      ? permissionMode
       : planParam === "0"
-        ? "execute-only"
-        : "plan-then-execute";
+        ? "acceptEdits"
+        : "plan";
+    const firstTurnMode = runModeForPermission(firstTurnPermissionMode);
     // Send first, echo only on success (mirrors ChatPanel.handleSubmit). A
     // failed send used to leave the echoed user bubble behind, which flipped
     // hasHistory true and made the retry path strip ?brief= — so the new
@@ -274,6 +281,7 @@ export default function Workspace({
       type: "user_message",
       content: briefParam,
       mode: firstTurnMode,
+      permission_mode: firstTurnPermissionMode,
       model: model !== "auto" ? model : undefined,
       thinking: thinking !== "medium" ? thinking : undefined,
     });
@@ -293,6 +301,8 @@ export default function Workspace({
     firstTurnModeReady,
     mode,
     modeTouched,
+    permissionMode,
+    permissionModeTouched,
     planParam,
     model,
     thinking,

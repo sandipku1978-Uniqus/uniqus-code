@@ -1,0 +1,173 @@
+import { describe, it, expect } from "vitest";
+import type { ProviderName } from "./providers/types.js";
+import {
+  classifyTaskHeuristic,
+  mapToModel,
+  availableProvidersFromKeys,
+  turnReferencesImage,
+} from "./autoRouter.js";
+
+const set = (...p: ProviderName[]): Set<ProviderName> => new Set(p);
+// The production orchestrator today: Anthropic (always) + Z.ai.
+const PROD = set("anthropic", "zai");
+// All four providers configured.
+const ALL = set("anthropic", "zai", "openai", "google");
+const ANTHROPIC_ONLY = set("anthropic");
+
+describe("classifyTaskHeuristic", () => {
+  it("flags debugging / root-cause as hard", () => {
+    expect(classifyTaskHeuristic("Debug why the checkout total is wrong")).toBe("hard");
+    expect(classifyTaskHeuristic("the build keeps failing with a stack trace, fix it")).toBe("hard");
+    expect(classifyTaskHeuristic("there's a race condition in the queue worker")).toBe("hard");
+  });
+
+  it("flags architecture / cross-cutting work as hard", () => {
+    expect(classifyTaskHeuristic("Design the database schema for multi-tenant billing")).toBe("hard");
+    expect(classifyTaskHeuristic("refactor the auth flow across the whole codebase")).toBe("hard");
+  });
+
+  it("routes trivial edits to the quick (fast-model) tier", () => {
+    expect(classifyTaskHeuristic("change the button color to blue")).toBe("quick");
+    expect(classifyTaskHeuristic("fix a typo in the header")).toBe("quick");
+    expect(classifyTaskHeuristic("add a footer link")).toBe("quick");
+  });
+
+  it("routes explicitly speed-sensitive requests to quick", () => {
+    expect(classifyTaskHeuristic("just a quick change to the nav order")).toBe("quick");
+    expect(classifyTaskHeuristic("can you update the hero copy asap")).toBe("quick");
+  });
+
+  it("lets hard win over quick when both could match", () => {
+    // "quickly" is a speed word, but debugging a race condition is hard work.
+    expect(classifyTaskHeuristic("quickly debug the race condition in the worker")).toBe("hard");
+  });
+
+  it("treats a long, dense brief as hard", () => {
+    expect(classifyTaskHeuristic("Build ".concat("x".repeat(900)))).toBe("hard");
+  });
+
+  it("returns ambiguous for medium-length, signal-free requests", () => {
+    expect(
+      classifyTaskHeuristic(
+        "Can you make the dashboard show the user's recent orders with pagination?",
+      ),
+    ).toBe("ambiguous");
+  });
+
+  it("defaults empty input to standard rather than calling the tiebreak", () => {
+    expect(classifyTaskHeuristic("   ")).toBe("standard");
+  });
+});
+
+describe("mapToModel — multi-provider, cost-aware policy", () => {
+  it("sends quick work to Gemini 3.5 Flash when a Google key is present", () => {
+    expect(mapToModel("quick", false, ALL)).toEqual({
+      provider: "google",
+      model: "gemini-3.5-flash",
+      overridden: false,
+    });
+  });
+
+  it("routes standard work to GLM when a Z.ai key is present", () => {
+    expect(mapToModel("standard", false, PROD)).toEqual({
+      provider: "zai",
+      model: "glm-5.2",
+      overridden: false,
+    });
+  });
+
+  it("escalates hard work to Claude Opus", () => {
+    expect(mapToModel("hard", false, PROD)).toEqual({
+      provider: "anthropic",
+      model: "claude-opus-4-8",
+      overridden: false,
+    });
+  });
+
+  it("uses GPT-5.5 / Gemini Pro for hard work when Anthropic is absent", () => {
+    expect(mapToModel("hard", false, set("openai"))?.model).toBe("gpt-5.5");
+    expect(mapToModel("hard", false, set("google"))?.model).toBe(
+      "gemini-3.1-pro-preview-customtools",
+    );
+  });
+
+  it("does NOT route quick work to GLM (high first-token latency)", () => {
+    // Z.ai-only: GLM isn't in the quick list, so it falls through to the
+    // Anthropic terminal fallback rather than GLM.
+    expect(mapToModel("quick", false, set("anthropic", "zai"))?.provider).not.toBe("zai");
+  });
+
+  it("never marks an Auto pick as overridden", () => {
+    expect(mapToModel("hard", false, ALL)?.overridden).toBe(false);
+    expect(mapToModel("quick", false, ALL)?.overridden).toBe(false);
+    expect(mapToModel("standard", false, ALL)?.overridden).toBe(false);
+  });
+
+  it("prefers a native-vision model over text-only GLM for image-heavy turns", () => {
+    // Standard + vision on prod (anthropic+zai) → Sonnet, not GLM.
+    expect(mapToModel("standard", true, PROD)).toEqual({
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+      overridden: false,
+    });
+    // Quick + vision with Google → Gemini Flash (fast native vision).
+    expect(mapToModel("quick", true, ALL)).toEqual({
+      provider: "google",
+      model: "gemini-3.5-flash",
+      overridden: false,
+    });
+  });
+
+  it("falls back to GLM+bridge for vision only when no native-vision model is configured", () => {
+    expect(mapToModel("standard", true, set("zai"))).toEqual({
+      provider: "zai",
+      model: "glm-5.2",
+      overridden: false,
+    });
+  });
+
+  it("is cost-aware on an Anthropic-only orchestrator (Sonnet for quick/standard, Opus for hard)", () => {
+    expect(mapToModel("quick", false, ANTHROPIC_ONLY)?.model).toBe("claude-sonnet-4-6");
+    expect(mapToModel("standard", false, ANTHROPIC_ONLY)?.model).toBe("claude-sonnet-4-6");
+    expect(mapToModel("hard", false, ANTHROPIC_ONLY)?.model).toBe("claude-opus-4-8");
+  });
+
+  it("only routes to providers that have a key", () => {
+    const openaiOnly = set("openai");
+    expect(mapToModel("hard", false, openaiOnly)?.provider).toBe("openai");
+    expect(mapToModel("quick", false, openaiOnly)?.provider).toBe("openai");
+    expect(mapToModel("standard", false, openaiOnly)?.provider).toBe("openai");
+  });
+});
+
+describe("availableProvidersFromKeys", () => {
+  it("includes only providers with a truthy key", () => {
+    const s = availableProvidersFromKeys({ anthropic: "k", zai: "k", openai: undefined });
+    expect([...s].sort()).toEqual(["anthropic", "zai"]);
+  });
+});
+
+describe("turnReferencesImage", () => {
+  it("detects an uploaded image path in the message text", () => {
+    expect(turnReferencesImage("match this design assets/uploads/mockup.png please")).toBe(true);
+  });
+
+  it("detects an image content block in recent history", () => {
+    const history = [
+      {
+        role: "user" as const,
+        content: [
+          {
+            type: "image" as const,
+            source: { type: "base64" as const, media_type: "image/png" as const, data: "" },
+          },
+        ],
+      },
+    ];
+    expect(turnReferencesImage("what's wrong here?", history)).toBe(true);
+  });
+
+  it("is false for a plain text turn", () => {
+    expect(turnReferencesImage("add a contact form", [])).toBe(false);
+  });
+});

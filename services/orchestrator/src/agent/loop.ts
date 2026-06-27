@@ -38,6 +38,11 @@ import { runPredeployCheck, type PredeployIssue } from "./predeploy.js";
 import { upsertFlow, listFlows, getFlowByName, getFlow, setFlowRunResult } from "../db/flows.js";
 import { resolveModel, isValidChoice } from "./router.js";
 import {
+  pickAutoModel,
+  availableProvidersFromKeys,
+  turnReferencesImage,
+} from "./autoRouter.js";
+import {
   AGENT_TYPES,
   SPAWN_AGENTS_TOOL,
   buildSubAgentPreamble,
@@ -55,8 +60,11 @@ import type {
   FlowStep,
   ModelChoice,
   ModelProvider,
+  PermissionMode,
   ThinkingEffort,
+  ToolRiskCategory,
 } from "@uniqus/api-types";
+import { classifyToolRisk, decidePermission } from "./permissions.js";
 import { setTodos, type TodoItem } from "./todos.js";
 import { listProjectSecrets, plumbSecretToEnvFile } from "../secrets.js";
 import { callConnector, listProjectConnectors } from "../connectors/index.js";
@@ -356,6 +364,29 @@ export interface LoopHooks {
    * unavailable (e.g. plan mode already active) and reports so to the model.
    */
   requestPlan?: (reason: string) => Promise<string>;
+  /**
+   * The CURRENT permission mode, read fresh before every tool call so a mid-turn
+   * change (the composer's mode dropdown → `set_permission_mode`) takes effect on
+   * the very next tool. Absent ⇒ headless/CLI, which behaves as `bypass`.
+   */
+  getPermissionMode?: () => PermissionMode;
+  /**
+   * Pause the loop until the user approves/denies a gated tool call (an edit in
+   * `default`, a dangerous op in `default`/`acceptEdits`). Mirrors
+   * `requestUserAnswer`: the server registers a resolver on the run and emits a
+   * `tool_approval_requested`. Rejecting (abort) is treated as a deny. Absent ⇒
+   * no approver wired (headless), so gated calls run as if bypassed.
+   */
+  requestToolApproval?: (
+    callId: string,
+    info: {
+      tool: string;
+      category: ToolRiskCategory;
+      summary: string;
+      reason: string;
+      input: unknown;
+    },
+  ) => Promise<{ decision: "approve" | "approve_always" | "deny"; feedback?: string }>;
   /** Fires when the agent calls `todo_write`. UI rerenders the Tasks pane. */
   onTodoWrite?: (items: TodoItem[]) => void;
   /**
@@ -558,11 +589,29 @@ export async function runAgentLoop(
   // Resolve the model + provider once per turn. The model can't change
   // mid-turn (the user picks it before sending), so a single adapter serves
   // every iteration of this loop.
-  const resolved = resolveModel("agent", opts.modelChoice);
   const keys: ProviderKeys = opts.providerKeys ?? {
     ...providerKeysFromEnv(),
     anthropic: opts.apiKey,
   };
+  let resolved = resolveModel("agent", opts.modelChoice);
+  // Task-aware Auto: resolveModel returns a STATIC default for Auto. When the
+  // user is on Auto (not an explicit pick, not an ops env pin — both set
+  // `overridden`), refine it into a per-task pick: route routine work to the
+  // cost-effective default and escalate hard reasoning / image-heavy turns. Any
+  // failure returns null and we keep the static default, so this never breaks a
+  // turn. See agent/autoRouter.ts for the policy.
+  if (!resolved.overridden) {
+    const picked = await pickAutoModel(
+      "agent",
+      {
+        userMessage,
+        hasImages: turnReferencesImage(userMessage, opts.messages),
+        availableProviders: availableProvidersFromKeys(keys),
+      },
+      { anthropicKey: keys.anthropic },
+    );
+    if (picked) resolved = picked;
+  }
   const provider = getProvider(resolved.provider, keys);
   // Cumulative token usage across every iteration of this turn. Committed after
   // each provider call; the live figure (committed + the in-flight call's
@@ -637,6 +686,10 @@ export async function runAgentLoop(
   };
   // Consecutive pause_turn continuations so far (see MAX_PAUSE_TURN_RETRIES).
   let pauseTurnRetries = 0;
+  // Tools the user chose "don't ask again" for, this turn. Keyed by tool name;
+  // a gated call whose name is here skips the approval prompt for the rest of
+  // the run (reset next turn — deliberately not persisted).
+  const alwaysAllowTools = new Set<string>();
   const skillsBody =
     opts.skills !== undefined ? opts.skills : await readSkills(opts.sandbox.rootDir);
   // Web search is wired on Anthropic, OpenAI (Responses built-in), Z.ai (GLM's
@@ -941,6 +994,61 @@ export async function runAgentLoop(
         });
         continue;
       }
+
+      // ── Permission gate ──────────────────────────────────────────────────
+      // Re-read the mode LIVE (not a per-turn snapshot) so a switch made while
+      // this turn is running takes effect on the next tool. Read-only tools and
+      // `bypass` resolve to "allow" without a prompt; an edit/command/dangerous
+      // op under default/acceptEdits pauses for the user's verdict. When no
+      // approver is wired (headless), gated calls just run.
+      {
+        const mode = opts.getPermissionMode?.() ?? "bypass";
+        const risk = classifyToolRisk(call.name, call.input);
+        let gate = decidePermission(mode, risk.category);
+        if (gate === "ask" && alwaysAllowTools.has(call.name)) gate = "allow";
+        if (gate === "ask" && opts.requestToolApproval) {
+          let verdict: { decision: "approve" | "approve_always" | "deny"; feedback?: string };
+          try {
+            verdict = await opts.requestToolApproval(call.id, {
+              tool: call.name,
+              category: risk.category as ToolRiskCategory,
+              summary: risk.summary,
+              reason: risk.reason,
+              input: call.input,
+            });
+          } catch {
+            // The approval wait was rejected — an abort woke it. Treat as a deny
+            // so the tool_use gets a matching result (well-formed history); the
+            // next iteration's abort check unwinds the rest of the turn.
+            verdict = { decision: "deny", feedback: "(aborted)" };
+          }
+          if (verdict.decision === "deny") {
+            const fb = verdict.feedback?.trim();
+            const note = fb
+              ? `The user declined to run ${call.name}. Their guidance: ${fb}\nDo not retry this exact action — adjust course based on that guidance.`
+              : `The user declined to run ${call.name}. Do not retry it; consider a different approach or ask what they'd prefer.`;
+            opts.onToolResult?.(call.id, call.name, call.input, note, true);
+            toolResults.push({
+              type: "tool_result",
+              tool_use_id: call.id,
+              content: note,
+              is_error: true,
+            });
+            continue;
+          }
+          if (verdict.decision === "approve_always") alwaysAllowTools.add(call.name);
+        }
+      }
+
+      // Re-assert the tool call WITH ITS FULL INPUT right before it runs. The
+      // provider emits onToolCall during streaming, but with high reasoning some
+      // models keep emitting thought tokens for many seconds AFTER the tool args
+      // are complete, so the only event the UI has had so far can be the empty
+      // "started" stub — leaving a long-running command rendered as "Ran …" with
+      // no command shown. This idempotent re-emit (the store upgrades the row in
+      // place) guarantees the command/args are visible for the whole execution.
+      opts.onToolCall?.(call.id, call.name, call.input);
+
       try {
         // Captured by executeTool's onEditStats callback for write_file/edit_file,
         // then forwarded on the tool_result so the UI can show a "+A −R" badge.
@@ -1440,7 +1548,10 @@ export async function executeTool(
       if (typeof args.path !== "string") {
         throw new Error("read_file requires 'path' as a string");
       }
-      return await sb.readFile(sandbox, args.path);
+      return await sb.readFile(sandbox, args.path, {
+        offset: typeof args.offset === "number" ? args.offset : undefined,
+        limit: typeof args.limit === "number" ? args.limit : undefined,
+      });
     case "write_file":
       if (typeof args.path !== "string") {
         throw new Error("write_file requires 'path' as a string");
@@ -1483,7 +1594,10 @@ export async function executeTool(
       return entries.length > 0 ? entries.join("\n") : "(empty)";
     }
     case "grep":
-      return await sb.grep(sandbox, args.pattern, args.path);
+      return await sb.grep(sandbox, args.pattern, args.path, {
+        caseInsensitive: args.case_insensitive === true,
+        literal: args.literal === true,
+      });
     case "wait_for_port": {
       const ok = await sb.waitForPort(args.port, args.timeout_ms, signal);
       if (signal?.aborted) throw new Error("wait_for_port aborted by user");

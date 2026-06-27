@@ -10,12 +10,13 @@
  * Endpoints (mirror agentRpc.ts):
  *   GET  /health                     → { ok: true, kind: "node" }
  *   POST /net/configure              body: { ip, gw, mac?, mount_sandbox?, seed?, time_ms? } → { ok: true }
- *   GET  /fs/file?path=…             → { content } (+&encoding=base64 → { content, encoding: "base64" })
+ *   GET  /fs/file?path=…             → { content } (+&encoding=base64 → { content, encoding: "base64" };
+ *                                       +&offset=&limit= line range → { content, total_lines })
  *   PUT  /fs/file                    body: { path, content, encoding? }
  *   GET  /fs/manifest                → { files: [{ path, size, mtime_ms }] } (storage-sync exclusions applied)
  *   POST /fs/edit                    body: { path, old_string, new_string }
  *   GET  /fs/dir?path=…              → { entries }
- *   POST /fs/grep                    body: { pattern, path? } → { matches }
+ *   POST /fs/grep                    body: { pattern, path?, case_insensitive?, literal? } → { matches }
  *   POST /exec/run                   body: { command, timeout_ms } → { stdout, stderr, exitCode }
  *   POST /exec/start-server          body: { command, port, ready_timeout_ms } → { id, pid, port }
  *   POST /exec/stop-server           body: { id }
@@ -229,6 +230,19 @@ async function handleRequest(req, res) {
         return json(res, 200, { content: buf.toString("base64"), encoding: "base64" });
       }
       const content = await fs.readFile(p, "utf-8");
+      // Line-range read: slice in-guest so we don't ship a huge file across RPC
+      // just to window it. split("\n") (trailing newline → phantom empty last
+      // line) so total_lines matches the orchestrator/host line counting.
+      const offsetRaw = url.searchParams.get("offset");
+      const limitRaw = url.searchParams.get("limit");
+      if (offsetRaw !== null || limitRaw !== null) {
+        const lines = content.split("\n");
+        const total = lines.length;
+        const start = Math.max(1, parseInt(offsetRaw ?? "1", 10) || 1);
+        const count = Math.max(1, parseInt(limitRaw ?? "2000", 10) || 2000);
+        const sliced = start > total ? "" : lines.slice(start - 1, start - 1 + count).join("\n");
+        return json(res, 200, { content: sliced, total_lines: total });
+      }
       return json(res, 200, { content });
     }
     if (method === "GET" && url.pathname === "/fs/manifest") {
@@ -271,7 +285,10 @@ async function handleRequest(req, res) {
     }
     if (method === "POST" && url.pathname === "/fs/grep") {
       const body = await readBody(req);
-      const matches = await grep(body.pattern ?? "", body.path ?? null);
+      const matches = await grep(body.pattern ?? "", body.path ?? null, {
+        caseInsensitive: body.case_insensitive === true,
+        literal: body.literal === true,
+      });
       return json(res, 200, { matches });
     }
     if (method === "POST" && url.pathname === "/exec/run") {
@@ -407,10 +424,26 @@ async function buildManifest() {
   return files;
 }
 
-async function grep(pattern, sub) {
+async function grep(pattern, sub, opts = {}) {
   const target = sub ? resolveSandbox(sub) : SANDBOX_DIR;
-  const re = new RegExp(pattern);
   const root = path.resolve(SANDBOX_DIR);
+  // A literal request — or a pattern that won't compile as a regex (e.g. it
+  // contains literal parens/brackets the model meant verbatim) — degrades to a
+  // case-aware substring test rather than erroring, matching shell grep.
+  const ci = opts.caseInsensitive === true;
+  let fellBack = false;
+  let re = null;
+  if (!opts.literal) {
+    try {
+      re = new RegExp(pattern, ci ? "i" : "");
+    } catch {
+      fellBack = true;
+    }
+  }
+  const needle = ci ? pattern.toLowerCase() : pattern;
+  const test = re
+    ? (line) => re.test(line)
+    : (line) => (ci ? line.toLowerCase() : line).includes(needle);
   const out = [];
   async function walk(dir) {
     let entries;
@@ -430,7 +463,7 @@ async function grep(pattern, sub) {
         const text = await fs.readFile(full, "utf-8");
         const lines = text.split("\n");
         for (let i = 0; i < lines.length; i++) {
-          if (re.test(lines[i])) {
+          if (test(lines[i])) {
             out.push(`${path.relative(root, full)}:${i + 1}: ${lines[i].trim()}`);
           }
         }
@@ -440,7 +473,10 @@ async function grep(pattern, sub) {
     }
   }
   await walk(target);
-  return out.length ? out.join("\n") : "(no matches)";
+  const note = fellBack
+    ? "[pattern is not a valid regex — searched as a literal substring]\n"
+    : "";
+  return out.length ? `${note}${out.join("\n")}` : `${note}(no matches)`;
 }
 
 // Per-stream byte cap for /exec/run (C-61). Keep consuming the stream past

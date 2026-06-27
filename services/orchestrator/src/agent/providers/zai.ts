@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { fetch as undiciFetch } from "undici";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { ThinkingEffort } from "@uniqus/api-types";
 import { safeParseJson } from "./openai.js";
@@ -177,13 +178,23 @@ export class ZaiAdapter implements ModelProviderAdapter {
     this.client = new OpenAI({
       apiKey,
       baseURL: opts?.baseURL || ZAI_BASE_URL,
-      // Force an UNCOMPRESSED response stream. The SDK's fetch otherwise sends
-      // `Accept-Encoding: gzip`, and Z.ai's gzipped SSE is held in the
-      // decompression window and delivered in bursts: the reasoning phase emits
-      // enough `reasoning_content` to keep flushing (thinking looks live), but
-      // the sparser answer-text and tool_call deltas sit buffered and arrive in
-      // large chunks with multi-second gaps. `identity` makes each SSE event
-      // flush as it's written, so onText/onToolCallStarted fire in real time.
+      // Force an UNCOMPRESSED response stream. Z.ai's gzipped SSE isn't flushed
+      // per event, so when the transport negotiates gzip the WHOLE turn is held
+      // in the decompression window and delivered in one burst at the end — the
+      // "answers arrive in large batches" bug. `identity` makes each SSE event
+      // flush as written, so onText/onThinking/onToolCallStarted fire live.
+      //
+      // CRITICAL: this header only works if it actually reaches Z.ai, and
+      // `Accept-Encoding` is a Fetch-spec FORBIDDEN header. The OpenAI SDK calls
+      // `globalThis.fetch`, whose bundled undici may SILENTLY STRIP it (the rule
+      // is enforced inconsistently across Node versions) — then the transport
+      // falls back to gzip and the bursts return. That's why setting it via
+      // `defaultHeaders` alone "fixed" it on some machines but not the server.
+      // Pin the request to OUR undici dependency (v7), which reliably forwards
+      // the header, instead of the host's globalThis.fetch. Verified end-to-end:
+      // with gzip negotiated the SDK yields all deltas in one ~900ms burst; with
+      // pinned-undici + identity they stream ~25ms apart.
+      fetch: undiciFetch as unknown as typeof fetch,
       defaultHeaders: { "Accept-Encoding": "identity" },
       ...(opts?.timeout ? { timeout: opts.timeout } : {}),
     });

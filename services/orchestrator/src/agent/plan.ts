@@ -3,6 +3,11 @@ import type { ModelChoice, Plan } from "@uniqus/api-types";
 import { normalizeMessageHistory } from "./messageHistory.js";
 import { formatAccountPromptForPrompt, formatSkillsForPrompt } from "./skills.js";
 import { resolveModel } from "./router.js";
+import {
+  pickAutoModel,
+  availableProvidersFromKeys,
+  turnReferencesImage,
+} from "./autoRouter.js";
 import { getProvider, providerKeysFromEnv, type ProviderKeys } from "./providers/index.js";
 import { TOOLS } from "./tools.js";
 import { executeTool, truncateToolResultText, type LoopHooks } from "./loop.js";
@@ -122,11 +127,26 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
   )}${formatSkillsForPrompt(opts.skills ?? null)}`;
 
   // Plan mode honors the same per-turn model choice as the agent loop.
-  const resolved = resolveModel("plan", opts.modelChoice);
   const keys: ProviderKeys = opts.providerKeys ?? {
     ...providerKeysFromEnv(),
     anthropic: opts.apiKey,
   };
+  let resolved = resolveModel("plan", opts.modelChoice);
+  // Task-aware Auto (same as the agent loop): when on Auto, route per task —
+  // plan mode leans toward the stronger reasoner. Best-effort; keeps the static
+  // default on any failure. See agent/autoRouter.ts.
+  if (!resolved.overridden) {
+    const picked = await pickAutoModel(
+      "plan",
+      {
+        userMessage,
+        hasImages: turnReferencesImage(userMessage, opts.history),
+        availableProviders: availableProvidersFromKeys(keys),
+      },
+      { anthropicKey: keys.anthropic },
+    );
+    if (picked) resolved = picked;
+  }
   const provider = getProvider(resolved.provider, keys);
   const hooks = opts.hooks ?? {};
 

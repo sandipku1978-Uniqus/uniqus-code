@@ -1133,6 +1133,55 @@ async function destroyOnDiskArtifacts(projectId: string): Promise<void> {
   await teardownTap(tapName).catch(() => {});
 }
 
+/**
+ * Realign the project's VM with the host mirror after a checkpoint restore.
+ *
+ * Checkpoints rewind the HOST mirror (agent/checkpoints.ts), but in Firecracker
+ * mode the VM owns the authoritative copy: the agent reads files over RPC,
+ * run_command runs inside the guest, and the dev server serves from the mounted
+ * sandbox image. Without this step a rewind never reaches the guest — the files,
+ * the agent's view, and the live preview all stay on the un-rewound state (the
+ * "restore is host-only" bug).
+ *
+ *  - running     → re-hydrate the live guest from the rewound mirror. The files
+ *                  land in the mounted sandbox image and the dev server's
+ *                  watcher hot-reloads the preview. node_modules/.git untouched.
+ *  - otherwise   → (paused / snapshotted / on-disk orphan / no VM) reclaim it:
+ *                  drop the warm process + on-disk snapshot but KEEP the ext4 so
+ *                  node_modules survive. The next open cold-boots and hydrateInto
+ *                  re-pushes the rewound mirror over the persisted image.
+ *
+ * Best-effort and never throws — a restore still reports success to the user
+ * even if the realign hiccups (the next cold boot heals it). Returns a short
+ * tag for logging/telemetry.
+ */
+export async function syncRestoreToVm(
+  projectId: string,
+  hostDir: string,
+): Promise<"hydrated" | "reset"> {
+  const entry = vms.get(projectId);
+  if (entry && entry.handle.state === "running") {
+    try {
+      await hydrateInto(entry.handle, hostDir);
+      // Count the restore as activity so the idle sweeper doesn't reclaim the
+      // VM we just realigned out from under the user's next turn.
+      entry.handle.lastUsedAt = Date.now();
+      return "hydrated";
+    } catch (err) {
+      console.error(
+        `[fleet ${entry.handle.id}] restore re-hydrate failed; reclaiming so the next open cold-boots:`,
+        err,
+      );
+    }
+  }
+  // Not running (or a failed live re-hydrate): drop the warm/snapshot state but
+  // keep the ext4 — the next ensureVm cold-boots and hydrateInto re-pushes the
+  // rewound mirror over it. reclaimVm also sweeps cross-process on-disk orphans,
+  // and is a clean no-op when Firecracker is disabled (nothing tracked on disk).
+  await reclaimVm(projectId).catch(() => {});
+  return "reset";
+}
+
 export function listVms(): VmHandle[] {
   return Array.from(vms.values()).map((v) => v.handle);
 }

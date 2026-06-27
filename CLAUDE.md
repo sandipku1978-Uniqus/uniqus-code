@@ -50,10 +50,36 @@
 
 ## Model providers (multi-provider agent)
 - The coding agent runs on a model resolved by `services/orchestrator/src/agent/router.ts`.
-  Default is **Auto**, which resolves to **GLM-5.2** when a Z.ai key is set on
-  the orchestrator and falls back to **Claude Opus** otherwise (so Auto is never
-  broken on an orchestrator without the key — the switch flips on the moment
-  `ZAI_API_KEY` is deployed). Users override per-turn / as an account default via
+  Default is **Auto**. `router.ts` gives Auto a STATIC floor (**GLM-5.2** when a
+  Z.ai key is set, else **Claude Opus** — so Auto is never broken on an
+  orchestrator without the key; the switch flips on the moment `ZAI_API_KEY` is
+  deployed). On top of that floor, the agent loop + plan mode run **task-aware
+  Auto** (`services/orchestrator/src/agent/autoRouter.ts`): per turn it
+  classifies the request into one of three tiers and routes to the model whose
+  strengths fit, **across all configured providers** (each provider has a home
+  tier so its key gets real traffic):
+  - **quick** (trivial edits / explicitly speed-sensitive) → the FASTEST model,
+    **Gemini 3.5 Flash** leading. GLM is deliberately excluded here — its
+    1M-context first-token latency is the opposite of "quick". Falls back to
+    Sonnet (the always-present Anthropic safety net) when no Google key.
+  - **standard** (routine features) → **GLM-5.2** (cost-effective frontier
+    coding); Sonnet/Flash when no Z.ai key.
+  - **hard** (debug / architecture / cross-cutting / long briefs) → the strongest
+    reasoner: **Opus › GPT-5.5 › Gemini Pro › GLM**.
+  - **vision** overlay: image-heavy turns prefer a NATIVELY-multimodal model
+    (Gemini/Claude/GPT) over text-only GLM (which would lean on the
+    analyze_image bridge); falls through to GLM+bridge only if no native-vision
+    key is set.
+  Heuristics decide clear cases for free; a tiny Haiku `classify` call does a
+  3-way (QUICK/STANDARD/HARD) tiebreak only when ambiguous (plan mode skips it,
+  biasing ambiguous→hard). Routing is constrained to providers with a configured
+  key (Anthropic, always set, is the terminal fallback in every list so a pick
+  always resolves), marks picks `overridden:false` (no "results may vary"
+  notice), and on any failure keeps the static floor — it can't break a turn. An
+  explicit per-turn pick or `UNIQUS_MODEL_<ROLE>` env pin (`overridden:true`)
+  bypasses task routing entirely. **NOTE: Gemini/OpenAI routing only kicks in
+  when `GOOGLE_API_KEY`/`OPENAI_API_KEY` are set on the orchestrator** — without
+  them Auto picks among Anthropic + GLM only. Users override per-turn / as an account default via
   the composer + Settings "Default model" picker (Anthropic, Z.ai, OpenAI,
   Google). The curated, selectable list is `MODEL_CATALOG` in `packages/api-types`
   — the single source of truth shared by the UI and the router. Low tiers (Haiku,
