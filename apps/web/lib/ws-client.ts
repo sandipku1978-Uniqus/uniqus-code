@@ -309,6 +309,16 @@ function handleEvent(event: ServerEvent): void {
       break;
     case "iteration":
       break;
+    case "model_selected":
+      // Auto routing's per-turn pick — render the "⚡ Auto → <model>" chip at the
+      // top of the turn (arrives before any text/tool events).
+      s.addModelSelection({
+        provider: event.provider,
+        model: event.model,
+        tier: event.tier,
+        vision: event.vision,
+      });
+      break;
     case "text":
       // Buffer + flush once per frame (A3); see scheduleStreamFlush.
       pendingText += event.content;

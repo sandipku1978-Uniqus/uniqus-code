@@ -779,6 +779,22 @@ export type ServerEvent =
       chat_session?: { id: string; title: string | null };
     }
   | { type: "iteration"; iter: number }
+  | {
+      /**
+       * Task-aware "Auto" routing picked the model for THIS turn. Emitted once at
+       * turn start, and ONLY when the user is on Auto (an explicit pick / env pin
+       * is already shown in the composer, so it isn't announced). Lets the UI
+       * surface e.g. "⚡ Auto → GLM-5.2" before the answer streams, so the routing
+       * isn't invisible. `tier` is the classified task tier (quick / standard /
+       * hard) for a short "why" hint; `vision` marks an image-biased pick.
+       */
+      type: "model_selected";
+      provider: ModelProvider;
+      /** Provider-native model id, e.g. "glm-5.2". */
+      model: string;
+      tier?: "quick" | "standard" | "hard";
+      vision?: boolean;
+    }
   | { type: "text"; content: string }
   | {
       /**

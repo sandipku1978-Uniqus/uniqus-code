@@ -464,9 +464,11 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
   // overwriting the path the user is mid-typing.
   const urlFocusedRef = useRef(false);
   const [navState, setNavState] = useState({ canBack: false, canForward: false });
-  // Load state for the proxied iframe (inferred from load events + a timeout).
-  // "slow" = the iframe hasn't loaded yet but nothing has actually failed (a
-  // first `npm install` + compile routinely runs tens of seconds); "error" is
+  // Load state for the proxied iframe. Flipped to "ready" by whichever fires
+  // first: the nav-reporter's DOMContentLoaded message (see the nav listener —
+  // the moment the app paints) or the iframe `load` event (full quiescence).
+  // "slow" = nothing has loaded yet but nothing has failed either (a first
+  // `npm install` + compile routinely runs tens of seconds); "error" is
   // reserved for a real iframe load failure. The old code flipped to a hard
   // "Preview unavailable" after a fixed 8 s, false-failing healthy boots.
   const [status, setStatus] = useState<"loading" | "ready" | "slow" | "error">("loading");
@@ -601,7 +603,18 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
       if (previewOrigin !== "*" && e.origin !== previewOrigin) return;
       if (!isPreviewNavMessage(e.data)) return;
       if (e.data.server_id !== server.id) return;
+      // The proxy-injected nav reporter posts this on DOMContentLoaded (and on
+      // every soft nav) — i.e. as soon as the document is parsed and the app is
+      // visible. That's a far better "ready" signal than the iframe's `load`
+      // event below, which only fires once EVERY subresource (images, fonts,
+      // the HMR socket) has settled. While the agent's turn churns the in-VM
+      // dev server (constant HMR recompiles + CPU contention on a small shared
+      // VM), `load` can be deferred for the whole turn even though the page
+      // already rendered — leaving the overlay stuck on "Loading preview…".
+      // Clearing it here shows the app the moment it paints; the `onLoad`
+      // handler stays as a fallback for apps that strip our injected script.
       const path = e.data.path || "/";
+      setStatus((s) => (s === "loading" || s === "slow" ? "ready" : s));
       setIframePath(path);
       // Keep iframePath (used for the displayed URL + open-in-new-tab) in sync,
       // but don't clobber the address bar while the user is typing in it.

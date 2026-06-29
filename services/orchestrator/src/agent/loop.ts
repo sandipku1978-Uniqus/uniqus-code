@@ -146,7 +146,7 @@ function buildSystemPrompt(
     .map((d) => `${d.key} (${d.blurb})`)
     .join("; ");
   const subAgentsToolLine = hasSubAgents
-    ? `\n- spawn_agents — delegate focused work to one or more specialized sub-agents that run autonomously in THIS sandbox and report back. Each entry is { type, task, model?, instructions? }; pass MULTIPLE entries to run them IN PARALLEL. Use it to (a) parallelize INDEPENDENT work — e.g. audit the backend while a design agent restyles the UI — or (b) get a focused expert pass. Types: ${subAgentTypeList}. Each sub-agent has your full tool set except spawning more sub-agents, sees ONLY the task you write (not this conversation — so make the task self-contained), can run on a model you choose (\`model\`), and can take extra prompt guidance you write (\`instructions\`). Don't spawn agents for trivial steps you can do yourself, and never run parallel agents that edit the SAME files (they clobber each other). The tool returns each sub-agent's final report.`
+    ? `\n- spawn_agents — delegate focused work to one or more specialized sub-agents that run autonomously in THIS sandbox and report back. Each entry is { type, task, model?, instructions? }; pass MULTIPLE entries to run them IN PARALLEL. Use it to (a) parallelize INDEPENDENT work — e.g. audit the backend while a design agent restyles the UI — or (b) get a focused expert pass. Types: ${subAgentTypeList}. Each sub-agent has your full tool set except spawning more sub-agents, sees ONLY the task you write (not this conversation — so make the task self-contained), can run on a model you choose (\`model\`), and can take extra prompt guidance you write (\`instructions\`). FAN OUT by default when a request decomposes into several largely-independent pieces — "build out the rest of the site" / a set of new pages, a batch of components, or sections that each live in their own files: do the shared scaffolding FIRST (routing, nav, shared layout, design tokens) yourself or in one agent, THEN spawn one sub-agent PER page/section in parallel rather than building them all yourself one-by-one. Building many independent things serially when you could fan out is the most common mistake here — for any multi-part build, default to delegating. Only skip it for trivial steps you can just do yourself, and never run parallel agents that edit the SAME files (they clobber each other). The tool returns each sub-agent's final report.`
     : "";
 
   // Truth-in-advertising for vision: when the active model is text-only (GLM),
@@ -337,6 +337,19 @@ export interface LoopHooks {
     imagePaths?: string[],
   ) => void;
   onIteration?: (iter: number) => void;
+  /**
+   * Fires once at turn start when the user is on Auto and task-aware routing has
+   * resolved the model for THIS turn. The server forwards it as `model_selected`
+   * so the UI can show which model Auto picked (and the tier it classified)
+   * before the answer streams. NOT fired for an explicit pick / env pin (that's
+   * already shown in the composer) or for a spawned sub-agent.
+   */
+  onModelResolved?: (info: {
+    provider: string;
+    model: string;
+    tier?: "quick" | "standard" | "hard";
+    vision?: boolean;
+  }) => void;
   /**
    * Fires when the loop summarized older turns to keep the context window
    * survivable (Plan §3.6). The server surfaces this as a system message
@@ -540,6 +553,15 @@ export interface LoopOptions extends LoopHooks {
    */
   allowSubAgents?: boolean;
   /**
+   * Drains user messages the user sent MID-TURN ("steering") so the loop can
+   * inject them at its next iteration boundary — returning (and clearing) any
+   * queued messages each time it's called. Wired ONLY for a top-level/main-agent
+   * turn; a spawned sub-agent never receives this, so sub-agents can't be steered
+   * by the end user (by design — they report to the lead agent, not the user).
+   * Absent ⇒ no mid-turn steering (headless/CLI, or a sub-agent).
+   */
+  pullSteeringMessages?: () => string[];
+  /**
    * Specialization preamble for a spawned sub-agent (audit/design/backend/…),
    * prepended ahead of the shared engineering system prompt so the sub-agent
    * keeps every sandbox rule but adopts its role + the lead agent's extra
@@ -610,7 +632,19 @@ export async function runAgentLoop(
       },
       { anthropicKey: keys.anthropic },
     );
-    if (picked) resolved = picked;
+    if (picked) {
+      // Strip the routing metadata off the model the loop runs with; keep tier/
+      // vision only for the UI announcement below.
+      resolved = { provider: picked.provider, model: picked.model, overridden: false };
+      // Tell the UI which model Auto landed on for this turn (and why), up front
+      // — only on a top-level turn, where the server wires this hook.
+      opts.onModelResolved?.({
+        provider: picked.provider,
+        model: picked.model,
+        tier: picked.tier,
+        vision: picked.vision,
+      });
+    }
   }
   const provider = getProvider(resolved.provider, keys);
   // Cumulative token usage across every iteration of this turn. Committed after
@@ -792,8 +826,10 @@ export async function runAgentLoop(
                 allowSubAgents: false, // depth cap = 1
                 // Forward live preview frames so the user still sees a sub-agent
                 // driving the browser. Deliberately NOT forwarded: onText /
-                // onThinking (would interleave into the lead transcript) and
-                // onTodoWrite (would clobber the lead agent's Tasks pane).
+                // onThinking (would interleave into the lead transcript),
+                // onTodoWrite (would clobber the lead agent's Tasks pane), and
+                // pullSteeringMessages (mid-turn user steering targets the MAIN
+                // agent only — a sub-agent reports to the lead, not the user).
                 onPreviewFrame: opts.onPreviewFrame,
               });
               // Meter the sub-agent's spend as its own usage event (precise
@@ -839,6 +875,15 @@ export async function runAgentLoop(
         return formatSubAgentReports(reports, requested);
       }
     : undefined;
+
+  // Wrap mid-turn "steering" messages (sent by the user while the agent is
+  // working) so the model reads them as updated instructions rather than as a
+  // fresh, unrelated request. Only ever non-empty for a top-level turn — a
+  // sub-agent isn't given pullSteeringMessages, so it can't be steered.
+  const formatSteer = (msgs: string[]): string =>
+    `The user sent ${msgs.length === 1 ? "a new message" : `${msgs.length} new messages`} ` +
+    `while you were working — treat ${msgs.length === 1 ? "it" : "them"} as updated instructions ` +
+    `and adjust course as needed:\n\n${msgs.join("\n\n")}`;
 
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
     if (opts.signal?.aborted) return finish(true);
@@ -962,6 +1007,17 @@ export async function runAgentLoop(
     }
 
     if (turn.stopReason === "end_turn" || turn.stopReason === "refusal" || toolCalls.length === 0) {
+      // Mid-turn steering: the agent is about to end, but the user sent a
+      // message while it worked. Don't finish — inject it as a new user turn and
+      // keep going. The assistant message was just recorded above, so a user
+      // message follows it cleanly (valid alternation). Skipped on abort.
+      if (!opts.signal?.aborted) {
+        const steer = opts.pullSteeringMessages?.() ?? [];
+        if (steer.length > 0) {
+          record({ role: "user", content: [{ type: "text", text: formatSteer(steer) }] });
+          continue;
+        }
+      }
       // Truncation with no tool calls is otherwise reported as a clean finish,
       // leaving the user with a mid-sentence or empty answer and no signal.
       // Surface a short notice through the same text channel as model output so
@@ -1151,7 +1207,18 @@ export async function runAgentLoop(
       }
     }
 
-    record({ role: "user", content: toolResults });
+    // Mid-turn steering during tool execution: fold any message(s) the user sent
+    // while these tools ran into THIS tool-result user turn, as a trailing text
+    // block. Appending to the existing user message (rather than pushing a second
+    // user message) keeps the canonical user/assistant alternation valid across
+    // every provider adapter — a user turn may carry tool_result blocks followed
+    // by text. The model sees the steer on the next iteration.
+    const steer = opts.signal?.aborted ? [] : opts.pullSteeringMessages?.() ?? [];
+    const userContent: Anthropic.MessageParam["content"] =
+      steer.length > 0
+        ? [...toolResults, { type: "text", text: formatSteer(steer) }]
+        : toolResults;
+    record({ role: "user", content: userContent });
   }
 
   // Attach the usage accrued across all iterations so the server can record it

@@ -331,6 +331,13 @@ interface RunHandle {
    */
   permissionMode: PermissionMode;
   /**
+   * Mid-turn "steering": user messages sent while THIS run is in flight, queued
+   * here for the agent loop to inject at its next iteration boundary (drained via
+   * the pullSteeringMessages closure). Main-agent turn only — never wired into a
+   * spawned sub-agent, so a sub-agent can't be steered by the end user.
+   */
+  steerQueue: string[];
+  /**
    * Resolve/reject pending tool-approval prompts, keyed by tool call_id. The
    * `category` is kept so a switch to a more-permissive mode can auto-resolve a
    * prompt that mode would no longer gate. Mirrors `answerResolvers`.
@@ -390,6 +397,7 @@ function registerRun(
     // Overwritten from the user_message's permission_mode before the loop runs;
     // bypass is the safe back-compat default (old execute-only = run everything).
     permissionMode: "bypass",
+    steerQueue: [],
     approvalResolvers: new Map(),
   };
   runs.set(key, handle);
@@ -4075,7 +4083,24 @@ async function handleConnection(
         // this socket's local flag, is the source of truth, so a reconnected
         // socket can't start a second turn over a run that began on another.
         const runK = runKey(project.id, sessionId);
-        if (busy || runs.has(runK)) {
+        const activeRun = runs.get(runK);
+        if (activeRun) {
+          // A turn is already in flight for this session → treat this as a
+          // MID-TURN "steering" message: queue it for the running (main) agent
+          // loop to pick up at its next iteration boundary, instead of rejecting
+          // it. The loop folds it into the turn's history (so it persists); the
+          // sending tab already echoed the bubble optimistically. Only the main
+          // agent is steered — sub-agents never see this queue.
+          const steer = typeof event.content === "string" ? event.content.trim() : "";
+          if (steer) {
+            activeRun.steerQueue.push(steer);
+            console.log(`[ws ${project.id}] steering message queued (len=${steer.length})`);
+          }
+          return;
+        }
+        if (busy) {
+          // Busy flag set but no registered run yet (the brief pre-registration
+          // window during VM boot) — reject rather than racing a second turn.
           console.log(`[ws ${project.id}] rejected: already busy`);
           send({ type: "error", message: "agent is already running" });
           return;
@@ -4291,6 +4316,14 @@ async function handleConnection(
                 });
               }),
             currentAbort.signal,
+            // Drain mid-turn steering messages queued on this run (main agent
+            // only — runSession passes this straight to the top-level loop).
+            () => {
+              if (runHandle.steerQueue.length === 0) return [];
+              const q = runHandle.steerQueue;
+              runHandle.steerQueue = [];
+              return q;
+            },
           );
           await touchProject(project.id);
         } finally {
@@ -4756,6 +4789,8 @@ async function runSession(
     },
   ) => Promise<{ decision: "approve" | "approve_always" | "deny"; feedback?: string }>,
   signal: AbortSignal,
+  /** Drains queued mid-turn steering messages (main-agent turn only). */
+  pullSteeringMessages: () => string[],
 ): Promise<void> {
   const start = Date.now();
   let toolCalls = 0;
@@ -4993,6 +5028,10 @@ async function runSession(
     messages: history,
     collectMessages: turnMessages,
     signal,
+    // Mid-turn steering — the main agent loop drains queued user messages at its
+    // next iteration boundary. Only passed here (the top-level turn); the
+    // runSubAgents closure never forwards it, so sub-agents can't be steered.
+    pullSteeringMessages,
     previewBaseUrl: PREVIEW_BASE_URL,
     skills: skillsBody,
     accountPrompt,
@@ -5053,6 +5092,16 @@ async function runSession(
     onText: (content) => send({ type: "text", content }),
     onThinking: (content) => send({ type: "thinking", content }),
     onIteration: (iter) => send({ type: "iteration", iter }),
+    // Auto routing resolved the model for this turn — surface it in the chat so
+    // the user sees which model Auto picked (and the tier) before output streams.
+    onModelResolved: (info) =>
+      send({
+        type: "model_selected",
+        provider: info.provider as ModelProvider,
+        model: info.model,
+        tier: info.tier,
+        vision: info.vision,
+      }),
     onToolCallStarted: (callId, name) => {
       toolCalls++;
       // Emit tool_call with empty input so the UI can render a "running…" row

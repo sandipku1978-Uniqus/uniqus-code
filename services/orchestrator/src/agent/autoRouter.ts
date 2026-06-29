@@ -217,6 +217,17 @@ export function mapToModel(
 }
 
 /**
+ * An Auto pick, carrying the resolved model PLUS the routing rationale (the task
+ * tier it classified into, and whether the turn was image-biased) so the caller
+ * can surface "why this model" to the UI. The model fields are a plain
+ * {@link ResolvedModel} (overridden:false), so it drops straight into the loop.
+ */
+export interface AutoPick extends ResolvedModel {
+  tier: "quick" | "standard" | "hard";
+  vision: boolean;
+}
+
+/**
  * Resolve Auto to a concrete model for this turn. Returns null to mean "no
  * task-specific signal — keep the caller's static Auto default."
  */
@@ -224,7 +235,7 @@ export async function pickAutoModel(
   role: ModelRole,
   signals: AutoSignals,
   opts: PickOptions = {},
-): Promise<ResolvedModel | null> {
+): Promise<AutoPick | null> {
   let tier = classifyTaskHeuristic(signals.userMessage);
 
   // Plan mode is reasoning-heavy by nature — resolve ambiguity toward the
@@ -238,13 +249,12 @@ export async function pickAutoModel(
   // `tier` is guaranteed non-ambiguous here — the block above resolved it.
   const resolvedTier: "quick" | "standard" | "hard" = tier;
   const picked = mapToModel(resolvedTier, signals.hasImages, signals.availableProviders);
-  if (picked) {
-    console.log(
-      `[auto-router] ${role} → ${picked.provider}:${picked.model} ` +
-        `(tier=${resolvedTier}${signals.hasImages ? ", vision" : ""})`,
-    );
-  }
-  return picked;
+  if (!picked) return null;
+  console.log(
+    `[auto-router] ${role} → ${picked.provider}:${picked.model} ` +
+      `(tier=${resolvedTier}${signals.hasImages ? ", vision" : ""})`,
+  );
+  return { ...picked, tier: resolvedTier, vision: signals.hasImages };
 }
 
 /**

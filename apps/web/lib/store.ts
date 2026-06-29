@@ -289,6 +289,19 @@ export type ChatItem =
     }
   | { kind: "system"; id: string; content: string }
   /**
+   * Auto routing's per-turn model pick (from the `model_selected` WS event),
+   * rendered as a compact "⚡ Auto → <model>" chip at the top of the turn so the
+   * user can see which model Auto chose for the task. Only present on Auto turns.
+   */
+  | {
+      kind: "routing";
+      id: string;
+      provider: string;
+      model: string;
+      tier?: "quick" | "standard" | "hard";
+      vision?: boolean;
+    }
+  /**
    * A run-level failure (C7), rendered as a friendly card (title + plain-English
    * cause + collapsible raw detail + Retry/Simplify actions) instead of a bare
    * muted `error: <raw>` line. `code` selects the copy; `retryable` hints whether
@@ -717,6 +730,13 @@ interface State {
   /** Resolve a still-pending plan card when its run is aborted (C-27). */
   cancelPendingPlan(): void;
   addSystem(content: string): void;
+  /** Add Auto's per-turn model pick chip (from the `model_selected` event). */
+  addModelSelection(info: {
+    provider: string;
+    model: string;
+    tier?: "quick" | "standard" | "hard";
+    vision?: boolean;
+  }): void;
   /** Add a run-level error card (C7). */
   addErrorItem(message: string, code?: string, retryable?: boolean): void;
   addCompleteMarker(
@@ -1205,6 +1225,8 @@ export const useStore = create<State>((set, get) => ({
 
   addSystem: (content) =>
     set((s) => ({ chat: [...s.chat, { kind: "system", id: id(), content }] })),
+  addModelSelection: (info) =>
+    set((s) => ({ chat: [...s.chat, { kind: "routing", id: id(), ...info }] })),
   addErrorItem: (message, code, retryable) =>
     set((s) => ({ chat: [...s.chat, { kind: "error", id: id(), message, code, retryable }] })),
 

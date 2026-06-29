@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ClientEvent, UploadedFileSummary } from "@uniqus/api-types";
+import { MODEL_CATALOG } from "@uniqus/api-types";
 import {
   fetchSlashCommandsApi,
   getApiBase,
@@ -618,9 +619,12 @@ export default function ChatPanel() {
     const trimmed = input.trim();
     // Snapshot the picked element now — it's valid context even with no text.
     const selectedElement = pendingSelectedElement;
+    // NOTE: `busy` is intentionally NOT a guard here. While a turn is running,
+    // a send becomes a MID-TURN steering message — the server queues it for the
+    // running main agent to pick up at its next step (see the orchestrator's
+    // user_message handler). Stop stays available as the separate kill switch.
     if (
       (!trimmed && pendingFiles.length === 0 && !selectedElement) ||
-      busy ||
       uploading ||
       !project ||
       !connected
@@ -644,11 +648,11 @@ export default function ChatPanel() {
       return;
     }
 
-    // The upload await above could have spanned a disconnect or the start of
-    // another turn (e.g. an auto-retry). Re-check before send() so we don't
-    // echo a bubble and clear the composer against a closed socket / busy
-    // session — mirrors the pre-upload guard and the ok-check below.
-    if (!connected || busy) {
+    // The upload await above could have spanned a disconnect. Re-check
+    // connectivity before send() so we don't echo a bubble and clear the
+    // composer against a closed socket. `busy` is NOT re-checked: a send while
+    // busy is a deliberate steering message (see the guard above).
+    if (!connected) {
       addSystem(
         "disconnected — message not sent. We'll reconnect automatically; try again in a moment.",
       );
@@ -1235,14 +1239,17 @@ export default function ChatPanel() {
                 void handleSubmit();
               }
             }}
-            disabled={busy || uploading || !project || !connected}
+            // Stays enabled while busy so the user can send a mid-turn steering
+            // message (Enter) without stopping the agent — the Stop button is the
+            // separate kill switch.
+            disabled={uploading || !project || !connected}
             placeholder={
               // The ghost suggestion (when shown) owns the empty-state line, so
               // suppress the native placeholder to avoid two overlaid texts.
               ghostSuggestion
                 ? ""
                 : busy
-                ? "Uniqus is running…"
+                ? "Add a message — Uniqus reads it as it works…"
                 : !connected
                 ? "Reconnecting…"
                 : project
@@ -1875,6 +1882,9 @@ const ChatItemView = memo(function ChatItemView({
   if (item.kind === "system") {
     return <div className="msg-system">{item.content}</div>;
   }
+  if (item.kind === "routing") {
+    return <RoutingChip item={item} />;
+  }
   if (item.kind === "error") {
     return (
       <ErrorCard
@@ -1889,6 +1899,42 @@ const ChatItemView = memo(function ChatItemView({
   }
   return null;
 });
+
+/**
+ * Compact "⚡ Auto → <model>" chip shown at the top of an Auto turn, so the user
+ * can see which model task-aware routing picked (and the task tier it inferred).
+ * Self-contained inline styles off the design tokens — it's a muted, secondary
+ * affordance, not agent output. Falls back to the raw provider-native id if the
+ * model isn't in the catalog.
+ */
+function RoutingChip({ item }: { item: Extract<ChatItem, { kind: "routing" }> }) {
+  const entry = MODEL_CATALOG.find(
+    (m) => m.model === item.model && m.provider === item.provider,
+  );
+  const label = entry?.label ?? item.model;
+  const why = [item.tier, item.vision ? "vision" : null].filter(Boolean).join(" · ");
+  return (
+    <div
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        fontSize: 11.5,
+        color: "var(--text-dim)",
+        fontFamily: "var(--font-mono, ui-monospace, Menlo, Consolas, monospace)",
+        padding: "1px 0 3px",
+        userSelect: "none",
+      }}
+      title={`Auto routed this turn to ${label}${item.tier ? ` (${item.tier} task)` : ""}`}
+    >
+      <span aria-hidden style={{ color: "var(--brand-magenta, #d4439a)" }}>⚡</span>
+      <span>
+        Auto → <strong style={{ color: "var(--text-muted)", fontWeight: 600 }}>{label}</strong>
+      </span>
+      {why && <span style={{ opacity: 0.65 }}>· {why}</span>}
+    </div>
+  );
+}
 
 function ErrorCard({
   item,
