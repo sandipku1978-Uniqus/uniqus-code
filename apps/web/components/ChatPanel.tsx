@@ -113,6 +113,8 @@ export default function ChatPanel() {
   const model = useStore((s) => s.model);
   const thinking = useStore((s) => s.thinking);
   const thinkingEnabled = useStore((s) => s.thinkingEnabled);
+  const suggestionsEnabled = useStore((s) => s.suggestionsEnabled);
+  const setSuggestionsEnabled = useStore((s) => s.setSuggestionsEnabled);
   const addUserMessage = useStore((s) => s.addUserMessage);
   const addSystem = useStore((s) => s.addSystem);
   const setBusy = useStore((s) => s.setBusy);
@@ -123,6 +125,10 @@ export default function ChatPanel() {
   const expandedTurns = useStore((s) => s.expandedTurns);
   const toggleTurn = useStore((s) => s.toggleTurn);
   const liveUsage = useStore((s) => s.liveUsage);
+  // Sub-agents spend their own tokens in the same turn; fold them into the live
+  // "Usage so far" counter so it reflects the WHOLE turn's cost, not just the
+  // lead agent's (item 3). Matches what the Activity Monitor already totals.
+  const subagents = useStore((s) => s.subagents);
   const isMobile = useIsMobile();
   // Element the user picked from the preview (PreviewPanel sets this); attached
   // to the next turn as `selected_element` and cleared on a successful send.
@@ -168,6 +174,9 @@ export default function ChatPanel() {
   // Drives the Modal-based "Clear chat history?" confirmation (replaces the
   // native window.confirm so it matches the app's other destructive dialogs).
   const [confirmReset, setConfirmReset] = useState(false);
+  // The composer "+" add-menu (item 9): replaces the bare Files button with a
+  // small popup so more actions can live under one affordance.
+  const [plusMenuOpen, setPlusMenuOpen] = useState(false);
   // Escalation for a Stop that the server is slow to honour: after a timeout we
   // offer a local "Force stop" so the kill switch never dead-ends (§C).
   const [forceStop, setForceStop] = useState(false);
@@ -441,6 +450,7 @@ export default function ChatPanel() {
   }, [turns]);
   const [ghostDismissedId, setGhostDismissedId] = useState<string | null>(null);
   const ghostSuggestion: string | null =
+    suggestionsEnabled &&
     latestComplete &&
     latestComplete.id !== ghostDismissedId &&
     !busy &&
@@ -929,25 +939,40 @@ export default function ChatPanel() {
           sub-agents surface right above the composer instead. */}
       {isMobile && <SubAgentList compact />}
 
-      {busy &&
-        liveUsage &&
-        (liveUsage.input + liveUsage.cacheRead + liveUsage.cacheCreation > 0 || liveUsage.output > 0) && (
+      {busy && (() => {
+        // Lead + every sub-agent, so the counter reflects the whole turn (item 3).
+        const subIn = subagents.reduce(
+          (a, s) => a + s.inputTokens + s.cacheReadTokens + s.cacheCreationTokens,
+          0,
+        );
+        const subOut = subagents.reduce((a, s) => a + s.outputTokens, 0);
+        const tokIn = (liveUsage ? liveUsage.input + liveUsage.cacheRead + liveUsage.cacheCreation : 0) + subIn;
+        const tokOut = (liveUsage?.output ?? 0) + subOut;
+        if (tokIn <= 0 && tokOut <= 0) return null;
+        const runningSubs = subagents.filter((s) => s.status === "running").length;
+        return (
           <div
             className="live-usage"
-            title={`Usage for this response — ${formatTokens(
-              liveUsage.input + liveUsage.cacheRead + liveUsage.cacheCreation,
-            )} tokens read, ${formatTokens(
-              liveUsage.output,
-            )} tokens written. Tokens are the unit AI models bill in.`}
+            title={`Usage for this response — ${formatTokens(tokIn)} tokens read, ${formatTokens(
+              tokOut,
+            )} tokens written${
+              subagents.length > 0 ? " (lead agent + sub-agents)" : ""
+            }. Tokens are the unit AI models bill in.`}
           >
             <span className="live-usage-dot" />
             <span>
-              Usage so far ·{" "}
-              <strong>{formatTokens(liveUsage.input + liveUsage.cacheRead + liveUsage.cacheCreation)}</strong>{" "}
-              in · <strong>{formatTokens(liveUsage.output)}</strong> out
+              Usage so far · <strong>{formatTokens(tokIn)}</strong> in ·{" "}
+              <strong>{formatTokens(tokOut)}</strong> out
+              {runningSubs > 0 && (
+                <span style={{ opacity: 0.7 }}>
+                  {" "}
+                  · {runningSubs} sub-agent{runningSubs === 1 ? "" : "s"} working
+                </span>
+              )}
             </span>
           </div>
-        )}
+        );
+      })()}
 
       {!connected && !connectionFailed && (
         <div className="chat-offline-pill" role="status">
@@ -1218,19 +1243,34 @@ export default function ChatPanel() {
             style={{ resize: "none" }}
           />
           {ghostSuggestion && (
-            // Dimmed follow-up hint overlaying the empty textarea. Same font
-            // metrics so it sits on the first text line; click or Tab fills it.
-            <button
-              type="button"
-              className="composer-ghost"
-              tabIndex={-1}
-              aria-hidden="true"
-              onClick={acceptGhostSuggestion}
-              title="Tab to use this suggestion"
-            >
+            // Dimmed follow-up hint overlaying the empty textarea. The container
+            // is click-THROUGH (pointer-events:none) so clicking the composer to
+            // start typing focuses the textarea instead of filling the suggestion
+            // (item 8) — only the explicit "Tab" chip (or the Tab key) accepts it.
+            <div className="composer-ghost" aria-hidden="true">
               <span className="composer-ghost-text">{ghostSuggestion}</span>
-              <span className="composer-ghost-key">Tab</span>
-            </button>
+              <span className="composer-ghost-actions">
+                <button
+                  type="button"
+                  className="composer-ghost-key"
+                  tabIndex={-1}
+                  onClick={acceptGhostSuggestion}
+                  title="Use this suggestion (or press Tab)"
+                >
+                  Tab
+                </button>
+                <button
+                  type="button"
+                  className="composer-ghost-off"
+                  tabIndex={-1}
+                  onClick={() => setSuggestionsEnabled(false)}
+                  title="Turn off follow-up suggestions (re-enable in the model menu)"
+                  aria-label="Turn off follow-up suggestions"
+                >
+                  ✕
+                </button>
+              </span>
+            </div>
           )}
           </div>
           <input
@@ -1288,18 +1328,51 @@ export default function ChatPanel() {
             </div>
           )}
           <div className="controls">
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={busy || uploading || !project}
-              className="attach-btn"
-              title="Attach files to this agent turn"
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M21.4 11.6 12 21a6 6 0 0 1-8.5-8.5l9.9-9.9a4 4 0 0 1 5.7 5.7l-9.9 9.9a2 2 0 0 1-2.8-2.8l9.4-9.4" />
-              </svg>
-              Files
-            </button>
+            {/* "+" add-menu (item 9): a generic add affordance that opens a small
+                menu; file upload lives inside it (room for more actions later). */}
+            <div className="composer-plus">
+              <button
+                type="button"
+                onClick={() => setPlusMenuOpen((v) => !v)}
+                disabled={busy || uploading || !project}
+                className="attach-btn plus"
+                title="Add to this message"
+                aria-haspopup="menu"
+                aria-expanded={plusMenuOpen}
+                aria-label="Add to this message"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+              </button>
+              {plusMenuOpen && (
+                <>
+                  <button
+                    type="button"
+                    className="composer-plus-backdrop"
+                    aria-label="Close menu"
+                    tabIndex={-1}
+                    onClick={() => setPlusMenuOpen(false)}
+                  />
+                  <div className="composer-plus-menu" role="menu">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setPlusMenuOpen(false);
+                        fileInputRef.current?.click();
+                      }}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M21.4 11.6 12 21a6 6 0 0 1-8.5-8.5l9.9-9.9a4 4 0 0 1 5.7 5.7l-9.9 9.9a2 2 0 0 1-2.8-2.8l9.4-9.4" />
+                      </svg>
+                      <span>Upload files</span>
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
             <PermissionModePicker />
             <ModelPicker variant="compact" />
             <MicButton
@@ -2199,9 +2272,11 @@ function CompleteRow({
   // skip it rather than show a misleading "0.0s".
   if (item.elapsed_ms > 0) parts.push(`${(item.elapsed_ms / 1000).toFixed(1)}s`);
   if (item.input_tokens !== undefined || item.output_tokens !== undefined) {
-    parts.push(
-      `${formatTokens(item.input_tokens ?? 0)} in · ${formatTokens(item.output_tokens ?? 0)} out`,
-    );
+    // Include sub-agent tokens so the summary matches the true turn spend the
+    // cost reflects (item 3). The lead figures already fold in the plan phase.
+    const tokIn = (item.input_tokens ?? 0) + (item.subagent_input_tokens ?? 0);
+    const tokOut = (item.output_tokens ?? 0) + (item.subagent_output_tokens ?? 0);
+    parts.push(`${formatTokens(tokIn)} in · ${formatTokens(tokOut)} out`);
   }
   // Per-run cost estimate (C5). "est." kept deliberately — there's no billing
   // system; this is a best-effort number, not a charge. When sub-agents ran this
@@ -2400,14 +2475,18 @@ function describeTool(
 ): { verb: string; object?: string; mono?: boolean } {
   const a = (input ?? {}) as Record<string, unknown>;
   const str = (v: unknown): string => (typeof v === "string" ? v : "");
-  const path = str(a.path);
+  // Accept the alternate arg names a model may stream (file_path / file) so the
+  // file name isn't blank while the args are still arriving (item 4).
+  const path = str(a.path) || str(a.file_path) || str(a.file);
   // Pick the tense-appropriate verb from a (present, past) pair.
   const v = (present: string, past: string) => (done ? past : present);
   switch (name) {
     case "write_file":
-      return { verb: v("Writing", "Wrote"), object: path, mono: true };
+      // Until the path streams in, show a subtle placeholder rather than a blank
+      // gap after "Writing" (item 4).
+      return { verb: v("Writing", "Wrote"), object: path || (done ? "" : "…"), mono: !!path };
     case "edit_file":
-      return { verb: v("Editing", "Edited"), object: path, mono: true };
+      return { verb: v("Editing", "Edited"), object: path || (done ? "" : "…"), mono: !!path };
     case "read_file":
       return { verb: v("Reading", "Read"), object: path, mono: true };
     case "list_dir":
@@ -2458,15 +2537,49 @@ function describeTool(
       return { verb: v("Updating the task list", "Updated the task list") };
     case "ask_user":
       return { verb: v("Asking you", "Asked you"), object: str(a.question) };
+    // Image generation + vision tools. Explicit so they read as proper phrases
+    // ("Generating an image") instead of the mangled snake_case fallback that
+    // conjugated the whole phrase ("generate_image" → "Generate imaging"; item 5).
+    case "generate_image":
+      return {
+        verb: v("Generating an image", "Generated an image"),
+        object: str(a.prompt) ? `“${str(a.prompt).slice(0, 60)}”` : "",
+      };
+    case "analyze_image":
+      return { verb: v("Analyzing an image", "Analyzed an image"), object: str(a.question) };
+    case "extract_text_from_image":
+      return { verb: v("Reading text from an image", "Read text from an image") };
+    case "ui_screenshot_to_code":
+      return { verb: v("Turning a screenshot into code", "Turned a screenshot into code") };
+    case "diagnose_screenshot":
+      return { verb: v("Diagnosing a screenshot", "Diagnosed a screenshot") };
+    case "understand_diagram":
+      return { verb: v("Reading a diagram", "Read a diagram") };
+    case "analyze_chart":
+      return { verb: v("Analyzing a chart", "Analyzed a chart") };
+    case "compare_ui":
+      return { verb: v("Comparing the UI", "Compared the UI") };
     default: {
       // snake_case → "Verb object" fallback so a new/unknown tool still reads as
-      // a phrase: "run_migration" → "Run migration" / "Running migration".
-      const base = name.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
-      const verb = done ? base : base.endsWith("e") ? `${base.slice(0, -1)}ing` : `${base}ing`;
-      const first = a.path ?? a.url ?? a.query ?? a.command ?? a.name ?? a.pattern ?? a.id ?? a.server_id;
-      const object =
+      // a phrase: "run_migration" → "Running migration". Conjugate ONLY the first
+      // word (the verb) — the old code appended "ing" to the WHOLE phrase, so
+      // "generate image" became "generate imaging" (item 5).
+      const words = name.replace(/_/g, " ").trim().split(/\s+/).filter(Boolean);
+      const rawVerb = words[0] ?? name;
+      const rest = words.slice(1).join(" ");
+      const cap = (s: string) => s.replace(/^\w/, (c) => c.toUpperCase());
+      const gerund =
+        rawVerb.length > 2 && rawVerb.endsWith("e")
+          ? `${rawVerb.slice(0, -1)}ing`
+          : `${rawVerb}ing`;
+      const verb = cap(done ? rawVerb : gerund);
+      const first = a.path ?? a.url ?? a.query ?? a.command ?? a.name ?? a.pattern ?? a.prompt ?? a.id ?? a.server_id;
+      const argObject =
         typeof first === "string" || typeof first === "number" ? String(first) : undefined;
-      return { verb, object, mono: object !== undefined };
+      // Prefer the snake_case remainder as the plain object ("run_migration" →
+      // "migration"); fall back to a streamed arg value (rendered mono).
+      const object = rest || argObject;
+      return { verb, object, mono: !rest && argObject !== undefined };
     }
   }
 }

@@ -33,11 +33,16 @@ function applyEffort(
     if (effort) params.output_config = { effort };
     return;
   }
-  if (!effort) return;
   // Opus 4.8 accepts the full low/medium/high/xhigh/max scale under
   // output_config.effort, paired with adaptive thinking so the model reasons.
-  params.thinking = { type: "adaptive" };
-  params.output_config = { effort };
+  // display:"summarized" is REQUIRED to stream a visible reasoning trace: on
+  // Opus 4.8/4.7 the `display` default is "omitted", which still emits thinking
+  // blocks but with EMPTY text — so `thinking_delta` fires with nothing in it and
+  // the UI's reasoning card never fills (the "no thought signatures on Claude"
+  // bug). Summarized returns a readable trace; thinking is billed the same either
+  // way. See claude-api skill → "Thinking display".
+  params.thinking = { type: "adaptive", display: "summarized" };
+  if (effort) params.output_config = { effort };
 }
 
 // Non-standard fields other adapters stamp onto content blocks for their own

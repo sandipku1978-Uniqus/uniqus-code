@@ -64,6 +64,22 @@ export interface PlanOptions {
   signal?: AbortSignal;
   /** Stream the planner's progress to the client (same events as the agent loop). */
   hooks?: PlanHooks;
+  /**
+   * Fired once when the plan finishes, with the tokens the planning phase spent
+   * (summed across the investigation turns) plus the model/provider it ran on.
+   * The server records this as a usage event and folds it into the turn's cost so
+   * plan-mode work is billed/shown like everything else (it used to be free).
+   */
+  onUsage?: (usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    model: string;
+    // The provider the planner resolved to (may be any configured provider,
+    // including "zai"); recordUsageEvent takes a plain string.
+    provider: string;
+  }) => void;
 }
 
 const MAX_PLAN_ITERATIONS = 16;
@@ -231,6 +247,33 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
     { role: "user", content: userMessage },
   ]);
 
+  // Accumulate the planning phase's token spend across investigation turns so the
+  // server can bill it + fold it into the turn cost (item 12 — plan work used to
+  // be free). Reported once via opts.onUsage on the way out.
+  const planUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+  const bankUsage = (u?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+  }): void => {
+    if (!u) return;
+    planUsage.inputTokens += u.inputTokens;
+    planUsage.outputTokens += u.outputTokens;
+    planUsage.cacheReadTokens += u.cacheReadTokens ?? 0;
+    planUsage.cacheCreationTokens += u.cacheCreationTokens ?? 0;
+  };
+  const reportUsage = (): void => {
+    if (
+      planUsage.inputTokens ||
+      planUsage.outputTokens ||
+      planUsage.cacheReadTokens ||
+      planUsage.cacheCreationTokens
+    ) {
+      opts.onUsage?.({ ...planUsage, model: resolved.model, provider: resolved.provider });
+    }
+  };
+
   for (let iter = 0; iter < MAX_PLAN_ITERATIONS; iter++) {
     if (opts.signal?.aborted) throw new Error("aborted before plan");
 
@@ -253,12 +296,16 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
       if (opts.signal?.aborted) throw new Error("aborted during plan");
       throw err;
     }
+    bankUsage(turn.usage);
 
     messages.push({ role: "assistant", content: turn.content });
 
     // The model submitted its plan — done.
     const submitted = turn.toolCalls.find((c) => c.name === "submit_plan");
-    if (submitted) return normalizePlan(submitted.input);
+    if (submitted) {
+      reportUsage();
+      return normalizePlan(submitted.input);
+    }
 
     // No tools and no plan: it just talked. Force a plan to finish.
     if (turn.toolCalls.length === 0) break;
@@ -322,6 +369,7 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
     maxTokens: 4096,
     signal: opts.signal,
   });
+  reportUsage();
   return normalizePlan(forced);
 }
 

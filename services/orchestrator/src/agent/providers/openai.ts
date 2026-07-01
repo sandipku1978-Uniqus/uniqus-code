@@ -69,15 +69,18 @@ function reasoningParam(
   // the lowest reasoning_effort the Responses API accepts.
   if (!enabled) return { effort: "minimal", summary: "auto" };
   if (!effort) return undefined;
-  // reasoning_effort accepts minimal/low/medium/high only — our xhigh/max clamp
-  // to "high"; *-pro models accept only "high" (composer hides xhigh/max for
-  // OpenAI, so this is the Auto-resolved-to-OpenAI safety net).
+  // Current GPT-5.x models accept low/medium/high/xhigh (xhigh is the ceiling —
+  // there is NO "max"), so pass low→xhigh straight through and map our top rung
+  // `max` down to `xhigh`. `*-pro` models only accept "high" (low/medium/xhigh
+  // 400), so clamp those. `xhigh` is model-dependent on OpenAI's side; the
+  // composer only offers it for OpenAI, and Auto-resolved-to-OpenAI requests at
+  // `max` land on `xhigh` here.
   const level = model.includes("-pro")
     ? "high"
-    : effort === "xhigh" || effort === "max"
-      ? "high"
+    : effort === "max"
+      ? "xhigh"
       : effort;
-  return { effort: level, summary: "auto" };
+  return { effort: level as NonNullable<OpenAI.Responses.ResponseCreateParams["reasoning"]>["effort"], summary: "auto" };
 }
 
 export class OpenAIAdapter implements ModelProviderAdapter {

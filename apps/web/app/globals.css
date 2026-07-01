@@ -2226,8 +2226,11 @@ section.band .sub {
   background: transparent;
   border: 0;
   text-align: left;
-  cursor: text;
-  overflow: hidden;
+  overflow: visible;
+  /* Click-THROUGH: clicking the composer to type must reach the textarea, not
+     fill the suggestion. Only the explicit action chips below opt back in to
+     pointer events (item 8). */
+  pointer-events: none;
   animation: fadeIn var(--dur-base) var(--ease-out) backwards;
 }
 .composer-ghost-text {
@@ -2241,6 +2244,13 @@ section.band .sub {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.composer-ghost-actions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  pointer-events: auto; /* the chips ARE clickable; the text is not */
+}
 .composer-ghost-key {
   flex: 0 0 auto;
   font-family: var(--font-mono-stack);
@@ -2248,16 +2258,28 @@ section.band .sub {
   line-height: 1.4;
   letter-spacing: 0.02em;
   color: var(--text-muted);
-  padding: 1px 5px;
+  padding: 1px 6px;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm, 5px);
   background: var(--bg-surface);
+  cursor: pointer;
 }
-.composer-ghost:hover .composer-ghost-text { color: var(--text-muted); }
-.composer-ghost:hover .composer-ghost-key {
+.composer-ghost-key:hover {
   border-color: color-mix(in srgb, var(--brand-magenta) 45%, var(--border-default));
   color: var(--text-primary);
 }
+.composer-ghost-off {
+  flex: 0 0 auto;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm, 5px);
+  padding: 2px 5px;
+  cursor: pointer;
+}
+.composer-ghost-off:hover { color: var(--text-primary); background: var(--bg-surface); }
 
 .composer .controls {
   display: flex;
@@ -2965,33 +2987,76 @@ section.band .sub {
 }
 .effort-slider-track {
   position: relative;
-  height: 5px;
-  margin: 5px 6px 0;
+  height: 6px;
+  /* Roomy vertical hit area so the whole strip is grabbable (item 7); the visible
+     rail is painted via ::before so the touch target is bigger than 6px. */
+  margin: 9px 8px;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  touch-action: none; /* let pointer-drag own the gesture on touch */
+  outline: none;
+}
+.effort-slider-track::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 6px;
+  transform: translateY(-50%);
   border-radius: 999px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
 }
+.effort-slider-track:focus-visible {
+  outline: 2px solid var(--accent, #b21e7d);
+  outline-offset: 4px;
+  border-radius: 999px;
+}
 .effort-slider-fill {
   position: absolute;
-  top: 0;
+  top: 50%;
   left: 0;
-  height: 100%;
+  height: 6px;
+  transform: translateY(-50%);
   border-radius: 999px;
   background: var(--brand-gradient, var(--accent, #b21e7d));
   transition: width var(--dur-fast, 0.12s) ease;
+  pointer-events: none;
 }
+/* Rung tick marks along the rail so the discrete stops read as a slider. */
+.effort-slider-tick {
+  position: absolute;
+  top: 50%;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--border-strong, #55505c);
+  pointer-events: none;
+  transition: background var(--dur-fast, 0.12s) ease;
+}
+.effort-slider-tick[data-active="true"] { background: rgba(255, 255, 255, 0.85); }
 .effort-slider-knob {
   position: absolute;
   top: 50%;
-  width: 13px;
-  height: 13px;
+  width: 15px;
+  height: 15px;
   border-radius: 50%;
   background: #fff;
   border: 2px solid var(--accent, #b21e7d);
   transform: translate(-50%, -50%);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
-  transition: left var(--dur-fast, 0.12s) ease;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  transition: left var(--dur-fast, 0.12s) ease, box-shadow var(--dur-fast, 0.12s) ease;
+  pointer-events: none;
 }
+.effort-slider-track:active .effort-slider-knob {
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent, #b21e7d) 22%, transparent), 0 1px 4px rgba(0, 0, 0, 0.45);
+  transition: box-shadow var(--dur-fast, 0.12s) ease; /* knob follows the finger without lag */
+}
+.effort-slider-track:active .effort-slider-fill { transition: none; }
+.effort-slider-stop:disabled { cursor: default; }
 .effort-slider-stops {
   display: flex;
   justify-content: space-between;
@@ -5307,20 +5372,36 @@ section.band .sub {
   width: 100%;
 }
 
-/* "Use on every new project" star toggle, top-right of a skill tile head. */
+/* "Auto-apply to every new project" toggle, top-right of a skill tile head. Now
+   a labeled pill (item 11) so a bare ★ isn't mistaken for a favourite/bookmark. */
 .skill-default-star {
   position: relative;
   z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   background: none;
-  border: 0;
+  border: 1px solid transparent;
+  border-radius: 999px;
   cursor: pointer;
-  font-size: 16px;
+  font-size: 13px;
   line-height: 1;
-  padding: 2px 4px;
+  padding: 3px 8px 3px 6px;
   color: var(--text-dim);
-  transition: color var(--dur-fast, 0.12s) ease, transform var(--dur-fast, 0.12s) ease;
+  transition: color var(--dur-fast, 0.12s) ease, background var(--dur-fast, 0.12s) ease,
+    border-color var(--dur-fast, 0.12s) ease;
 }
-.skill-default-star:hover { color: var(--brand-magenta, #b21e7d); transform: scale(1.12); }
+.skill-default-star-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+.skill-default-star:hover {
+  color: var(--brand-magenta, #b21e7d);
+  background: color-mix(in srgb, var(--brand-magenta, #b21e7d) 10%, transparent);
+  border-color: color-mix(in srgb, var(--brand-magenta, #b21e7d) 30%, transparent);
+}
 .skill-default-star[data-on="true"] { color: var(--brand-magenta, #b21e7d); }
 .skill-default-star:disabled { opacity: 0.5; cursor: default; }
 
@@ -9218,4 +9299,110 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   background: transparent;
   border: none;
   padding: 2px 0;
+}
+
+/* ── Composer "+" add-menu (item 9) ──────────────────────────────────────── */
+.composer-plus { position: relative; display: inline-flex; }
+.composer .attach-btn.plus {
+  width: 30px;
+  padding: 0;
+  justify-content: center;
+  font-size: 0; /* icon only */
+}
+.composer-plus-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: transparent;
+  border: 0;
+  cursor: default;
+}
+.composer-plus-menu {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 41;
+  min-width: 168px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md, 8px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  animation: popIn var(--dur-fast, 0.12s) var(--ease-out, ease) backwards;
+}
+.composer-plus-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  color: var(--text-primary);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm, 5px);
+  cursor: pointer;
+}
+.composer-plus-menu button:hover { background: var(--bg-surface); }
+.composer-plus-menu button svg { color: var(--text-muted); flex: 0 0 auto; }
+
+/* ── Live-build animations (item 13) ─────────────────────────────────────── */
+/* Respect reduced-motion — everything below is decorative. */
+@media (prefers-reduced-motion: no-preference) {
+  /* New edited-file diff cards slide in as the agent writes files. */
+  .am-diff-feed > .am-diff-card {
+    animation: amCardIn 0.32s var(--ease-out, cubic-bezier(0.22, 1, 0.36, 1)) backwards;
+  }
+  /* A fresh sub-agent row easing in. */
+  .subagents-list > .subagent-row {
+    animation: amRowIn 0.28s var(--ease-out, cubic-bezier(0.22, 1, 0.36, 1)) backwards;
+  }
+  /* The live token stat value ticks with a subtle pulse whenever it changes.
+     ActivityMonitor keys the inner span on the value, so it remounts (and this
+     mount animation restarts) only when the number actually changes. */
+  .am-stat-value-inner {
+    display: inline-block;
+    animation: amStatBump 0.4s var(--ease-out, ease);
+  }
+  /* Diff body lines reveal top-to-bottom while the file streams in. */
+  .am-diff-body .am-diff-add,
+  .am-diff-body .am-diff-del {
+    animation: amLineIn 0.18s ease backwards;
+  }
+  /* The chat "working" strip already spins; give tool cards a gentle entrance. */
+  .chat-scroll .tool-card {
+    animation: amRowIn 0.24s var(--ease-out, ease) backwards;
+  }
+}
+@keyframes amCardIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes amRowIn {
+  from { opacity: 0; transform: translateY(5px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes amLineIn {
+  from { opacity: 0; transform: translateX(-3px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes amStatBump {
+  0% { transform: none; }
+  30% { transform: translateY(-2px) scale(1.06); }
+  100% { transform: none; }
+}
+/* The Activity Monitor live dot already uses .pulse; make the header dot glow a
+   touch stronger while working so "live" reads at a glance. */
+.am-live-dot.pulse {
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, #b21e7d) 55%, transparent);
+  animation: amDotPulse 1.6s ease-in-out infinite;
+}
+@keyframes amDotPulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, #b21e7d) 45%, transparent); }
+  50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent, #b21e7d) 0%, transparent); }
 }

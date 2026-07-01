@@ -231,6 +231,8 @@ function PickerBody({
   const setThinking = useStore((s) => s.setThinking);
   const thinkingEnabled = useStore((s) => s.thinkingEnabled);
   const setThinkingEnabled = useStore((s) => s.setThinkingEnabled);
+  const suggestionsEnabled = useStore((s) => s.suggestionsEnabled);
+  const setSuggestionsEnabled = useStore((s) => s.setSuggestionsEnabled);
 
   // Inline (settings): expand the list when a specific model is already chosen.
   const [expanded, setExpanded] = useState(!flyout && model !== "auto");
@@ -332,6 +334,24 @@ function PickerBody({
           ? "Higher effort = deeper reasoning before acting, at the cost of latency and tokens."
           : "Thinking off — fastest, cheapest responses; the model answers without a reasoning pass."}
       </p>
+
+      <div className="model-picker-sep" />
+
+      {/* Follow-up suggestions toggle (item 8) — the re-enable home for the ✕ on
+          the composer's ghost hint. */}
+      <div className="model-picker-think-head">
+        <span className="label-micro" style={{ margin: 0 }}>
+          Follow-up suggestions
+        </span>
+        <Toggle
+          checked={suggestionsEnabled}
+          onChange={setSuggestionsEnabled}
+          label="Show a suggested follow-up prompt after each turn"
+        />
+      </div>
+      <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.4 }}>
+        A dimmed next-step prompt after each turn — press Tab to use it. It never sends on its own.
+      </p>
     </div>
   );
 }
@@ -402,10 +422,10 @@ function Toggle({
 }
 
 /**
- * A discrete effort slider modelled on Claude Code's — a filled track with a
- * knob at the selected rung and clickable tick stops for each supported rung.
- * Adaptive: `options` is the model's supported set (2–5 rungs). Disabled when
- * thinking is toggled off (rendered greyed, non-interactive).
+ * A real, draggable effort slider modelled on Claude Code's — a filled track you
+ * can grab and drag (pointer), nudge with the arrow keys, or click a stop. The
+ * knob snaps to the nearest supported rung. Adaptive: `options` is the model's
+ * supported set (2–5 rungs). Disabled when thinking is toggled off.
  */
 function EffortSlider({
   value,
@@ -418,44 +438,92 @@ function EffortSlider({
   disabled?: boolean;
   onChange: (v: ThinkingEffort) => void;
 }) {
+  const trackRef = useRef<HTMLDivElement>(null);
   const idx = Math.max(0, options.indexOf(value));
   const last = Math.max(1, options.length - 1);
   // Knob/fill position as a percentage across the track (first stop = 0%).
   const pct = (idx / last) * 100;
 
+  // Map a pointer x-coordinate to the nearest rung and commit it.
+  const setFromClientX = (clientX: number) => {
+    const el = trackRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0) return;
+    const t = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    const next = options[Math.round(t * last)];
+    if (next && next !== value) onChange(next);
+  };
+
   return (
-    <div
-      className="effort-slider"
-      data-disabled={disabled ? "true" : "false"}
-      role="radiogroup"
-      aria-label="Thinking effort"
-    >
-      <div className="effort-slider-track" aria-hidden>
+    <div className="effort-slider" data-disabled={disabled ? "true" : "false"}>
+      <div
+        ref={trackRef}
+        className="effort-slider-track"
+        role="slider"
+        tabIndex={disabled ? -1 : 0}
+        aria-label="Thinking effort"
+        aria-valuemin={0}
+        aria-valuemax={last}
+        aria-valuenow={idx}
+        aria-valuetext={EFFORT_LABEL[value]}
+        aria-disabled={disabled ? "true" : "false"}
+        onPointerDown={(e) => {
+          if (disabled) return;
+          e.preventDefault();
+          (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+          setFromClientX(e.clientX);
+        }}
+        onPointerMove={(e) => {
+          if (disabled || e.buttons === 0) return; // only track while dragging
+          setFromClientX(e.clientX);
+        }}
+        onKeyDown={(e) => {
+          if (disabled) return;
+          if (e.key === "ArrowRight" || e.key === "ArrowUp") {
+            e.preventDefault();
+            onChange(options[Math.min(last, idx + 1)]);
+          } else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
+            e.preventDefault();
+            onChange(options[Math.max(0, idx - 1)]);
+          } else if (e.key === "Home") {
+            e.preventDefault();
+            onChange(options[0]);
+          } else if (e.key === "End") {
+            e.preventDefault();
+            onChange(options[last]);
+          }
+        }}
+      >
         <div className="effort-slider-fill" style={{ width: `${pct}%` }} />
-        <div className="effort-slider-knob" style={{ left: `${pct}%` }} />
+        {options.map((opt, i) => (
+          <span
+            key={opt}
+            className="effort-slider-tick"
+            data-active={i <= idx ? "true" : "false"}
+            style={{ left: `${(i / last) * 100}%` }}
+            aria-hidden
+          />
+        ))}
+        <div className="effort-slider-knob" style={{ left: `${pct}%` }} aria-hidden />
       </div>
       <div className="effort-slider-stops">
-        {options.map((opt, i) => {
-          const active = opt === value;
-          return (
-            <button
-              key={opt}
-              type="button"
-              role="radio"
-              aria-checked={active}
-              disabled={disabled}
-              className="effort-slider-stop"
-              data-active={active ? "true" : "false"}
-              // Nudge the first/last labels inward so they don't clip the edges.
-              style={{
-                justifySelf: i === 0 ? "start" : i === options.length - 1 ? "end" : "center",
-              }}
-              onClick={() => onChange(opt)}
-            >
-              {EFFORT_LABEL[opt]}
-            </button>
-          );
-        })}
+        {options.map((opt, i) => (
+          <button
+            key={opt}
+            type="button"
+            disabled={disabled}
+            className="effort-slider-stop"
+            data-active={opt === value ? "true" : "false"}
+            // Nudge the first/last labels inward so they don't clip the edges.
+            style={{
+              justifySelf: i === 0 ? "start" : i === options.length - 1 ? "end" : "center",
+            }}
+            onClick={() => onChange(opt)}
+          >
+            {EFFORT_LABEL[opt]}
+          </button>
+        ))}
       </div>
     </div>
   );

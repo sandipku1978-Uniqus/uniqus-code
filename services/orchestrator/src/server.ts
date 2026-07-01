@@ -4959,6 +4959,39 @@ async function runSession(
     ) => send({ type: "tool_result", call_id: callId, result, is_error: isError }),
   };
 
+  // Planning-phase spend (item 12): plan-mode investigation used to be entirely
+  // free — its tokens were never recorded or shown. Accumulate them here, record
+  // each planner run as its own billed usage event (like sub-agents do), and fold
+  // the cost + tokens into this turn's `complete` summary so the "≈ $X est." and
+  // "N in · M out" reflect the plan too. Populated by proposePlan's onUsage hook.
+  let planCostUsd = 0;
+  let planInputTokens = 0; // total processed (fresh + cache), matching the lead convention
+  let planOutputTokens = 0;
+  const onPlanUsage = (u: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    model: string;
+    provider: string;
+  }): void => {
+    planCostUsd += estimateTurnCostUsd(u.model, u);
+    planInputTokens += u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens;
+    planOutputTokens += u.outputTokens;
+    void recordUsageEvent({
+      projectId,
+      userId,
+      provider: u.provider,
+      model: u.model,
+      inputTokens: u.inputTokens,
+      outputTokens: u.outputTokens,
+      cacheReadTokens: u.cacheReadTokens,
+      cacheCreationTokens: u.cacheCreationTokens,
+      costUsd: estimateTurnCostUsd(u.model, u),
+      elapsedMs: 0,
+    }).catch((e) => console.error("recordUsageEvent (plan) failed:", e));
+  };
+
   if (mode === "plan-then-execute") {
     const plan = await proposePlan(`${messageWithRefs}${selectedBlock}`, {
       apiKey: anthropicKey,
@@ -4971,6 +5004,7 @@ async function runSession(
       projectId,
       signal,
       hooks: planHooks,
+      onUsage: onPlanUsage,
     });
     if (signal.aborted) {
       send({ type: "complete", tool_calls: 0, elapsed_ms: Date.now() - start, aborted: true });
@@ -5015,6 +5049,7 @@ async function runSession(
             projectId,
             signal,
             hooks: planHooks,
+            onUsage: onPlanUsage,
           });
           if (signal.aborted) throw new Error("aborted before plan approval");
           send({ type: "plan_proposed", plan });
@@ -5529,16 +5564,21 @@ async function runSession(
     elapsed_ms: elapsedMs,
     aborted: result.aborted || undefined,
     // Total processed input (fresh + cache) to match the live counter; the
-    // honest fresh/cache split is persisted to usage_events above.
+    // honest fresh/cache split is persisted to usage_events above. Plan-phase
+    // tokens (item 12) are folded in so the turn summary reflects planning too —
+    // they're already billed as their own usage event(s) via onPlanUsage.
     input_tokens:
       result.usage.inputTokens +
       result.usage.cacheReadTokens +
-      result.usage.cacheCreationTokens,
-    output_tokens: result.usage.outputTokens,
+      result.usage.cacheCreationTokens +
+      planInputTokens,
+    output_tokens: result.usage.outputTokens + planOutputTokens,
     cache_read_tokens: result.usage.cacheReadTokens,
     cache_creation_tokens: result.usage.cacheCreationTokens,
     model: result.model,
-    cost_usd: costUsd,
+    // Lead-agent cost plus the planning-phase cost (item 12); sub-agent cost is
+    // carried separately in subagent_cost_usd and added client-side.
+    cost_usd: costUsd + planCostUsd,
     // Sub-agent spend folded into this turn (priced per-model in the loop). The
     // turn's true cost is cost_usd + subagent_cost_usd. Absent when none ran.
     subagent_count: result.subAgents?.count,

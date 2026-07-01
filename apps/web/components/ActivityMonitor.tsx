@@ -21,12 +21,16 @@ function fmtCost(usd: number): string {
   return `$${usd.toFixed(usd < 1 ? 3 : 2)}`;
 }
 
-/** A live token/cost stat cell. */
+/** A live token/cost stat cell. The inner span is keyed on `value` so it remounts
+ *  (re-triggering the subtle count-up bump animation) only when the number
+ *  actually changes (item 13). */
 function Stat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
   return (
     <div className="am-stat">
       <span className="am-stat-value" style={accent ? { color: "var(--accent, #B21E7D)" } : undefined}>
-        {value}
+        <span className="am-stat-value-inner" key={value}>
+          {value}
+        </span>
       </span>
       <span className="am-stat-label">{label}</span>
     </div>
@@ -59,7 +63,11 @@ function diffForTool(item: ToolItem): { lines: { sign: "+" | "-" | " "; text: st
 function filePath(item: ToolItem): string {
   const input = (item.input ?? {}) as Record<string, unknown>;
   const p = input.path ?? input.file ?? input.file_path;
-  return typeof p === "string" ? p : item.name;
+  // Treat an empty string (partial args still streaming) as "not known yet" so
+  // the row shows a placeholder instead of a blank gap after "Writing" (item 4).
+  const s = typeof p === "string" ? p.trim() : "";
+  if (s) return s;
+  return item.result === undefined ? "…" : item.name;
 }
 
 /** One file's diff card in the edited-files feed. */
@@ -123,8 +131,10 @@ export default function ActivityMonitor({
   onStartPreview,
   startingPreview,
 }: {
-  onStartPreview: () => void;
-  startingPreview: boolean;
+  /** When provided, the idle empty-state shows a "Start preview" CTA (Builder
+   *  stage). Omitted when rendered as a standalone tab (item 2). */
+  onStartPreview?: () => void;
+  startingPreview?: boolean;
 }) {
   const busy = useStore((s) => s.busy);
   const liveUsage = useStore((s) => s.liveUsage);
@@ -145,6 +155,16 @@ export default function ActivityMonitor({
     busy || todos.length > 0 || subagents.length > 0 || liveUsage !== null || edits.length > 0;
 
   if (!hasActivity) {
+    // Standalone tab (no start handler): a quiet idle state, no CTA.
+    if (!onStartPreview) {
+      return (
+        <div className="builder-empty">
+          <h2>Activity Monitor</h2>
+          <p>Live tokens, cost, tasks, sub-agents, and file diffs show up here the moment the agent starts working.</p>
+          <span className="builder-empty-hint">Ask for something in chat to see it come alive.</span>
+        </div>
+      );
+    }
     return (
       <div className="builder-empty">
         <h2>See your app come to life</h2>

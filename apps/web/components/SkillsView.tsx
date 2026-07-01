@@ -425,7 +425,8 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
         {skills !== null && skills.length > 0 && (
           <span className="sub">
             {skills.length} skill{skills.length === 1 ? "" : "s"} · attach from any project&apos;s Skills panel, or
-            star (★) one to apply it to every new project automatically
+            tap the ★ on a skill to <strong>auto-apply it to every new project</strong> — so it&apos;s already
+            active on the first turn, no re-attaching
           </span>
         )}
       </div>
@@ -479,8 +480,10 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
                   <span className="proj-avatar" style={{ background: avatarColor(s.id) }}>
                     {s.name.trim().charAt(0).toUpperCase() || "·"}
                   </span>
-                  {/* "Use on every new project" toggle — a star that persists to
-                      the account's default_skill_library_ids. */}
+                  {/* "Auto-apply to every new project" toggle — a star that
+                      persists to the account's default_skill_library_ids. The
+                      label spells out what the star does so it doesn't read as a
+                      bare "favorite" (item 11). */}
                   <button
                     type="button"
                     className="skill-default-star"
@@ -488,13 +491,21 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
                     disabled={defaultBusy === s.id}
                     onClick={() => void toggleDefault(s.id)}
                     aria-pressed={isDefault}
+                    aria-label={
+                      isDefault
+                        ? "Auto-applied to every new project — click to stop"
+                        : "Auto-apply this skill to every new project"
+                    }
                     title={
                       isDefault
-                        ? "Applied to every new project — click to remove"
-                        : "Apply this skill to every new project"
+                        ? "Auto-applied to every new project — click to stop"
+                        : "Auto-apply to every new project (active on the first turn, no re-attaching)"
                     }
                   >
-                    {isDefault ? "★" : "☆"}
+                    <span aria-hidden>{isDefault ? "★" : "☆"}</span>
+                    <span className="skill-default-star-label">
+                      {isDefault ? "Auto-applied" : "Auto-apply"}
+                    </span>
                   </button>
                 </div>
                 <button
@@ -507,7 +518,7 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
                   <h3>{s.name}</h3>
                   <p className="desc">{s.description || "No description"}</p>
                   <div className="meta">
-                    {isDefault && <span className="tile-chip live">★ Default</span>}
+                    {isDefault && <span className="tile-chip live">★ Auto-applied to new projects</span>}
                     <span>{(s.body.length / 1024).toFixed(1)} KB</span>
                     <span title={`Last edited ${relativeTime(s.updated_at)}`}>{relativeTime(s.updated_at)}</span>
                   </div>

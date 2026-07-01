@@ -114,8 +114,10 @@ export const THINKING_EFFORTS: ThinkingEffort[] = ["low", "medium", "high", "xhi
  * - **Z.ai / GLM-5.2** collapses reasoning to two real tiers, so we expose only
  *   `high`→`max` (our `high`⇒GLM "max"-adjacent deepest; anything lower is a
  *   bounded tier). Showing five rungs would be a lie — three of them no-op.
- * - **OpenAI / Google** cap out at `high` (`reasoning_effort` / `thinkingLevel`
- *   have no xhigh/max), so we hide the top two rungs.
+ * - **OpenAI** (`reasoning.effort`) tops out at `xhigh` on the current GPT-5.x
+ *   models (there is no `max`), so we expose `low`→`xhigh` and hide only `max`.
+ * - **Google** caps out at `high` (`thinkingLevel` has no xhigh/max), so we hide
+ *   the top two rungs.
  * - **Auto / unknown** shows the full scale — Auto may resolve to any provider,
  *   and each adapter clamps a rung it can't honor.
  *
@@ -130,6 +132,7 @@ export function thinkingEffortsForModel(choice: string): ThinkingEffort[] {
     case "zai":
       return ["high", "max"];
     case "openai":
+      return ["low", "medium", "high", "xhigh"];
     case "google":
       return ["low", "medium", "high"];
     case "anthropic":

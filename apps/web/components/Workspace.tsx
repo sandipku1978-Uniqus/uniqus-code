@@ -10,7 +10,7 @@ import {
 } from "react-resizable-panels";
 import { type PermissionMode, runModeForPermission } from "@uniqus/api-types";
 import { connect, disconnect, send } from "@/lib/ws-client";
-import { useStore, previewTabId, fileTabId, AGENT_PREVIEW_TAB } from "@/lib/store";
+import { useStore, previewTabId, fileTabId, AGENT_PREVIEW_TAB, ACTIVITY_TAB } from "@/lib/store";
 import { useIsMobile } from "@/lib/use-is-mobile";
 import { runProjectApi, switchProjectBranchApi } from "@/lib/api";
 import { toast } from "@/lib/toast";
@@ -815,6 +815,19 @@ export default function Workspace({
             }
           />
           <MobileTab
+            active={mobileView === "editor" && editorTab === ACTIVITY_TAB}
+            onClick={() => {
+              setMobileView("editor");
+              setEditorTab(ACTIVITY_TAB);
+            }}
+            label="Activity"
+            icon={
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M3 12h4l2 6 4-16 2 8h6" />
+              </svg>
+            }
+          />
+          <MobileTab
             active={mobileView === "files"}
             onClick={() => setMobileView("files")}
             label="Files"
@@ -1212,13 +1225,16 @@ function BuilderStage({ projectId }: { projectId: string }) {
   // flips editorTab to it, so the builder stage takes over like a screen-share.
   const showAgent = agentHasFrames || agentActive;
   const onAgent = editorTab === AGENT_PREVIEW_TAB && showAgent;
+  // The Activity Monitor is now a first-class tab (item 2), not just the idle
+  // fallback — the user can flip back to it while a preview is running.
+  const onActivity = editorTab === ACTIVITY_TAB;
 
-  // No live preview / agent surface to show yet. Instead of a dead "Start
-  // preview" splash, fill the stage with the Activity Monitor — a live build
-  // dashboard (tokens/cost, tasks, sub-agents, edited-file diffs). It falls back
-  // to the "Start preview" call-to-action itself when there's no activity yet,
-  // and is swapped out for the real preview the moment one exists.
-  if (!active && !onAgent) {
+  // No live preview / agent surface to show yet, and not explicitly on Activity.
+  // Instead of a dead "Start preview" splash, fill the stage with the Activity
+  // Monitor — a live build dashboard (tokens/cost, tasks, sub-agents, edited-file
+  // diffs). It falls back to the "Start preview" CTA when there's no activity
+  // yet, and is swapped out for the real preview the moment one exists.
+  if (!active && !onAgent && !onActivity) {
     return (
       <div className="builder-stage">
         <ActivityMonitor onStartPreview={run} startingPreview={busy} />
@@ -1228,7 +1244,7 @@ function BuilderStage({ projectId }: { projectId: string }) {
 
   return (
     <div className="builder-stage">
-      {(previews.length > 1 || showAgent) && (
+      {(previews.length > 0 || showAgent) && (
         <div
           className="builder-preview-bar"
           role="tablist"
@@ -1239,13 +1255,16 @@ function BuilderStage({ projectId }: { projectId: string }) {
               key={p.id}
               type="button"
               role="tab"
-              aria-selected={!onAgent && p.id === active?.id}
+              aria-selected={!onAgent && !onActivity && p.id === active?.id}
               className="toggle-btn"
-              data-on={!onAgent && p.id === active?.id}
+              data-on={!onAgent && !onActivity && p.id === active?.id}
               onClick={() => setEditorTab(previewTabId(p.id))}
               title={`Show the app running on port ${p.port}`}
             >
-              :{p.port}
+              {/* "Live preview" instead of a bare port number — a non-technical
+                  user shouldn't have to know what ":3000" means (item 1). The
+                  port is only appended to disambiguate multiple servers. */}
+              Live preview{previews.length > 1 ? ` :${p.port}` : ""}
             </button>
           ))}
           {showAgent && (
@@ -1259,7 +1278,7 @@ function BuilderStage({ projectId }: { projectId: string }) {
               title="Watch the agent interact with your app, and replay saved flows"
               style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
             >
-              Agent
+              Agent preview
               {agentActive && (
                 <span
                   style={{
@@ -1273,10 +1292,27 @@ function BuilderStage({ projectId }: { projectId: string }) {
               )}
             </button>
           )}
+          <button
+            type="button"
+            role="tab"
+            aria-selected={onActivity}
+            className="toggle-btn"
+            data-on={onActivity}
+            onClick={() => setEditorTab(ACTIVITY_TAB)}
+            title="Live tokens, cost, tasks, sub-agents, and file diffs"
+          >
+            Activity
+          </button>
         </div>
       )}
       <ErrorBoundary label="preview">
-        {onAgent ? <AgentPreviewPanel /> : active ? <PreviewPanel server={active} /> : null}
+        {onActivity ? (
+          <ActivityMonitor onStartPreview={run} startingPreview={busy} />
+        ) : onAgent ? (
+          <AgentPreviewPanel />
+        ) : active ? (
+          <PreviewPanel server={active} />
+        ) : null}
       </ErrorBoundary>
     </div>
   );

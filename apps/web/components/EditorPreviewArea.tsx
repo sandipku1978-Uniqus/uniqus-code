@@ -8,6 +8,7 @@ import {
   fileTabId,
   previewTabId,
   AGENT_PREVIEW_TAB,
+  ACTIVITY_TAB,
   flushSave,
   flushAllPendingEdits,
 } from "@/lib/store";
@@ -17,6 +18,7 @@ import Modal from "./Modal";
 import CodeEditor from "./CodeEditor";
 import PreviewPanel from "./PreviewPanel";
 import AgentPreviewPanel from "./AgentPreviewPanel";
+import ActivityMonitor from "./ActivityMonitor";
 
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"]);
 
@@ -245,7 +247,11 @@ export default function EditorPreviewArea() {
   // The single live "Preview (Agent)" tab appears once the agent has produced
   // any interaction frames (or a run is mid-flight).
   const showAgentTab = agentHasFrames || agentActive;
-  const hasAnyTabs = openFiles.length > 0 || previews.length > 0 || showAgentTab;
+  // The Activity tab is permanent, so the strip is worth showing whenever it's
+  // the active view too (e.g. a mobile "Activity" tap on a project with no files
+  // open) — otherwise the tab strip vanishes and there's no way back.
+  const hasAnyTabs =
+    openFiles.length > 0 || previews.length > 0 || showAgentTab || editorTab === ACTIVITY_TAB;
   // How many open files have unsaved edits, for the Save-all affordance.
   const dirtyCount = openFiles.filter(
     (p) => saveStatus[p]?.kind === "dirty" || saveStatus[p]?.kind === "saving",
@@ -373,7 +379,7 @@ export default function EditorPreviewArea() {
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M3 3l7 17 2-7 7-2z" />
               </svg>
-              <span>Preview (Agent)</span>
+              <span>Agent preview</span>
               {agentActive ? (
                 <span
                   style={{
@@ -400,6 +406,19 @@ export default function EditorPreviewArea() {
               )}
             </button>
           )}
+          {/* Activity Monitor tab (item 2) — a real editor tab so the live build
+              dashboard is reachable in Code view without the ⋯ menu. */}
+          <button
+            type="button"
+            onClick={() => setEditorTab(ACTIVITY_TAB)}
+            className={`tab ${activeTab === ACTIVITY_TAB ? "active" : ""}`}
+            title="Live tokens, cost, tasks, sub-agents, and file diffs"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M3 12h4l2 6 4-16 2 8h6" />
+            </svg>
+            <span>Activity</span>
+          </button>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4 }}>
             {dirtyCount > 1 && (
               <button
@@ -433,6 +452,7 @@ export default function EditorPreviewArea() {
       )}
 
       <div className="editor-content">
+        {activeTab === ACTIVITY_TAB && <ActivityMonitor />}
         {activeTab === AGENT_PREVIEW_TAB && <AgentPreviewPanel />}
         {activePreview && <PreviewPanel server={activePreview} />}
         {activeFilePath && isImageFile(activeFilePath) ? (
@@ -442,7 +462,7 @@ export default function EditorPreviewArea() {
         ) : activeFilePath ? (
           <CodeEditor />
         ) : null}
-        {!hasAnyTabs && (
+        {!hasAnyTabs && activeTab !== ACTIVITY_TAB && (
           <div className="editor-empty">
             <h3>Your preview will show up here.</h3>
             <p>
