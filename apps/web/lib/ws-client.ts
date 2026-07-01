@@ -436,7 +436,30 @@ function handleEvent(event: ServerEvent): void {
       s.addSystem(`server stopped`);
       break;
     case "usage":
-      s.setLiveUsage({ input: event.input_tokens, output: event.output_tokens });
+      s.setLiveUsage({
+        input: event.input_tokens,
+        output: event.output_tokens,
+        cacheRead: event.cache_read_tokens ?? 0,
+        cacheCreation: event.cache_creation_tokens ?? 0,
+        model: event.model,
+      });
+      break;
+    case "subagent_update":
+      s.upsertSubAgent({
+        id: event.id,
+        index: event.index,
+        type: event.agent_type,
+        label: event.label,
+        task: event.task,
+        model: event.model,
+        status: event.status,
+        lastAction: event.last_action,
+        inputTokens: event.input_tokens ?? 0,
+        outputTokens: event.output_tokens ?? 0,
+        cacheReadTokens: event.cache_read_tokens ?? 0,
+        cacheCreationTokens: event.cache_creation_tokens ?? 0,
+        error: event.error,
+      });
       break;
     case "complete":
       s.addCompleteMarker(
@@ -450,6 +473,10 @@ function handleEvent(event: ServerEvent): void {
           cache_creation_tokens: event.cache_creation_tokens,
           model: event.model,
           cost_usd: event.cost_usd,
+          subagent_count: event.subagent_count,
+          subagent_input_tokens: event.subagent_input_tokens,
+          subagent_output_tokens: event.subagent_output_tokens,
+          subagent_cost_usd: event.subagent_cost_usd,
           changed_files: event.changed_files,
           suggestions: event.suggestions,
         },

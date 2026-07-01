@@ -62,8 +62,8 @@ export default async function MarketingPage() {
             </h1>
             <p className="lede">
               An AI workspace for building real apps. Pick the AI you trust for each
-              step — Claude, GPT, or Gemini — watch your app come to life with a live
-              preview, and run every project in its own private, secure space.
+              step — Claude, GLM, GPT, or Gemini — watch your app come to life with a
+              live preview, and run every project in its own private, secure space.
             </p>
 
             <LandingPrompt
@@ -398,7 +398,7 @@ function FeatureArt({ kind }: { kind: string }) {
 }
 
 const HERO_PROOF = [
-  { k: "3 AI providers", v: "Anthropic, OpenAI, Google" },
+  { k: "4 AI providers", v: "Anthropic, Z.ai, OpenAI, Google" },
   { k: "A machine per project", v: "Private and secure" },
   { k: "Launch-ready", v: "tested, previewed, live" },
 ];
@@ -435,8 +435,13 @@ const MODELS = [
     body: "Deep planning, careful changes, and long, focused building sessions.",
   },
   {
+    provider: "Z.ai",
+    name: "GLM-5.2",
+    body: "Near-Opus coding quality at a fraction of the cost, with a 1M-token context.",
+  },
+  {
     provider: "OpenAI",
-    name: "GPT-5.x / Codex",
+    name: "GPT-5.5 / GPT-5.3 Codex",
     body: "Complex problem-solving, writing code, and sticking with multi-step tasks.",
   },
   {
@@ -509,7 +514,7 @@ const STEPS = [
   {
     num: "02",
     title: "Choose your AI",
-    body: "Stay on Auto, or pick Claude, GPT, or Gemini for that step — and dial how hard it thinks from low to high.",
+    body: "Stay on Auto, or pick Claude, GLM, GPT, or Gemini for that step — and dial how hard it thinks from low to high.",
   },
   {
     num: "03",

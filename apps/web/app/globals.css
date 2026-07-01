@@ -2802,10 +2802,21 @@ section.band .sub {
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
-  padding: 12px;
-  /* Content is short (Auto + More models + thinking); keep overflow visible so
-     the "More models" flyout can escape to the side without being clipped. */
+  padding: 10px;
+  /* Content is short (current model + thinking); keep overflow visible so the
+     model-list flyout can escape to the side without being clipped. */
   overflow: visible;
+}
+/* Compact effort badge on the composer trigger, e.g. "Max" / "off". */
+.model-picker-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(178, 30, 125, 0.12);
+  color: var(--accent, #b21e7d);
+  text-transform: none;
+  letter-spacing: 0;
 }
 /* "More models" row + its side flyout (the full model list). */
 .model-picker-more-wrap { position: relative; }
@@ -2856,7 +2867,7 @@ section.band .sub {
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  padding: 6px 8px;
+  padding: 5px 7px;
   cursor: pointer;
   font-family: inherit;
 }
@@ -2865,6 +2876,141 @@ section.band .sub {
   border-color: var(--accent);
   background: rgba(178, 30, 125, 0.08);
 }
+
+/* Settings inline wrapper — tighter than the old .settings-card padding. */
+.model-picker-card {
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-elev);
+}
+
+/* Current-model row — "shows current model, click to change". */
+.model-picker-current {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 6px 9px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.model-picker-current:hover,
+.model-picker-current[data-open="true"] {
+  border-color: var(--accent);
+  background: rgba(178, 30, 125, 0.06);
+}
+
+/* Section divider inside the picker. */
+.model-picker-sep {
+  height: 1px;
+  background: var(--border-default);
+  margin: 2px 0;
+}
+
+/* Thinking header row: "Thinking · Max" label + on/off toggle. */
+.model-picker-think-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* On/off pill toggle. */
+.model-picker-toggle {
+  position: relative;
+  width: 30px;
+  height: 17px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  cursor: pointer;
+  padding: 0;
+  transition: background var(--dur-fast, 0.12s) ease, border-color var(--dur-fast, 0.12s) ease;
+}
+.model-picker-toggle[data-on="true"] {
+  background: var(--brand-gradient, var(--accent, #b21e7d));
+  border-color: transparent;
+}
+.model-picker-toggle-knob {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  transition: transform var(--dur-fast, 0.12s) ease;
+}
+.model-picker-toggle[data-on="true"] .model-picker-toggle-knob {
+  transform: translateX(13px);
+}
+
+/* Claude-Code-style discrete effort slider: filled track + knob + tick labels. */
+.effort-slider {
+  display: grid;
+  gap: 6px;
+  padding: 2px 2px 0;
+}
+.effort-slider[data-disabled="true"] {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.effort-slider-track {
+  position: relative;
+  height: 5px;
+  margin: 5px 6px 0;
+  border-radius: 999px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+}
+.effort-slider-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--brand-gradient, var(--accent, #b21e7d));
+  transition: width var(--dur-fast, 0.12s) ease;
+}
+.effort-slider-knob {
+  position: absolute;
+  top: 50%;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--accent, #b21e7d);
+  transform: translate(-50%, -50%);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  transition: left var(--dur-fast, 0.12s) ease;
+}
+.effort-slider-stops {
+  display: flex;
+  justify-content: space-between;
+  gap: 2px;
+}
+.effort-slider-stop {
+  flex: 1;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 2px 0;
+  white-space: nowrap;
+}
+.effort-slider-stop:hover { color: var(--text-primary); }
+.effort-slider-stop[data-active="true"] { color: var(--accent, #b21e7d); }
 
 /* ── Reasoning trace (the model's live thinking) ─────────────────────────── */
 .reasoning-card {
@@ -5160,6 +5306,23 @@ section.band .sub {
   cursor: pointer;
   width: 100%;
 }
+
+/* "Use on every new project" star toggle, top-right of a skill tile head. */
+.skill-default-star {
+  position: relative;
+  z-index: 3;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 4px;
+  color: var(--text-dim);
+  transition: color var(--dur-fast, 0.12s) ease, transform var(--dur-fast, 0.12s) ease;
+}
+.skill-default-star:hover { color: var(--brand-magenta, #b21e7d); transform: scale(1.12); }
+.skill-default-star[data-on="true"] { color: var(--brand-magenta, #b21e7d); }
+.skill-default-star:disabled { opacity: 0.5; cursor: default; }
 
 /* Dashed "create" tile at the end of the grid. */
 .skill-new-tile {
@@ -8792,4 +8955,267 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   .post-card.lead .post-thumb { aspect-ratio: 16 / 9; }
   .mk-cta-band { padding: 44px 24px; }
   .job-row { flex-direction: column; align-items: flex-start; gap: 12px; }
+}
+
+/* ── Activity Monitor (Builder stage live build dashboard) ─────────────────── */
+.activity-monitor {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 16px 20px;
+  overflow-y: auto;
+  background: var(--bg-pane);
+  color: var(--text-primary);
+}
+.am-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.am-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex-shrink: 0;
+}
+.am-live-dot.pulse {
+  background: var(--accent, #b21e7d);
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+.am-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.am-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: var(--font-mono-stack);
+}
+.am-tokens {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  flex-shrink: 0;
+}
+.am-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md, 8px);
+}
+.am-stat-value {
+  font-size: 16px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono-stack);
+}
+.am-stat-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.am-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+.am-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.am-section-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.am-section-count {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.am-diff-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.am-diff-card {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+.am-diff-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.am-diff-head:hover {
+  background: var(--bg-elev);
+}
+.am-diff-caret {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+.am-diff-verb {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.am-diff-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono-stack);
+  font-size: 11.5px;
+}
+.am-diff-stat {
+  font-family: var(--font-mono-stack);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.am-diff-running {
+  font-size: 10px;
+  color: var(--accent, #b21e7d);
+}
+.am-diff-body {
+  margin: 0;
+  padding: 6px 0;
+  max-height: 320px;
+  overflow: auto;
+  background: var(--bg-code, #07080d);
+  font-family: var(--font-mono-stack);
+  font-size: 11.5px;
+  line-height: 1.55;
+  border-top: 1px solid var(--border-default);
+}
+.am-diff-body > div {
+  padding: 0 10px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.am-diff-sign {
+  display: inline-block;
+  width: 18px;
+  text-align: center;
+  user-select: none;
+  opacity: 0.7;
+}
+.am-diff-add {
+  background: rgba(52, 211, 153, 0.08);
+  color: var(--conf-high, #34d399);
+}
+.am-diff-del {
+  background: rgba(248, 113, 113, 0.08);
+  color: var(--conf-low, #f87171);
+}
+.am-diff-ctx {
+  color: var(--text-muted);
+}
+.am-diff-more {
+  padding: 4px 10px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+/* ── Sub-agent widget (Activity Monitor + mobile composer strip) ───────────── */
+.subagents {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.subagents-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.subagents-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.subagents-count {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.subagents-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.subagent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  font-size: 12px;
+  min-width: 0;
+}
+.subagent-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.subagent-dot.pulse {
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+.subagent-name {
+  flex-shrink: 0;
+  font-weight: 600;
+  font-size: 11.5px;
+}
+.subagent-action {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-family: var(--font-mono-stack);
+  font-size: 11px;
+}
+.subagent-tokens {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-family: var(--font-mono-stack);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+/* Compact variant pinned above the mobile composer. */
+.subagents-compact {
+  border-top: 1px solid var(--border-default);
+  background: rgba(178, 30, 125, 0.04);
+  padding: 6px 10px;
+  gap: 3px;
+}
+.subagents-compact .subagent-row {
+  background: transparent;
+  border: none;
+  padding: 2px 0;
 }

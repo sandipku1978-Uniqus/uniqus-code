@@ -3,10 +3,10 @@ import Link from "next/link";
 export const metadata = {
   title: "AI models — Uniqus Code",
   description:
-    "Pick the AI you trust for each step — Claude, GPT, or Gemini — or stay on Auto and let Uniqus route planning and building to the best model for the job.",
+    "Pick the AI you trust for each step — Claude, GLM, GPT, or Gemini — or stay on Auto and let Uniqus route planning and building to the best model for the job.",
 };
 
-type Icon = "auto" | "claude" | "gpt" | "gemini" | "dial" | "search";
+type Icon = "auto" | "claude" | "glm" | "gpt" | "gemini" | "dial" | "search";
 
 function ModelIcon({ name }: { name: Icon }) {
   const p = {
@@ -38,6 +38,14 @@ function ModelIcon({ name }: { name: Icon }) {
         <svg {...p}>
           <circle cx="12" cy="12" r="9" />
           <path d="M15.5 8.5l-2 5-5 2 2-5 5-2Z" />
+        </svg>
+      );
+    case "glm":
+      // Bolt in a frame — efficient, high-value coding at a fraction of the cost.
+      return (
+        <svg {...p}>
+          <rect x="3" y="4" width="18" height="16" rx="3" />
+          <path d="M13 8l-4 5h3l-1 4 4-5h-3l1-4Z" />
         </svg>
       );
     case "gpt":
@@ -98,10 +106,22 @@ const PROVIDERS: {
     ],
   },
   {
+    icon: "glm",
+    iconClass: "green",
+    provider: "Z.ai — GLM",
+    name: "GLM-5.2",
+    body: "The value pick. Near-Opus coding quality at a fraction of the cost, with a 1M-token context that swallows whole codebases in one go.",
+    strengths: [
+      "Near-Opus coding quality for a fraction of the price",
+      "1M-token context for large, sprawling projects",
+      "Strong, cost-effective everyday building",
+    ],
+  },
+  {
     icon: "gpt",
     iconClass: "purple",
     provider: "OpenAI",
-    name: "GPT-5.x / Codex",
+    name: "GPT-5.5 / GPT-5.3 Codex",
     body: "The problem-solver. Strong at writing code, untangling tricky bugs, and pushing through multi-step tasks without losing the thread.",
     strengths: [
       "Complex problem-solving and debugging",
@@ -144,30 +164,35 @@ const EFFORTS: { level: string; tone: string; body: string }[] = [
 const COMPARE: {
   feature: string;
   claude: string;
+  glm: string;
   gpt: string;
   gemini: string;
 }[] = [
   {
     feature: "Built-in web search",
     claude: "yes",
+    glm: "yes",
     gpt: "yes",
     gemini: "yes",
   },
   {
     feature: "Thinking effort (low / med / high)",
     claude: "yes",
+    glm: "yes",
     gpt: "yes",
     gemini: "yes",
   },
   {
     feature: "Best for",
     claude: "Deep planning & careful changes",
+    glm: "Great coding value & huge context",
     gpt: "Complex problems & multi-step code",
     gemini: "Research & fast turnarounds",
   },
   {
     feature: "Works on Auto",
     claude: "yes",
+    glm: "yes",
     gpt: "yes",
     gemini: "yes",
   },
@@ -201,9 +226,9 @@ export default function ModelsPage() {
             Pick the AI you trust <span className="grad">for each step</span>.
           </h1>
           <p className="mk-lede">
-            Uniqus Code runs on three frontier model families — Anthropic Claude,
-            OpenAI GPT, and Google Gemini. Stay on Auto and let it route planning
-            and building to the right model, or choose yourself for any turn.
+            Uniqus Code runs on four frontier model families — Anthropic Claude,
+            Z.ai GLM, OpenAI GPT, and Google Gemini. Stay on Auto and let it route
+            planning and building to the right model, or choose yourself for any turn.
           </p>
           <div className="mk-hero-cta">
             <Link href="/login" className="btn-primary btn-lg">
@@ -239,17 +264,17 @@ export default function ModelsPage() {
         </article>
       </section>
 
-      {/* Three providers */}
+      {/* Four providers */}
       <section className="mk-page">
         <div className="mk-section-head center">
-          <span className="label-eyebrow">Three providers, one workspace</span>
-          <h2>Three strong models, each great at something.</h2>
+          <span className="label-eyebrow">Four providers, one workspace</span>
+          <h2>Four strong models, each great at something.</h2>
           <p>
             They each have a personality. Knowing the differences helps you reach
             for the right one — or trust Auto to do it for you.
           </p>
         </div>
-        <div className="mk-grid cols-3">
+        <div className="mk-grid cols-2">
           {PROVIDERS.map((m) => (
             <article className="mk-card hover" key={m.name}>
               <span className={`mk-ic ${m.iconClass}`}>
@@ -288,7 +313,7 @@ export default function ModelsPage() {
               <ul className="mk-checks">
                 <li>Per-turn control, set in the composer&rsquo;s model picker</li>
                 <li>Account-wide default in Settings — defaults to medium</li>
-                <li>Works across all three providers</li>
+                <li>Works across all four providers</li>
               </ul>
             </div>
             <div className="mk-row-art">
@@ -356,12 +381,12 @@ export default function ModelsPage() {
                 When the answer depends on something current — a library&rsquo;s
                 latest API, a framework that shipped last week, today&rsquo;s docs —
                 the model can search the web on its own. It&rsquo;s built in for
-                Claude, GPT, and Gemini alike, so you get up-to-date answers no
+                Claude, GLM, GPT, and Gemini alike, so you get up-to-date answers no
                 matter which AI you&rsquo;re using. Every search shows up in the
                 project history, so you can see exactly what it looked up.
               </p>
               <ul className="mk-checks">
-                <li>Available on all three providers</li>
+                <li>Available on all four providers</li>
                 <li>Used only when the answer needs fresh information</li>
                 <li>Each search is logged in your project&rsquo;s history</li>
               </ul>
@@ -393,7 +418,7 @@ export default function ModelsPage() {
                   </span>
                   latest framework release notes
                 </div>
-                {["Anthropic Claude", "OpenAI GPT", "Google Gemini"].map((label) => (
+                {["Anthropic Claude", "Z.ai GLM", "OpenAI GPT", "Google Gemini"].map((label) => (
                   <div
                     key={label}
                     style={{
@@ -456,6 +481,7 @@ export default function ModelsPage() {
               <tr>
                 <th>Capability</th>
                 <th>Claude</th>
+                <th>GLM</th>
                 <th>GPT</th>
                 <th>Gemini</th>
               </tr>
@@ -465,6 +491,7 @@ export default function ModelsPage() {
                 <tr key={row.feature}>
                   <th>{row.feature}</th>
                   <td>{cell(row.claude)}</td>
+                  <td>{cell(row.glm)}</td>
                   <td>{cell(row.gpt)}</td>
                   <td>{cell(row.gemini)}</td>
                 </tr>

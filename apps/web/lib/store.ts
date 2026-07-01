@@ -57,7 +57,8 @@ function persistModel(model: ModelChoice): void {
  * default — a balance of quality and latency/cost.
  */
 const THINKING_STORAGE_KEY = "uniqus.thinking";
-const THINKING_LEVELS: ThinkingEffort[] = ["low", "medium", "high"];
+const THINKING_ENABLED_STORAGE_KEY = "uniqus.thinkingEnabled";
+const THINKING_LEVELS: ThinkingEffort[] = ["low", "medium", "high", "xhigh", "max"];
 
 function readStoredThinking(): ThinkingEffort {
   if (typeof window === "undefined") return "medium";
@@ -75,6 +76,26 @@ function persistThinking(thinking: ThinkingEffort): void {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(THINKING_STORAGE_KEY, thinking);
+  } catch {
+    /* private mode / quota — non-fatal */
+  }
+}
+
+/** Thinking on/off toggle — persisted account-wide like the effort level. */
+function readStoredThinkingEnabled(): boolean {
+  if (typeof window === "undefined") return true;
+  try {
+    // Default ON: only an explicit "false" turns it off.
+    return window.localStorage.getItem(THINKING_ENABLED_STORAGE_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+function persistThinkingEnabled(enabled: boolean): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(THINKING_ENABLED_STORAGE_KEY, enabled ? "true" : "false");
   } catch {
     /* private mode / quota — non-fatal */
   }
@@ -334,6 +355,14 @@ export type ChatItem =
       model?: string;
       /** Estimated USD cost for this run (C5) — an estimate, not a charge. */
       cost_usd?: number;
+      /**
+       * Sub-agent spend folded into this turn (Phase 1). `cost_usd` is the lead
+       * agent's cost; the turn's true cost is `cost_usd + subagent_cost_usd`.
+       */
+      subagent_count?: number;
+      subagent_input_tokens?: number;
+      subagent_output_tokens?: number;
+      subagent_cost_usd?: number;
       /** Deterministic per-turn changeset, tool-derived (C6 Tier-1). */
       changed_files?: ChangedFile[];
       /** Context-aware follow-up prompt chips (C2). */
@@ -480,6 +509,28 @@ export interface AgentPreviewState {
   unseen: boolean;
 }
 
+/**
+ * Live status of one background sub-agent (the Activity Monitor's sub-agent
+ * widget), fed by `subagent_update` WS events and keyed by `id`. Run-scoped:
+ * cleared when a new turn starts; the final state of the last turn's sub-agents
+ * stays visible until then.
+ */
+export interface SubAgentLive {
+  id: string;
+  index: number;
+  type: string;
+  label: string;
+  task: string;
+  model: string;
+  status: "running" | "done" | "error";
+  lastAction?: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  error?: string;
+}
+
 interface State {
   connected: boolean;
   /**
@@ -549,6 +600,12 @@ interface State {
    */
   thinking: ThinkingEffort;
   /**
+   * Whether extended thinking is enabled (the composer's on/off toggle). Sent
+   * with each turn as `thinking_enabled`; when false the orchestrator disables
+   * reasoning for a faster turn. Persisted account-wide, default on.
+   */
+  thinkingEnabled: boolean;
+  /**
    * Active dashboard workspace (P3.1): null = Personal, else an org id.
    * Account-wide, localStorage-backed; read by the ProjectPicker to scope its
    * project list + new-project creation.
@@ -613,11 +670,25 @@ interface State {
   /** Agent-maintained todo list (Plan §5). Updated via `todos_updated` WS events. */
   todos: TodoItem[];
   /**
+   * Live background sub-agents for the in-flight turn (the Activity Monitor's
+   * sub-agent widget), keyed by id and ordered by spawn index. Updated from
+   * `subagent_update` WS events; cleared when a new turn starts.
+   */
+  subagents: SubAgentLive[];
+  /**
    * Live cumulative token usage for the in-flight turn (Plan §5), updated from
    * `usage` WS events. Null when no turn is running. The composer shows it as a
-   * running "X in · Y out" counter; cleared when the turn completes.
+   * running "X in · Y out" counter; cleared when the turn completes. `input` is
+   * FRESH (uncached) input; cached reads/writes are tracked separately so the
+   * Activity Monitor can show the split and price the live spend via `model`.
    */
-  liveUsage: { input: number; output: number } | null;
+  liveUsage: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheCreation: number;
+    model?: string;
+  } | null;
   /**
    * Element the user picked from the preview (element picker), waiting to be
    * attached to the next turn. Set by PreviewPanel, rendered as a chip and sent
@@ -672,6 +743,8 @@ interface State {
   setDensity(d: DensityChoice): void;
   /** Set the agent reasoning effort and persist it as the account-wide default. */
   setThinking(t: ThinkingEffort): void;
+  /** Toggle extended thinking on/off; persists account-wide. */
+  setThinkingEnabled(enabled: boolean): void;
   /** Switch the active dashboard workspace (null = Personal); persists account-wide. */
   setActiveWorkspace(id: string | null): void;
   addUserMessage(
@@ -752,9 +825,19 @@ interface State {
       cost_usd?: number;
       changed_files?: ChangedFile[];
       suggestions?: string[];
+      subagent_count?: number;
+      subagent_input_tokens?: number;
+      subagent_output_tokens?: number;
+      subagent_cost_usd?: number;
     },
   ): void;
-  setLiveUsage(usage: { input: number; output: number } | null): void;
+  setLiveUsage(
+    usage: { input: number; output: number; cacheRead: number; cacheCreation: number; model?: string } | null,
+  ): void;
+  /** Upsert one background sub-agent's live status (from `subagent_update`). */
+  upsertSubAgent(s: SubAgentLive): void;
+  /** Clear all sub-agents (a new turn starts). */
+  clearSubAgents(): void;
   /** Set (or clear) the element picked from the preview for the next turn. */
   setPendingSelectedElement(el: SelectedElement | null): void;
   /** Append files (e.g. an annotated screenshot) for the composer to pick up. */
@@ -826,6 +909,17 @@ interface State {
   reset(): void;
 }
 
+/** Merge a sub-agent update into the list, keyed by id, ordered by spawn index. */
+function upsertSubAgentList(list: SubAgentLive[], s: SubAgentLive): SubAgentLive[] {
+  const idx = list.findIndex((x) => x.id === s.id);
+  if (idx >= 0) {
+    const next = list.slice();
+    next[idx] = s;
+    return next;
+  }
+  return [...list, s].sort((a, b) => a.index - b.index);
+}
+
 let nextId = 1;
 const id = () => `i${nextId++}`;
 // Rewind the block-id counter so a fresh session (resetChat/reset) starts ids
@@ -868,6 +962,7 @@ export const useStore = create<State>((set, get) => ({
   theme: "dark",
   density: "comfortable",
   thinking: readStoredThinking(),
+  thinkingEnabled: readStoredThinkingEnabled(),
   activeWorkspaceId: readStoredWorkspace(),
   chat: [],
   tree: [],
@@ -898,6 +993,7 @@ export const useStore = create<State>((set, get) => ({
   deployment: null,
   redeploySuggested: false,
   todos: [],
+  subagents: [],
   liveUsage: null,
   pendingSelectedElement: null,
   queuedComposerFiles: [],
@@ -967,6 +1063,10 @@ export const useStore = create<State>((set, get) => ({
   setThinking: (t) => {
     persistThinking(t);
     set({ thinking: t });
+  },
+  setThinkingEnabled: (enabled) => {
+    persistThinkingEnabled(enabled);
+    set({ thinkingEnabled: enabled });
   },
   setActiveWorkspace: (id) => {
     persistWorkspace(id);
@@ -1249,12 +1349,18 @@ export const useStore = create<State>((set, get) => ({
           cache_creation_tokens: extra?.cache_creation_tokens,
           model: extra?.model,
           cost_usd: extra?.cost_usd,
+          subagent_count: extra?.subagent_count,
+          subagent_input_tokens: extra?.subagent_input_tokens,
+          subagent_output_tokens: extra?.subagent_output_tokens,
+          subagent_cost_usd: extra?.subagent_cost_usd,
           changed_files: extra?.changed_files,
           suggestions: extra?.suggestions,
         },
       ],
     })),
   setLiveUsage: (usage) => set({ liveUsage: usage }),
+  upsertSubAgent: (s) => set((st) => ({ subagents: upsertSubAgentList(st.subagents, s) })),
+  clearSubAgents: () => set({ subagents: [] }),
   setPendingSelectedElement: (el) => set({ pendingSelectedElement: el }),
   enqueueComposerFiles: (files) =>
     set((s) => ({ queuedComposerFiles: [...s.queuedComposerFiles, ...files] })),
@@ -1355,21 +1461,18 @@ export const useStore = create<State>((set, get) => ({
       // the most recent 60 (each frame is tens of KB of base64).
       const frames = next.length > 60 ? next.slice(next.length - 60) : next;
       const onTab = s.editorTab === AGENT_PREVIEW_TAB;
-      // Take over the surface like a screen-share when a run starts — unless the
-      // user is actively editing a file (don't yank them out of code). If they're
-      // on a preview/agent tab or nothing's open, switch to the live view.
-      const takeOver =
-        isNewRun && (s.editorTab === "" || s.editorTab.startsWith("preview:") || onTab);
-      const willBeOnTab = onTab || takeOver;
+      // Surface the live "Preview (Agent)" tab via its activity badge, but do NOT
+      // steal focus. A run used to auto-switch the editor onto the agent view like
+      // a screen-share, yanking the user off whatever they were doing; now it only
+      // flags "unseen" (the pulsing badge) unless they're already on the tab.
       return {
         agentPreview: {
           callId: frame.call_id,
           flowName: frame.flow_name ?? null,
           frames,
           active: !frame.done,
-          unseen: willBeOnTab ? false : true,
+          unseen: onTab ? false : true,
         },
-        ...(takeOver ? { editorTab: AGENT_PREVIEW_TAB } : {}),
       };
     }),
 
@@ -1471,6 +1574,7 @@ export const useStore = create<State>((set, get) => ({
       expandedTurns: {},
       redeploySuggested: false,
       liveUsage: null,
+      subagents: [],
       pendingSelectedElement: null,
       queuedComposerFiles: [],
     });
@@ -1511,6 +1615,7 @@ export const useStore = create<State>((set, get) => ({
       deployment: null,
       redeploySuggested: false,
       todos: [],
+      subagents: [],
       liveUsage: null,
       pendingSelectedElement: null,
       queuedComposerFiles: [],

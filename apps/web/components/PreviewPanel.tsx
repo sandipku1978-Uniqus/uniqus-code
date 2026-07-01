@@ -44,6 +44,20 @@ function isPreviewNavMessage(data: unknown): data is PreviewNavMessage {
 }
 
 /**
+ * Strip a leading "/preview/<serverId>" proxy prefix from a reported path so
+ * it's relative to the proxy base. Guards against the doubled-URL bug where an
+ * older nav reporter echoes back the full proxied pathname. Only the EXACT
+ * serverId prefix is stripped (serverId is `srv_<hex>`, so this can't collide
+ * with a real app route named `/preview/...`); idempotent on already-relative
+ * paths, which newer proxies now send.
+ */
+function stripPreviewPrefix(path: string, serverId: string): string {
+  let p = (path || "/").replace(new RegExp(`^/preview/${serverId}(?=/|$)`), "");
+  if (!p || p[0] !== "/") p = `/${p}`;
+  return p;
+}
+
+/**
  * Shared element-picker contract (C) — mirrored by the proxy-injected script.
  *
  *   parent → iframe : { type: "uniqus:picker", active: boolean }
@@ -613,7 +627,12 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
       // already rendered — leaving the overlay stuck on "Loading preview…".
       // Clearing it here shows the app the moment it paints; the `onLoad`
       // handler stays as a fallback for apps that strip our injected script.
-      const path = e.data.path || "/";
+      // Normalize the reported path to be RELATIVE to the proxy base. Newer
+      // proxies already strip the prefix, but an older orchestrator (Hetzner
+      // deploys separately from this Vercel frontend) — or a stale cached iframe
+      // — still reports the full "/preview/<serverId>/…". Stripping it here stops
+      // "open in new tab" from opening a doubled ".../preview/<id>/preview/<id>/…".
+      const path = stripPreviewPrefix(e.data.path || "/", server.id);
       setStatus((s) => (s === "loading" || s === "slow" ? "ready" : s));
       setIframePath(path);
       // Keep iframePath (used for the displayed URL + open-in-new-tab) in sync,

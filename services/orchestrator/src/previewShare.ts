@@ -26,7 +26,10 @@ export function createShareToken(
   projectId: string | null,
   ttlMs: number = DEFAULT_TTL_MS,
 ): { token: string; expiresAt: number } {
-  const token = randomBytes(24).toString("base64url");
+  // 12 bytes → a 16-char base64url token. 96 bits is far beyond brute-forceable
+  // for a revocable, ~2h-lived, server-scoped capability, and keeps the share
+  // link short (the old 24-byte/32-char token made the URL needlessly long).
+  const token = randomBytes(12).toString("base64url");
   const expiresAt = Date.now() + ttlMs;
   shares.set(token, { serverId, projectId, expiresAt });
   return { token, expiresAt };

@@ -3,6 +3,7 @@ import { fetch as undiciFetch } from "undici";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { ThinkingEffort } from "@uniqus/api-types";
 import { safeParseJson } from "./openai.js";
+import { parsePartialJson } from "./partialJson.js";
 import type {
   ForcedToolParams,
   ModelProviderAdapter,
@@ -218,7 +219,11 @@ export class ZaiAdapter implements ModelProviderAdapter {
       stream: true,
       stream_options: { include_usage: true },
     } as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
-    applyThinking(body as unknown as Record<string, unknown>, p.thinkingEffort);
+    applyThinking(
+      body as unknown as Record<string, unknown>,
+      p.thinkingEffort,
+      p.thinkingEnabled !== false,
+    );
     // Stream function-call arguments incrementally (GLM-4.6+). WITHOUT this GLM
     // buffers each tool call and emits its whole `arguments` JSON in one burst at
     // the end — so on a coding turn (mostly large write_file/edit_file calls) the
@@ -236,8 +241,9 @@ export class ZaiAdapter implements ModelProviderAdapter {
 
     let text = "";
     // Streamed tool calls arrive in fragments keyed by `index`; accumulate the
-    // id, name, and (chunked) argument string per index.
-    const toolAcc = new Map<number, { id: string; name: string; args: string }>();
+    // id, name, and (chunked) argument string per index. `lastEmit` throttles the
+    // live partial-parse emission so per-fragment deltas don't flood the socket.
+    const toolAcc = new Map<number, { id: string; name: string; args: string; lastEmit: number }>();
     const announced = new Set<number>();
     let usage: TokenUsage | undefined;
     let finish: string | null = null;
@@ -265,7 +271,7 @@ export class ZaiAdapter implements ModelProviderAdapter {
           const idx = tc.index;
           let cur = toolAcc.get(idx);
           if (!cur) {
-            cur = { id: "", name: "", args: "" };
+            cur = { id: "", name: "", args: "", lastEmit: 0 };
             toolAcc.set(idx, cur);
           }
           if (tc.id) cur.id = tc.id;
@@ -274,6 +280,16 @@ export class ZaiAdapter implements ModelProviderAdapter {
           if (cur.id && cur.name && !announced.has(idx)) {
             announced.add(idx);
             p.onToolCallStarted?.(cur.id, cur.name);
+          }
+          // Forward a best-effort partial parse (throttled ~60ms) so the UI
+          // shows the file name / command / diff live as GLM types the args.
+          if (cur.id && cur.name && tc.function?.arguments && p.onToolCallPartial) {
+            const now = Date.now();
+            if (now - cur.lastEmit >= 60) {
+              cur.lastEmit = now;
+              const partial = parsePartialJson(cur.args);
+              if (partial !== undefined) p.onToolCallPartial(cur.id, cur.name, partial);
+            }
           }
         }
       }
@@ -322,24 +338,37 @@ export class ZaiAdapter implements ModelProviderAdapter {
 }
 
 /** Map GLM's thinking-effort control onto the Chat Completions request body. */
-function applyThinking(body: Record<string, unknown>, effort: ThinkingEffort | undefined): void {
+function applyThinking(
+  body: Record<string, unknown>,
+  effort: ThinkingEffort | undefined,
+  enabled: boolean,
+): void {
+  // Thinking toggled OFF: disable GLM's reasoning for a faster turn. GLM accepts
+  // `thinking:{type:"disabled"}` on Chat Completions; drop reasoning_effort too.
+  if (!enabled) {
+    body.thinking = { type: "disabled" };
+    return;
+  }
   if (!effort) return;
   // GLM-5.2's `reasoning_effort` accepts max/xhigh/high/medium/low/minimal/none,
   // but with thinking ON the server COLLAPSES them to two working tiers:
-  // low/medium → "high" (enhanced reasoning) and xhigh/max → "max" (deepest,
-  // GLM's recommended coding default). So our three UI levels map onto those two:
-  //   high       ⇒ "max"   — GLM's deepest reasoning, for the hardest turns
-  //   low/medium ⇒ "high"  — enhanced but BOUNDED reasoning
+  // low/medium → "high" (enhanced reasoning) and high/xhigh/max → "max" (deepest,
+  // GLM's recommended coding default). The composer only ever surfaces high/max
+  // for a GLM model (thinkingEffortsForModel), so those two are the live path;
+  // lower rungs (only reachable on an Auto turn that resolved to GLM) fold in:
+  //   high/xhigh/max ⇒ "max"   — GLM's deepest reasoning, for the hardest turns
+  //   low/medium     ⇒ "high"  — enhanced but BOUNDED reasoning
   // CRITICAL: medium must NOT map to "max". It used to (`effort === "low" ? high
   // : max`), which silently promoted a *medium* request to GLM's deepest tier and
   // let GLM-5.2 spiral in thinking for minutes — repeatedly "deciding" to start
-  // implementing, then re-deliberating — with no tool call ever emitted. Only an
-  // explicit "high" should opt into max. We send the already-resolved tier
+  // implementing, then re-deliberating — with no tool call ever emitted. Only
+  // high/xhigh/max should opt into "max". We send the already-resolved tier
   // ("high"/"max") rather than leaning on the server-side collapse, so the request
   // is explicit and robust if that mapping ever changes.
   // https://docs.z.ai/api-reference/llm/chat-completion (reasoning_effort)
+  const deep = effort === "high" || effort === "xhigh" || effort === "max";
   body.thinking = { type: "enabled" };
-  body.reasoning_effort = effort === "high" ? "max" : "high";
+  body.reasoning_effort = deep ? "max" : "high";
 }
 
 /** "tool_calls"/"length"/"stop" → our canonical stop reason. */

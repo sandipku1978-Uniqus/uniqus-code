@@ -38,11 +38,19 @@ import type {
  * model sees the preview. Images in plain user messages are forwarded too.
  */
 
-/** 2.5 thinkingBudget (tokens) per effort level; 3.x uses thinkingLevel instead. */
+/**
+ * 2.5 thinkingBudget (tokens) per effort level; 3.x uses thinkingLevel instead.
+ * Gemini has no reasoning tiers above "high", so xhigh/max just buy a larger 2.5
+ * budget (the composer hides xhigh/max for Google models anyway — these keys
+ * exist only to satisfy the exhaustive Record and for an Auto turn that resolved
+ * to Gemini with a higher rung requested).
+ */
 const GEMINI_2_5_BUDGET: Record<ThinkingEffort, number> = {
   low: 2048,
   medium: 8192,
   high: 16384,
+  xhigh: 24576,
+  max: 32768,
 };
 
 /**
@@ -59,6 +67,10 @@ const GEMINI_3_LEVEL: Record<ThinkingEffort, ThinkingLevel> = {
   low: ThinkingLevel.LOW,
   medium: ThinkingLevel.MEDIUM,
   high: ThinkingLevel.HIGH,
+  // Gemini 3.x has no level above HIGH — the top two rungs clamp to HIGH (the
+  // composer hides them for Google models; this is only hit on an Auto turn).
+  xhigh: ThinkingLevel.HIGH,
+  max: ThinkingLevel.HIGH,
 };
 
 /**
@@ -71,7 +83,15 @@ const GEMINI_3_LEVEL: Record<ThinkingEffort, ThinkingLevel> = {
 export function thinkingConfigFor(
   model: string,
   effort: ThinkingEffort | undefined,
+  enabled = true,
 ): Record<string, unknown> | undefined {
+  // Thinking toggled OFF. Gemini can't fully disable reasoning the way Claude
+  // can, so we minimize it: 2.5 takes a 0-token budget (its "off"); 3.x has no
+  // sub-LOW level, so LOW is the floor. No includeThoughts — nothing to surface.
+  if (!enabled) {
+    if (/^gemini-3/.test(model)) return { thinkingLevel: ThinkingLevel.LOW };
+    return { thinkingBudget: 0 };
+  }
   // includeThoughts returns thought-summary parts we surface as the live
   // reasoning trace (see the `part.thought` handling in streamAgentTurn).
   const base = { includeThoughts: true };
@@ -183,7 +203,7 @@ export class GoogleAdapter implements ModelProviderAdapter {
 
   async streamAgentTurn(p: StreamTurnParams): Promise<StreamTurnResult> {
     const contents = toGeminiContents(p.messages);
-    const thinkingConfig = thinkingConfigFor(p.model, p.thinkingEffort);
+    const thinkingConfig = thinkingConfigFor(p.model, p.thinkingEffort, p.thinkingEnabled !== false);
     // Built-in Google Search grounding (3.x only — 2.5 can't combine it with
     // function calling). Needs includeServerSideToolInvocations or 3.x 400s.
     const useSearch = /^gemini-3/.test(p.model);

@@ -13,13 +13,32 @@ const ENTRIES: {
   changes: { tag: Tag; text: string }[];
 }[] = [
   {
+    date: "Jul 2026",
+    ver: "v2.0",
+    title: "GLM joins the lineup",
+    changes: [
+      {
+        tag: "new",
+        text: "Z.ai's GLM-5.2 is now a first-class model — near-Opus coding quality at a fraction of the cost, with a 1M-token context. Auto reaches for it on routine features, and you can pin it per turn from the composer's model picker.",
+      },
+      {
+        tag: "new",
+        text: "Built-in web search now covers GLM too, so all four providers — Claude, GLM, GPT, and Gemini — can pull current docs mid-build.",
+      },
+      {
+        tag: "new",
+        text: "Bring your own Z.ai key in Settings alongside Anthropic, OpenAI, and Google, and route your GLM builds — planning included — through your own account.",
+      },
+    ],
+  },
+  {
     date: "Jun 2026",
     ver: "v1.9",
     title: "Bring your keys, take your code",
     changes: [
       {
         tag: "new",
-        text: "Bring your own model keys — connect your Anthropic, OpenAI, or Google account in Settings and route your builds through it, so usage (including planning) bills to you. Leave it blank and we use ours.",
+        text: "Bring your own model keys — connect your Anthropic, Z.ai, OpenAI, or Google account in Settings and route your builds through it, so usage (including planning) bills to you. Leave it blank and we use ours.",
       },
       {
         tag: "new",
@@ -92,7 +111,7 @@ const ENTRIES: {
     changes: [
       {
         tag: "new",
-        text: "Multi-provider models: build with Claude, GPT, or Gemini and switch between them right from the composer's model picker — or set an account-wide default in Settings.",
+        text: "Multi-provider models: build with Claude, GLM, GPT, or Gemini and switch between them right from the composer's model picker — or set an account-wide default in Settings.",
       },
       {
         tag: "new",
@@ -111,7 +130,7 @@ const ENTRIES: {
     changes: [
       {
         tag: "new",
-        text: "Built-in web search across Claude, GPT, and Gemini. The agent can pull current docs and references mid-build, and every search shows up as its own activity in the timeline.",
+        text: "Built-in web search across Claude, GLM, GPT, and Gemini. The agent can pull current docs and references mid-build, and every search shows up as its own activity in the timeline.",
       },
       {
         tag: "improved",

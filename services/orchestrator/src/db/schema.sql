@@ -92,6 +92,12 @@ create unique index if not exists users_guest_recovery_hash_idx
 -- unset); the API caps them at 16 KB / 64 KB respectively.
 alter table users add column if not exists custom_prompt text;
 alter table users add column if not exists default_skills text;
+-- Library skills (from the account Skill Library) to AUTO-ATTACH to every NEW
+-- project on creation — the "use on every project" toggle in the Skills tab. On
+-- project create the orchestrator seeds projects.skill_library_ids from this
+-- list, so a default skill is active on the first turn without re-selecting it.
+alter table users add column if not exists default_skill_library_ids uuid[]
+  not null default '{}';
 
 create table if not exists projects (
   id uuid primary key default gen_random_uuid(),

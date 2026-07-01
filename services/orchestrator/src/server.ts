@@ -288,6 +288,29 @@ async function seedDefaultSkills(ownerId: string, sandboxDir: string): Promise<v
   }
 }
 
+/**
+ * The library-skill ids to attach to a NEW project. An explicit selection from
+ * the create form wins; otherwise fall back to the account's default library
+ * skills (the "use on every project" toggle in the Skills tab), so a default
+ * skill is active on the very first turn without the user re-selecting it. Both
+ * paths run through resolveOwnedSkillIds, so only skills the user actually owns
+ * are attached. Never throws — a settings lookup failure just yields no defaults.
+ */
+async function resolveNewProjectSkillIds(
+  ownerId: string,
+  explicit: string[] | undefined,
+): Promise<string[]> {
+  if (explicit && explicit.length > 0) return resolveOwnedSkillIds(ownerId, explicit);
+  try {
+    const { default_skill_library_ids } = await getAccountSettings(ownerId);
+    if (!default_skill_library_ids.length) return [];
+    return await resolveOwnedSkillIds(ownerId, default_skill_library_ids);
+  } catch (err) {
+    console.error("resolveNewProjectSkillIds defaults lookup failed (non-fatal):", err);
+    return [];
+  }
+}
+
 type Sender = (event: ServerEvent) => void;
 interface SessionCtx {
   send: Sender;
@@ -337,6 +360,14 @@ interface RunHandle {
    * spawned sub-agent, so a sub-agent can't be steered by the end user.
    */
   steerQueue: string[];
+  /**
+   * One-shot resolvers waiting for the NEXT steering message. When the lead
+   * agent has ended its turn and is PARKED waiting on background sub-agents, it
+   * registers one here so a user message wakes it immediately (instead of the
+   * message sitting queued until a sub-agent happens to finish). Drained + called
+   * the moment a steer is enqueued. Lets the user "ask it anything while it sleeps".
+   */
+  steerWaiters: (() => void)[];
   /**
    * Resolve/reject pending tool-approval prompts, keyed by tool call_id. The
    * `category` is kept so a switch to a more-permissive mode can auto-resolve a
@@ -398,6 +429,7 @@ function registerRun(
     // bypass is the safe back-compat default (old execute-only = run everything).
     permissionMode: "bypass",
     steerQueue: [],
+    steerWaiters: [],
     approvalResolvers: new Map(),
   };
   runs.set(key, handle);
@@ -1106,8 +1138,16 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return json(res, 200, { ok: true, providers: await listAccountProviderKeys(user.id) });
   }
   if (req.url === "/api/account/settings" && req.method === "PUT") {
-    const body = await readJsonBody<{ custom_prompt?: string; default_skills?: string }>(req);
-    const patch: { custom_prompt?: string; default_skills?: string } = {};
+    const body = await readJsonBody<{
+      custom_prompt?: string;
+      default_skills?: string;
+      default_skill_library_ids?: unknown;
+    }>(req);
+    const patch: {
+      custom_prompt?: string;
+      default_skills?: string;
+      default_skill_library_ids?: string[];
+    } = {};
     if (typeof body.custom_prompt === "string") {
       if (body.custom_prompt.length > 16 * 1024) {
         return json(res, 400, { error: "custom_prompt exceeds 16 KB" });
@@ -1119,6 +1159,14 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         return json(res, 400, { error: "default_skills exceeds 64 KB" });
       }
       patch.default_skills = body.default_skills;
+    }
+    if (body.default_skill_library_ids !== undefined) {
+      // Validate against the account's OWNED library skills so a stale/foreign
+      // id can never be persisted as a default and silently attach nothing.
+      const ids = Array.isArray(body.default_skill_library_ids)
+        ? body.default_skill_library_ids.filter((x): x is string => typeof x === "string")
+        : [];
+      patch.default_skill_library_ids = await resolveOwnedSkillIds(user.id, ids);
     }
     if (Object.keys(patch).length === 0) {
       return json(res, 400, { error: "nothing to update" });
@@ -1177,7 +1225,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       name,
       description: body.description ?? null,
       design_system_id: await resolveDesignSystemId(user.id, body.design_system_id),
-      skill_library_ids: await resolveOwnedSkillIds(user.id, body.skill_library_ids),
+      skill_library_ids: await resolveNewProjectSkillIds(user.id, body.skill_library_ids),
       org_id: ws.orgId,
     });
     const sandboxDir = sandboxDirFor(project.id);
@@ -1221,7 +1269,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       name: refined.name,
       description: body.description ?? brief.slice(0, 200),
       design_system_id: await resolveDesignSystemId(user.id, body.design_system_id),
-      skill_library_ids: await resolveOwnedSkillIds(user.id, body.skill_library_ids),
+      skill_library_ids: await resolveNewProjectSkillIds(user.id, body.skill_library_ids),
       org_id: ws.orgId,
     });
     const sandboxDir = sandboxDirFor(project.id);
@@ -4095,6 +4143,10 @@ async function handleConnection(
           if (steer) {
             activeRun.steerQueue.push(steer);
             console.log(`[ws ${project.id}] steering message queued (len=${steer.length})`);
+            // Wake the loop if it's PARKED waiting on background sub-agents, so a
+            // message the user sends while it "sleeps" is picked up immediately
+            // rather than sitting until a sub-agent happens to finish.
+            for (const w of activeRun.steerWaiters.splice(0)) w();
           }
           return;
         }
@@ -4256,6 +4308,7 @@ async function handleConnection(
             runModeForPermission(permissionMode),
             event.model,
             event.thinking,
+            event.thinking_enabled,
             selectedElement,
             runSend,
             apiKey,
@@ -4324,6 +4377,18 @@ async function handleConnection(
               runHandle.steerQueue = [];
               return q;
             },
+            // Wake-on-steer: resolves when the next steering message lands (or at
+            // once if one is already queued), so a parked-on-sub-agents lead
+            // picks up user input immediately. Aborts unblock it too (the loop
+            // also races the abort signal).
+            () =>
+              new Promise<void>((resolve) => {
+                if (runHandle.steerQueue.length > 0 || runHandle.abort.signal.aborted) {
+                  resolve();
+                  return;
+                }
+                runHandle.steerWaiters.push(resolve);
+              }),
           );
           await touchProject(project.id);
         } finally {
@@ -4759,6 +4824,8 @@ async function runSession(
   mode: "plan-then-execute" | "execute-only",
   modelChoice: ModelChoice | undefined,
   thinkingEffort: ThinkingEffort | undefined,
+  /** Whether extended thinking is on for this turn (composer toggle). Default true. */
+  thinkingEnabled: boolean | undefined,
   selectedElement: SelectedElement | null,
   send: Sender,
   apiKey: string,
@@ -4791,6 +4858,12 @@ async function runSession(
   signal: AbortSignal,
   /** Drains queued mid-turn steering messages (main-agent turn only). */
   pullSteeringMessages: () => string[],
+  /**
+   * Resolves the next time a steering message is enqueued (or immediately if one
+   * is already queued). The loop awaits this while PARKED on background
+   * sub-agents so a user message wakes it right away. Undefined ⇒ no steer-wake.
+   */
+  waitForSteer?: () => Promise<void>,
 ): Promise<void> {
   const start = Date.now();
   let toolCalls = 0;
@@ -4969,19 +5042,74 @@ async function runSession(
     }, 500);
   };
 
+  // Pull + checkpoint + Storage-sync the file writes a batch of background
+  // sub-agents made (Phase 2). Sub-agents run nested loops in THIS sandbox and
+  // their edits bypass the per-tool handler, so without this their files would
+  // only sync at turn end. Now that spawn_agents is non-blocking, this fires via
+  // the onSubAgentsSettled hook (at await_subagents / park-resume) when the
+  // sub-agents have actually finished writing — not when spawn_agents returns.
+  // Best-effort/background — never blocks the loop. Mirrors the run_command sync.
+  const syncSubAgentWork = (): void => {
+    pullVmChanges(projectId, sandboxDir)
+      .then((pull) => {
+        for (const p of (pull?.pulled ?? []).slice(0, 50)) {
+          broadcastToProject(projectId, { type: "file_changed", path: p });
+        }
+        return commitCheckpoint(sandboxDir, projectId, "spawn_agents: sub-agent file changes")
+          .then((meta) => {
+            if (meta) {
+              void audit({
+                project_id: projectId,
+                user_id: userId,
+                kind: "checkpoint_create",
+                target: meta.sha,
+                metadata: { tool: "spawn_agents", summary: "sub-agent file changes" },
+              });
+              broadcastToProject(projectId, {
+                type: "checkpoint_created",
+                sha: meta.sha,
+                short_sha: meta.short_sha,
+                message: meta.message,
+                created_at: meta.created_at,
+              });
+            }
+          })
+          .then(() => getTracker(projectId, sandboxDir).syncChanges());
+      })
+      .then(() => emitSynced())
+      .catch((err) => console.error("sub-agent settle sync failed:", err));
+  };
+
+  // The provider-native model the live spend is priced against. Known up front
+  // for an explicit pick (catalog id → bare model); for Auto it arrives via
+  // onModelResolved (set below). Rides each `usage` event so the Activity
+  // Monitor can compute a live cost client-side.
+  let currentModel: string | undefined =
+    modelChoice && modelChoice !== "auto"
+      ? MODEL_CATALOG.find((c) => c.id === modelChoice)?.model
+      : undefined;
+
   // Throttle the live token counter — onUsage can fire on every output-token
   // delta (Anthropic). Coalesce to at most one `usage` event per ~300ms, but
   // always remember the latest so the final figure isn't lost to the timer.
-  let latestUsage = { inputTokens: 0, outputTokens: 0 };
+  let latestUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
   let usageEmitTimer: NodeJS.Timeout | null = null;
   const flushUsage = (): void => {
     send({
       type: "usage",
       input_tokens: latestUsage.inputTokens,
       output_tokens: latestUsage.outputTokens,
+      cache_read_tokens: latestUsage.cacheReadTokens,
+      cache_creation_tokens: latestUsage.cacheCreationTokens,
+      model: currentModel,
     });
   };
-  const emitUsage = (u: { inputTokens: number; outputTokens: number }): void => {
+  const emitUsage = (u: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  }): void => {
     latestUsage = u;
     if (usageEmitTimer) return;
     usageEmitTimer = setTimeout(() => {
@@ -5032,10 +5160,14 @@ async function runSession(
     // next iteration boundary. Only passed here (the top-level turn); the
     // runSubAgents closure never forwards it, so sub-agents can't be steered.
     pullSteeringMessages,
+    // Wakes the loop from a park-on-sub-agents wait when the user sends a message.
+    waitForSteer,
     previewBaseUrl: PREVIEW_BASE_URL,
     skills: skillsBody,
     accountPrompt,
     thinkingEffort: effort,
+    // Composer's thinking on/off toggle (default on). Off disables reasoning.
+    thinkingEnabled: thinkingEnabled !== false,
     userId,
     repo,
     designSystem,
@@ -5094,20 +5226,54 @@ async function runSession(
     onIteration: (iter) => send({ type: "iteration", iter }),
     // Auto routing resolved the model for this turn — surface it in the chat so
     // the user sees which model Auto picked (and the tier) before output streams.
-    onModelResolved: (info) =>
+    onModelResolved: (info) => {
+      // Price the live `usage` events against the model Auto landed on.
+      currentModel = info.model;
       send({
         type: "model_selected",
         provider: info.provider as ModelProvider,
         model: info.model,
         tier: info.tier,
         vision: info.vision,
+      });
+    },
+    // Live sub-agent progress → the Activity Monitor's sub-agent widget.
+    // Broadcast to the whole project (parity with preview frames) so the panel
+    // updates regardless of which socket is bound.
+    onSubAgentUpdate: (u) =>
+      broadcastToProject(projectId, {
+        type: "subagent_update",
+        id: u.id,
+        index: u.index,
+        agent_type: u.type,
+        label: u.label,
+        task: u.task,
+        model: u.model,
+        status: u.status,
+        last_action: u.lastAction,
+        input_tokens: u.usage?.inputTokens,
+        output_tokens: u.usage?.outputTokens,
+        cache_read_tokens: u.usage?.cacheReadTokens,
+        cache_creation_tokens: u.usage?.cacheCreationTokens,
+        error: u.error,
       }),
+    // A batch of sub-agents settled — pull their VM file writes to the host,
+    // checkpoint, and Storage-sync (their edits bypass the per-tool handler).
+    onSubAgentsSettled: () => syncSubAgentWork(),
     onToolCallStarted: (callId, name) => {
       toolCalls++;
       // Emit tool_call with empty input so the UI can render a "running…" row
       // immediately, before the model has finished generating the input. The
-      // final tool_call event below will replace the input once it's known.
+      // partial + final tool_call events below replace the input as it streams.
       send({ type: "tool_call", call_id: callId, name, input: {} });
+    },
+    onToolCallPartial: (callId, name, input) => {
+      // Live: re-emit the row with the arguments parsed SO FAR (may be partial)
+      // so the file name / command / diff fill in as the model types them. The
+      // UI upserts by call_id and replaces `input`; the final onToolCall below is
+      // the authoritative full input. Adapter-throttled (~60ms), so this is safe
+      // to forward straight to the socket.
+      send({ type: "tool_call", call_id: callId, name, input });
     },
     onToolCall: (callId, name, input) => {
       // Re-emit with the full input now that streaming finished. The UI
@@ -5210,21 +5376,11 @@ async function runSession(
         return;
       }
       if (name === "spawn_agents") {
-        // Sub-agents ran nested loops in THIS sandbox and may have written
-        // arbitrary files (their edits don't pass through this per-tool handler).
-        // Mirror run_command: pull VM changes, broadcast them to open Files
-        // panes, checkpoint, and do a full Storage sync so the delegated work is
-        // durable and visible. Background — never blocks the loop.
-        pullVmChanges(projectId, sandboxDir)
-          .then((pull) => {
-            for (const p of (pull?.pulled ?? []).slice(0, 50)) {
-              broadcastToProject(projectId, { type: "file_changed", path: p });
-            }
-            checkpointNow("spawn_agents: sub-agent file changes");
-            return getTracker(projectId, sandboxDir).syncChanges();
-          })
-          .then(() => emitSynced())
-          .catch((err) => console.error("post-spawn_agents sync failed:", err));
+        // spawn_agents is NON-BLOCKING now: this tool_result fires immediately,
+        // BEFORE the sub-agents have written anything. The VM-pull + checkpoint +
+        // Storage sync therefore happens later via the onSubAgentsSettled hook
+        // (syncSubAgentWork), when the sub-agents have actually finished (at
+        // await_subagents / park-resume). Nothing to do here.
         return;
       }
       if (name === "start_server") {
@@ -5383,6 +5539,12 @@ async function runSession(
     cache_creation_tokens: result.usage.cacheCreationTokens,
     model: result.model,
     cost_usd: costUsd,
+    // Sub-agent spend folded into this turn (priced per-model in the loop). The
+    // turn's true cost is cost_usd + subagent_cost_usd. Absent when none ran.
+    subagent_count: result.subAgents?.count,
+    subagent_input_tokens: result.subAgents?.inputTokens,
+    subagent_output_tokens: result.subAgents?.outputTokens,
+    subagent_cost_usd: result.subAgents?.costUsd,
     // Deterministic, git/tool-derived changeset (C6 Tier-1) — the trustworthy
     // "what changed" counterpart to the model's prose summary.
     changed_files: result.changedFiles.length ? result.changedFiles : undefined,

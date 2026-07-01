@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
   MODEL_CATALOG,
+  thinkingEffortsForModel,
+  clampThinkingEffort,
   type ModelProvider,
   type ThinkingEffort,
 } from "@uniqus/api-types";
@@ -18,11 +20,14 @@ const PROVIDER_LABEL: Record<ModelProvider, string> = {
 
 const PROVIDER_ORDER: ModelProvider[] = ["anthropic", "zai", "openai", "google"];
 
-const THINKING_OPTIONS: { value: ThinkingEffort; label: string }[] = [
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
-];
+/** Human label for one reasoning-effort rung. */
+const EFFORT_LABEL: Record<ThinkingEffort, string> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "X-High",
+  max: "Max",
+};
 
 /** Human label for the current model choice, e.g. "Auto" or "GPT-5.5". */
 export function modelChoiceLabel(choice: string): string {
@@ -40,14 +45,16 @@ function useMounted(): boolean {
 /**
  * Model + reasoning-effort picker.
  *
- * - `variant="compact"` — a small trigger in the chat composer that opens a
- *   popover: Auto on top, an expandable "More models" list (grouped by
- *   provider), and a thinking-effort segmented control.
- * - `variant="settings"` — the same choices rendered inline (no popover) plus
- *   the Advanced-override advisory, for the Settings "Default model" card.
+ * - `variant="compact"` — a small trigger in the chat composer that shows the
+ *   CURRENT model and opens a popover to change it, with the thinking-effort
+ *   control (an on/off toggle + a Claude-Code-style discrete slider) below.
+ * - `variant="settings"` — the same picker rendered inline (no popover) plus the
+ *   Advanced-override advisory, for the Settings "Default model" card.
  *
  * "Auto" lets the orchestrator pick the strongest model per task; any explicit
- * pick is the Advanced override. Thinking effort applies to every choice.
+ * pick is the Advanced override. The effort slider is ADAPTIVE — it renders only
+ * the rungs the selected model actually supports (Claude low→max; GLM high/max;
+ * OpenAI/Gemini low→high) via `thinkingEffortsForModel`.
  */
 export default function ModelPicker({
   variant = "compact",
@@ -61,9 +68,8 @@ export default function ModelPicker({
 
 function CompactPicker() {
   const model = useStore((s) => s.model);
-  const setModel = useStore((s) => s.setModel);
   const thinking = useStore((s) => s.thinking);
-  const setThinking = useStore((s) => s.setThinking);
+  const thinkingEnabled = useStore((s) => s.thinkingEnabled);
   const mounted = useMounted();
 
   const [open, setOpen] = useState(false);
@@ -72,6 +78,11 @@ function CompactPicker() {
   // Before mount, render the SSR-safe defaults so hydration matches.
   const curModel = mounted ? model : "auto";
   const curThinking = mounted ? thinking : "medium";
+  const curEnabled = mounted ? thinkingEnabled : true;
+
+  // Trigger shows the current model + a compact effort badge, e.g. "Auto · Max"
+  // or "Auto · off" — the whole picker's state at a glance.
+  const badge = curEnabled ? EFFORT_LABEL[curThinking] : "off";
 
   return (
     <div style={{ position: "relative", display: "inline-flex" }}>
@@ -84,9 +95,8 @@ function CompactPicker() {
         aria-haspopup="true"
         aria-expanded={open ? "true" : "false"}
       >
-        {/* Collapsed trigger: just a "Model" button — the chosen model and
-            thinking effort live inside the popover, not on the composer. */}
-        <span style={{ fontWeight: 600 }}>Model</span>
+        <span style={{ fontWeight: 600 }}>{modelChoiceLabel(curModel)}</span>
+        <span className="model-picker-badge">{badge}</span>
         <span style={{ opacity: 0.55, fontSize: 9 }}>▾</span>
       </button>
 
@@ -100,16 +110,7 @@ function CompactPicker() {
         onRequestClose={() => setOpen(false)}
         className="model-picker-pop"
       >
-        <PickerBody
-          model={curModel}
-          thinking={curThinking}
-          flyout
-          onPickModel={(m) => {
-            setModel(m);
-            setOpen(false);
-          }}
-          onPickThinking={setThinking}
-        />
+        <PickerBody flyout onDone={() => setOpen(false)} />
       </Popover>
     </div>
   );
@@ -119,31 +120,14 @@ function CompactPicker() {
 
 function SettingsPicker() {
   const model = useStore((s) => s.model);
-  const setModel = useStore((s) => s.setModel);
-  const thinking = useStore((s) => s.thinking);
-  const setThinking = useStore((s) => s.setThinking);
   const mounted = useMounted();
-
   const curModel = mounted ? model : "auto";
-  const curThinking = mounted ? thinking : "medium";
   const isOverride = curModel !== "auto";
 
   return (
-    <div style={{ display: "grid", gap: 12 }}>
-      <div
-        style={{
-          border: "1px solid var(--border-default)",
-          borderRadius: 8,
-          padding: 12,
-          background: "var(--bg-elev)",
-        }}
-      >
-        <PickerBody
-          model={curModel}
-          thinking={curThinking}
-          onPickModel={setModel}
-          onPickThinking={setThinking}
-        />
+    <div style={{ display: "grid", gap: 10 }}>
+      <div className="model-picker-card">
+        <PickerBody />
       </div>
       {isOverride && (
         <p style={{ margin: 0, fontSize: 12, color: "var(--conf-low)" }}>
@@ -170,8 +154,8 @@ function ModelList({
         const models = MODEL_CATALOG.filter((m) => m.provider === provider);
         if (models.length === 0) return null;
         return (
-          <div key={provider} style={{ display: "grid", gap: 4 }}>
-            <div className="label-micro" style={{ marginTop: 4 }}>
+          <div key={provider} style={{ display: "grid", gap: 2 }}>
+            <div className="label-micro" style={{ marginTop: 2 }}>
               {PROVIDER_LABEL[provider]}
             </div>
             {models.map((m) => (
@@ -191,109 +175,162 @@ function ModelList({
 }
 
 /**
- * The composer's "More models" flyout. A Popover (portaled to <body>, fixed) so
- * it can't be clipped by the chat pane's overflow or painted under the editor /
- * file panes to its right. Opens to the right of the trigger and flips to the
- * left when there isn't room; capped to the viewport with an internal scroll.
+ * The composer's model flyout, anchored to the current-model row. A Popover
+ * (portaled to <body>, fixed) so it can't be clipped by the chat pane overflow
+ * or painted under the editor / file panes to its right.
  */
 function ModelFlyout({
   model,
   onPick,
+  anchorRef,
+  open,
+  onClose,
 }: {
   model: string;
   onPick: (m: string) => void;
+  anchorRef: React.RefObject<HTMLButtonElement | null>;
+  open: boolean;
+  onClose: () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const btnRef = useRef<HTMLButtonElement>(null);
-
   return (
-    <>
-      <button
-        ref={btnRef}
-        type="button"
-        className="model-picker-more"
-        data-open={open ? "true" : "false"}
-        onClick={() => setOpen((o) => !o)}
-        aria-haspopup="true"
-        aria-expanded={open ? "true" : "false"}
-      >
-        <span>More models</span>
-        <span style={{ fontSize: 9, opacity: 0.6 }}>▸</span>
-      </button>
-      <Popover
-        open={open}
-        anchorRef={btnRef}
-        placement="right-start"
-        gap={8}
-        onRequestClose={() => setOpen(false)}
-        className="model-picker-flyout"
-        role="menu"
-        style={{ maxHeight: "min(440px, 65vh)", zIndex: 120 }}
-      >
-        <ModelList
-          model={model}
-          onPick={(m) => {
-            setOpen(false);
-            onPick(m);
-          }}
-        />
-      </Popover>
-    </>
-  );
-}
-
-function PickerBody({
-  model,
-  thinking,
-  onPickModel,
-  onPickThinking,
-  flyout = false,
-}: {
-  model: string;
-  thinking: ThinkingEffort;
-  onPickModel: (m: string) => void;
-  onPickThinking: (t: ThinkingEffort) => void;
-  /** Compact (composer) opens "More models" as a side flyout; settings inlines it. */
-  flyout?: boolean;
-}) {
-  // Inline mode: auto-expand the list when a specific model is already chosen.
-  const [showInline, setShowInline] = useState(!flyout && model !== "auto");
-
-  return (
-    <div style={{ display: "grid", gap: 8, minWidth: 248 }}>
-      <div className="label-micro">Model</div>
-
+    <Popover
+      open={open}
+      anchorRef={anchorRef}
+      placement="right-start"
+      gap={8}
+      onRequestClose={onClose}
+      className="model-picker-flyout"
+      role="menu"
+      style={{ maxHeight: "min(440px, 65vh)", zIndex: 120 }}
+    >
+      <div className="label-micro" style={{ marginBottom: 4 }}>
+        Choose a model
+      </div>
       <OptionRow
         label="⚡ Auto"
         sub="Recommended — strongest model per task"
         active={model === "auto"}
-        onClick={() => onPickModel("auto")}
+        onClick={() => onPick("auto")}
       />
+      <ModelList model={model} onPick={onPick} />
+    </Popover>
+  );
+}
+
+function PickerBody({
+  flyout = false,
+  onDone,
+}: {
+  /** Compact (composer) opens the model list as a side flyout; settings inlines it. */
+  flyout?: boolean;
+  onDone?: () => void;
+}) {
+  const model = useStore((s) => s.model);
+  const setModel = useStore((s) => s.setModel);
+  const thinking = useStore((s) => s.thinking);
+  const setThinking = useStore((s) => s.setThinking);
+  const thinkingEnabled = useStore((s) => s.thinkingEnabled);
+  const setThinkingEnabled = useStore((s) => s.setThinkingEnabled);
+
+  // Inline (settings): expand the list when a specific model is already chosen.
+  const [expanded, setExpanded] = useState(!flyout && model !== "auto");
+  const modelRowRef = useRef<HTMLButtonElement>(null);
+
+  // Switching model re-scopes the effort slider; clamp the current rung into the
+  // new model's supported set (never escalating) so the selection stays valid.
+  const pickModel = (m: string) => {
+    setModel(m);
+    const clamped = clampThinkingEffort(thinking, m);
+    if (clamped !== thinking) setThinking(clamped);
+    setExpanded(false);
+    onDone?.();
+  };
+
+  const efforts = thinkingEffortsForModel(model);
+  // If the persisted rung isn't in this model's set (e.g. account default "max"
+  // on a GPT model), show the clamped rung as active without mutating storage.
+  const activeEffort = efforts.includes(thinking) ? thinking : clampThinkingEffort(thinking, model);
+
+  return (
+    <div style={{ display: "grid", gap: 10, minWidth: 258 }}>
+      <div className="label-micro">Model</div>
+
+      {/* Current model — click to change (flyout in the composer, inline expand
+          in settings). This is the "shows current model, click to change" row. */}
+      <button
+        ref={modelRowRef}
+        type="button"
+        className="model-picker-current"
+        data-open={expanded ? "true" : "false"}
+        onClick={() => setExpanded((e) => !e)}
+        aria-haspopup="true"
+        aria-expanded={expanded ? "true" : "false"}
+      >
+        <span style={{ display: "grid", gap: 1, textAlign: "left", minWidth: 0 }}>
+          <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text-primary)" }}>
+            {model === "auto" ? "⚡ Auto" : modelChoiceLabel(model)}
+          </span>
+          <span
+            style={{
+              fontSize: 11,
+              color: "var(--text-muted)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {model === "auto"
+              ? "Strongest model per task"
+              : (MODEL_CATALOG.find((m) => m.id === model)?.description ?? "Advanced override")}
+          </span>
+        </span>
+        <span style={{ fontSize: 10, opacity: 0.6, flexShrink: 0 }}>
+          {flyout ? "›" : expanded ? "▴" : "▾"}
+        </span>
+      </button>
 
       {flyout ? (
-        <ModelFlyout model={model} onPick={onPickModel} />
+        <ModelFlyout
+          model={model}
+          onPick={pickModel}
+          anchorRef={modelRowRef}
+          open={expanded}
+          onClose={() => setExpanded(false)}
+        />
       ) : (
-        <>
-          <button
-            type="button"
-            className="model-picker-more"
-            onClick={() => setShowInline((s) => !s)}
-            aria-expanded={showInline ? "true" : "false"}
-          >
-            <span>{showInline ? "Hide models" : "More models"}</span>
-            <span style={{ fontSize: 9, opacity: 0.6 }}>{showInline ? "▴" : "▾"}</span>
-          </button>
-          {showInline && <ModelList model={model} onPick={onPickModel} />}
-        </>
+        expanded && (
+          <div style={{ display: "grid", gap: 4 }}>
+            <OptionRow
+              label="⚡ Auto"
+              sub="Recommended — strongest model per task"
+              active={model === "auto"}
+              onClick={() => pickModel("auto")}
+            />
+            <ModelList model={model} onPick={pickModel} />
+          </div>
+        )
       )}
 
-      <div style={{ borderTop: "1px solid var(--border-default)", margin: "4px 0" }} />
+      <div className="model-picker-sep" />
 
-      <div className="label-micro">Thinking effort</div>
-      <Segmented value={thinking} options={THINKING_OPTIONS} onChange={onPickThinking} />
+      {/* Thinking: on/off toggle + adaptive Claude-Code-style effort slider. */}
+      <div className="model-picker-think-head">
+        <span className="label-micro" style={{ margin: 0 }}>
+          Thinking{thinkingEnabled ? ` · ${EFFORT_LABEL[activeEffort]}` : ""}
+        </span>
+        <Toggle checked={thinkingEnabled} onChange={setThinkingEnabled} label="Extended thinking" />
+      </div>
+
+      <EffortSlider
+        value={activeEffort}
+        options={efforts}
+        disabled={!thinkingEnabled}
+        onChange={setThinking}
+      />
       <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.4 }}>
-        More effort = deeper reasoning before acting, at the cost of latency and
-        tokens.
+        {thinkingEnabled
+          ? "Higher effort = deeper reasoning before acting, at the cost of latency and tokens."
+          : "Thinking off — fastest, cheapest responses; the model answers without a reasoning pass."}
       </p>
     </div>
   );
@@ -317,64 +354,109 @@ function OptionRow({
       className="model-picker-option"
       data-active={active ? "true" : "false"}
     >
-      <span style={{ display: "grid", gap: 1, textAlign: "left" }}>
+      <span style={{ display: "grid", gap: 1, textAlign: "left", minWidth: 0 }}>
         <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>
           {label}
         </span>
-        <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{sub}</span>
+        <span
+          style={{
+            fontSize: 11,
+            color: "var(--text-muted)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {sub}
+        </span>
       </span>
-      {active && <span style={{ color: "var(--accent)", fontSize: 12 }}>✓</span>}
+      {active && <span style={{ color: "var(--accent)", fontSize: 12, flexShrink: 0 }}>✓</span>}
     </button>
   );
 }
 
-function Segmented({
+/** A compact on/off switch (Claude-Code-style pill). */
+function Toggle({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      title={label}
+      className="model-picker-toggle"
+      data-on={checked ? "true" : "false"}
+      onClick={() => onChange(!checked)}
+    >
+      <span className="model-picker-toggle-knob" />
+    </button>
+  );
+}
+
+/**
+ * A discrete effort slider modelled on Claude Code's — a filled track with a
+ * knob at the selected rung and clickable tick stops for each supported rung.
+ * Adaptive: `options` is the model's supported set (2–5 rungs). Disabled when
+ * thinking is toggled off (rendered greyed, non-interactive).
+ */
+function EffortSlider({
   value,
   options,
+  disabled,
   onChange,
 }: {
   value: ThinkingEffort;
-  options: { value: ThinkingEffort; label: string }[];
+  options: ThinkingEffort[];
+  disabled?: boolean;
   onChange: (v: ThinkingEffort) => void;
 }) {
+  const idx = Math.max(0, options.indexOf(value));
+  const last = Math.max(1, options.length - 1);
+  // Knob/fill position as a percentage across the track (first stop = 0%).
+  const pct = (idx / last) * 100;
+
   return (
     <div
+      className="effort-slider"
+      data-disabled={disabled ? "true" : "false"}
       role="radiogroup"
-      style={{
-        display: "inline-flex",
-        gap: 2,
-        padding: 2,
-        background: "var(--bg-surface)",
-        border: "1px solid var(--border-default)",
-        borderRadius: 6,
-        width: "fit-content",
-      }}
+      aria-label="Thinking effort"
     >
-      {options.map((opt) => {
-        const active = opt.value === value;
-        return (
-          <button
-            key={opt.value}
-            type="button"
-            role="radio"
-            aria-checked={active ? "true" : "false"}
-            onClick={() => onChange(opt.value)}
-            style={{
-              border: 0,
-              cursor: "pointer",
-              fontFamily: "inherit",
-              fontSize: 11,
-              fontWeight: 600,
-              padding: "4px 12px",
-              borderRadius: 4,
-              color: active ? "#fff" : "var(--text-muted)",
-              background: active ? "var(--brand-gradient)" : "transparent",
-            }}
-          >
-            {opt.label}
-          </button>
-        );
-      })}
+      <div className="effort-slider-track" aria-hidden>
+        <div className="effort-slider-fill" style={{ width: `${pct}%` }} />
+        <div className="effort-slider-knob" style={{ left: `${pct}%` }} />
+      </div>
+      <div className="effort-slider-stops">
+        {options.map((opt, i) => {
+          const active = opt === value;
+          return (
+            <button
+              key={opt}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              disabled={disabled}
+              className="effort-slider-stop"
+              data-active={active ? "true" : "false"}
+              // Nudge the first/last labels inward so they don't clip the edges.
+              style={{
+                justifySelf: i === 0 ? "start" : i === options.length - 1 ? "end" : "center",
+              }}
+              onClick={() => onChange(opt)}
+            >
+              {EFFORT_LABEL[opt]}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

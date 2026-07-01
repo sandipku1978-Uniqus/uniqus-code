@@ -91,11 +91,70 @@ export type ModelChoice = "auto" | string;
 
 /**
  * Per-turn reasoning/thinking effort for the agent. Maps to each provider's
- * native control: Anthropic extended-thinking budget, OpenAI `reasoning_effort`,
- * Gemini `thinkingConfig.thinkingBudget`. Account-wide default like the model
- * choice; also overridable per turn from the composer.
+ * native control: Anthropic `output_config.effort` (low→max), OpenAI
+ * `reasoning_effort` (clamped to high), Gemini `thinkingConfig`. Account-wide
+ * default like the model choice; also overridable per turn from the composer.
+ *
+ * The full scale is `low`→`max`, but not every provider accepts every rung —
+ * see {@link thinkingEffortsForModel}, the single source of truth the composer
+ * uses to render only the rungs a model actually supports. `xhigh` (added on
+ * Claude Opus 4.7) sits between `high` and `max`.
  */
-export type ThinkingEffort = "low" | "medium" | "high";
+export type ThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
+
+/** Every rung, low→max, in order. The composer slider renders a subset of these. */
+export const THINKING_EFFORTS: ThinkingEffort[] = ["low", "medium", "high", "xhigh", "max"];
+
+/**
+ * Which reasoning-effort rungs a given model actually supports — the adaptive
+ * set the composer's slider renders. Shared by the web UI and the router so the
+ * two never drift (mirrors how MODEL_CATALOG is the single source of truth).
+ *
+ * - **Anthropic** (`output_config.effort`) accepts the full low→max scale.
+ * - **Z.ai / GLM-5.2** collapses reasoning to two real tiers, so we expose only
+ *   `high`→`max` (our `high`⇒GLM "max"-adjacent deepest; anything lower is a
+ *   bounded tier). Showing five rungs would be a lie — three of them no-op.
+ * - **OpenAI / Google** cap out at `high` (`reasoning_effort` / `thinkingLevel`
+ *   have no xhigh/max), so we hide the top two rungs.
+ * - **Auto / unknown** shows the full scale — Auto may resolve to any provider,
+ *   and each adapter clamps a rung it can't honor.
+ *
+ * @param choice a MODEL_CATALOG id ("<provider>:<model>"), "auto", or a bare id.
+ */
+export function thinkingEffortsForModel(choice: string): ThinkingEffort[] {
+  const provider =
+    choice === "auto" || !choice
+      ? undefined
+      : MODEL_CATALOG.find((m) => m.id === choice)?.provider;
+  switch (provider) {
+    case "zai":
+      return ["high", "max"];
+    case "openai":
+    case "google":
+      return ["low", "medium", "high"];
+    case "anthropic":
+      return ["low", "medium", "high", "xhigh", "max"];
+    default:
+      // Auto (undefined) or a model not in the catalog: expose the full scale;
+      // the resolved provider's adapter clamps any rung it can't take.
+      return ["low", "medium", "high", "xhigh", "max"];
+  }
+}
+
+/**
+ * Clamp an effort to the rungs a model supports, choosing the nearest rung at or
+ * below the request (never escalating). Used when the composer switches to a
+ * model whose slider doesn't include the currently-selected rung (e.g. `max`
+ * selected, then switch to GPT which caps at `high`).
+ */
+export function clampThinkingEffort(effort: ThinkingEffort, choice: string): ThinkingEffort {
+  const allowed = thinkingEffortsForModel(choice);
+  if (allowed.includes(effort)) return effort;
+  const want = THINKING_EFFORTS.indexOf(effort);
+  // Highest allowed rung that is ≤ the requested rung; else the lowest allowed.
+  const atOrBelow = allowed.filter((e) => THINKING_EFFORTS.indexOf(e) <= want);
+  return atOrBelow.length ? atOrBelow[atOrBelow.length - 1] : allowed[0];
+}
 
 /**
  * One selectable model in the Advanced picker. The curated `MODEL_CATALOG`
@@ -452,6 +511,13 @@ export type ClientEvent =
        * ("medium"). Higher = more internal reasoning before answering.
        */
       thinking?: ThinkingEffort;
+      /**
+       * Whether extended thinking is enabled for this turn (the composer's
+       * on/off toggle). Omitted or `true` ⇒ thinking on at `thinking` effort;
+       * `false` ⇒ the adapter disables reasoning (Anthropic `thinking:disabled`,
+       * GLM thinking off, OpenAI `minimal`, Gemini lowest) for a faster turn.
+       */
+      thinking_enabled?: boolean;
       attachments?: UploadedFileSummary[];
       /**
        * Sandbox-relative paths the user explicitly @-referenced in the
@@ -759,6 +825,15 @@ export interface CurrentUser {
 export interface AccountSettings {
   custom_prompt: string;
   default_skills: string;
+  /**
+   * Library skill ids (from the account's Skill Library) to AUTO-ATTACH to
+   * every NEW project on creation — the "use this skill on every project"
+   * toggle in the Skills tab. On project create the orchestrator seeds
+   * `project.skill_library_ids` from this list, so a default skill is active on
+   * the very first turn without the user re-selecting and re-prompting. Ids that
+   * no longer resolve to an owned skill are ignored. Empty = no defaults.
+   */
+  default_skill_library_ids?: string[];
 }
 
 export type DeploymentState = "QUEUED" | "BUILDING" | "READY" | "ERROR" | "CANCELED";
@@ -912,8 +987,51 @@ export type ServerEvent =
        * — i.e. total tokens billed so far this turn, not per-iteration.
        */
       type: "usage";
+      /** FRESH (uncached) input tokens so far this turn. */
       input_tokens: number;
       output_tokens: number;
+      /** Prompt tokens served from cache this turn (billed ~0.1×). */
+      cache_read_tokens?: number;
+      /** Tokens written to the cache this turn (billed ~1.25×). */
+      cache_creation_tokens?: number;
+      /**
+       * Provider-native model id the turn is running on (e.g. "claude-opus-4-8"),
+       * so the client can price the live spend via estimateCostUsd. May be absent
+       * for the first few events on an Auto turn until routing resolves.
+       */
+      model?: string;
+    }
+  | {
+      /**
+       * Live progress for one spawned sub-agent (the Activity Monitor's
+       * sub-agent widget). Emitted as a sub-agent runs in the background: on
+       * spawn (status "running"), on each tool call (updated `last_action`), and
+       * on completion (status "done"/"error" with final token usage). The client
+       * upserts by `id`. Sub-agents run asynchronously now, so several of these
+       * stream concurrently while the lead agent keeps working.
+       */
+      type: "subagent_update";
+      /** Stable per-turn id, e.g. "sa_0". The client dedupes/updates on this. */
+      id: string;
+      /** 1-based display index within the turn. */
+      index: number;
+      /** Specialization key (e.g. "frontend") + its human label. */
+      agent_type: string;
+      label: string;
+      /** Short task description the lead agent gave this sub-agent. */
+      task: string;
+      /** Provider-native model the sub-agent runs on ("auto" until resolved). */
+      model: string;
+      status: "running" | "done" | "error";
+      /** Most recent action, e.g. "Writing src/App.tsx" (1-line, for the widget). */
+      last_action?: string;
+      /** Cumulative token usage for this sub-agent so far (for live cost). */
+      input_tokens?: number;
+      output_tokens?: number;
+      cache_read_tokens?: number;
+      cache_creation_tokens?: number;
+      /** Set when status is "error". */
+      error?: string;
     }
   | {
       type: "complete";
@@ -940,6 +1058,17 @@ export type ServerEvent =
        * time. (C5)
        */
       cost_usd?: number;
+      /**
+       * Sub-agent spend folded into this turn (Phase 1): how many sub-agents ran,
+       * their combined tokens, and their combined estimated USD cost (priced
+       * per-model server-side, since sub-agents may run on different models than
+       * the lead). `cost_usd` above is the LEAD agent's cost only; the turn's true
+       * cost is `cost_usd + subagent_cost_usd`. Absent when no sub-agents ran.
+       */
+      subagent_count?: number;
+      subagent_input_tokens?: number;
+      subagent_output_tokens?: number;
+      subagent_cost_usd?: number;
       /**
        * Deterministic, tool-derived list of files this turn created / edited /
        * deleted (C6-Tier1). Drives the "What changed" list on the complete

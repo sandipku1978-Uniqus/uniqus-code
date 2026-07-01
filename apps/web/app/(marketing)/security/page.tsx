@@ -132,7 +132,7 @@ const FAQ = [
   },
   {
     q: "Who are your sub-processors?",
-    a: "Anthropic, OpenAI, and Google process model requests; Vercel hosts the web app and Hetzner runs the orchestrator and isolated VMs; Supabase is our database; and WorkOS handles authentication and SSO. We only use a provider when the feature you've turned on requires it — for example, your turn only reaches OpenAI or Google if you select one of their models.",
+    a: "Anthropic, Z.ai, OpenAI, and Google process model requests; Vercel hosts the web app and Hetzner runs the orchestrator and isolated VMs; Supabase is our database; and WorkOS handles authentication and SSO. We only use a provider when the feature you've turned on requires it — for example, your turn only reaches Z.ai, OpenAI, or Google if you select one of their models.",
   },
   {
     q: "How is my data encrypted?",

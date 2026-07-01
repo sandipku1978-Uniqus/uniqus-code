@@ -19,6 +19,7 @@ import FileExplorer from "./FileExplorer";
 import EditorPreviewArea from "./EditorPreviewArea";
 import PreviewPanel from "./PreviewPanel";
 import AgentPreviewPanel from "./AgentPreviewPanel";
+import ActivityMonitor from "./ActivityMonitor";
 import TerminalPanel from "./TerminalPanel";
 import DeployButton from "./DeployButton";
 import BrandLockup from "./BrandLockup";
@@ -1212,30 +1213,15 @@ function BuilderStage({ projectId }: { projectId: string }) {
   const showAgent = agentHasFrames || agentActive;
   const onAgent = editorTab === AGENT_PREVIEW_TAB && showAgent;
 
-  // Empty state only when there's nothing to show at all — neither a running
-  // preview nor an agent interaction to replay.
+  // No live preview / agent surface to show yet. Instead of a dead "Start
+  // preview" splash, fill the stage with the Activity Monitor — a live build
+  // dashboard (tokens/cost, tasks, sub-agents, edited-file diffs). It falls back
+  // to the "Start preview" call-to-action itself when there's no activity yet,
+  // and is swapped out for the real preview the moment one exists.
   if (!active && !onAgent) {
     return (
       <div className="builder-stage">
-        <div className="builder-empty">
-          <h2>See your app come to life</h2>
-          <p>
-            Start a live preview to watch your app right here — it refreshes as
-            you chat and make changes.
-          </p>
-          <button
-            type="button"
-            className="btn-primary btn-lg"
-            onClick={run}
-            disabled={busy}
-          >
-            {busy ? "Starting…" : "Start preview"}
-          </button>
-          <span className="builder-empty-hint">
-            Or just ask in chat — your preview appears automatically once the app
-            is running.
-          </span>
-        </div>
+        <ActivityMonitor onStartPreview={run} startingPreview={busy} />
       </div>
     );
   }

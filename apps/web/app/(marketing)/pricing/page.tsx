@@ -15,7 +15,7 @@ const TIERS = [
     cta: { label: "Start building", href: "/login", primary: true },
     features: [
       { label: "Unlimited public-idea projects", on: true },
-      { label: "Auto model routing (Claude, GPT, Gemini)", on: true },
+      { label: "Auto model routing (Claude, GPT, Gemini, GLM)", on: true },
       { label: "One private workspace at a time", on: true },
       { label: "Live preview + plan mode", on: true },
       { label: "Built-in web search", on: true },
@@ -98,7 +98,7 @@ const FAQ = [
   },
   {
     q: "Can I use my own model API keys?",
-    a: "Bring-your-own keys are coming to Team and Enterprise: you'll add your own Anthropic, OpenAI, or Google keys in Settings, usage will be billed by those providers directly, and your keys will stay encrypted. Want early access? Reach out through the Enterprise page.",
+    a: "Bring-your-own keys are coming to Team and Enterprise: you'll add your own Anthropic, OpenAI, Google, or Z.ai keys in Settings, usage will be billed by those providers directly, and your keys will stay encrypted. Want early access? Reach out through the Enterprise page.",
   },
   {
     q: "What happens to my guest work if I sign up?",

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Modal from "./Modal";
 import { toast } from "@/lib/toast";
 import {
@@ -11,6 +11,8 @@ import {
   generateSkillLibraryApi,
   fetchSkillPacksApi,
   fetchSkillPackBodyApi,
+  fetchAccountSettingsApi,
+  updateAccountSettingsApi,
   type SkillLibrary,
   type SkillPackSummary,
 } from "@/lib/api";
@@ -58,6 +60,32 @@ function relativeTime(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
+/**
+ * Parse an imported skill file into name/description/body. Supports the standard
+ * skill format — a `.md` (or `.txt`/SKILL.md) file with an OPTIONAL YAML-ish
+ * frontmatter block (`---\nname: …\ndescription: …\n---`), same shape Claude
+ * Code / Anthropic skills use. Falls back to the filename (sans extension) as
+ * the name and the whole file as the body when there's no frontmatter.
+ */
+function parseSkillFile(
+  filename: string,
+  text: string,
+): { name: string; description: string; body: string } {
+  const fallbackName = filename.replace(/\.(md|markdown|txt)$/i, "").replace(/[-_]+/g, " ").trim();
+  const fm = text.match(/^﻿?---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!fm) return { name: fallbackName, description: "", body: text.trim() };
+  const [, front, rest] = fm;
+  const field = (key: string): string => {
+    const m = front.match(new RegExp(`^${key}\\s*:\\s*(.*)$`, "im"));
+    if (!m) return "";
+    // Strip surrounding quotes a YAML string may carry.
+    return m[1].trim().replace(/^["']|["']$/g, "").trim();
+  };
+  const name = field("name") || fallbackName;
+  const description = field("description");
+  return { name, description, body: rest.trim() || text.trim() };
+}
+
 /** Editor buffer: null = closed; id null = creating a new skill. */
 interface EditorState {
   id: string | null;
@@ -72,6 +100,13 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
   const [skills, setSkills] = useState<SkillLibrary[] | null>(null);
   const [packs, setPacks] = useState<SkillPackSummary[]>([]);
   const [busy, setBusy] = useState(false);
+  // Library skill ids marked "use on every new project" (account default_skill_
+  // library_ids). A default skill is auto-attached to new projects, so it's
+  // active on the first turn without re-selecting it.
+  const [defaultIds, setDefaultIds] = useState<string[]>([]);
+  const [defaultBusy, setDefaultBusy] = useState<string | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [pristine, setPristine] = useState("");
@@ -105,8 +140,72 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
     fetchSkillPacksApi()
       .then((r) => setPacks(r.packs))
       .catch(() => setPacks([])); // packs are an enhancement — the library still works without them
+    // Which library skills are the account's "every new project" defaults.
+    fetchAccountSettingsApi()
+      .then((r) => setDefaultIds(r.settings.default_skill_library_ids ?? []))
+      .catch(() => setDefaultIds([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isGuest]);
+
+  const defaultSet = useMemo(() => new Set(defaultIds), [defaultIds]);
+
+  /** Toggle a skill as an every-new-project default; persists to account settings. */
+  async function toggleDefault(id: string) {
+    if (defaultBusy) return;
+    const next = defaultSet.has(id) ? defaultIds.filter((x) => x !== id) : [...defaultIds, id];
+    setDefaultBusy(id);
+    // Optimistic — revert on failure.
+    const prev = defaultIds;
+    setDefaultIds(next);
+    try {
+      const { settings } = await updateAccountSettingsApi({ default_skill_library_ids: next });
+      setDefaultIds(settings.default_skill_library_ids ?? next);
+      toast.success(
+        next.includes(id) ? "Added to every new project" : "Removed from new-project defaults",
+      );
+    } catch (e) {
+      setDefaultIds(prev);
+      toast.error(`Couldn't update default: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDefaultBusy(null);
+    }
+  }
+
+  /** Import a skill from a .md file (optional frontmatter → name/description). */
+  async function handleImportFiles(files: FileList | null) {
+    if (!files || files.length === 0 || importBusy) return;
+    setImportBusy(true);
+    let created = 0;
+    try {
+      for (const file of Array.from(files)) {
+        const text = await file.text();
+        if (text.length > MAX_BODY) {
+          toast.error(`"${file.name}" exceeds the 64 KB limit — skipped`);
+          continue;
+        }
+        const parsed = parseSkillFile(file.name, text);
+        if (!parsed.name.trim() || !parsed.body.trim()) {
+          toast.error(`"${file.name}" looks empty — skipped`);
+          continue;
+        }
+        await createSkillLibraryApi({
+          name: parsed.name.slice(0, 120),
+          description: parsed.description.slice(0, 280) || null,
+          body: parsed.body,
+        });
+        created++;
+      }
+      if (created > 0) {
+        toast.success(`Imported ${created} skill${created === 1 ? "" : "s"}`);
+        await load();
+      }
+    } catch (e) {
+      toast.error(`Import failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setImportBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
 
   // Pack ⇒ "already in your library" when a skill with the same name exists, so
   // the card can show Added instead of offering a duplicate copy.
@@ -249,6 +348,25 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
         >
           + New skill
         </button>
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={importBusy}
+          title="Import a skill from a .md file (with optional name/description frontmatter)"
+        >
+          {importBusy ? "Importing…" : "↑ Import skill"}
+        </button>
+        {/* Hidden file input backing the Import button. Accepts the standard
+            skill file formats (.md / .markdown / .txt, incl. a SKILL.md). */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".md,.markdown,.txt,text/markdown,text/plain"
+          multiple
+          style={{ display: "none" }}
+          onChange={(e) => void handleImportFiles(e.target.files)}
+        />
       </div>
 
       {/* How attached library skills get APPLIED when the agent builds a project.
@@ -306,7 +424,8 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
         </div>
         {skills !== null && skills.length > 0 && (
           <span className="sub">
-            {skills.length} skill{skills.length === 1 ? "" : "s"} · attach them from any project&apos;s Skills panel
+            {skills.length} skill{skills.length === 1 ? "" : "s"} · attach from any project&apos;s Skills panel, or
+            star (★) one to apply it to every new project automatically
           </span>
         )}
       </div>
@@ -351,30 +470,51 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
         </div>
       ) : (
         <div className="proj-grid">
-          {skills.map((s) => (
-            <div key={s.id} className="proj proj-tile">
-              <div className="proj-cover" style={{ background: coverBackground(s.id) }} aria-hidden="true" />
-              <div className="proj-tile-head">
-                <span className="proj-avatar" style={{ background: avatarColor(s.id) }}>
-                  {s.name.trim().charAt(0).toUpperCase() || "·"}
-                </span>
-              </div>
-              <button
-                type="button"
-                className="proj-tile-link skill-tile-btn"
-                onClick={() =>
-                  openEditor({ id: s.id, name: s.name, description: s.description ?? "", body: s.body })
-                }
-              >
-                <h3>{s.name}</h3>
-                <p className="desc">{s.description || "No description"}</p>
-                <div className="meta">
-                  <span>{(s.body.length / 1024).toFixed(1)} KB</span>
-                  <span title={`Last edited ${relativeTime(s.updated_at)}`}>{relativeTime(s.updated_at)}</span>
+          {skills.map((s) => {
+            const isDefault = defaultSet.has(s.id);
+            return (
+              <div key={s.id} className="proj proj-tile">
+                <div className="proj-cover" style={{ background: coverBackground(s.id) }} aria-hidden="true" />
+                <div className="proj-tile-head">
+                  <span className="proj-avatar" style={{ background: avatarColor(s.id) }}>
+                    {s.name.trim().charAt(0).toUpperCase() || "·"}
+                  </span>
+                  {/* "Use on every new project" toggle — a star that persists to
+                      the account's default_skill_library_ids. */}
+                  <button
+                    type="button"
+                    className="skill-default-star"
+                    data-on={isDefault ? "true" : "false"}
+                    disabled={defaultBusy === s.id}
+                    onClick={() => void toggleDefault(s.id)}
+                    aria-pressed={isDefault}
+                    title={
+                      isDefault
+                        ? "Applied to every new project — click to remove"
+                        : "Apply this skill to every new project"
+                    }
+                  >
+                    {isDefault ? "★" : "☆"}
+                  </button>
                 </div>
-              </button>
-            </div>
-          ))}
+                <button
+                  type="button"
+                  className="proj-tile-link skill-tile-btn"
+                  onClick={() =>
+                    openEditor({ id: s.id, name: s.name, description: s.description ?? "", body: s.body })
+                  }
+                >
+                  <h3>{s.name}</h3>
+                  <p className="desc">{s.description || "No description"}</p>
+                  <div className="meta">
+                    {isDefault && <span className="tile-chip live">★ Default</span>}
+                    <span>{(s.body.length / 1024).toFixed(1)} KB</span>
+                    <span title={`Last edited ${relativeTime(s.updated_at)}`}>{relativeTime(s.updated_at)}</span>
+                  </div>
+                </button>
+              </div>
+            );
+          })}
           <button
             type="button"
             className="proj proj-tile skill-new-tile"

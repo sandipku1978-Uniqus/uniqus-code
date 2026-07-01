@@ -97,7 +97,7 @@ const VALUES: { icon: Icon; iconClass: string; title: string; body: string }[] =
     icon: "models",
     iconClass: "amber",
     title: "Your choice of AI",
-    body: "Claude, GPT, and Gemini all live in the same workspace. Pick the model you trust for the job, or let Auto route each step to the right one. You're never locked into a single provider.",
+    body: "Claude, GPT, Gemini, and GLM all live in the same workspace. Pick the model you trust for the job, or let Auto route each step to the right one. You're never locked into a single provider.",
   },
   {
     icon: "ship",
@@ -108,7 +108,7 @@ const VALUES: { icon: Icon; iconClass: string; title: string; body: string }[] =
 ];
 
 const STATS = [
-  { num: "3 AI", lbl: "providers in one workspace — Claude, GPT, Gemini" },
+  { num: "4 AI", lbl: "providers in one workspace — Claude, GPT, Gemini, GLM" },
   { num: "1 VM", lbl: "per project — a real, isolated machine" },
   { num: "Plan-first", lbl: "the agent shows its plan before it builds" },
   { num: "You ship", lbl: "deploys and pushes happen only when you say so" },
@@ -158,7 +158,7 @@ export default function AboutPage() {
             We also refused to make the AI a black box. It shows its plan before
             it changes anything, cites what it looked up when it searches the web,
             and keeps every tool call and result visible. You choose the model you
-            trust for each step — Claude, GPT, or Gemini — and nothing deploys or
+            trust for each step — Claude, GPT, Gemini, or GLM — and nothing deploys or
             pushes to GitHub until you decide it should. The result is software you
             can actually understand and stand behind, not output you have to take
             on faith.

@@ -115,6 +115,7 @@ const INTEGRATIONS = [
   "Stripe",
   "Supabase",
   "Anthropic",
+  "Z.ai",
   "OpenAI",
   "Google",
 ];
@@ -160,7 +161,7 @@ const VALUES: { icon: Icon; iconClass: string; title: string; body: string }[] =
 
 const STATS = [
   { num: "1 VM", lbl: "per project — fully isolated, no shared tenancy" },
-  { num: "3", lbl: "model providers: Claude, GPT & Gemini" },
+  { num: "4", lbl: "model providers: Claude, GLM, GPT & Gemini" },
   { num: "WorkOS", lbl: "enterprise auth today; SAML + SCIM and org roles on the roadmap" },
   { num: "Plan-first", lbl: "the agent proposes before it changes anything" },
 ];
@@ -204,10 +205,10 @@ const ROWS: {
     iconClass: "cyan",
     eyebrow: "Your providers",
     title: "Bring your own model keys",
-    body: "On our enterprise roadmap: route usage through your organization’s own Anthropic, OpenAI, or Google accounts and contracts, while Auto mode still picks the right model for each step. Talk to us if per-org keys are a requirement for your rollout.",
+    body: "On our enterprise roadmap: route usage through your organization’s own Anthropic, Z.ai, OpenAI, or Google accounts and contracts, while Auto mode still picks the right model for each step. Talk to us if per-org keys are a requirement for your rollout.",
     checks: [
-      "Per-org keys for Claude, GPT & Gemini — coming soon",
-      "Built-in web search across all three providers",
+      "Per-org keys for Claude, GLM, GPT & Gemini — coming soon",
+      "Built-in web search across all four providers",
       "Set an account-wide default model and thinking effort",
     ],
   },
@@ -240,7 +241,7 @@ export default function EnterprisePage() {
           </h1>
           <p className="mk-lede">
             Give every team a governed, secure way to build with AI. Uniqus Code
-            pairs Claude, GPT, and Gemini with private workspaces, plan-first
+            pairs Claude, GLM, GPT, and Gemini with private workspaces, plan-first
             guardrails, and the controls your security and IT teams expect.
           </p>
           <div className="mk-hero-cta">

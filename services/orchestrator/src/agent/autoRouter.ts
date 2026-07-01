@@ -12,24 +12,24 @@ import { ensureAnthropic, type ResolvedModel } from "./router.js";
  * maps it to the model whose strengths fit — across ALL configured providers,
  * not just Anthropic.
  *
- * Tiers (per the product steer — "keep GLM on the frontier side, cost-aware",
- * plus "use the other models where they're best"):
+ * NOTE: GLM (zai) and OpenAI are excluded from Auto routing "for now" — Auto
+ * routes across Anthropic + Google only. Both stay selectable in the manual
+ * picker; they're just not auto-picked. See the tier constants below to restore.
+ *
+ * Tiers:
  *   - quick    → the FASTEST capable model for trivial / latency-sensitive work
- *                (Gemini 3.5 Flash leads). Note GLM is deliberately NOT here: its
- *                1M-context first-token latency is high, the opposite of "quick".
- *   - standard → GLM-5.2: frontier-quality coding at a fraction of the cost — the
- *                cost-effective workhorse for routine features.
+ *                (Gemini 3.5 Flash leads).
+ *   - standard → a solid workhorse for routine features (Sonnet, then Flash).
  *   - hard     → the strongest available reasoner for debugging / architecture /
- *                cross-cutting work (Opus › GPT-5.5 › Gemini Pro › GLM).
+ *                cross-cutting work (Opus › Gemini Pro).
  *   - vision   → an overlay: image-heavy turns prefer a NATIVELY multimodal model
- *                (Gemini / Claude / GPT) over text-only GLM, which would otherwise
- *                lean on the analyze_image bridge.
+ *                (Gemini / Claude).
  *
  * Each provider has a home tier so configured keys get real traffic: Gemini owns
- * `quick` (and much of vision), GLM owns `standard`, Anthropic owns `hard`, with
- * GPT-5.5 / Gemini Pro as genuine `hard` alternates and GPT-5.3 Codex as a
- * fallback. Routing is constrained to providers with a key; Anthropic (always
- * configured) is the terminal fallback in every list, so a pick always resolves.
+ * `quick` (and much of vision), Anthropic owns `standard`/`hard`, with Gemini Pro
+ * as a genuine `hard` alternate. Routing is constrained to providers with a key;
+ * Anthropic (always configured) is the terminal fallback in every list, so a pick
+ * always resolves.
  *
  * Mechanism: free heuristics decide the clear cases instantly; a tiny Haiku
  * classifier (the `classify` role) breaks ties ONLY when ambiguous, so most
@@ -146,47 +146,44 @@ function firstAvailable(
 // every list as the terminal fallback, so a pick always resolves on a normal
 // orchestrator (Anthropic key is required).
 //
-// quick: speed-first. GLM is intentionally excluded — its 1M-context first-token
-// latency is the opposite of "quick".
+// NOTE: GLM (zai) and OpenAI are intentionally excluded from Auto routing "for
+// now" — Auto routes across Anthropic + Google only. Both remain selectable via
+// the manual picker (MODEL_CATALOG); they're just not auto-picked. To restore,
+// re-add "zai:glm-5.2" to STANDARD/HARD and the "openai:*" ids to their tiers.
+//
+// quick: speed-first (Gemini 3.5 Flash leads).
 const QUICK = [
   "google:gemini-3.5-flash",
   "anthropic:claude-sonnet-4-6",
-  "openai:gpt-5.3-codex",
   "google:gemini-2.5-pro",
   "anthropic:claude-opus-4-8",
 ];
 const STANDARD = [
-  "zai:glm-5.2",
   "anthropic:claude-sonnet-4-6",
   "google:gemini-3.5-flash",
-  "openai:gpt-5.3-codex",
   "anthropic:claude-opus-4-8",
 ];
 const HARD = [
   "anthropic:claude-opus-4-8",
-  "openai:gpt-5.5",
   "google:gemini-3.1-pro-preview-customtools",
-  "zai:glm-5.2",
+  "anthropic:claude-sonnet-4-6",
 ];
-// Image-heavy turns: natively-multimodal models only (GLM excluded — text-only).
+// Image-heavy turns: natively-multimodal models only.
 const QUICK_VISION = [
   "google:gemini-3.5-flash",
   "anthropic:claude-sonnet-4-6",
   "google:gemini-2.5-pro",
-  "openai:gpt-5.3-codex",
   "anthropic:claude-opus-4-8",
 ];
 const STANDARD_VISION = [
   "anthropic:claude-sonnet-4-6",
   "google:gemini-3.5-flash",
   "google:gemini-2.5-pro",
-  "openai:gpt-5.5",
   "anthropic:claude-opus-4-8",
 ];
 const HARD_VISION = [
   "anthropic:claude-opus-4-8",
   "google:gemini-3.1-pro-preview-customtools",
-  "openai:gpt-5.5",
   "anthropic:claude-sonnet-4-6",
 ];
 

@@ -348,7 +348,8 @@ export default function WorkspacesPage() {
             used to train models. You decide when it leaves the workspace — read
             more about that on our{" "}
             <Link href="/security">security page</Link>, and about choosing the
-            AI that does the building on <Link href="/models">AI models</Link>.
+            AI that does the building — Claude, GLM, GPT, or Gemini — on{" "}
+            <Link href="/models">AI models</Link>.
           </p>
         </div>
       </section>

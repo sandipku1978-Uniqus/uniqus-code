@@ -14,6 +14,7 @@ import {
 } from "@/lib/api";
 import { useStore, AGENT_PREVIEW_TAB, type ChatItem, type SelectedElement } from "@/lib/store";
 import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
+import { useIsMobile } from "@/lib/use-is-mobile";
 import { errorCopyFor } from "@/lib/errorCopy";
 import { connect, send } from "@/lib/ws-client";
 import PlanReview from "./PlanReview";
@@ -22,6 +23,8 @@ import ModelPicker from "./ModelPicker";
 import PermissionModePicker from "./PermissionModePicker";
 import MicButton from "./MicButton";
 import Modal from "./Modal";
+import TodoList from "./TodoList";
+import SubAgentList from "./SubAgentList";
 import { ErrorBoundary } from "./ErrorBoundary";
 
 /**
@@ -109,16 +112,18 @@ export default function ChatPanel() {
   const permissionMode = useStore((s) => s.permissionMode);
   const model = useStore((s) => s.model);
   const thinking = useStore((s) => s.thinking);
+  const thinkingEnabled = useStore((s) => s.thinkingEnabled);
   const addUserMessage = useStore((s) => s.addUserMessage);
   const addSystem = useStore((s) => s.addSystem);
   const setBusy = useStore((s) => s.setBusy);
+  const clearSubAgents = useStore((s) => s.clearSubAgents);
   const project = useStore((s) => s.project);
   const connected = useStore((s) => s.connected);
   const connectionFailed = useStore((s) => s.connectionFailed);
   const expandedTurns = useStore((s) => s.expandedTurns);
   const toggleTurn = useStore((s) => s.toggleTurn);
-  const todos = useStore((s) => s.todos);
   const liveUsage = useStore((s) => s.liveUsage);
+  const isMobile = useIsMobile();
   // Element the user picked from the preview (PreviewPanel sets this); attached
   // to the next turn as `selected_element` and cleared on a successful send.
   const pendingSelectedElement = useStore((s) => s.pendingSelectedElement);
@@ -140,7 +145,6 @@ export default function ChatPanel() {
   // silently drop the user back to the project's default thread).
   const searchParams = useSearchParams();
   const sessionParam = searchParams?.get("session") ?? null;
-  const [tasksExpanded, setTasksExpanded] = useState(false);
   const [input, setInput] = useState("");
   // Persist the composer draft per-project so a reload or a client-side crash
   // doesn't lose typed-but-unsent text. Cleared on successful send.
@@ -572,6 +576,8 @@ export default function ChatPanel() {
         permission_mode: permissionMode,
         model: model !== "auto" ? model : undefined,
         thinking: thinking !== "medium" ? thinking : undefined,
+        // Only send when OFF — omitted defaults to on server-side.
+        thinking_enabled: thinkingEnabled ? undefined : false,
         file_refs: fileRefs.length > 0 ? fileRefs : undefined,
       };
       const ok = send(payload);
@@ -582,10 +588,13 @@ export default function ChatPanel() {
         return false;
       }
       addUserMessage(trimmed, undefined, fileRefs, undefined, Date.now());
+      // Fresh turn (sendText only runs when not busy) — clear the previous turn's
+      // sub-agents so the Activity Monitor / mobile strip don't show stale rows.
+      clearSubAgents();
       setBusy(true);
       return true;
     },
-    [busy, uploading, project, connected, mode, permissionMode, model, thinking, validFilePaths, addSystem, addUserMessage, setBusy],
+    [busy, uploading, project, connected, mode, permissionMode, model, thinking, thinkingEnabled, validFilePaths, addSystem, addUserMessage, clearSubAgents, setBusy],
   );
 
   // Load a previous user message back into the composer for editing.
@@ -675,6 +684,8 @@ export default function ChatPanel() {
       permission_mode: permissionMode,
       model: model !== "auto" ? model : undefined,
       thinking: thinking !== "medium" ? thinking : undefined,
+      // Only send when OFF — omitted defaults to on server-side.
+      thinking_enabled: thinkingEnabled ? undefined : false,
       attachments,
       file_refs: fileRefs.length > 0 ? fileRefs : undefined,
     };
@@ -696,6 +707,9 @@ export default function ChatPanel() {
       // Sent — echo the message, mark the turn busy, and clear the composer +
       // its persisted draft (and the one-shot selected element).
       addUserMessage(content, attachments, fileRefs, selectedElement ?? undefined, Date.now());
+      // Only a FRESH turn clears the previous turn's sub-agents. A send while
+      // busy is steering for the running turn — keep its live sub-agents.
+      if (!busy) clearSubAgents();
       setBusy(true);
       setInput("");
       setPendingFiles([]);
@@ -907,89 +921,33 @@ export default function ChatPanel() {
             instead of an in-stream pill, so it stays put while output scrolls. */}
       </div>
 
-      {/* Inline tasks bar — collapsible, above the composer */}
-      {todos.length > 0 && (
-        <div className="tasks-inline">
-          <button
-            type="button"
-            className="tasks-inline-toggle"
-            onClick={() => setTasksExpanded((v) => !v)}
-          >
-            <span className="tasks-inline-summary">
-              {(() => {
-                const done = todos.filter((t) => t.status === "completed").length;
-                const inFlight = todos.find((t) => t.status === "in_progress");
-                return (
-                  <>
-                    <span style={{ opacity: 0.6 }}>Tasks {done}/{todos.length}</span>
-                    {inFlight && (
-                      <span className="tasks-inline-active">
-                        <span title="In progress" role="img" aria-label="In progress">
-                          ▶
-                        </span>{" "}
-                        {inFlight.activeForm}
-                      </span>
-                    )}
-                  </>
-                );
-              })()}
-            </span>
-            <span style={{ fontSize: 10, opacity: 0.5 }}>{tasksExpanded ? "▾" : "▸"}</span>
-          </button>
-          {tasksExpanded && (
-            <div className="tasks-inline-list">
-              {todos.map((t) => {
-                const icon = t.status === "completed" ? "✓" : t.status === "in_progress" ? "▶" : "·";
-                const stateLabel =
-                  t.status === "completed"
-                    ? "Completed"
-                    : t.status === "in_progress"
-                    ? "In progress"
-                    : "Pending";
-                const color = t.status === "completed" ? "var(--text-dim)" : t.status === "in_progress" ? "var(--accent, #a78bfa)" : "var(--text-primary)";
-                const label = t.status === "in_progress" ? t.activeForm : t.content;
-                return (
-                  // Key on the todo's stable text (TodoItem has no id), not the
-                  // array index — index keys mismatch state/DOM when the list
-                  // reorders. content+activeForm disambiguates any duplicates.
-                  <div
-                    key={`${t.content} ${t.activeForm}`}
-                    className="tasks-inline-item"
-                    style={{ color }}
-                  >
-                    <span
-                      title={stateLabel}
-                      role="img"
-                      aria-label={stateLabel}
-                      style={{ fontFamily: "var(--font-mono-stack)", fontSize: 11 }}
-                    >
-                      {icon}
-                    </span>
-                    <span style={{ textDecoration: t.status === "completed" ? "line-through" : "none" }}>{label}</span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      )}
+      {/* Agent task list — collapsible, above the composer (shared component). */}
+      <TodoList collapsible defaultExpanded={false} />
 
-      {busy && liveUsage && (liveUsage.input > 0 || liveUsage.output > 0) && (
-        <div
-          className="live-usage"
-          title={`Usage for this response — ${formatTokens(
-            liveUsage.input,
-          )} tokens read, ${formatTokens(
-            liveUsage.output,
-          )} tokens written. Tokens are the unit AI models bill in.`}
-        >
-          <span className="live-usage-dot" />
-          <span>
-            Usage so far · <strong>{formatTokens(liveUsage.input)}</strong> in ·{" "}
-            <strong>{formatTokens(liveUsage.output)}</strong> out
-          </span>
-        </div>
-      )}
+      {/* Compact sub-agent strip — MOBILE ONLY. On desktop the Activity Monitor
+          shows sub-agents; phones can't fit the dashboard, so the live
+          sub-agents surface right above the composer instead. */}
+      {isMobile && <SubAgentList compact />}
+
+      {busy &&
+        liveUsage &&
+        (liveUsage.input + liveUsage.cacheRead + liveUsage.cacheCreation > 0 || liveUsage.output > 0) && (
+          <div
+            className="live-usage"
+            title={`Usage for this response — ${formatTokens(
+              liveUsage.input + liveUsage.cacheRead + liveUsage.cacheCreation,
+            )} tokens read, ${formatTokens(
+              liveUsage.output,
+            )} tokens written. Tokens are the unit AI models bill in.`}
+          >
+            <span className="live-usage-dot" />
+            <span>
+              Usage so far ·{" "}
+              <strong>{formatTokens(liveUsage.input + liveUsage.cacheRead + liveUsage.cacheCreation)}</strong>{" "}
+              in · <strong>{formatTokens(liveUsage.output)}</strong> out
+            </span>
+          </div>
+        )}
 
       {!connected && !connectionFailed && (
         <div className="chat-offline-pill" role="status">
@@ -2246,9 +2204,15 @@ function CompleteRow({
     );
   }
   // Per-run cost estimate (C5). "est." kept deliberately — there's no billing
-  // system; this is a best-effort number, not a charge.
-  if (item.cost_usd !== undefined && item.cost_usd > 0) {
-    parts.push(`≈ ${formatCost(item.cost_usd)} est.`);
+  // system; this is a best-effort number, not a charge. When sub-agents ran this
+  // turn, fold their per-model cost into the figure so it reflects the TRUE turn
+  // cost (lead + delegated), and note the count.
+  const turnCost = (item.cost_usd ?? 0) + (item.subagent_cost_usd ?? 0);
+  if (turnCost > 0) {
+    parts.push(`≈ ${formatCost(turnCost)} est.`);
+  }
+  if (item.subagent_count && item.subagent_count > 0) {
+    parts.push(`${item.subagent_count} sub-agent${item.subagent_count === 1 ? "" : "s"}`);
   }
   const summary = parts.join(" · ");
   const changed = item.changed_files ?? [];
@@ -2415,70 +2379,90 @@ function ReasoningCard({
 
 /**
  * Codex-style one-line activity phrase for a tool call (B5): a natural-language
- * verb + object so the chat reads as a sentence ("Wrote `index.html`", "Ran
- * `npm install`", "Searched the web for …") instead of a raw `write_file` name.
- * `mono` styles the object as code (paths, commands, patterns). The raw tool
- * name is still surfaced via the card's `data-tool`/`title` for power users.
+ * verb + object so the chat reads as a sentence ("Writing `index.html`",
+ * "Running `npm install`", "Searching the web for …") instead of a raw
+ * `write_file` name. `mono` styles the object as code (paths, commands,
+ * patterns). The raw tool name is still surfaced via the card's
+ * `data-tool`/`title` for power users.
+ *
+ * TENSE tracks state: while the tool is still running the verb is present-tense
+ * ("Writing", "Running"); once it finishes it flips to past-tense ("Wrote",
+ * "Ran"). `done` = the tool result has arrived. Each entry gives the (present,
+ * past) pair; a couple of state-verbs ("Checked running servers") reuse one form
+ * for both. The object (path/command/query) fills in live as the arguments
+ * stream, so the blank "Writing …" placeholder is replaced the moment the file
+ * name is known.
  */
 function describeTool(
   name: string,
   input: unknown,
+  done: boolean,
 ): { verb: string; object?: string; mono?: boolean } {
   const a = (input ?? {}) as Record<string, unknown>;
   const str = (v: unknown): string => (typeof v === "string" ? v : "");
   const path = str(a.path);
+  // Pick the tense-appropriate verb from a (present, past) pair.
+  const v = (present: string, past: string) => (done ? past : present);
   switch (name) {
     case "write_file":
-      return { verb: "Wrote", object: path, mono: true };
+      return { verb: v("Writing", "Wrote"), object: path, mono: true };
     case "edit_file":
-      return { verb: "Edited", object: path, mono: true };
+      return { verb: v("Editing", "Edited"), object: path, mono: true };
     case "read_file":
-      return { verb: "Read", object: path, mono: true };
+      return { verb: v("Reading", "Read"), object: path, mono: true };
     case "list_dir":
-      return { verb: "Listed", object: path || "the project", mono: !!path };
+      return { verb: v("Listing", "Listed"), object: path || "the project", mono: !!path };
     case "grep":
-      return { verb: "Searched for", object: str(a.pattern), mono: true };
+      return { verb: v("Searching for", "Searched for"), object: str(a.pattern), mono: true };
     case "run_command":
-      return { verb: "Ran", object: str(a.command), mono: true };
+      return { verb: v("Running", "Ran"), object: str(a.command), mono: true };
     case "web_search":
-      return { verb: "Searched the web for", object: str(a.query) ? `"${str(a.query)}"` : "" };
+      return {
+        verb: v("Searching the web for", "Searched the web for"),
+        object: str(a.query) ? `"${str(a.query)}"` : "",
+      };
     case "knowledge_search":
       return {
-        verb: "Searched your knowledge for",
+        verb: v("Searching your knowledge for", "Searched your knowledge for"),
         object: str(a.query) ? `"${str(a.query)}"` : "",
       };
     case "start_server":
-      return { verb: "Started the app", object: a.port ? `on :${a.port}` : "" };
+      return { verb: v("Starting the app", "Started the app"), object: a.port ? `on :${a.port}` : "" };
     case "stop_server":
-      return { verb: "Stopped the app" };
+      return { verb: v("Stopping the app", "Stopped the app") };
     case "list_servers":
-      return { verb: "Checked running servers" };
+      return { verb: v("Checking running servers", "Checked running servers") };
     case "read_server_log":
-      return { verb: "Read the server log" };
+      return { verb: v("Reading the server log", "Read the server log") };
     case "wait_for_port":
-      return { verb: "Waited for", object: a.port ? `port ${a.port}` : "the server" };
+      return { verb: v("Waiting for", "Waited for"), object: a.port ? `port ${a.port}` : "the server" };
     case "screenshot_preview":
-      return { verb: "Checked the UI" };
+      return { verb: v("Taking a screenshot", "Took a screenshot") };
     case "interact_preview":
-      return { verb: "Tested in the browser", object: str(a.url) || str(a.server_id) || "", mono: !!(a.url || a.server_id) };
+      return {
+        verb: v("Testing in the browser", "Tested in the browser"),
+        object: str(a.url) || str(a.server_id) || "",
+        mono: !!(a.url || a.server_id),
+      };
     case "run_flow":
-      return { verb: "Replayed flow", object: str(a.name), mono: !!a.name };
+      return { verb: v("Replaying flow", "Replayed flow"), object: str(a.name), mono: !!a.name };
     case "save_flow":
-      return { verb: "Saved a test flow", object: str(a.name), mono: !!a.name };
+      return { verb: v("Saving a test flow", "Saved a test flow"), object: str(a.name), mono: !!a.name };
     case "list_flows":
-      return { verb: "Listed saved flows" };
+      return { verb: v("Listing saved flows", "Listed saved flows") };
     case "read_asset":
-      return { verb: "Viewed", object: path || "an asset", mono: !!path };
+      return { verb: v("Viewing", "Viewed"), object: path || "an asset", mono: !!path };
     case "list_assets":
-      return { verb: "Listed assets" };
+      return { verb: v("Listing assets", "Listed assets") };
     case "todo_write":
-      return { verb: "Updated the task list" };
+      return { verb: v("Updating the task list", "Updated the task list") };
     case "ask_user":
-      return { verb: "Asked you", object: str(a.question) };
+      return { verb: v("Asking you", "Asked you"), object: str(a.question) };
     default: {
-      // snake_case → "Verbed object" fallback so a new/unknown tool still reads
-      // as a phrase: "run_migration" → "Run migration".
-      const verb = name.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+      // snake_case → "Verb object" fallback so a new/unknown tool still reads as
+      // a phrase: "run_migration" → "Run migration" / "Running migration".
+      const base = name.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+      const verb = done ? base : base.endsWith("e") ? `${base.slice(0, -1)}ing` : `${base}ing`;
       const first = a.path ?? a.url ?? a.query ?? a.command ?? a.name ?? a.pattern ?? a.id ?? a.server_id;
       const object =
         typeof first === "string" || typeof first === "number" ? String(first) : undefined;
@@ -2495,8 +2479,9 @@ function ToolCard({
   const isError = item.is_error === true;
   // Auto-expand errors so the reason is visible without a click (§C).
   const [expanded, setExpanded] = useState(isError);
-  const desc = describeTool(item.name, item.input);
   const hasResult = item.result !== undefined;
+  // Present tense while running ("Writing app.tsx"), past once done ("Wrote").
+  const desc = describeTool(item.name, item.input, hasResult);
   // Interaction tools stream a live screenshot run into the Preview (Agent) tab;
   // offer a jump so the user can watch it instead of reading the text result.
   const isInteraction = item.name === "interact_preview" || item.name === "run_flow";

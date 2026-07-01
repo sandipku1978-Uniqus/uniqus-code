@@ -64,11 +64,6 @@ const PROVIDERS: ReadonlySet<string> = new Set<ModelProvider>([
   "zai",
 ]);
 
-/** True when a Z.ai (GLM) key is configured on the orchestrator. */
-function hasZaiKey(): boolean {
-  return Boolean(process.env.ZAI_API_KEY || process.env.GLM_API_KEY);
-}
-
 /** Resolve a curated catalog id ("<provider>:<model>") to a concrete model. */
 function fromCatalog(choice: string): ResolvedModel | null {
   const opt = MODEL_CATALOG.find((m) => m.id === choice);
@@ -127,15 +122,11 @@ export function resolveModel(role: ModelRole, choice?: ModelChoice): ResolvedMod
   // routine work cheap, escalate hard/vision turns). This map is the floor Auto
   // falls back to when task routing finds no signal or is unavailable.
   //
-  // GLM-5.2 is the default when its key is
-  // configured (near-Opus coding quality at a fraction of the cost). When no
-  // Z.ai key is set we fall back to AUTO (Claude), so Auto is never broken on an
-  // orchestrator that hasn't been given the key — the switch flips on the moment
-  // ZAI_API_KEY is deployed. Internal roles (compact/classify/design) are
-  // unaffected and stay on Claude.
-  if ((role === "agent" || role === "plan") && hasZaiKey()) {
-    return { provider: "zai", model: "glm-5.2", overridden: false };
-  }
+  // NOTE: GLM (zai) and OpenAI are excluded from Auto "for now" — Auto's floor
+  // stays Claude (AUTO map) regardless of whether a Z.ai key is set, and
+  // autoRouter.ts routes only across Anthropic + Google. GLM/OpenAI remain
+  // selectable via the manual picker. To restore the GLM floor, re-add the
+  // `hasZaiKey()` branch that returned { provider: "zai", model: "glm-5.2" }.
   return AUTO[role];
 }
 

@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { ThinkingEffort } from "@uniqus/api-types";
+import { parsePartialJson } from "./partialJson.js";
 import type {
   ForcedToolParams,
   ModelProviderAdapter,
@@ -62,9 +63,21 @@ function supportsStreaming(model: string): boolean {
 function reasoningParam(
   model: string,
   effort: ThinkingEffort | undefined,
+  enabled = true,
 ): OpenAI.Responses.ResponseCreateParams["reasoning"] | undefined {
+  // GPT-5.x always reasons — the on/off toggle can only floor it: "minimal" is
+  // the lowest reasoning_effort the Responses API accepts.
+  if (!enabled) return { effort: "minimal", summary: "auto" };
   if (!effort) return undefined;
-  return { effort: model.includes("-pro") ? "high" : effort, summary: "auto" };
+  // reasoning_effort accepts minimal/low/medium/high only — our xhigh/max clamp
+  // to "high"; *-pro models accept only "high" (composer hides xhigh/max for
+  // OpenAI, so this is the Auto-resolved-to-OpenAI safety net).
+  const level = model.includes("-pro")
+    ? "high"
+    : effort === "xhigh" || effort === "max"
+      ? "high"
+      : effort;
+  return { effort: level, summary: "auto" };
 }
 
 export class OpenAIAdapter implements ModelProviderAdapter {
@@ -80,7 +93,7 @@ export class OpenAIAdapter implements ModelProviderAdapter {
       return this.completeAgentTurn(p);
     }
 
-    const reasoning = reasoningParam(p.model, p.thinkingEffort);
+    const reasoning = reasoningParam(p.model, p.thinkingEffort, p.thinkingEnabled !== false);
     const stream = await this.client.responses.create(
       {
         model: p.model,
@@ -105,6 +118,11 @@ export class OpenAIAdapter implements ModelProviderAdapter {
     let text = "";
     const announced = new Set<string>();
     const calls: Array<{ callId: string; name: string; args: string; reasoning?: ReasoningRef }> = [];
+    // Live tool-arg streaming: the Responses API emits function-call argument
+    // fragments as `response.function_call_arguments.delta` events keyed by the
+    // output ITEM id. Track id → {callId, name, args} so we can forward a
+    // best-effort partial parse (throttled) and fill the UI row live.
+    const argAcc = new Map<string, { callId: string; name: string; args: string; lastEmit: number }>();
     // OpenAI's Responses stream only reports usage once, on the terminal
     // `response.completed`/`response.incomplete` event (no incremental counts).
     let usage: TokenUsage | undefined;
@@ -116,6 +134,24 @@ export class OpenAIAdapter implements ModelProviderAdapter {
     let pendingReasoning: ReasoningRef | undefined;
 
     for await (const event of stream) {
+      // Function-call argument deltas — the live path for showing a call's file
+      // name / command as it streams. Handled before the typed switch because
+      // the SDK's event union may not expose this variant across versions.
+      const etype = (event as { type?: string }).type;
+      if (etype === "response.function_call_arguments.delta") {
+        const e = event as unknown as { item_id?: string; delta?: string };
+        const acc = e.item_id ? argAcc.get(e.item_id) : undefined;
+        if (acc && p.onToolCallPartial && typeof e.delta === "string") {
+          acc.args += e.delta;
+          const now = Date.now();
+          if (now - acc.lastEmit >= 60) {
+            acc.lastEmit = now;
+            const partial = parsePartialJson(acc.args);
+            if (partial !== undefined) p.onToolCallPartial(acc.callId, acc.name, partial);
+          }
+        }
+        continue;
+      }
       switch (event.type) {
         case "response.output_text.delta":
           text += event.delta;
@@ -161,6 +197,15 @@ export class OpenAIAdapter implements ModelProviderAdapter {
         case "response.output_item.added":
           if (event.item.type === "function_call" && !announced.has(event.item.call_id)) {
             announced.add(event.item.call_id);
+            // Map the output-item id → this call so argument deltas can stream.
+            if (event.item.id) {
+              argAcc.set(event.item.id, {
+                callId: event.item.call_id,
+                name: event.item.name,
+                args: "",
+                lastEmit: 0,
+              });
+            }
             p.onToolCallStarted?.(event.item.call_id, event.item.name);
           } else if (event.item.type === "web_search_call") {
             // Server-side search — surface the activity, never execute it.
@@ -216,7 +261,7 @@ export class OpenAIAdapter implements ModelProviderAdapter {
   }
 
   private async completeAgentTurn(p: StreamTurnParams): Promise<StreamTurnResult> {
-    const reasoning = reasoningParam(p.model, p.thinkingEffort);
+    const reasoning = reasoningParam(p.model, p.thinkingEffort, p.thinkingEnabled !== false);
     const response = await this.client.responses.create(
       {
         model: p.model,

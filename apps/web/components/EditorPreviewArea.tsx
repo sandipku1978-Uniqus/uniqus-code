@@ -333,6 +333,7 @@ export default function EditorPreviewArea() {
                 type="button"
                 onClick={() => setEditorTab(tabId)}
                 className={`tab ${activeTab === tabId ? "active" : ""}`}
+                title={`Live dev server · port ${p.port}`}
               >
                 <svg
                   width="11"
@@ -346,7 +347,7 @@ export default function EditorPreviewArea() {
                   <line x1="2" y1="12" x2="22" y2="12" />
                   <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
                 </svg>
-                <span>preview :{p.port}</span>
+                <span>Live preview</span>
                 <span
                   className="x"
                   onClick={(e) => {

@@ -643,12 +643,24 @@ function navReporterScript(serverId: string): string {
   if (window.__uniqusNavReporterInstalled) return;
   window.__uniqusNavReporterInstalled = true;
   var serverId = ${JSON.stringify(serverId)};
+  // Report the path RELATIVE to the proxy base. The proxied app is served under
+  // /preview/<serverId>/ (or /preview/share/<token>/ for a share recipient), so
+  // location.pathname carries that prefix — reporting it verbatim made the
+  // parent double it (baseUrl + "/preview/<id>/foo" => .../preview/<id>/preview/
+  // <id>/foo), which is exactly what "open in new tab" opened. Strip the prefix
+  // here so the parent can append the app path cleanly.
+  function appPath() {
+    var p = location.pathname || "/";
+    p = p.replace(/^\\/preview\\/share\\/[^/]+/, "").replace(/^\\/preview\\/[^/]+/, "");
+    if (p === "" || p.charAt(0) !== "/") p = "/" + p;
+    return p + location.search + location.hash;
+  }
   function post() {
     try {
       window.parent.postMessage({
         type: "uniqus:preview-nav",
         server_id: serverId,
-        path: location.pathname + location.search + location.hash,
+        path: appPath(),
       }, "*");
     } catch (e) {}
   }

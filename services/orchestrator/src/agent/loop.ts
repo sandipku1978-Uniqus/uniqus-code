@@ -45,9 +45,14 @@ import {
 import {
   AGENT_TYPES,
   SPAWN_AGENTS_TOOL,
+  AWAIT_SUBAGENTS_TOOL,
+  SUBAGENT_BLOCKED_TOOLS,
   buildSubAgentPreamble,
   parseAgentSpecs,
   formatSubAgentReports,
+  formatSpawnAck,
+  formatSubAgentCompletionNotice,
+  summarizeToolCall,
   type SubAgentSpec,
   type SubAgentRunReport,
 } from "./subagents.js";
@@ -319,6 +324,13 @@ export interface LoopHooks {
   /** Fires for each reasoning/thinking delta (surfaced as a collapsible trace). */
   onThinking?: (text: string) => void;
   onToolCallStarted?: (callId: string, name: string) => void;
+  /**
+   * Fires as a tool's arguments stream in, with a best-effort partial parse of
+   * the arguments so far. Lets the UI show the file name / command / live diff
+   * before the call finishes. Forwarded to the server as an updated `tool_call`
+   * event (the client upserts by id). Whole-call providers (Gemini) never fire.
+   */
+  onToolCallPartial?: (callId: string, name: string, partialInput: unknown) => void;
   onToolCall?: (callId: string, name: string, input: unknown) => void;
   onToolResult?: (
     callId: string,
@@ -414,8 +426,46 @@ export interface LoopHooks {
    * Fires as token usage accrues, with the CUMULATIVE totals for the whole
    * turn so far (summed across every iteration of the loop). The server
    * forwards this (throttled) as the live "X in · Y out" composer counter.
+   * `inputTokens` is FRESH (uncached) input; cached reads/writes are reported
+   * separately so the Activity Monitor can show the In/Cached split and price
+   * the live spend.
    */
-  onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
+  onUsage?: (usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  }) => void;
+  /**
+   * Live progress for ONE background sub-agent (the Activity Monitor's sub-agent
+   * widget). Fires on spawn, on each sub-agent tool call (with `lastAction`), and
+   * on completion (status done/error + final usage). Wired only for a top-level
+   * turn; a sub-agent doesn't receive it (its own activity is surfaced via the
+   * PARENT's onSubAgentUpdate). The server forwards it as a `subagent_update`.
+   */
+  onSubAgentUpdate?: (update: SubAgentUpdate) => void;
+  /**
+   * Fires when one or more background sub-agents have SETTLED and their work has
+   * been folded into this turn (at await_subagents and at park-resume). The
+   * server uses it to pull the sub-agents' VM file writes to the host, checkpoint,
+   * and Storage-sync — sub-agent edits don't pass through the per-tool handler, so
+   * without this their files would only sync at turn end. Best-effort/background.
+   */
+  onSubAgentsSettled?: () => void;
+}
+
+/** Live status of one background sub-agent, surfaced to the Activity Monitor. */
+export interface SubAgentUpdate {
+  id: string;
+  index: number;
+  type: string;
+  label: string;
+  task: string;
+  model: string;
+  status: "running" | "done" | "error";
+  lastAction?: string;
+  usage?: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number };
+  error?: string;
 }
 
 export interface LoopOptions extends LoopHooks {
@@ -505,6 +555,12 @@ export interface LoopOptions extends LoopHooks {
    */
   thinkingEffort?: ThinkingEffort;
   /**
+   * Whether extended thinking is enabled for the turn (the composer's on/off
+   * toggle). Undefined ⇒ true. Forwarded to the adapter, which disables
+   * reasoning in its native way when false. Inherited by sub-agents.
+   */
+  thinkingEnabled?: boolean;
+  /**
    * Provider API keys. Defaults to reading them from the environment; passed
    * explicitly mainly for tests. `apiKey` above remains the Anthropic key used
    * for compaction and as the Anthropic provider key.
@@ -562,6 +618,14 @@ export interface LoopOptions extends LoopHooks {
    */
   pullSteeringMessages?: () => string[];
   /**
+   * Resolves the next time the user sends a steering message (or at once if one
+   * is already queued). Awaited ONLY while the lead is PARKED waiting on
+   * background sub-agents, so a message the user sends while it "sleeps" wakes it
+   * immediately instead of sitting queued until a sub-agent finishes. Absent ⇒
+   * the park only wakes on sub-agent completion / abort (headless, or a sub-agent).
+   */
+  waitForSteer?: () => Promise<void>;
+  /**
    * Specialization preamble for a spawned sub-agent (audit/design/backend/…),
    * prepended ahead of the shared engineering system prompt so the sub-agent
    * keeps every sandbox rule but adopts its role + the lead agent's extra
@@ -595,6 +659,18 @@ export interface LoopResult {
    * not model prose. Drives the "What changed" list on the complete marker.
    */
   changedFiles: ChangedFile[];
+  /**
+   * Aggregate spend of every sub-agent spawned this turn, priced per-model (a
+   * sub-agent can run on a different model than the lead). The lead's own `usage`
+   * above does NOT include these; the turn's true cost is the lead's cost plus
+   * `subAgents.costUsd`. Absent/zeroed when no sub-agents ran.
+   */
+  subAgents?: {
+    count: number;
+    inputTokens: number;
+    outputTokens: number;
+    costUsd: number;
+  };
   /**
    * Why the final iteration ended, when known (e.g. "max_tokens" on a truncated
    * answer, "refusal"). Lets the server surface truncation/refusal on the
@@ -695,6 +771,15 @@ export async function runAgentLoop(
         lines_added: v.added,
         lines_removed: v.removed,
       })),
+      subAgents:
+        subAgentSeq > 0
+          ? {
+              count: subAgentSeq,
+              inputTokens: subAgentInputTokens,
+              outputTokens: subAgentOutputTokens,
+              costUsd: subAgentCostUsd,
+            }
+          : undefined,
       stopReason,
     };
   };
@@ -779,23 +864,103 @@ export async function runAgentLoop(
   record({ role: "user", content: turnContent });
   normalizeMessageHistoryInPlace(messages);
 
-  // The spawn_agents handler. Defined here (not in executeTool) because every
-  // sub-agent is a fresh runAgentLoop that needs THIS turn's full context —
-  // provider keys, sandbox, project/user, system-prompt enrichment, hooks — all
-  // of which are in scope. Undefined for a sub-agent (allowSubAgents:false) so a
-  // sub-agent can't spawn its own (depth cap = 1). Each sub-agent's file changes
-  // and token usage are merged back into this turn (the `changed` map below +
-  // its own usage event), and its final report is returned to the lead agent.
+  // ── Background sub-agents (Phase 2: async delegation) ──────────────────────
+  // spawn_agents starts each sub-agent as a BACKGROUND promise tracked here
+  // rather than awaiting it, so the lead agent can keep working / end its turn
+  // and be resumed as each finishes (mirroring Claude Code's workflow agents).
+  // Entries live for the whole turn so their final state stays visible in the
+  // Activity Monitor. A sub-agent run (allowSubAgents:false) never populates this.
+  interface BgSubAgent {
+    id: string;
+    index: number;
+    type: string;
+    label: string;
+    task: string;
+    model: string;
+    status: "running" | "done" | "error";
+    /** Resolves (never rejects) when this sub-agent settles. */
+    done: Promise<void>;
+    report: string;
+    error?: string;
+    aborted: boolean;
+    /** Whether this sub-agent's report has already been surfaced to the lead. */
+    reported: boolean;
+    lastAction?: string;
+    usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number };
+  }
+  const bgSubAgents: BgSubAgent[] = [];
+  let subAgentSeq = 0;
+  // Aggregate sub-agent spend, priced per-model as each settles (a sub-agent may
+  // run on a different model than the lead). Folded onto the LoopResult so the
+  // complete marker can show the turn's TRUE cost (lead + sub-agents).
+  let subAgentCostUsd = 0;
+  let subAgentInputTokens = 0;
+  let subAgentOutputTokens = 0;
+
+  // Push one sub-agent's current state to the Activity Monitor. Emitted on
+  // spawn, model-resolution, each tool call, and settlement — NOT per usage
+  // delta (that would flood the socket); usage rides the next tool-call emit.
+  const emitSubAgent = (s: BgSubAgent): void => {
+    opts.onSubAgentUpdate?.({
+      id: s.id,
+      index: s.index,
+      type: s.type,
+      label: s.label,
+      task: s.task,
+      model: s.model,
+      status: s.status,
+      lastAction: s.lastAction,
+      usage: s.usage,
+      error: s.error,
+    });
+  };
+
+  // A promise that resolves the instant the turn is aborted, so a park/await on
+  // sub-agents unblocks on Stop. Created once (a per-iteration listener would
+  // leak). Never resolves when there's no signal.
+  const abortPromise: Promise<void> = opts.signal
+    ? new Promise<void>((resolve) => {
+        if (opts.signal!.aborted) resolve();
+        else opts.signal!.addEventListener("abort", () => resolve(), { once: true });
+      })
+    : new Promise<void>(() => {});
+
+  // The spawn_agents handler — NON-BLOCKING. Starts each sub-agent's nested
+  // runAgentLoop in the background (full turn context is in scope here: provider
+  // keys, sandbox, project/user, prompt enrichment, hooks) and returns an ack
+  // immediately. Undefined for a sub-agent (depth cap = 1). Each sub-agent's
+  // file changes + per-model cost are merged back into this turn as it settles.
   const runSubAgents = allowSubAgents
     ? async (specs: SubAgentSpec[]): Promise<string> => {
         const requested = specs.length;
-        const reports: SubAgentRunReport[] = await Promise.all(
-          specs.map(async (spec, i): Promise<SubAgentRunReport> => {
-            const def = AGENT_TYPES[spec.type] ?? AGENT_TYPES.general;
-            // Fresh history + a separate collect sink (record() pushes to BOTH,
-            // so they must be different arrays or every message double-pushes).
-            const subMessages: Anthropic.MessageParam[] = [];
-            const subCollected: Anthropic.MessageParam[] = [];
+        const started: { id: string; index: number; type: string; task: string; model: string }[] = [];
+        for (const spec of specs) {
+          const def = AGENT_TYPES[spec.type] ?? AGENT_TYPES.general;
+          const index = ++subAgentSeq;
+          const entry: BgSubAgent = {
+            id: `sa_${index - 1}`,
+            index,
+            type: spec.type,
+            label: def.label,
+            task: spec.task,
+            model: spec.model ?? "auto",
+            status: "running",
+            done: Promise.resolve(),
+            report: "",
+            aborted: false,
+            reported: false,
+            usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
+          };
+          bgSubAgents.push(entry);
+          started.push({ id: entry.id, index, type: spec.type, task: spec.task, model: entry.model });
+          emitSubAgent(entry);
+          // Fresh history + a separate collect sink (record() pushes to BOTH, so
+          // they must be different arrays or every message double-pushes).
+          const subMessages: Anthropic.MessageParam[] = [];
+          const subCollected: Anthropic.MessageParam[] = [];
+          // Launch WITHOUT awaiting. The IIFE updates `entry` + resolves
+          // `entry.done` on settle, and never rejects (errors are captured).
+          entry.done = (async () => {
             try {
               const sub = await runAgentLoop(spec.task, {
                 sandbox: opts.sandbox,
@@ -819,28 +984,61 @@ export async function runAgentLoop(
                 activeConnectors: opts.activeConnectors,
                 userId: opts.userId,
                 thinkingEffort: opts.thinkingEffort,
-                // Per-spawn overrides: the lead agent picks the model + writes
-                // extra prompt guidance for this sub-agent.
+                thinkingEnabled: opts.thinkingEnabled,
+                // Per-spawn overrides: the lead picks the model + extra guidance.
                 modelChoice: spec.model,
                 personaPreamble: buildSubAgentPreamble(def, spec.instructions),
                 allowSubAgents: false, // depth cap = 1
-                // Forward live preview frames so the user still sees a sub-agent
-                // driving the browser. Deliberately NOT forwarded: onText /
-                // onThinking (would interleave into the lead transcript),
-                // onTodoWrite (would clobber the lead agent's Tasks pane), and
-                // pullSteeringMessages (mid-turn user steering targets the MAIN
-                // agent only — a sub-agent reports to the lead, not the user).
+                // Surface the sub-agent's live activity to the Activity Monitor.
+                // NOT forwarded: onText/onThinking (would pollute the lead's
+                // transcript), onTodoWrite (would clobber the lead's Tasks pane),
+                // pullSteeringMessages (a sub-agent reports to the lead, not the
+                // user). onPreviewFrame is forwarded but sub-agents can't drive
+                // the browser now (preview tools disabled), so it rarely fires.
                 onPreviewFrame: opts.onPreviewFrame,
+                onModelResolved: (info) => {
+                  entry.model = info.model;
+                  emitSubAgent(entry);
+                },
+                onToolCall: (_callId, name, input) => {
+                  entry.lastAction = summarizeToolCall(name, input);
+                  emitSubAgent(entry);
+                },
+                // Fill the sub-agent's live action (e.g. "Writing src/App.tsx")
+                // as its args stream, not just once the call completes. The
+                // adapter already throttles these to ~60ms.
+                onToolCallPartial: (_callId, name, input) => {
+                  entry.lastAction = summarizeToolCall(name, input);
+                  emitSubAgent(entry);
+                },
+                // Track running usage WITHOUT emitting per delta — the next
+                // tool-call emit (and the terminal emit) carry the fresh figure.
+                onUsage: (u) => {
+                  entry.usage = {
+                    inputTokens: u.inputTokens,
+                    outputTokens: u.outputTokens,
+                    cacheReadTokens: u.cacheReadTokens,
+                    cacheCreationTokens: u.cacheCreationTokens,
+                  };
+                },
               });
-              // Meter the sub-agent's spend as its own usage event (precise
-              // per-model cost), mirroring the vision-bridge sub-calls.
-              recordSubAgentUsage(
-                opts.projectId ?? null,
-                opts.userId ?? null,
-                sub.provider,
-                sub.model,
-                sub.usage,
-              );
+              entry.model = sub.model;
+              entry.usage = {
+                inputTokens: sub.usage.inputTokens,
+                outputTokens: sub.usage.outputTokens,
+                cacheReadTokens: sub.usage.cacheReadTokens,
+                cacheCreationTokens: sub.usage.cacheCreationTokens,
+              };
+              entry.report = extractFinalAssistantText(subCollected);
+              entry.aborted = sub.aborted;
+              entry.status = sub.aborted ? "error" : "done";
+              if (sub.aborted && !entry.error) entry.error = "aborted by user";
+              // Meter the sub-agent's spend as its own DB usage event (precise
+              // per-model cost), and fold it into the turn aggregate.
+              recordSubAgentUsage(opts.projectId ?? null, opts.userId ?? null, sub.provider, sub.model, sub.usage);
+              subAgentInputTokens += sub.usage.inputTokens;
+              subAgentOutputTokens += sub.usage.outputTokens;
+              subAgentCostUsd += estimateTurnCostUsd(sub.model, sub.usage);
               // Fold the sub-agent's file changes into THIS turn's changeset so
               // the "What changed" list + the server's checkpoint/sync see them.
               for (const f of sub.changedFiles) {
@@ -851,28 +1049,46 @@ export async function runAgentLoop(
                   removed: (prev?.removed ?? 0) + f.lines_removed,
                 });
               }
-              return {
-                index: i + 1,
-                type: spec.type,
-                task: spec.task,
-                model: sub.model,
-                report: extractFinalAssistantText(subCollected),
-                aborted: sub.aborted,
-              };
             } catch (err) {
-              return {
-                index: i + 1,
-                type: spec.type,
-                task: spec.task,
-                model: spec.model ?? "auto",
-                report: "",
-                aborted: opts.signal?.aborted ?? false,
-                error: err instanceof Error ? err.message : String(err),
-              };
+              entry.status = "error";
+              entry.error = err instanceof Error ? err.message : String(err);
+              entry.aborted = opts.signal?.aborted ?? false;
+            } finally {
+              emitSubAgent(entry);
             }
-          }),
-        );
-        return formatSubAgentReports(reports, requested);
+          })();
+        }
+        return formatSpawnAck(started, requested);
+      }
+    : undefined;
+
+  // The await_subagents handler — BLOCKS until the targeted background sub-agents
+  // settle, then returns their reports (and triggers the host file sync, since a
+  // sub-agent's VM writes don't pass through the per-tool handler). Undefined for
+  // a sub-agent run.
+  const awaitSubAgents = allowSubAgents
+    ? async (ids?: string[]): Promise<string> => {
+        const targets = bgSubAgents.filter((s) => !ids || ids.length === 0 || ids.includes(s.id));
+        if (targets.length === 0) {
+          return ids && ids.length > 0
+            ? `No sub-agents match those ids (${ids.join(", ")}). Check the ids returned by spawn_agents.`
+            : "No sub-agents to wait for — none were started this turn. Call spawn_agents first.";
+        }
+        await Promise.race([Promise.all(targets.map((s) => s.done)), abortPromise]);
+        const reports: SubAgentRunReport[] = targets.map((s) => {
+          s.reported = true;
+          return {
+            index: s.index,
+            type: s.type,
+            task: s.task,
+            model: s.model,
+            report: s.report,
+            aborted: s.aborted,
+            error: s.error,
+          };
+        });
+        opts.onSubAgentsSettled?.();
+        return formatSubAgentReports(reports, reports.length);
       }
     : undefined;
 
@@ -919,38 +1135,39 @@ export async function runAgentLoop(
         model: resolved.model,
         system: systemPrompt,
         // Text-only models get the analyze_image vision bridge appended; vision
-        // models see images natively and don't need it. spawn_agents is added
-        // only for a top-level turn (sub-agents can't spawn — depth cap = 1).
+        // models see images natively and don't need it. spawn_agents +
+        // await_subagents are added only for a top-level turn (sub-agents can't
+        // spawn — depth cap = 1). A sub-agent ALSO loses the server/preview tools
+        // (SUBAGENT_BLOCKED_TOOLS) so N concurrent sub-agents can't each spin up
+        // a dev server and saturate the sandbox — the lead owns the preview.
         tools: [
-          ...TOOLS,
+          ...(allowSubAgents ? TOOLS : TOOLS.filter((t) => !SUBAGENT_BLOCKED_TOOLS.has(t.name))),
           ...(hasVision ? [] : VISION_BRIDGE_TOOLS),
-          ...(allowSubAgents ? [SPAWN_AGENTS_TOOL] : []),
+          ...(allowSubAgents ? [SPAWN_AGENTS_TOOL, AWAIT_SUBAGENTS_TOOL] : []),
         ] as Anthropic.Tool[],
         messages,
         maxTokens: MAX_TOKENS,
         thinkingEffort: opts.thinkingEffort,
+        thinkingEnabled: opts.thinkingEnabled,
         signal: opts.signal,
         onText: opts.onText,
         onThinking: opts.onThinking,
         onToolCallStarted: opts.onToolCallStarted,
+        onToolCallPartial: opts.onToolCallPartial,
         onToolCall: opts.onToolCall,
         onToolResult: opts.onToolResult,
-        // Live counter: forward committed totals + this call's running counts.
-        // The composer's "X in" shows TOTAL processed input (fresh + cache), so
-        // a cached turn doesn't visually collapse to near-zero now that the
-        // buckets are split — the honest split still goes to the DB/dashboard.
-        // Also stash the call-local figure so an abort can bank it (see finish).
+        // Live counter: forward the committed-plus-in-flight token split so the
+        // Activity Monitor can show In / Cached / Out separately and price the
+        // live spend. The composer's "X in" re-combines fresh+cache for its
+        // "total processed input" figure. Also stash the call-local figure so an
+        // abort can bank it (see finish).
         onUsage: (u) => {
           inflight = u;
           opts.onUsage?.({
-            inputTokens:
-              usageIn +
-              usageCacheRead +
-              usageCacheCreate +
-              u.inputTokens +
-              (u.cacheReadTokens ?? 0) +
-              (u.cacheCreationTokens ?? 0),
+            inputTokens: usageIn + u.inputTokens,
             outputTokens: usageOut + u.outputTokens,
+            cacheReadTokens: usageCacheRead + (u.cacheReadTokens ?? 0),
+            cacheCreationTokens: usageCacheCreate + (u.cacheCreationTokens ?? 0),
           });
         },
       });
@@ -974,10 +1191,13 @@ export async function runAgentLoop(
     usageCacheRead += turn.usage?.cacheReadTokens ?? 0;
     usageCacheCreate += turn.usage?.cacheCreationTokens ?? 0;
     inflight = null;
-    // Settled cumulative for the live counter — total processed input.
+    // Settled cumulative for the live counter — the fresh/cache split (the
+    // server re-combines for the composer's "total in" and prices the spend).
     opts.onUsage?.({
-      inputTokens: usageIn + usageCacheRead + usageCacheCreate,
+      inputTokens: usageIn,
       outputTokens: usageOut,
+      cacheReadTokens: usageCacheRead,
+      cacheCreationTokens: usageCacheCreate,
     });
 
     const toolCalls = turn.toolCalls;
@@ -1016,6 +1236,68 @@ export async function runAgentLoop(
         if (steer.length > 0) {
           record({ role: "user", content: [{ type: "text", text: formatSteer(steer) }] });
           continue;
+        }
+      }
+      // Park-on-end_turn (Phase 2): the lead agent wants to end, but background
+      // sub-agents are still running (or finished and not yet reported). Don't
+      // finish — wait for the next completion, surface the freshly-finished
+      // reports as a new user turn, and resume so the lead reacts to each
+      // sub-agent as it lands (the "resumed via notification" flow). Skipped on
+      // abort. Bounded: each resume consumes a loop iteration and there are at
+      // most a handful of sub-agents, and each sub-agent has its own iteration
+      // cap, so this can't spin forever.
+      if (!opts.signal?.aborted) {
+        const running = bgSubAgents.filter((s) => s.status === "running");
+        const haveUnreported = bgSubAgents.some((s) => s.status !== "running" && !s.reported);
+        if (running.length > 0 || haveUnreported) {
+          if (!haveUnreported) {
+            // Park until a sub-agent settles, the USER steers, or abort. Racing
+            // the steer-wake is what lets the user "ask it anything while it
+            // sleeps" — without it, a message would sit queued until a sub-agent
+            // happened to finish. `waitForSteer` resolves at once if a steer is
+            // already queued, so we never miss one that landed just before we parked.
+            await Promise.race([
+              Promise.race(running.map((s) => s.done)),
+              abortPromise,
+              opts.waitForSteer?.() ?? new Promise<void>(() => {}),
+            ]);
+          }
+          if (opts.signal?.aborted) return finish(true);
+          // Woke (possibly) because the user sent a message — respond to it NOW.
+          // Sub-agents keep running in the background; their reports still land on
+          // later iterations (they stay unreported until then). This is the
+          // "resumed by the user while parked" path.
+          const parkedSteer = opts.pullSteeringMessages?.() ?? [];
+          if (parkedSteer.length > 0) {
+            record({ role: "user", content: [{ type: "text", text: formatSteer(parkedSteer) }] });
+            continue;
+          }
+          const ready: SubAgentRunReport[] = bgSubAgents
+            .filter((s) => s.status !== "running" && !s.reported)
+            .map((s) => {
+              s.reported = true;
+              return {
+                index: s.index,
+                type: s.type,
+                task: s.task,
+                model: s.model,
+                report: s.report,
+                aborted: s.aborted,
+                error: s.error,
+              };
+            });
+          const stillPending = bgSubAgents
+            .filter((s) => s.status === "running")
+            .map((s) => ({ id: s.id, index: s.index, type: s.type }));
+          if (ready.length > 0) {
+            opts.onSubAgentsSettled?.();
+            record({
+              role: "user",
+              content: [{ type: "text", text: formatSubAgentCompletionNotice(ready, stillPending) }],
+            });
+            continue;
+          }
+          if (stillPending.length > 0) continue; // woke with none ready — re-await
         }
       }
       // Truncation with no tool calls is otherwise reported as a clean finish,
@@ -1130,6 +1412,7 @@ export async function runAgentLoop(
           keys.zai ?? null,
           hasVision,
           runSubAgents,
+          awaitSubAgents,
         );
         // Multimodal results (e.g. screenshots) include image content blocks.
         if (result && typeof result === "object" && (result as any).__multimodal) {
@@ -1608,6 +1891,12 @@ export async function executeTool(
    * tool from its schema and makes a stray call here a clear error (depth cap=1).
    */
   runSubAgents?: (specs: SubAgentSpec[]) => Promise<string>,
+  /**
+   * Blocks until the turn's background sub-agents settle, returning their
+   * reports. Like runSubAgents, defined in the loop (the background registry is
+   * in scope there) and wired ONLY for a top-level turn.
+   */
+  awaitSubAgents?: (ids?: string[]) => Promise<string>,
 ): Promise<string | { __multimodal: true; content: unknown[]; __imagePaths?: string[] }> {
   const args = input as Record<string, any>;
   switch (name) {
@@ -2375,6 +2664,17 @@ export async function executeTool(
       }
       const specs = parseAgentSpecs(args.agents, isValidChoice);
       return await runSubAgents(specs);
+    }
+    case "await_subagents": {
+      if (!awaitSubAgents) {
+        throw new Error(
+          "await_subagents is not available here — a sub-agent cannot wait on sub-agents (delegation depth is capped at 1).",
+        );
+      }
+      const ids = Array.isArray(args.ids)
+        ? args.ids.filter((x: unknown): x is string => typeof x === "string")
+        : undefined;
+      return await awaitSubAgents(ids);
     }
     default:
       throw new Error(`Unknown tool: ${name}`);

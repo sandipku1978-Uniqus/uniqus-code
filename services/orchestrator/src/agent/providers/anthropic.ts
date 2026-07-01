@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { ThinkingEffort } from "@uniqus/api-types";
 import { WEB_SEARCH_TOOL } from "../tools.js";
+import { parsePartialJson } from "./partialJson.js";
 import type {
   ForcedToolParams,
   ModelProviderAdapter,
@@ -21,8 +22,20 @@ import type {
 function applyEffort(
   params: Record<string, unknown>,
   effort: ThinkingEffort | undefined,
+  enabled: boolean,
 ): void {
+  // Thinking toggled OFF: disable extended thinking entirely (accepted on Opus
+  // 4.8/4.7). We still let `effort` govern overall token spend when set — effort
+  // and thinking are independent controls — but with thinking disabled the model
+  // won't burn a reasoning budget, which is the whole point of the toggle.
+  if (!enabled) {
+    params.thinking = { type: "disabled" };
+    if (effort) params.output_config = { effort };
+    return;
+  }
   if (!effort) return;
+  // Opus 4.8 accepts the full low/medium/high/xhigh/max scale under
+  // output_config.effort, paired with adaptive thinking so the model reasons.
   params.thinking = { type: "adaptive" };
   params.output_config = { effort };
 }
@@ -139,7 +152,11 @@ export class AnthropicAdapter implements ModelProviderAdapter {
       ] as Anthropic.Tool[]) as Anthropic.MessageCreateParams["tools"],
       messages: withPrefixCache(stripForeignFields(p.messages)),
     } as Anthropic.MessageCreateParamsStreaming;
-    applyEffort(params as unknown as Record<string, unknown>, p.thinkingEffort);
+    applyEffort(
+      params as unknown as Record<string, unknown>,
+      p.thinkingEffort,
+      p.thinkingEnabled !== false,
+    );
 
     const stream = this.client.messages.stream(
       params,
@@ -147,6 +164,11 @@ export class AnthropicAdapter implements ModelProviderAdapter {
     );
 
     const announced = new Set<string>();
+    // Live tool-arg streaming: accumulate each tool_use block's partial JSON
+    // (keyed by content-block index) and forward a best-effort parse so the UI
+    // shows the file name / command / diff as it's typed. Throttled per block so
+    // per-token deltas don't flood the parse+socket path.
+    const toolBlocks = new Map<number, { id: string; name: string; json: string; lastEmit: number }>();
     // Live token usage. message_start carries the input breakdown; each
     // message_delta carries the running output_tokens. We keep the three input
     // buckets SEPARATE — `input_tokens` is the fresh/uncached remainder,
@@ -177,6 +199,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
         const block = event.content_block;
         if (block.type === "tool_use" && !announced.has(block.id)) {
           announced.add(block.id);
+          toolBlocks.set(event.index, { id: block.id, name: block.name, json: "", lastEmit: 0 });
           p.onToolCallStarted?.(block.id, block.name);
         }
       } else if (event.type === "content_block_delta") {
@@ -184,6 +207,21 @@ export class AnthropicAdapter implements ModelProviderAdapter {
         // Adaptive/extended thinking streams as thinking_delta — surface it as
         // the live reasoning trace (separate from the final answer text).
         else if (event.delta.type === "thinking_delta") p.onThinking?.(event.delta.thinking);
+        // A tool's arguments stream as input_json_delta fragments. Accumulate
+        // and forward a best-effort partial parse (throttled ~60ms) so the UI
+        // shows the file name / command / diff live before the call completes.
+        else if (event.delta.type === "input_json_delta") {
+          const tb = toolBlocks.get(event.index);
+          if (tb && p.onToolCallPartial) {
+            tb.json += event.delta.partial_json;
+            const now = Date.now();
+            if (now - tb.lastEmit >= 60) {
+              tb.lastEmit = now;
+              const partial = parsePartialJson(tb.json);
+              if (partial !== undefined) p.onToolCallPartial(tb.id, tb.name, partial);
+            }
+          }
+        }
       }
     });
 

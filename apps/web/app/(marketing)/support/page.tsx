@@ -91,7 +91,7 @@ const TOPICS: Topic[] = [
         q: "Can I use my own model API keys?",
         a: (
           <>
-            Yes, on Team and Enterprise. Add your Anthropic, OpenAI, or Google key in
+            Yes, on Team and Enterprise. Add your Anthropic, OpenAI, Google, or Z.ai key in
             Settings and that usage is billed by the provider directly. Your keys are
             encrypted at rest and are never displayed back in full or exposed to the
             agent.
@@ -180,15 +180,16 @@ const TOPICS: Topic[] = [
     eyebrow: "Models & thinking",
     heading: "Picking the right AI.",
     blurb:
-      "Choose Claude, GPT, or Gemini per turn, let Auto route for you, and dial how hard the model thinks.",
+      "Choose Claude, GPT, Gemini, or GLM per turn, let Auto route for you, and dial how hard the model thinks.",
     faqs: [
       {
         q: "Which models can I use?",
         a: (
           <>
-            You can pick from a curated list across three providers — Anthropic
-            (Claude), OpenAI (GPT), and Google (Gemini) — in the composer&rsquo;s model
-            picker, or set an account-wide default in Settings. The default is{" "}
+            You can pick from a curated list across four providers — Anthropic
+            (Claude), Z.ai (GLM), OpenAI (GPT), and Google (Gemini) — in the
+            composer&rsquo;s model picker, or set an account-wide default in Settings.
+            The default is{" "}
             <strong>Auto</strong>, which routes each step to a strong general-purpose
             model so you don&rsquo;t have to think about it.
           </>
@@ -201,7 +202,7 @@ const TOPICS: Topic[] = [
             Thinking effort (low / medium / high) controls how much reasoning the model
             puts into a turn before it acts. Higher effort is better for tricky, multi-step
             changes; lower is faster for small edits. It&rsquo;s a per-turn control in the
-            model picker with a default in Settings, and it applies across all three
+            model picker with a default in Settings, and it applies across all four
             providers.
           </>
         ),
@@ -210,8 +211,8 @@ const TOPICS: Topic[] = [
         q: "Can the agent search the web?",
         a: (
           <>
-            Yes — built-in web search is available on Claude, GPT, and the latest Gemini
-            models, so the agent can pull in current docs and API details rather than
+            Yes — built-in web search is available on Claude, GPT, GLM, and the latest
+            Gemini models, so the agent can pull in current docs and API details rather than
             guessing from memory. Searches show up as a clearly labeled step in the
             activity, and the system only advertises search when the model you picked
             actually supports it.
@@ -223,7 +224,7 @@ const TOPICS: Topic[] = [
         a: (
           <>
             On Free, Auto routing works without any key of your own. To pick specific
-            OpenAI or Google models, add that provider&rsquo;s key in Settings (Team and
+            OpenAI, Google, or Z.ai models, add that provider&rsquo;s key in Settings (Team and
             Enterprise). If a key is missing for a model you choose, you&rsquo;ll get a
             clear &ldquo;set X&rdquo; message for that turn only — the rest of your work
             keeps going.

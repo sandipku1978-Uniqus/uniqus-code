@@ -44,6 +44,13 @@ export interface StreamTurnParams {
    * provider's own default (no reasoning param sent).
    */
   thinkingEffort?: ThinkingEffort;
+  /**
+   * Whether extended thinking is enabled for this turn (the composer's on/off
+   * toggle). Undefined ⇒ true (thinking on). When false, each adapter disables
+   * reasoning in its native way (Anthropic `thinking:disabled`, GLM thinking
+   * off, OpenAI `minimal`, Gemini its lowest tier) for a faster, cheaper turn.
+   */
+  thinkingEnabled?: boolean;
   signal?: AbortSignal;
   /** Fires for each streamed text delta. */
   onText?: (delta: string) => void;
@@ -56,6 +63,15 @@ export interface StreamTurnParams {
   onThinking?: (delta: string) => void;
   /** Fires once when a tool block first appears (UI shows a "running…" row). */
   onToolCallStarted?: (id: string, name: string) => void;
+  /**
+   * Fires as a tool's argument JSON streams in, carrying a best-effort partial
+   * parse of the arguments so far (see parsePartialJson — may be incomplete).
+   * Lets the UI fill in the file name / command / live diff BEFORE the tool call
+   * finishes generating, instead of a blank "running…" row. Providers that emit
+   * whole tool calls atomically (Gemini) never fire this; the loop forwards it as
+   * an updated `tool_call` event, which the client upserts by id.
+   */
+  onToolCallPartial?: (id: string, name: string, partialInput: unknown) => void;
   /** Fires with the full parsed input once a tool block finishes streaming. */
   onToolCall?: (id: string, name: string, input: unknown) => void;
   /**
