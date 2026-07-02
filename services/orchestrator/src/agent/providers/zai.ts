@@ -4,6 +4,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import type { ThinkingEffort } from "@uniqus/api-types";
 import { safeParseJson } from "./openai.js";
 import { parsePartialJson } from "./partialJson.js";
+import { DEFAULT_VISION_BRIDGE_SYSTEM } from "./types.js";
 import type {
   ForcedToolParams,
   ModelProviderAdapter,
@@ -47,9 +48,8 @@ const ZAI_VISION_MODEL = "glm-5v-turbo";
  * its analysis as text, which GLM then reads. A small system steer keeps the
  * answer concrete and UI-aware.
  */
-/** Default system steer for the GLM-V bridge (overridden by task-specialized tools). */
-const DEFAULT_VISION_SYSTEM =
-  "You are a precise visual-analysis assistant. Examine the image and answer the question factually and specifically. For UI screenshots, report layout, alignment, spacing, color/contrast, overlaps, truncation, legibility, and anything visibly broken or off. Be concrete; do not speculate beyond what's visible.";
+// Default system steer for the GLM-V bridge (overridden by task-specialized
+// tools) — shared with the Gemini bridge via types.ts so the two can't drift.
 
 export async function describeImage(opts: {
   apiKey: string;
@@ -70,7 +70,7 @@ export async function describeImage(opts: {
       model,
       max_tokens: opts.maxTokens ?? 4096,
       messages: [
-        { role: "system", content: opts.system || DEFAULT_VISION_SYSTEM },
+        { role: "system", content: opts.system || DEFAULT_VISION_BRIDGE_SYSTEM },
         {
           role: "user",
           content: [

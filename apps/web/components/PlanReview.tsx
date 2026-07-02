@@ -170,6 +170,18 @@ export default function PlanReview({ item }: { item: PlanItem }) {
                 {draft.wireframe}
               </pre>
             )}
+            {!simplified && !!draft.open_questions?.length && (
+              <>
+                <p className="label-micro" style={{ marginTop: 8, color: "var(--text-dim)" }}>
+                  Open questions — answer in chat, or approve and the agent picks the default
+                </p>
+                <ul style={{ margin: "4px 0 8px", paddingLeft: 18 }} aria-label="Open questions">
+                  {draft.open_questions.map((q, i) => (
+                    <li key={i}>{q}</li>
+                  ))}
+                </ul>
+              </>
+            )}
             {!simplified && hasTech && (
               <>
                 <button

@@ -52,4 +52,18 @@ describe("normalizePlan — defends the UI against malformed model output", () =
     expect(normalizePlan({ plain_summary: "P" }).summary).toBe("P");
     expect(normalizePlan({ summary: 123 as unknown }).summary).toBe("Proposed plan");
   });
+
+  it("carries open_questions through, dropping non-string/empty entries", () => {
+    const out = normalizePlan({
+      summary: "x",
+      steps: [],
+      open_questions: ["Use Postgres or SQLite?", "  ", 42, null],
+    });
+    expect(out.open_questions).toEqual(["Use Postgres or SQLite?"]);
+    // Absent/empty → field omitted entirely, not an empty array.
+    expect(normalizePlan({ summary: "x", steps: [] }).open_questions).toBeUndefined();
+    expect(
+      normalizePlan({ summary: "x", steps: [], open_questions: "not an array" }).open_questions,
+    ).toBeUndefined();
+  });
 });

@@ -41,6 +41,7 @@ import {
   pickAutoModel,
   availableProvidersFromKeys,
   turnReferencesImage,
+  lastUserMessageText,
 } from "./autoRouter.js";
 import {
   AGENT_TYPES,
@@ -101,6 +102,8 @@ function buildSystemPrompt(
   runningServers: ServerInfo[],
   activeConnectors: { id: string; name: string; status: string }[],
   hasSubAgents: boolean,
+  hasAskUser: boolean,
+  hasPlanMode: boolean,
   personaPreamble: string | null,
 ): string {
   const { name: shellName, isUnixLike } = sb.shellInfo();
@@ -115,8 +118,8 @@ function buildSystemPrompt(
   // conversation.
   const runningServersSection =
     runningServers.length === 0
-      ? `Running dev servers: none right now. Any server mentioned earlier in this conversation has been stopped (e.g. the project was reopened) — do NOT assume it is still up. If you need a preview, start one with start_server; do not screenshot, read_server_log, or interact_preview against a server id from an earlier turn without first confirming it via list_servers.`
-      : `Running dev servers (live, this turn — treat as ground truth over anything said earlier):\n${runningServers
+      ? `Running dev servers: none at the start of this turn. Any server mentioned earlier in this conversation has been stopped (e.g. the project was reopened) — do NOT assume it is still up. A server you started THIS turn with start_server IS live — trust its tool result. If you need a preview and haven't started one this turn, start one with start_server; do not screenshot, read_server_log, or interact_preview against a server id from an earlier turn without first confirming it via list_servers.`
+      : `Running dev servers (snapshot at the start of this turn — ground truth over anything said earlier; servers you start later this turn are also live, trust their tool results):\n${runningServers
           .map((s) => `  • id ${s.id} — port ${s.port} — \`${s.command}\``)
           .join("\n")}`;
 
@@ -150,8 +153,23 @@ function buildSystemPrompt(
   const subAgentTypeList = Object.values(AGENT_TYPES)
     .map((d) => `${d.key} (${d.blurb})`)
     .join("; ");
+  // Kept to the WHEN/workflow policy — the mechanics (async ack, model/
+  // instructions fields, await semantics) live in the spawn_agents /
+  // await_subagents tool schemas, the single canonical home (drift guard).
   const subAgentsToolLine = hasSubAgents
-    ? `\n- spawn_agents — delegate focused work to one or more specialized sub-agents that run autonomously in THIS sandbox and report back. Each entry is { type, task, model?, instructions? }; pass MULTIPLE entries to run them IN PARALLEL. Use it to (a) parallelize INDEPENDENT work — e.g. audit the backend while a design agent restyles the UI — or (b) get a focused expert pass. Types: ${subAgentTypeList}. Each sub-agent has your full tool set except spawning more sub-agents, sees ONLY the task you write (not this conversation — so make the task self-contained), can run on a model you choose (\`model\`), and can take extra prompt guidance you write (\`instructions\`). FAN OUT by default when a request decomposes into several largely-independent pieces — "build out the rest of the site" / a set of new pages, a batch of components, or sections that each live in their own files: do the shared scaffolding FIRST (routing, nav, shared layout, design tokens) yourself or in one agent, THEN spawn one sub-agent PER page/section in parallel rather than building them all yourself one-by-one. Building many independent things serially when you could fan out is the most common mistake here — for any multi-part build, default to delegating. Only skip it for trivial steps you can just do yourself, and never run parallel agents that edit the SAME files (they clobber each other). The tool returns each sub-agent's final report.`
+    ? `\n- spawn_agents / await_subagents — delegate focused work to specialized sub-agents that run autonomously in THIS sandbox and report back; multiple entries run IN PARALLEL. Types: ${subAgentTypeList}. FAN OUT by default when a request decomposes into largely-independent pieces (a set of new pages, a batch of components, sections that live in their own files): do the shared scaffolding FIRST (routing, nav, shared layout, design tokens), then spawn one sub-agent PER piece — building many independent things serially when you could fan out is the most common mistake here. Each sub-agent sees ONLY the task text you write (make it self-contained), cannot spawn further agents or run the preview, and must not edit the SAME files as another running agent. You own the preview: when they finish, integrate their work, then run and visually verify the combined result. Mechanics (async behavior, model/instructions fields) are in the tool schemas.`
+    : "";
+
+  // enter_plan_mode / ask_user are gated on their hooks actually being wired —
+  // absent for a spawned sub-agent (which must decide-and-note, per its
+  // preamble, never ask the end user) and for headless/CLI runs. Same
+  // truth-in-advertising rule as web_search/vision: never describe a tool the
+  // model can't meaningfully call. The tool list below is filtered to match.
+  const planModeToolLine = hasPlanMode
+    ? `\n- enter_plan_mode — when the user requests a large or risky change (new app, multi-file feature, big refactor, schema/data migration) WITHOUT having turned plan mode on, call this BEFORE editing anything. It drafts a plan, shows it to the user to edit/approve, and returns the approved plan for you to execute. Skip it for small, well-understood edits — just make those. Never call it if plan mode is already active.`
+    : "";
+  const askUserToolLine = hasAskUser
+    ? `\n- ask_user — pause and ask the user a question when you need their input to proceed. Use it when: you're unsure which technology/framework to use, the user's request is ambiguous enough that two reasonable interpretations would produce very different results, you need a credential or API key, or the user asked you to check with them before a major decision. The user sees the question inline in the chat and can respond with buttons or free text.`
     : "";
 
   // Truth-in-advertising for vision: when the active model is text-only (GLM),
@@ -233,11 +251,11 @@ Product and design quality:
 - Build responsive layouts deliberately: stable dimensions, no text overlap, usable touch targets on mobile, and no viewport-width font scaling.
 - Include accessible semantics, labels, keyboard reachability, visible focus states, sufficient contrast, and reduced-motion-friendly animation.
 - Use visual assets when a site, app, or game needs them. Prefer uploaded assets, local assets, generated bitmap assets, or relevant public assets over generic placeholder blocks.
-- generate_image: create REAL raster images (hero images, logos, illustrations, backgrounds, icons, OG/social images, product mockups) with Nano Banana instead of placeholder boxes — pass a specific prompt (subject, style, colours, composition) and optional aspect_ratio. It saves into assets/generated/ and returns the path; reference it from your code (copy into the app's public/ or static folder and use the URL). Edit an existing image by passing input_image. Default model nano-banana-2 (fast); use nano-banana-pro when fidelity or in-image text matters. It needs a Google API key and costs money per image, so generate deliberately — not for every decorative element.
+- Use generate_image for REAL raster assets (hero images, logos, illustrations, backgrounds, icons, OG/social images) instead of placeholder boxes — pass a specific prompt (subject, style, colours, composition). It costs money per image, so generate deliberately — not for every decorative element. Model choice, editing, and file placement are covered in the tool schema.
 - After meaningful frontend work, start or reuse a preview server and inspect it with screenshot_preview at desktop and mobile sizes. Fix obvious layout, contrast, or rendering issues before reporting completion.
 - Screenshot viewport: keep viewport dimensions reasonable (max ~1920x1080). Do NOT use full_page=true on pages with very long scroll — the resulting image may exceed the 8000px dimension limit and fail. For long pages, take multiple viewport-sized screenshots at different scroll positions instead.
-- When you change something interactive — a form, login/signup, routing, data entry, checkout, a dashboard action — don't just screenshot it: drive it with interact_preview. Click through the real flow (fill fields, submit, navigate) and assert the outcome (assert_text / assert_url / assert_visible). It returns a RESULT: PASSED/FAILED verdict plus console errors, failed requests, and an accessibility scan alongside a final screenshot. A FAILED verdict is BLOCKING: assertion failures, uncaught errors, AND console errors — ESPECIALLY React hydration mismatches ("hydration failed" / "did not match" / "Text content does not match") — mean the app is broken even when the screenshot looks fine. Fix the root cause and re-run until it PASSES before telling the user the feature works; never report success on a FAILED run. The user watches each step live in a "Preview (Agent)" tab, so this doubles as showing your work — treat it as quiet QA you do for yourself, not a stage you make the user run.
-- Before claiming a web app is ready to deploy (to Vercel, a prod URL, or "shipped"), run predeploy_check. It runs a production build and scans for serverless-safety issues (filesystem/in-memory "databases", in-server file writes, WebSocket servers, localhost URLs) — the class of bug that works in the preview but breaks live. Treat a FAILED verdict as blocking, like interact_preview: fix the root cause and re-run until it PASSES. Never tell the user the app is deployable when predeploy_check failed.
+- When you change something interactive — a form, login/signup, routing, data entry, checkout, a dashboard action — don't just screenshot it: drive the real flow with interact_preview (fill fields, submit, navigate, assert the outcome) and treat a FAILED verdict as BLOCKING — fix the root cause and re-run until it PASSES before telling the user it works (the failure modes and verdict details are in the tool schema). The user watches each step live in a "Preview (Agent)" tab, so this doubles as showing your work — treat it as quiet QA you do for yourself, not a stage you make the user run.
+- Before claiming a web app is ready to deploy (to Vercel, a prod URL, or "shipped"), run predeploy_check and treat a FAILED verdict as blocking, like interact_preview: fix the root cause and re-run until it PASSES. Never tell the user the app is deployable when predeploy_check failed.
 - Reusable smoke-flows (save_flow / run_flow / list_flows): once a multi-step flow works (e.g. "create an invoice and mark it paid"), call save_flow({ name, description, actions }) with the interact_preview steps so it becomes a replayable checklist. After later changes that could affect it, run_flow({ name, server_id }) re-drives it and reports pass/fail — a cheap regression check. Use list_flows to see what's saved. Save a flow once a feature is solid; don't re-save it every turn.
 - The live preview (the public_url from start_server, shown as "Preview (Agent)") is a DEV environment that auto-pauses when idle — it is NOT a durable, shareable product URL. Never hand a preview URL to the user as "the deployed app" or something to share; it will stop responding. Real deployment is a separate step (push to the linked repo / deploy to Vercel). Say so when the user asks to "ship" or "share" it.
 
@@ -255,7 +273,7 @@ Secrets & env vars (the user's "set it like in Vercel" expectation):
 - After adding/changing env vars, restart the dev server (stop_server then start_server) so the new process picks them up — a running process won't see env changes.
 
 Building for serverless deploy (apps deploy to Vercel serverless — you verify in the preview, but WRITE for that target):
-- PERSISTENCE: NEVER use the filesystem (fs.writeFile, a JSON file, SQLite/better-sqlite3/Prisma-sqlite, lowdb) or module-level in-memory state (let rows=[], new Map(), a global cache) as a database, session store, or cache. It works in the preview (a long-lived dev server with a writable disk) but Vercel's filesystem is read-only and every request is an isolated, ephemeral function — writes vanish and the data resets. Silently losing data is worse than not building the feature. For real persistence use a database (see the Available integrations section above).
+- PERSISTENCE: NEVER use the filesystem (fs.writeFile, a JSON file, SQLite/better-sqlite3/Prisma-sqlite, lowdb) or module-level in-memory state (let rows=[], new Map(), a global cache) as a database, session store, or cache. It works in the preview (a long-lived dev server with a writable disk) but Vercel's filesystem is read-only and every request is an isolated, ephemeral function — writes vanish and the data resets. Silently losing data is worse than not building the feature. For real persistence use a database (see Available integrations in the Live project state section at the end of this prompt).
 - NO long-lived-process patterns: setInterval/cron, in-process queues, WebSocket servers, and long-held SSE do NOT work on serverless — a function has a short timeout (Vercel's default is ~60s; don't rely on long-running work) and is killed right after the response. For scheduled work use an external cron; for real-time use a hosted relay (Pusher/Ably). Uniqus deploys to Vercel (serverless) — apps that need a persistent server (a WebSocket server, an in-process worker) aren't a fit; avoid those patterns, or tell the user that piece needs separate hosting.
 - NETWORKING & URLs: in app code, call your own backend with plain relative paths (fetch("/api/...")). NEVER hardcode localhost, 127.0.0.1, a port, or the preview/orchestrator origin — those work in the preview but are wrong after deploy. The preview routes relative requests for you.
 - HYDRATION: never render a non-deterministic value (Date.now(), Math.random(), new Date(), locale date formatting, browser-only APIs) directly in a component's render — server and client then produce different HTML and React throws a hydration mismatch that quietly breaks interactivity. Compute such values in useEffect/event handlers (client-only) or pass stable values via props.
@@ -272,19 +290,12 @@ Environment:
 - All paths are relative to the sandbox root.
 - The sandbox is shared with the user — files persist across your turns.${repoSection}${knowledgeSection}
 
-Tools you have:
+Core tools (highlights — your full tool list is authoritative and includes more):
 - read_file / write_file / edit_file / list_dir / grep — file ops in the sandbox.
 - run_command — short-lived shell commands (default timeout 60s; use 120000–300000 ms for installs/builds). stdin is closed.
 - start_server / stop_server / list_servers / read_server_log — long-running dev servers (Next.js, Flask, Express, etc.). The user sees a live preview when you start one. The tool result includes a "public_url" — quote that exact URL to the user. Do not tell them to use a raw dev-server localhost URL.
 - wait_for_port — wait for a TCP port on localhost.
-${webSearchToolLine}${visionToolLine}${knowledgeToolLine}
-- enter_plan_mode — when the user requests a large or risky change (new app, multi-file feature, big refactor, schema/data migration) WITHOUT having turned plan mode on, call this BEFORE editing anything. It drafts a plan, shows it to the user to edit/approve, and returns the approved plan for you to execute. Skip it for small, well-understood edits — just make those. Never call it if plan mode is already active.
-- ask_user — pause and ask the user a question when you need their input to proceed. Use it when: you're unsure which technology/framework to use, the user's request is ambiguous enough that two reasonable interpretations would produce very different results, you need a credential or API key, or the user asked you to check with them before a major decision. The user sees the question inline in the chat and can respond with buttons or free text.${subAgentsToolLine}
-
-${runningServersSection}
-
-Available integrations:
-${availableConnectorsSection}
+${webSearchToolLine}${visionToolLine}${knowledgeToolLine}${planModeToolLine}${askUserToolLine}${subAgentsToolLine}
 
 User uploads:
 - Files uploaded through Uniqus Code are saved under assets/uploads/. To discover and read them, use the list_assets and read_asset tools (NOT read_file). read_asset works for text assets (CSV, JSON, etc.) and returns their content. For images, reference them by their sandbox-relative path (e.g. assets/uploads/abc12345-logo.png) in generated code — do not ask the user to upload them again.
@@ -315,8 +326,13 @@ Conventions:
 6. After a non-zero exit, read the error and fix the root cause before retrying. Do not retry blindly — if the same command fails twice, change your approach.
 7. Use list_dir or grep to verify state when you're unsure (e.g., after a scaffold) instead of guessing paths.
 8. When the task is complete, briefly summarize what you built, include the public URL if you started a server, and describe how to use it inside Uniqus Code. Do not end by telling the user to run local terminal commands. End that summary with a short \`## What changed\` section: a plain-English bulleted list, one line per file you created or edited this turn, written for a NON-technical reader (e.g. "Added the expenses table and the running-total bar" rather than "edited src/App.tsx"). Keep it to the files you actually touched — do not list files you only read. (This is a human-readable gloss; an exact, machine-generated file list is shown separately, so don't pad it.)
-9. File size: write_file content is part of your output token budget (~16k tokens). For files larger than ~500 lines, write a smaller version first then grow it with edit_file or additional write_file calls — do NOT try to dump 1000+ lines in a single tool call, the response will be truncated and the tool input will arrive without the content field. If that happens you'll see "write_file requires 'content' as a string" — split the work and retry.
-10. Currency of facts: when the task names specific products, models, versions, or prices — ESPECIALLY anything about AI/LLM models (benchmark dashboards, model pickers, "compare the latest models" apps) — do NOT trust your training data for the current lineup; it lags reality by months. ${currencyGuidance} Naming a stale model (an old version when a newer one has shipped, or omitting a current flagship) is a failure the user will immediately notice. The same applies to "latest" library versions, framework releases, and API endpoints.${formatAccountPromptForPrompt(accountPrompt)}${formatDesignSystemForPrompt(designTokens)}${formatLibrarySkillsForPrompt(librarySkills)}${formatSkillsForPrompt(skillsBody)}`;
+9. Currency of facts: when the task names specific products, models, versions, or prices — ESPECIALLY AI/LLM model lineups — your training data lags reality by months. ${currencyGuidance} A stale model name or a missing current flagship is a failure the user will notice immediately.${formatAccountPromptForPrompt(accountPrompt)}${formatDesignSystemForPrompt(designTokens)}${formatLibrarySkillsForPrompt(librarySkills)}${formatSkillsForPrompt(skillsBody)}
+
+Live project state (refreshed at the start of every turn — kept at the END of this prompt because it changes often; when it contradicts anything earlier in the conversation, THIS section wins):
+
+${runningServersSection}
+
+${availableConnectorsSection}`;
 }
 
 export interface LoopHooks {
@@ -703,6 +719,7 @@ export async function runAgentLoop(
       "agent",
       {
         userMessage,
+        previousUserMessage: lastUserMessageText(opts.messages),
         hasImages: turnReferencesImage(userMessage, opts.messages),
         availableProviders: availableProvidersFromKeys(keys),
       },
@@ -829,6 +846,12 @@ export async function runAgentLoop(
   // allowSubAgents:false (depth cap = 1). Gates both the tool list and the
   // runSubAgents closure below, and whether the prompt advertises spawn_agents.
   const allowSubAgents = opts.allowSubAgents !== false;
+  // ask_user / enter_plan_mode exist only when their server hooks are wired —
+  // absent for sub-agents (which report to the lead, not the user) and for
+  // headless/CLI runs. Gates the prompt advert AND the tool list, so the model
+  // is never offered a tool that would just error "not available".
+  const hasAskUser = !!opts.requestUserAnswer;
+  const hasPlanMode = !!opts.requestPlan;
   const systemPrompt = buildSystemPrompt(
     skillsBody,
     opts.accountPrompt ?? null,
@@ -841,6 +864,8 @@ export async function runAgentLoop(
     opts.runningServers ?? [],
     opts.activeConnectors ?? [],
     allowSubAgents,
+    hasAskUser,
+    hasPlanMode,
     opts.personaPreamble ?? null,
   );
   const messages = opts.messages ?? [];
@@ -1141,7 +1166,12 @@ export async function runAgentLoop(
         // (SUBAGENT_BLOCKED_TOOLS) so N concurrent sub-agents can't each spin up
         // a dev server and saturate the sandbox — the lead owns the preview.
         tools: [
-          ...(allowSubAgents ? TOOLS : TOOLS.filter((t) => !SUBAGENT_BLOCKED_TOOLS.has(t.name))),
+          ...TOOLS.filter(
+            (t) =>
+              (allowSubAgents || !SUBAGENT_BLOCKED_TOOLS.has(t.name)) &&
+              (hasAskUser || t.name !== "ask_user") &&
+              (hasPlanMode || t.name !== "enter_plan_mode"),
+          ),
           ...(hasVision ? [] : VISION_BRIDGE_TOOLS),
           ...(allowSubAgents ? [SPAWN_AGENTS_TOOL, AWAIT_SUBAGENTS_TOOL] : []),
         ] as Anthropic.Tool[],

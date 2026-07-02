@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { FunctionCallingConfigMode, GoogleGenAI, ThinkingLevel } from "@google/genai";
+import { DEFAULT_VISION_BRIDGE_SYSTEM } from "./types.js";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { ThinkingEffort } from "@uniqus/api-types";
 import type {
@@ -105,8 +106,8 @@ export function thinkingConfigFor(
 /** Default model backing the analyze_image vision bridge (override via env). */
 export const VISION_BRIDGE_MODEL = "gemini-3.5-flash";
 
-const VISION_BRIDGE_SYSTEM =
-  "You are a precise visual-analysis assistant. Examine the image and answer the question factually and specifically. For UI screenshots, report layout, alignment, spacing, color/contrast, overlaps, truncation, legibility, and anything visibly broken or off. Be concrete; do not speculate beyond what's visible.";
+// Default vision-bridge system steer — shared with the GLM-5V fallback bridge
+// via types.ts (DEFAULT_VISION_BRIDGE_SYSTEM) so the two backends can't drift.
 
 /**
  * Vision bridge for text-only models (e.g. GLM-5.2). The analyze_image tool
@@ -149,7 +150,7 @@ export async function describeImage(opts: {
       },
     ],
     config: {
-      systemInstruction: opts.system || VISION_BRIDGE_SYSTEM,
+      systemInstruction: opts.system || DEFAULT_VISION_BRIDGE_SYSTEM,
       maxOutputTokens: opts.maxOutputTokens ?? 4096,
       ...(isGemini3 ? { thinkingConfig: { thinkingLevel: GEMINI_3_LEVEL[opts.thinking ?? "low"] } } : {}),
       abortSignal: opts.signal,

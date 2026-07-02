@@ -5,6 +5,7 @@ import {
   mapToModel,
   availableProvidersFromKeys,
   turnReferencesImage,
+  lastUserMessageText,
 } from "./autoRouter.js";
 
 const set = (...p: ProviderName[]): Set<ProviderName> => new Set(p);
@@ -68,10 +69,10 @@ describe("mapToModel — multi-provider, cost-aware policy", () => {
     });
   });
 
-  it("routes standard work to GLM when a Z.ai key is present", () => {
+  it("does not auto-pick GLM for standard work (zai is excluded from Auto for now)", () => {
     expect(mapToModel("standard", false, PROD)).toEqual({
-      provider: "zai",
-      model: "glm-5.2",
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
       overridden: false,
     });
   });
@@ -84,8 +85,8 @@ describe("mapToModel — multi-provider, cost-aware policy", () => {
     });
   });
 
-  it("uses GPT-5.5 / Gemini Pro for hard work when Anthropic is absent", () => {
-    expect(mapToModel("hard", false, set("openai"))?.model).toBe("gpt-5.5");
+  it("uses Gemini Pro for hard work when Anthropic is absent (OpenAI is excluded from Auto for now)", () => {
+    expect(mapToModel("hard", false, set("openai"))).toBeNull();
     expect(mapToModel("hard", false, set("google"))?.model).toBe(
       "gemini-3.1-pro-preview-customtools",
     );
@@ -118,12 +119,10 @@ describe("mapToModel — multi-provider, cost-aware policy", () => {
     });
   });
 
-  it("falls back to GLM+bridge for vision only when no native-vision model is configured", () => {
-    expect(mapToModel("standard", true, set("zai"))).toEqual({
-      provider: "zai",
-      model: "glm-5.2",
-      overridden: false,
-    });
+  it("returns null on a zai-only orchestrator (Auto keeps the static floor, which is GLM there)", () => {
+    // zai is excluded from the Auto tiers, so no pick resolves; pickAutoModel
+    // then returns null and the caller keeps the static default (GLM+bridge).
+    expect(mapToModel("standard", true, set("zai"))).toBeNull();
   });
 
   it("is cost-aware on an Anthropic-only orchestrator (Sonnet for quick/standard, Opus for hard)", () => {
@@ -132,11 +131,11 @@ describe("mapToModel — multi-provider, cost-aware policy", () => {
     expect(mapToModel("hard", false, ANTHROPIC_ONLY)?.model).toBe("claude-opus-4-8");
   });
 
-  it("only routes to providers that have a key", () => {
+  it("returns null when only Auto-excluded providers have keys (caller keeps the static default)", () => {
     const openaiOnly = set("openai");
-    expect(mapToModel("hard", false, openaiOnly)?.provider).toBe("openai");
-    expect(mapToModel("quick", false, openaiOnly)?.provider).toBe("openai");
-    expect(mapToModel("standard", false, openaiOnly)?.provider).toBe("openai");
+    expect(mapToModel("hard", false, openaiOnly)).toBeNull();
+    expect(mapToModel("quick", false, openaiOnly)).toBeNull();
+    expect(mapToModel("standard", false, openaiOnly)).toBeNull();
   });
 });
 
@@ -144,6 +143,32 @@ describe("availableProvidersFromKeys", () => {
   it("includes only providers with a truthy key", () => {
     const s = availableProvidersFromKeys({ anthropic: "k", zai: "k", openai: undefined });
     expect([...s].sort()).toEqual(["anthropic", "zai"]);
+  });
+});
+
+describe("lastUserMessageText", () => {
+  it("returns the last real user message, skipping tool_result wrappers", () => {
+    const history = [
+      { role: "user" as const, content: "build a todo app" },
+      { role: "assistant" as const, content: "ok" },
+      {
+        role: "user" as const,
+        content: [{ type: "tool_result" as const, tool_use_id: "t1", content: "done" }],
+      },
+    ];
+    expect(lastUserMessageText(history)).toBe("build a todo app");
+  });
+
+  it("reads text blocks from a block-form user message", () => {
+    const history = [
+      { role: "user" as const, content: [{ type: "text" as const, text: "fix the login bug" }] },
+    ];
+    expect(lastUserMessageText(history)).toBe("fix the login bug");
+  });
+
+  it("is undefined for empty or missing history", () => {
+    expect(lastUserMessageText([])).toBeUndefined();
+    expect(lastUserMessageText(undefined)).toBeUndefined();
   });
 });
 

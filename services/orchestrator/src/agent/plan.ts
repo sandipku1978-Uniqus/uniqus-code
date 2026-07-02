@@ -7,6 +7,7 @@ import {
   pickAutoModel,
   availableProvidersFromKeys,
   turnReferencesImage,
+  lastUserMessageText,
 } from "./autoRouter.js";
 import { getProvider, providerKeysFromEnv, type ProviderKeys } from "./providers/index.js";
 import { TOOLS } from "./tools.js";
@@ -23,6 +24,7 @@ When you have enough understanding, call the submit_plan tool to return:
 - A one-paragraph technical summary of what will be built and how it will work (this is the detailed, secondary view).
 - A list of concrete steps. Each step should be small enough to verify on its own — typically one file created, one command run, or one integration completed. Aim for 4–10 steps.
 - For each step, list the files it will touch (if any) and a one-line success criterion (how the agent will know the step worked).
+- Optionally, open_questions: up to ~4 short questions or assumptions the user should settle when approving the plan — ONLY decisions that materially change what gets built (framework choice, data store, scope boundaries, paid services). Phrase each with your default ("Using email+password auth — want social login too?"). Omit when there are none; never pad.
 
 Be specific about file names, frameworks, and commands, grounded in what you actually saw. For a brand-new project where there is nothing to inspect, skip straight to the plan.
 
@@ -147,12 +149,19 @@ export function normalizePlan(raw: unknown): Plan {
   const summary = typeof obj.summary === "string" ? obj.summary : "";
   const plain_summary = typeof obj.plain_summary === "string" ? obj.plain_summary : undefined;
   const wireframe = typeof obj.wireframe === "string" ? obj.wireframe : undefined;
+  const open_questions = Array.isArray(obj.open_questions)
+    ? obj.open_questions
+        .filter((q): q is string => typeof q === "string")
+        .map((q) => q.trim())
+        .filter(Boolean)
+    : [];
 
   return {
     summary: summary || plain_summary || "Proposed plan",
     steps,
     ...(plain_summary ? { plain_summary } : {}),
     ...(wireframe ? { wireframe } : {}),
+    ...(open_questions.length ? { open_questions } : {}),
   };
 }
 
@@ -175,6 +184,12 @@ const SUBMIT_PLAN_TOOL: Anthropic.Tool = {
         type: "string",
         description:
           "Optional ASCII wireframe of the primary screen (boxes + labels), ≤16 lines, ASCII-only. Omit for backend/CLI work.",
+      },
+      open_questions: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Optional. Up to ~4 short questions/assumptions the user should settle at approval — only decisions that materially change the build, each phrased with your default. Omit when none.",
       },
       steps: {
         type: "array",
@@ -227,6 +242,7 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
       "plan",
       {
         userMessage,
+        previousUserMessage: lastUserMessageText(opts.history),
         hasImages: turnReferencesImage(userMessage, opts.history),
         availableProviders: availableProvidersFromKeys(keys),
       },
@@ -384,6 +400,16 @@ export function formatPlanForExecution(plan: Plan): string {
       lines.push(`   Success: ${step.success_criteria}`);
     }
   });
-  lines.push("", "Now execute the plan. Use the tools to do the work, fix errors as they arise, and summarize at the end.");
+  if (plan.open_questions && plan.open_questions.length > 0) {
+    lines.push(
+      "",
+      "Open questions noted at approval (the user approved without answering — make a reasonable default choice for each and say what you chose):",
+    );
+    plan.open_questions.forEach((q) => lines.push(`- ${q}`));
+  }
+  lines.push(
+    "",
+    "Now execute the plan. Use the tools to do the work, fix errors as they arise, and summarize at the end. If reality diverges from a step (a file doesn't exist, an approach won't work), adapt to what you actually find rather than following the plan blindly — and note the deviation in your summary.",
+  );
   return lines.join("\n");
 }

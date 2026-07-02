@@ -6287,6 +6287,116 @@ function mergeComponents(
 }
 
 /**
+ * Structured-output tool shared by every design-system generation / inference /
+ * tweak call below. Forcing the model to "call" this tool (tool_choice) instead
+ * of asking for raw JSON in text removes the fence-stripping + JSON.parse
+ * failure class (prose around the JSON, truncation mid-string) — the same
+ * pattern plan.ts uses for submit_plan. The input still lands in
+ * mergeDesignTokens, which remains the defensive normalizer.
+ */
+const SUBMIT_DESIGN_SYSTEM_TOOL: Anthropic.Tool = {
+  name: "submit_design_system",
+  description: "Submit the completed design system tokens.",
+  input_schema: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Short system name." },
+      mode: { type: "string", enum: ["light", "dark", "system"] },
+      colors: {
+        type: "object",
+        description:
+          "Semantic color tokens as CSS colors — primary, accent, background, surface, text, muted, border (add success/warning etc. if the brand needs them).",
+        additionalProperties: { type: "string" },
+      },
+      fonts: {
+        type: "object",
+        properties: {
+          body: { type: "string", description: "CSS font stack." },
+          heading: { type: "string", description: "CSS font stack." },
+          mono: { type: "string", description: "CSS font stack." },
+        },
+      },
+      typeScale: { type: "string", description: 'E.g. "1.25 — major third".' },
+      radius: { type: "string", description: 'E.g. "10px".' },
+      spacing: { type: "string", description: 'E.g. "4px".' },
+      components: {
+        type: "object",
+        description:
+          'Component specs. Shape: {"button":{"radius":"..","paddingX":"..","paddingY":"..","fontWeight":600,"variants":[{"name":"primary","background":"primary","foreground":"#ffffff"},{"name":"secondary","background":"surface","foreground":"text","border":"border"},{"name":"outline","background":"transparent","foreground":"primary","border":"primary"},{"name":"ghost","background":"transparent","foreground":"muted"}]},"input":{"radius":"..","background":"background","border":"border"},"card":{"radius":"..","background":"surface","border":"border","shadow":"<css box-shadow or none>","padding":".."},"badge":{"radius":"999px","variant":"soft"},"catalog":[{"type":"primary-button","name":"Primary button","description":"short look/role","html":"<button>Label</button>"}]}. In color fields PREFER a token name (e.g. "primary"); raw hex only when necessary; "transparent" for ghost/outline fills.',
+      },
+      assets: {
+        type: "object",
+        properties: {
+          logo: { type: "string", description: "Absolute logo image URL, only if identifiable." },
+        },
+      },
+      notes: { type: "string", description: "Voice, density, motion guidance." },
+      findings: {
+        type: "object",
+        description:
+          "Only when the task asks you to report what you found: short, specific notes on what was detected/chosen.",
+        properties: {
+          colors: { type: "array", items: { type: "string" } },
+          typography: { type: "array", items: { type: "string" } },
+          components: { type: "array", items: { type: "string" } },
+          spacing: { type: "array", items: { type: "string" } },
+          notes: { type: "array", items: { type: "string" } },
+        },
+      },
+    },
+  },
+};
+
+/** Structured-output tool for agent-driven skill authoring (same rationale). */
+const SUBMIT_SKILL_TOOL: Anthropic.Tool = {
+  name: "submit_skill",
+  description: "Submit the authored skill.",
+  input_schema: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Short title-case name, max 60 chars." },
+      description: {
+        type: "string",
+        description: "One line: what it does / when to attach it, max 200 chars.",
+      },
+      body: { type: "string", description: "The full markdown skill body." },
+    },
+    required: ["name", "description", "body"],
+  },
+};
+
+/**
+ * One-shot structured generation on the internal Anthropic client: force the
+ * model to call `tool` and return its validated input object. Throws when the
+ * model somehow produced no tool call (e.g. output truncated by maxTokens).
+ */
+async function forceStructured(opts: {
+  apiKey: string;
+  model: string;
+  system: string;
+  content: string | Anthropic.ContentBlockParam[];
+  tool: Anthropic.Tool;
+  maxTokens: number;
+}): Promise<Record<string, unknown>> {
+  const client = new AnthropicCtor({ apiKey: opts.apiKey });
+  const response = await client.messages.create({
+    model: opts.model,
+    max_tokens: opts.maxTokens,
+    system: opts.system,
+    tools: [opts.tool],
+    tool_choice: { type: "tool", name: opts.tool.name },
+    messages: [{ role: "user", content: opts.content }],
+  });
+  const call = response.content.find(
+    (b): b is Anthropic.ToolUseBlock => b.type === "tool_use" && b.name === opts.tool.name,
+  );
+  if (!call || !call.input || typeof call.input !== "object") {
+    throw new Error(`model did not return a structured ${opts.tool.name} result`);
+  }
+  return call.input as Record<string, unknown>;
+}
+
+/**
  * Infer a DesignTokens object from a codebase directory by feeding its
  * design-relevant files to the model and parsing a JSON token object. Falls back
  * to DEFAULT_DESIGN_TOKENS on any error / missing key, so a caller always gets a
@@ -6297,27 +6407,20 @@ async function inferDesignTokensFromDir(dir: string): Promise<DesignTokens> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey || !files.trim()) return DEFAULT_DESIGN_TOKENS;
   try {
-    const client = new AnthropicCtor({ apiKey });
     const system =
       "You extract a design system from a codebase. From the provided config/CSS/theme files, infer the visual " +
-      "tokens. Reply with ONLY a JSON object (no prose, no markdown fences) of shape: " +
-      '{"mode":"light"|"dark"|"system","colors":{"<semantic-name>":"<css color>"},"fonts":{"body":"...",' +
-      '"heading":"...","mono":"..."},"typeScale":"...","radius":"<e.g. 8px>","spacing":"<e.g. 4px>",' +
-      '"notes":"<short guidance: voice, density, motion>"}. Use SEMANTIC color names (primary, accent, ' +
-      "background, surface, text, muted, border, …), not raw hue names. Omit any value you cannot determine.";
-    const response = await client.messages.create({
+      "tokens and submit them via the submit_design_system tool (mode, colors, fonts, typeScale, radius, spacing, " +
+      "notes). Use SEMANTIC color names (primary, accent, background, surface, text, muted, border, …), not raw " +
+      "hue names. Omit any value you cannot determine.";
+    const parsed = await forceStructured({
+      apiKey,
       model: ensureAnthropic("design"),
-      max_tokens: 1200,
       system,
-      messages: [{ role: "user", content: files }],
+      content: files,
+      tool: SUBMIT_DESIGN_SYSTEM_TOOL,
+      maxTokens: 1200,
     });
-    const text = response.content
-      .filter((b): b is Anthropic.TextBlock => b.type === "text")
-      .map((b) => b.text)
-      .join("")
-      .trim();
-    const jsonStr = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
-    return mergeDesignTokens(DEFAULT_DESIGN_TOKENS, JSON.parse(jsonStr));
+    return mergeDesignTokens(DEFAULT_DESIGN_TOKENS, parsed);
   } catch (err) {
     console.error("design token inference failed (falling back to defaults):", err);
     return DEFAULT_DESIGN_TOKENS;
@@ -6335,40 +6438,23 @@ async function generateDesignTokensFromBrief(
 ): Promise<{ tokens: DesignTokens; name: string }> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
-  const client = new AnthropicCtor({ apiKey });
   const system =
     "You are a senior product designer. From the user's brief, design a COMPLETE, coherent, tasteful design " +
-    "system. Reply with ONLY a JSON object (no prose, no markdown fences) of this shape:\n" +
-    '{"name":"<short system name>","mode":"light"|"dark"|"system",' +
-    '"colors":{"primary":"#..","accent":"#..","background":"#..","surface":"#..","text":"#..","muted":"#..","border":"#.."},' +
-    '"fonts":{"body":"<css font stack>","heading":"<css font stack>","mono":"<css font stack>"},' +
-    '"typeScale":"<e.g. 1.25 — major third>","radius":"<e.g. 10px>","spacing":"<e.g. 4px>",' +
-    '"components":{"button":{"radius":"..","paddingX":"..","paddingY":"..","fontWeight":600,' +
-    '"variants":[{"name":"primary","background":"primary","foreground":"#ffffff"},' +
-    '{"name":"secondary","background":"surface","foreground":"text","border":"border"},' +
-    '{"name":"outline","background":"transparent","foreground":"primary","border":"primary"},' +
-    '{"name":"ghost","background":"transparent","foreground":"muted"}]},' +
-    '"input":{"radius":"..","background":"background","border":"border"},' +
-    '"card":{"radius":"..","background":"surface","border":"border","shadow":"<css box-shadow or none>","padding":".."},' +
-    '"badge":{"radius":"999px","variant":"soft"}},"notes":"<voice, density, motion guidance>"}\n' +
+    "system and submit it via the submit_design_system tool — include name, mode, colors, fonts, typeScale, " +
+    "radius, spacing, components (button with the four standard variants, input, card, badge) and notes. " +
     "Rules: use SEMANTIC color names (primary, accent, background, surface, text, muted, border; add success/warning " +
     "etc. if the brand needs them). Ensure WCAG-AA contrast (text on background; each button foreground on its " +
     "background). In component color fields PREFER referencing a color token BY NAME (e.g. \"primary\", \"surface\", " +
     "\"border\"); use a raw hex only when necessary (e.g. white labels) and \"transparent\" for ghost/outline fills. " +
     "Make specific choices that fit the brief's industry, mood and audience — never generic filler.";
-  const response = await client.messages.create({
+  const parsed = await forceStructured({
+    apiKey,
     model: ensureAnthropic("design"),
-    max_tokens: 2000,
     system,
-    messages: [{ role: "user", content: `Brief: ${brief}` }],
+    content: `Brief: ${brief}`,
+    tool: SUBMIT_DESIGN_SYSTEM_TOOL,
+    maxTokens: 2000,
   });
-  const text = response.content
-    .filter((b): b is Anthropic.TextBlock => b.type === "text")
-    .map((b) => b.text)
-    .join("")
-    .trim();
-  const jsonStr = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
-  const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
   const tokens = mergeDesignTokens(DEFAULT_DESIGN_TOKENS, parsed);
   const name =
     typeof parsed.name === "string" && parsed.name.trim() ? parsed.name.trim().slice(0, 80) : "";
@@ -6386,32 +6472,23 @@ async function generateSkillFromBrief(
 ): Promise<{ name: string; description: string; body: string }> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
-  const client = new AnthropicCtor({ apiKey });
   const system =
     "You author reusable 'skills' for an AI coding agent. A skill is a concise markdown rule-set that is " +
     "injected into the agent's system prompt on every turn of projects it is attached to — standing guidance " +
     "like coding conventions, review checklists, domain rules, or brand voice. From the user's brief, write ONE " +
-    "complete skill. Reply with ONLY a JSON object (no prose, no markdown fences) of this shape:\n" +
-    '{"name":"<short title-case name, max 60 chars>",' +
-    '"description":"<one line: what it does / when to attach it, max 200 chars>",' +
-    '"body":"<the full markdown skill>"}\n' +
+    "complete skill and submit it via the submit_skill tool. " +
     "Rules for the body: start with a `# <name>` heading; use short sections and imperative bullet points " +
     "(\"Always …\", \"Prefer …\", \"Never …\"); be specific and actionable, never generic filler; include concrete " +
     "examples (code snippets, naming patterns, phrasings) where they sharpen the rule; stay under ~400 lines. " +
     "Cover the brief's intent fully, and add the obvious adjacent rules an expert would expect, but do not pad.";
-  const response = await client.messages.create({
+  const parsed = await forceStructured({
+    apiKey,
     model: ensureAnthropic("design"),
-    max_tokens: 4000,
     system,
-    messages: [{ role: "user", content: `Brief: ${brief}` }],
+    content: `Brief: ${brief}`,
+    tool: SUBMIT_SKILL_TOOL,
+    maxTokens: 4000,
   });
-  const text = response.content
-    .filter((b): b is Anthropic.TextBlock => b.type === "text")
-    .map((b) => b.text)
-    .join("")
-    .trim();
-  const jsonStr = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
-  const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
   const name = typeof parsed.name === "string" ? parsed.name.trim().slice(0, 120) : "";
   const body = typeof parsed.body === "string" ? parsed.body.trim() : "";
   if (!name || !body) throw new Error("model returned an incomplete skill");
@@ -6529,59 +6606,37 @@ async function analyzeDesignSystem(input: {
 }): Promise<DesignSystemDraft> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
-  const client = new AnthropicCtor({ apiKey });
   const system =
     "You are a senior product designer. From the provided context (a brief, codebase/theme files, a live site's CSS, " +
     "Figma styles, and/or reference images), design a COMPLETE, coherent, tasteful design system AND report what you " +
-    "found. Reply with ONLY a JSON object (no prose, no markdown fences) of this shape:\n" +
-    '{"name":"<short system name>","mode":"light"|"dark"|"system",' +
-    '"colors":{"primary":"#..","accent":"#..","background":"#..","surface":"#..","text":"#..","muted":"#..","border":"#.."},' +
-    '"fonts":{"body":"<css font stack>","heading":"<css font stack>","mono":"<css font stack>"},' +
-    '"typeScale":"<e.g. 1.25 — major third>","radius":"<e.g. 10px>","spacing":"<e.g. 4px>",' +
-    '"components":{"button":{"radius":"..","paddingX":"..","paddingY":"..","fontWeight":600,' +
-    '"variants":[{"name":"primary","background":"primary","foreground":"#ffffff"},' +
-    '{"name":"secondary","background":"surface","foreground":"text","border":"border"},' +
-    '{"name":"outline","background":"transparent","foreground":"primary","border":"primary"},' +
-    '{"name":"ghost","background":"transparent","foreground":"muted"}]},' +
-    '"input":{"radius":"..","background":"background","border":"border"},' +
-    '"card":{"radius":"..","background":"surface","border":"border","shadow":"<css box-shadow or none>","padding":".."},' +
-    '"badge":{"radius":"999px","variant":"soft"},' +
-    '"catalog":[{"type":"primary-button","name":"Primary button","description":"short look/role","html":"<button>Label</button>"}]},' +
-    '"assets":{"logo":"<absolute logo image URL if identifiable, else omit>"},' +
-    '"notes":"<voice, density, motion guidance>",' +
-    '"findings":{"colors":["short notes on palette you detected/chose"],"typography":["fonts + scale"],' +
-    '"components":["button/input/card/badge decisions"],"spacing":["radius/spacing"],"notes":["other rules/observations"]}}\n' +
+    "found — submit both via the submit_design_system tool (include name, mode, colors, fonts, typeScale, radius, " +
+    "spacing, components incl. catalog, assets, notes, and the findings field). " +
     "Rules: use SEMANTIC color names. Ensure WCAG-AA contrast (text on background; each button foreground on its " +
     "background). In component color fields PREFER a color token name (e.g. \"primary\"); use raw hex only when needed " +
     "and \"transparent\" for ghost/outline. When the context contains real values (detected colors/fonts/styles), " +
     "honor them; otherwise infer tastefully from the brief/images. " +
     "CATALOG: enumerate the DISTINCT real components present in the source — multiple button styles, inputs/search, " +
-    "cards, tables, badges, nav, chat bubbles, etc. (up to ~10). Each catalog `html` MUST be a self-contained snippet " +
-    "with NO <script> or external resources, styled via CSS variables var(--color-<token>) (one per color token), " +
-    "var(--radius), var(--font-heading)/var(--font-body), or inline styles, so it renders on-system. Keep each snippet " +
-    "concise — one representative component, roughly under 80 words of HTML. " +
+    "cards, tables, badges, nav, chat bubbles, etc. (up to ~10) in components.catalog. Each catalog `html` MUST be a " +
+    "self-contained snippet with NO <script> or external resources, styled via CSS variables var(--color-<token>) " +
+    "(one per color token), var(--radius), var(--font-heading)/var(--font-body), or inline styles, so it renders " +
+    "on-system. Keep each snippet concise — one representative component, roughly under 80 words of HTML. " +
     "ASSETS: if the source reveals a brand logo image, set assets.logo to its absolute URL. " +
     "Keep each findings entry short and specific.";
   const content: Anthropic.ContentBlockParam[] = [
     { type: "text", text: input.contextText.slice(0, 120_000) },
     ...(input.imageBlocks ?? []),
   ];
-  const response = await client.messages.create({
+  // Generous ceiling: the tool input carries a full token set + findings + a
+  // component catalog with HTML snippets, which easily exceeds a few thousand
+  // tokens. Too low truncates the tool call and forceStructured throws.
+  const parsed = await forceStructured({
+    apiKey,
     model: ensureAnthropic("design"),
-    // Generous ceiling: the JSON now carries a full token set + findings + a
-    // component catalog with HTML snippets, which easily exceeds a few thousand
-    // tokens. Too low here truncates the JSON ("Unterminated string").
-    max_tokens: 16000,
     system,
-    messages: [{ role: "user", content }],
+    content,
+    tool: SUBMIT_DESIGN_SYSTEM_TOOL,
+    maxTokens: 16000,
   });
-  const text = response.content
-    .filter((b): b is Anthropic.TextBlock => b.type === "text")
-    .map((b) => b.text)
-    .join("")
-    .trim();
-  const jsonStr = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
-  const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
   const tokens = mergeDesignTokens(DEFAULT_DESIGN_TOKENS, parsed);
   const name =
     typeof parsed.name === "string" && parsed.name.trim() ? parsed.name.trim().slice(0, 80) : "Design system";
@@ -6592,28 +6647,21 @@ async function analyzeDesignSystem(input: {
 async function tweakDesignTokens(base: DesignTokens, instruction: string): Promise<DesignTokens> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
-  const client = new AnthropicCtor({ apiKey });
   const system =
-    "You refine an existing design system. Apply the user's instruction to the given tokens JSON and reply with " +
-    "ONLY the COMPLETE updated tokens JSON (same shape), no prose, no fences. Leave everything the instruction " +
-    "doesn't touch unchanged. Keep semantic color names and the component/variant structure; preserve WCAG-AA contrast.";
-  const response = await client.messages.create({
+    "You refine an existing design system. Apply the user's instruction to the given tokens and submit the " +
+    "COMPLETE updated tokens via the submit_design_system tool. Leave everything the instruction doesn't touch " +
+    "unchanged. Keep semantic color names and the component/variant structure; preserve WCAG-AA contrast.";
+  // Echoes the COMPLETE tokens (incl. any component catalog), so keep the
+  // ceiling high enough that the tool call is never truncated.
+  const parsed = await forceStructured({
+    apiKey,
     model: ensureAnthropic("design"),
-    // Echoes the COMPLETE tokens JSON (incl. any component catalog), so keep the
-    // ceiling high enough that the returned JSON is never truncated.
-    max_tokens: 16000,
     system,
-    messages: [
-      { role: "user", content: `Current tokens:\n${JSON.stringify(base)}\n\nInstruction: ${instruction}` },
-    ],
+    content: `Current tokens:\n${JSON.stringify(base)}\n\nInstruction: ${instruction}`,
+    tool: SUBMIT_DESIGN_SYSTEM_TOOL,
+    maxTokens: 16000,
   });
-  const text = response.content
-    .filter((b): b is Anthropic.TextBlock => b.type === "text")
-    .map((b) => b.text)
-    .join("")
-    .trim();
-  const jsonStr = text.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
-  return mergeDesignTokens(base, JSON.parse(jsonStr));
+  return mergeDesignTokens(base, parsed);
 }
 
 /**

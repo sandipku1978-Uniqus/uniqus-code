@@ -154,6 +154,15 @@ export interface ModelProviderAdapter {
   callForcedTool(p: ForcedToolParams): Promise<unknown>;
 }
 
+/**
+ * Default system steer for the vision bridge that backs analyze_image for
+ * text-only models. ONE constant shared by both backends (Gemini Flash primary
+ * in google.ts, GLM-5V fallback in zai.ts) so their behavior can't drift;
+ * task-specialized vision tools override it per call (loop.ts visionBridgeSpec).
+ */
+export const DEFAULT_VISION_BRIDGE_SYSTEM =
+  "You are a precise visual-analysis assistant. Examine the image and answer the question factually and specifically. For UI screenshots, report layout, alignment, spacing, color/contrast, overlaps, truncation, legibility, and anything visibly broken or off. Be concrete; do not speculate beyond what's visible.";
+
 /** The env var(s) that configure each provider's key (for error messages). */
 const PROVIDER_ENV_HINT: Record<ProviderName, string> = {
   anthropic: "ANTHROPIC_API_KEY",

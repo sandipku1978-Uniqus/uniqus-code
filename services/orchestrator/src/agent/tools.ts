@@ -161,7 +161,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "write_file",
     description:
-      "Write full content to a file in the sandbox. Creates parent directories. Overwrites existing files. Prefer this over edit_file when creating or fully rewriting a file.",
+      "Write full content to a file in the sandbox. Creates parent directories. Overwrites existing files. Prefer this over edit_file when creating or fully rewriting a file. NOTE: content counts against your per-response output budget (~16k tokens) — for files longer than ~500 lines, write a smaller version first and grow it with edit_file or follow-up write_file calls. A call that overflows the budget arrives truncated WITHOUT its content field and fails with \"write_file requires 'content' as a string\"; if you see that, split the work and retry.",
     input_schema: {
       type: "object",
       properties: {
@@ -174,7 +174,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "edit_file",
     description:
-      "Replace an exact string in an existing file. old_string must appear exactly once in the file. Use for surgical edits only.",
+      "Replace an exact string in an existing file. old_string must appear exactly once in the file. Use for surgical edits only. If the edit fails (old_string not found, or not unique), re-read the file and retry with a corrected or more specific old_string — never resend the identical call.",
     input_schema: {
       type: "object",
       properties: {
@@ -322,7 +322,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "screenshot_preview",
     description:
-      "Take a PNG screenshot of a running preview server (or any URL) and save it under assets/screenshots/. Pass server_id to capture a server you started with start_server, or url for an arbitrary http(s) target. Returns the sandbox-relative asset_path; reference that path from generated code or surface it to the user as evidence that the UI rendered. Requires Playwright + chromium installed in the orchestrator (one-time `npx playwright install chromium`); errors clearly if missing.",
+      "Take a PNG screenshot of a running preview server (or any URL) and save it under assets/screenshots/. Pass server_id to capture a server you started with start_server, or url for an arbitrary http(s) target. Returns the sandbox-relative asset_path; reference that path from generated code or surface it to the user as evidence that the UI rendered. If it errors that the browser/Playwright is unavailable, report that to the user — it is a host-level dependency you cannot install from the sandbox.",
     input_schema: {
       type: "object",
       properties: {
@@ -339,7 +339,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "interact_preview",
     description:
-      "Drive a running preview like a real user, then capture what happened. Runs an ordered list of actions (navigate, click, type/fill, select, press, scroll, wait, wait_for_text) plus assertions (assert_text, assert_url, assert_visible) against a server you started (server_id) or a URL, and returns: a screenshot of the final state, the resulting URL/title, per-step pass/fail, console errors, failed network requests, assertion failures, and a quick accessibility scan. Reach for this AUTOMATICALLY after you change UI, forms, routing, auth, data entry, checkout, or dashboards — fill and submit the flow, assert the result, and fix anything the evidence surfaces BEFORE telling the user it works. Selectors are CSS (prefer stable ones: roles, labels, ids, data-testid). Requires Playwright + chromium in the orchestrator (same as screenshot_preview).",
+      "Drive a running preview like a real user, then capture what happened. Runs an ordered list of actions (navigate, click, type/fill, select, press, scroll, wait, wait_for_text) plus assertions (assert_text, assert_url, assert_visible) against a server you started (server_id) or a URL, and returns a RESULT: PASSED/FAILED verdict plus: a screenshot of the final state, the resulting URL/title, per-step pass/fail, console errors, failed network requests, assertion failures, and a quick accessibility scan. Reach for this AUTOMATICALLY after you change UI, forms, routing, auth, data entry, checkout, or dashboards — fill and submit the flow, assert the result. A FAILED verdict is BLOCKING: assertion failures, uncaught errors, AND console errors — ESPECIALLY React hydration mismatches (\"hydration failed\" / \"did not match\" / \"Text content does not match\") — mean the app is broken even when the screenshot looks fine; fix the root cause and re-run until it PASSES, and never report success on a FAILED run. Selectors are CSS (prefer stable ones: roles, labels, ids, data-testid). If it errors that the browser/Playwright is unavailable, report that to the user — you cannot install it from the sandbox.",
     input_schema: {
       type: "object",
       properties: {
