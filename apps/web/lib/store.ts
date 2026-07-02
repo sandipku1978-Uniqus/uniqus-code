@@ -285,6 +285,14 @@ export type ChatItem =
       call_id: string;
       name: string;
       input: unknown;
+      /**
+       * Bumped on every `tool_call` upsert for this call_id (streamed partial
+       * args + the final full input). Exists ONLY so the Turn memo's itemSig
+       * can see that the input changed without stringifying it — without this,
+       * the memo skipped repaints while args streamed and the row froze at the
+       * initial empty input ("Running … running…") until the result arrived.
+       */
+      input_rev?: number;
       result?: string;
       is_error?: boolean;
       /** Lines added/removed for write_file/edit_file — rendered as a "+A −R" badge. */
@@ -1191,11 +1199,19 @@ export const useStore = create<State>((set, get) => ({
       );
       if (idx >= 0) {
         const existing = s.chat[idx] as Extract<ChatItem, { kind: "tool" }>;
-        const next: ChatItem = { ...existing, name, input };
+        // input_rev feeds the Turn memo's itemSig: each streamed-args upsert
+        // must change the signature or the memo suppresses the repaint and the
+        // row stays "Running … running…" until the result lands.
+        const next: ChatItem = {
+          ...existing,
+          name,
+          input,
+          input_rev: (existing.input_rev ?? 0) + 1,
+        };
         return { chat: [...s.chat.slice(0, idx), next, ...s.chat.slice(idx + 1)] };
       }
       return {
-        chat: [...s.chat, { kind: "tool", id: id(), call_id: callId, name, input }],
+        chat: [...s.chat, { kind: "tool", id: id(), call_id: callId, name, input, input_rev: 0 }],
       };
     }),
 

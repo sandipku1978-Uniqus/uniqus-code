@@ -50,7 +50,12 @@ const PLAN_READONLY_TOOL_NAMES = new Set([
 /** Hooks to stream the planner's investigation (text, reasoning, tool activity). */
 export type PlanHooks = Pick<
   LoopHooks,
-  "onText" | "onThinking" | "onToolCallStarted" | "onToolCall" | "onToolResult"
+  | "onText"
+  | "onThinking"
+  | "onToolCallStarted"
+  | "onToolCallPartial"
+  | "onToolCall"
+  | "onToolResult"
 >;
 
 export interface PlanOptions {
@@ -305,6 +310,9 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
         onText: hooks.onText,
         onThinking: hooks.onThinking,
         onToolCallStarted: hooks.onToolCallStarted,
+        // Live partial args — without this, plan-mode tool rows sat on the
+        // initial empty input until the call finished streaming.
+        onToolCallPartial: hooks.onToolCallPartial,
         onToolCall: hooks.onToolCall,
         onToolResult: hooks.onToolResult,
       });

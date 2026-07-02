@@ -296,6 +296,12 @@ export class GoogleAdapter implements ModelProviderAdapter {
           if (!announced.has(id)) {
             announced.add(id);
             p.onToolCallStarted?.(id, name);
+            // Gemini delivers functionCall args ATOMICALLY with the part, so the
+            // full input is known right now — surface it immediately as a
+            // "partial" (the UI upserts by id) instead of leaving the row on the
+            // empty started-input until the whole stream ends (trailing text
+            // after a call could keep the label blank for seconds).
+            p.onToolCallPartial?.(id, name, fc.args ?? {});
           }
           calls.push({ id, name, args: fc.args ?? {}, signature: part.thoughtSignature });
         }

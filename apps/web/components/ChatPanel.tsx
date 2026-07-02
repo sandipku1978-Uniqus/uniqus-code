@@ -1534,7 +1534,12 @@ function itemSig(it: ChatItem): string {
     case "system":
       return `${it.id}:${it.content.length}`;
     case "tool":
-      return `${it.id}:${it.result === undefined ? "p" : it.is_error ? "e" : "r"}:${it.lines_added ?? ""}/${it.lines_removed ?? ""}:${it.imagePaths?.length ?? 0}`;
+      // input_rev MUST be in the signature: while a tool's arguments stream in,
+      // the store upserts the row with the partial input every ~60ms. Without a
+      // sig change the Turn memo skips the repaint and the row freezes at the
+      // initial empty input ("Running … running…") until the result arrives —
+      // the long-standing "blank tool label while running" bug.
+      return `${it.id}:${it.result === undefined ? "p" : it.is_error ? "e" : "r"}:${it.input_rev ?? 0}:${it.lines_added ?? ""}/${it.lines_removed ?? ""}:${it.imagePaths?.length ?? 0}`;
     case "user_question":
       return `${it.id}:${it.answer ?? ""}`;
     case "tool_approval":
@@ -2584,6 +2589,33 @@ function describeTool(
   }
 }
 
+/**
+ * Live +/− line estimate for a STILL-STREAMING write_file/edit_file call,
+ * computed from the partial input (content / old_string / new_string). Ticks
+ * up as the args stream in (the store re-upserts the row every ~60ms), then is
+ * replaced by the authoritative editStats when the result lands. write_file
+ * can't know removals live (the old file isn't in the input), so it shows only
+ * the growing +N.
+ */
+function liveDiffEstimate(
+  name: string,
+  input: unknown,
+): { added?: number; removed?: number } | null {
+  const a = (input ?? {}) as Record<string, unknown>;
+  const lines = (v: unknown): number | undefined =>
+    typeof v === "string" && v.length > 0 ? v.split("\n").length : undefined;
+  if (name === "write_file") {
+    const added = lines(a.content);
+    return added !== undefined ? { added } : null;
+  }
+  if (name === "edit_file") {
+    const removed = lines(a.old_string);
+    const added = lines(a.new_string);
+    return removed !== undefined || added !== undefined ? { added, removed } : null;
+  }
+  return null;
+}
+
 function ToolCard({
   item,
 }: {
@@ -2595,6 +2627,11 @@ function ToolCard({
   const hasResult = item.result !== undefined;
   // Present tense while running ("Writing app.tsx"), past once done ("Wrote").
   const desc = describeTool(item.name, item.input, hasResult);
+  // Diff badge: authoritative editStats once done; a live estimate from the
+  // streaming args while the call is still generating (ticks up as it types).
+  const live = !hasResult ? liveDiffEstimate(item.name, item.input) : null;
+  const diffAdded = item.lines_added ?? live?.added;
+  const diffRemoved = item.lines_removed ?? live?.removed;
   // Interaction tools stream a live screenshot run into the Preview (Agent) tab;
   // offer a jump so the user can watch it instead of reading the text result.
   const isInteraction = item.name === "interact_preview" || item.name === "run_flow";
@@ -2622,14 +2659,18 @@ function ToolCard({
         <div className="row">
           <span className={`name ${isError ? "error" : ""}`}>{desc.verb}</span>
           {desc.object && <span className="summary">{desc.object}</span>}
-          {(item.lines_added !== undefined || item.lines_removed !== undefined) && (
+          {(diffAdded !== undefined || diffRemoved !== undefined) && (
             <span
               className="tool-diff"
               style={{ fontSize: 11, fontFamily: "ui-monospace,Menlo,Consolas,monospace", whiteSpace: "nowrap" }}
-              title={`${item.lines_added ?? 0} added, ${item.lines_removed ?? 0} removed`}
+              title={
+                hasResult
+                  ? `${diffAdded ?? 0} added, ${diffRemoved ?? 0} removed`
+                  : `~${diffAdded ?? 0} added, ~${diffRemoved ?? 0} removed (streaming)`
+              }
             >
-              <span style={{ color: "var(--conf-high, #3ea76a)" }}>+{item.lines_added ?? 0}</span>{" "}
-              <span style={{ color: "var(--conf-medium, #d98a3d)" }}>−{item.lines_removed ?? 0}</span>
+              <span style={{ color: "var(--conf-high, #3ea76a)" }}>+{diffAdded ?? 0}</span>{" "}
+              <span style={{ color: "var(--conf-medium, #d98a3d)" }}>−{diffRemoved ?? 0}</span>
             </span>
           )}
           <span className={`status ${!hasResult ? "run" : isError ? "err" : "ok"}`}>

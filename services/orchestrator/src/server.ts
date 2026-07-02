@@ -4948,6 +4948,11 @@ async function runSession(
     onThinking: (content: string) => send({ type: "thinking", content }),
     onToolCallStarted: (callId: string, name: string) =>
       send({ type: "tool_call", call_id: callId, name, input: {} }),
+    // Live partial args (adapter-throttled ~60ms) so the file name / pattern
+    // fills in while the planner's tool call is still streaming — mirrors the
+    // execute loop's forwarding; the UI upserts by call_id.
+    onToolCallPartial: (callId: string, name: string, input: unknown) =>
+      send({ type: "tool_call", call_id: callId, name, input }),
     onToolCall: (callId: string, name: string, input: unknown) =>
       send({ type: "tool_call", call_id: callId, name, input }),
     onToolResult: (
