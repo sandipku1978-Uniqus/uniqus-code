@@ -10,6 +10,7 @@ import {
 } from "@uniqus/api-types";
 import { useStore } from "@/lib/store";
 import Popover from "./Popover";
+import Tooltip from "./Tooltip";
 
 const PROVIDER_LABEL: Record<ModelProvider, string> = {
   anthropic: "Anthropic — Claude",
@@ -231,8 +232,6 @@ function PickerBody({
   const setThinking = useStore((s) => s.setThinking);
   const thinkingEnabled = useStore((s) => s.thinkingEnabled);
   const setThinkingEnabled = useStore((s) => s.setThinkingEnabled);
-  const suggestionsEnabled = useStore((s) => s.suggestionsEnabled);
-  const setSuggestionsEnabled = useStore((s) => s.setSuggestionsEnabled);
 
   // Inline (settings): expand the list when a specific model is already chosen.
   const [expanded, setExpanded] = useState(!flyout && model !== "auto");
@@ -254,42 +253,53 @@ function PickerBody({
   const activeEffort = efforts.includes(thinking) ? thinking : clampThinkingEffort(thinking, model);
 
   return (
-    <div style={{ display: "grid", gap: 10, minWidth: 258 }}>
+    // maxWidth is load-bearing in the composer popover: it shrink-wraps its
+    // content, so an unconstrained grid sizes to MAX-content — the one-sentence
+    // help paragraphs below then render as single ~470px lines and balloon the
+    // whole menu. Capping the body makes them wrap and keeps the menu compact.
+    // Settings renders inline in a normal-width card, which needs no cap.
+    <div style={{ display: "grid", gap: 10, minWidth: 224, maxWidth: flyout ? 248 : undefined }}>
       <div className="label-micro">Model</div>
 
       {/* Current model — click to change (flyout in the composer, inline expand
-          in settings). This is the "shows current model, click to change" row. */}
-      <button
-        ref={modelRowRef}
-        type="button"
-        className="model-picker-current"
-        data-open={expanded ? "true" : "false"}
-        onClick={() => setExpanded((e) => !e)}
-        aria-haspopup="true"
-        aria-expanded={expanded ? "true" : "false"}
+          in settings). Single compact line; the model's description shows on
+          hover/focus like the option rows. */}
+      <Tooltip
+        label={
+          model === "auto"
+            ? "Strongest model per task"
+            : (MODEL_CATALOG.find((m) => m.id === model)?.description ?? "Advanced override")
+        }
+        placement="right"
       >
-        <span style={{ display: "grid", gap: 1, textAlign: "left", minWidth: 0 }}>
-          <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text-primary)" }}>
-            {model === "auto" ? "⚡ Auto" : modelChoiceLabel(model)}
-          </span>
+        <button
+          ref={modelRowRef}
+          type="button"
+          className="model-picker-current"
+          data-open={expanded ? "true" : "false"}
+          onClick={() => setExpanded((e) => !e)}
+          aria-haspopup="true"
+          aria-expanded={expanded ? "true" : "false"}
+        >
           <span
             style={{
-              fontSize: 11,
-              color: "var(--text-muted)",
+              fontSize: 12.5,
+              fontWeight: 600,
+              color: "var(--text-primary)",
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
+              textAlign: "left",
+              minWidth: 0,
             }}
           >
-            {model === "auto"
-              ? "Strongest model per task"
-              : (MODEL_CATALOG.find((m) => m.id === model)?.description ?? "Advanced override")}
+            {model === "auto" ? "⚡ Auto" : modelChoiceLabel(model)}
           </span>
-        </span>
-        <span style={{ fontSize: 10, opacity: 0.6, flexShrink: 0 }}>
-          {flyout ? "›" : expanded ? "▴" : "▾"}
-        </span>
-      </button>
+          <span style={{ fontSize: 10, opacity: 0.6, flexShrink: 0 }}>
+            {flyout ? "›" : expanded ? "▴" : "▾"}
+          </span>
+        </button>
+      </Tooltip>
 
       {flyout ? (
         <ModelFlyout
@@ -329,29 +339,6 @@ function PickerBody({
         disabled={!thinkingEnabled}
         onChange={setThinking}
       />
-      <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.4 }}>
-        {thinkingEnabled
-          ? "Higher effort = deeper reasoning before acting, at the cost of latency and tokens."
-          : "Thinking off — fastest, cheapest responses; the model answers without a reasoning pass."}
-      </p>
-
-      <div className="model-picker-sep" />
-
-      {/* Follow-up suggestions toggle (item 8) — the re-enable home for the ✕ on
-          the composer's ghost hint. */}
-      <div className="model-picker-think-head">
-        <span className="label-micro" style={{ margin: 0 }}>
-          Follow-up suggestions
-        </span>
-        <Toggle
-          checked={suggestionsEnabled}
-          onChange={setSuggestionsEnabled}
-          label="Show a suggested follow-up prompt after each turn"
-        />
-      </div>
-      <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.4 }}>
-        A dimmed next-step prompt after each turn — press Tab to use it. It never sends on its own.
-      </p>
     </div>
   );
 }
@@ -367,31 +354,34 @@ function OptionRow({
   active: boolean;
   onClick: () => void;
 }) {
+  // Traditional compact menu row: label only. The description lives in a
+  // hover/focus tooltip instead of an always-on sub-line — that sub-line is
+  // what made the menu balloon to a third of the window.
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="model-picker-option"
-      data-active={active ? "true" : "false"}
-    >
-      <span style={{ display: "grid", gap: 1, textAlign: "left", minWidth: 0 }}>
-        <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>
-          {label}
-        </span>
+    <Tooltip label={sub} placement="right">
+      <button
+        type="button"
+        onClick={onClick}
+        className="model-picker-option"
+        data-active={active ? "true" : "false"}
+      >
         <span
           style={{
-            fontSize: 11,
-            color: "var(--text-muted)",
+            fontSize: 12,
+            fontWeight: active ? 600 : 500,
+            color: "var(--text-primary)",
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
+            textAlign: "left",
+            minWidth: 0,
           }}
         >
-          {sub}
+          {label}
         </span>
-      </span>
-      {active && <span style={{ color: "var(--accent)", fontSize: 12, flexShrink: 0 }}>✓</span>}
-    </button>
+        {active && <span style={{ color: "var(--accent)", fontSize: 12, flexShrink: 0 }}>✓</span>}
+      </button>
+    </Tooltip>
   );
 }
 
@@ -423,9 +413,11 @@ function Toggle({
 
 /**
  * A real, draggable effort slider modelled on Claude Code's — a filled track you
- * can grab and drag (pointer), nudge with the arrow keys, or click a stop. The
- * knob snaps to the nearest supported rung. Adaptive: `options` is the model's
- * supported set (2–5 rungs). Disabled when thinking is toggled off.
+ * can grab and drag (pointer), nudge with the arrow keys, or click a position.
+ * The knob snaps to the nearest supported rung. Adaptive: `options` is the
+ * model's supported set (2–5 rungs). Disabled when thinking is toggled off.
+ * Compact by design: the current rung's name lives in the "Thinking · X" header
+ * above (no per-stop label row), and the effort tradeoff is a hover tooltip.
  */
 function EffortSlider({
   value,
@@ -456,7 +448,15 @@ function EffortSlider({
   };
 
   return (
-    <div className="effort-slider" data-disabled={disabled ? "true" : "false"}>
+    <div
+      className="effort-slider"
+      data-disabled={disabled ? "true" : "false"}
+      title={
+        disabled
+          ? "Thinking off — fastest, cheapest responses"
+          : "Higher effort = deeper reasoning before acting, at the cost of latency and tokens"
+      }
+    >
       <div
         ref={trackRef}
         className="effort-slider-track"
@@ -506,24 +506,6 @@ function EffortSlider({
           />
         ))}
         <div className="effort-slider-knob" style={{ left: `${pct}%` }} aria-hidden />
-      </div>
-      <div className="effort-slider-stops">
-        {options.map((opt, i) => (
-          <button
-            key={opt}
-            type="button"
-            disabled={disabled}
-            className="effort-slider-stop"
-            data-active={opt === value ? "true" : "false"}
-            // Nudge the first/last labels inward so they don't clip the edges.
-            style={{
-              justifySelf: i === 0 ? "start" : i === options.length - 1 ? "end" : "center",
-            }}
-            onClick={() => onChange(opt)}
-          >
-            {EFFORT_LABEL[opt]}
-          </button>
-        ))}
       </div>
     </div>
   );

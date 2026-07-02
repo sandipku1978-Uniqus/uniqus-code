@@ -17,6 +17,16 @@ export interface Plan {
    */
   plain_summary?: string;
   /**
+   * Outcome bullets written for a non-technical user — what they'll GET, not how
+   * it's built ("A booking page where clients pick a class and a time slot").
+   * Deliberately NOT a 1:1 translation of `steps`: infrastructure steps have no
+   * user-visible outcome and are omitted rather than forced into fake plain
+   * language. Rendered as the "What you'll get" section of the plan document;
+   * the technical `steps` live in the collapsed details. Optional for
+   * backward-compat with plans emitted before the planner learned to write it.
+   */
+  deliverables?: string[];
+  /**
    * Optional low-fidelity ASCII wireframe of the intended primary screen (boxes
    * + labels for header / nav / main regions). Deliberately ASCII rather than
    * SVG/HTML so it can be rendered inside a <pre> with ZERO markup-injection

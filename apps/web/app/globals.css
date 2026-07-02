@@ -1891,6 +1891,90 @@ section.band .sub {
 }
 .plan-card .actions { display: flex; gap: 8px; margin-top: 12px; }
 
+/* Simple-view sections shared by both plan variants: "What you'll get"
+   deliverable bullets and the "Before we start" open questions. */
+.plan-section-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin: 10px 0 4px;
+}
+.plan-deliverables {
+  list-style: none;
+  margin: 0 0 6px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-primary);
+}
+.plan-deliverables li {
+  position: relative;
+  padding-left: 20px;
+  margin-bottom: 3px;
+}
+.plan-deliverables li::before {
+  content: "✓";
+  position: absolute;
+  left: 2px;
+  color: var(--brand-purple);
+  font-weight: 700;
+}
+.plan-questions {
+  margin: 0 0 8px;
+  padding-left: 18px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+.plan-tech-body { margin-top: 2px; }
+
+/* Compact chat stub shown while the full plan document is on the Builder
+   stage (desktop Builder view) — an anchor in history, not a second editor. */
+.plan-stub {
+  margin: 6px 0;
+  border: 1px solid var(--brand-purple);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  background: rgba(72, 40, 121, 0.08);
+}
+.plan-stub .plan-plain { margin-bottom: 4px; }
+.plan-stub-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+/* Stage variant: the plan as a full document filling the Builder stage — a
+   roomy centered column with larger type than the chat card. The wrap owns
+   the scroll so long plans never clip inside the fixed-height stage. */
+.plan-doc-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 28px 24px 40px;
+}
+.plan-doc {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 24px 28px;
+}
+.plan-doc .plan-plain {
+  font-size: 18px;
+  line-height: 1.45;
+  margin-bottom: 8px;
+}
+.plan-doc .plan-safety { font-size: 13px; margin-bottom: 14px; }
+.plan-doc .plan-section-label { font-size: 12px; margin: 16px 0 6px; }
+.plan-doc .plan-deliverables { font-size: 14.5px; line-height: 1.65; }
+.plan-doc .plan-deliverables li { margin-bottom: 5px; }
+.plan-doc .plan-questions { font-size: 13.5px; }
+.plan-doc .plan-wireframe { font-size: 12.5px; line-height: 1.4; padding: 14px 16px; }
+.plan-doc .plan-tech-toggle { font-size: 12.5px; margin-top: 10px; }
+.plan-doc .summary { font-size: 13.5px; }
+.plan-doc ol { font-size: 13px; }
+.plan-doc .actions { margin-top: 18px; }
+
 /* (Follow-up suggestion CHIPS were removed — GRIPE 10. The single most-recent
    suggestion is now offered as ghost text inside the composer; see
    .composer-ghost above.) */
@@ -2868,16 +2952,17 @@ section.band .sub {
      bottom of the screen. Capped + scrollable so it always fits the viewport. */
   bottom: -10px;
   z-index: 61;
-  min-width: 240px;
+  /* Traditional compact menu: single-line rows, descriptions on hover. */
+  min-width: 168px;
   max-height: min(440px, 65vh);
   overflow-y: auto;
   display: grid;
-  gap: 8px;
+  gap: 4px;
   background: var(--bg-elev);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
-  padding: 10px;
+  padding: 8px;
 }
 .model-picker-option {
   display: flex;
@@ -2889,7 +2974,7 @@ section.band .sub {
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  padding: 5px 7px;
+  padding: 4px 8px;
   cursor: pointer;
   font-family: inherit;
 }
@@ -3056,26 +3141,9 @@ section.band .sub {
   transition: box-shadow var(--dur-fast, 0.12s) ease; /* knob follows the finger without lag */
 }
 .effort-slider-track:active .effort-slider-fill { transition: none; }
-.effort-slider-stop:disabled { cursor: default; }
-.effort-slider-stops {
-  display: flex;
-  justify-content: space-between;
-  gap: 2px;
-}
-.effort-slider-stop {
-  flex: 1;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 10.5px;
-  font-weight: 600;
-  color: var(--text-muted);
-  padding: 2px 0;
-  white-space: nowrap;
-}
-.effort-slider-stop:hover { color: var(--text-primary); }
-.effort-slider-stop[data-active="true"] { color: var(--accent, #b21e7d); }
+/* (The per-stop label row under the track was removed — the current rung's
+   name lives in the "Thinking · X" header, so the labels were redundant and
+   made the composer menu taller than it needed to be.) */
 
 /* ── Reasoning trace (the model's live thinking) ─────────────────────────── */
 .reasoning-card {
@@ -5755,6 +5823,7 @@ section.band .sub {
 .tool-card,
 .reasoning-card,
 .plan-card,
+.plan-stub,
 .ask-user-card {
   animation: fadeInUp var(--dur-base) var(--ease-out) backwards;
 }

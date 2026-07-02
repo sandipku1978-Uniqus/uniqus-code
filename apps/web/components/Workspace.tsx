@@ -34,6 +34,7 @@ import SecretsModal from "./SecretsModal";
 import CheckpointsModal from "./CheckpointsModal";
 import { ErrorBoundary } from "./ErrorBoundary";
 import Coachmark from "./Coachmark";
+import PlanDocument, { type PlanItem } from "./PlanDocument";
 
 export default function Workspace({
   projectId,
@@ -1205,6 +1206,18 @@ function BuilderStage({ projectId }: { projectId: string }) {
   const previews = useStore((s) => s.previews);
   const editorTab = useStore((s) => s.editorTab);
   const setEditorTab = useStore((s) => s.setEditorTab);
+  // The current PENDING plan takes over the whole stage as a full document —
+  // it's the highest-stakes decision moment and (on the first turn especially)
+  // the stage is otherwise idle. Chat shows only a compact stub meanwhile (see
+  // PlanReview). The selector returns the same item reference across unrelated
+  // chat updates, so this doesn't re-render the stage on every message.
+  const pendingPlan = useStore((s): PlanItem | null => {
+    if (!s.pendingPlanItemId) return null;
+    const it = s.chat.find(
+      (i) => i.kind === "plan_proposal" && i.id === s.pendingPlanItemId,
+    );
+    return it && it.kind === "plan_proposal" ? it : null;
+  });
   // Narrow selectors so streamed frames don't re-render the big stage when it's
   // showing the App (only AgentPreviewPanel, mounted below, needs each frame).
   const agentHasFrames = useStore((s) => s.agentPreview.frames.length > 0);
@@ -1228,6 +1241,23 @@ function BuilderStage({ projectId }: { projectId: string }) {
   // The Activity Monitor is now a first-class tab (item 2), not just the idle
   // fallback — the user can flip back to it while a preview is running.
   const onActivity = editorTab === ACTIVITY_TAB;
+
+  // Pending plan → the stage becomes the plan document until it's decided.
+  // On approve/reject pendingPlanItemId clears and the stage falls through to
+  // the Activity Monitor (watch it build) and then the live preview — the
+  // plan → build → app arc in one pane.
+  if (pendingPlan) {
+    return (
+      <div className="builder-stage">
+        <ErrorBoundary label="plan">
+          {/* Keyed by item id: a NEW pending plan must remount the document so
+              its internal draft state re-seeds (useState initializers don't
+              re-run on prop change). */}
+          <PlanDocument key={pendingPlan.id} item={pendingPlan} variant="stage" />
+        </ErrorBoundary>
+      </div>
+    );
+  }
 
   // No live preview / agent surface to show yet, and not explicitly on Activity.
   // Instead of a dead "Start preview" splash, fill the stage with the Activity

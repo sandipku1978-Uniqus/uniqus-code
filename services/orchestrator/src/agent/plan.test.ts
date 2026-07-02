@@ -53,6 +53,20 @@ describe("normalizePlan — defends the UI against malformed model output", () =
     expect(normalizePlan({ summary: 123 as unknown }).summary).toBe("Proposed plan");
   });
 
+  it("carries deliverables through, dropping non-string/empty entries", () => {
+    const out = normalizePlan({
+      summary: "x",
+      steps: [],
+      deliverables: ["A booking page", "  ", 42, null],
+    });
+    expect(out.deliverables).toEqual(["A booking page"]);
+    // Absent/empty → field omitted entirely, not an empty array.
+    expect(normalizePlan({ summary: "x", steps: [] }).deliverables).toBeUndefined();
+    expect(
+      normalizePlan({ summary: "x", steps: [], deliverables: "not an array" }).deliverables,
+    ).toBeUndefined();
+  });
+
   it("carries open_questions through, dropping non-string/empty entries", () => {
     const out = normalizePlan({
       summary: "x",

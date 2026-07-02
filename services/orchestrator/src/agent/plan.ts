@@ -21,6 +21,7 @@ You have READ-ONLY tools to ground the plan in reality: read_file, list_dir, gre
 
 When you have enough understanding, call the submit_plan tool to return:
 - A plain_summary: ONE plain-English sentence a non-technical person understands, describing what they'll get — NOT how it's built. No file names, frameworks, or jargon. E.g. "I'll build a simple expense tracker where you can add expenses and watch a running total." This is the headline the user reads first.
+- deliverables: 3–7 outcome bullets, each one line, written for that same non-technical reader — the concrete things they'll be able to see or do when this plan is done ("A booking page where clients pick a class and a time slot", "An owner view listing the day's bookings"). Outcomes only: no file names, frameworks, commands, or jargon, and do NOT translate implementation steps 1:1 — a step like "scaffold the project" has no user-visible outcome and gets no bullet. This list is the body of the plan most users read INSTEAD of the steps, so it must cover everything the plan actually builds.
 - A one-paragraph technical summary of what will be built and how it will work (this is the detailed, secondary view).
 - A list of concrete steps. Each step should be small enough to verify on its own — typically one file created, one command run, or one integration completed. Aim for 4–10 steps.
 - For each step, list the files it will touch (if any) and a one-line success criterion (how the agent will know the step worked).
@@ -153,6 +154,12 @@ export function normalizePlan(raw: unknown): Plan {
 
   const summary = typeof obj.summary === "string" ? obj.summary : "";
   const plain_summary = typeof obj.plain_summary === "string" ? obj.plain_summary : undefined;
+  const deliverables = Array.isArray(obj.deliverables)
+    ? obj.deliverables
+        .filter((d): d is string => typeof d === "string")
+        .map((d) => d.trim())
+        .filter(Boolean)
+    : [];
   const wireframe = typeof obj.wireframe === "string" ? obj.wireframe : undefined;
   const open_questions = Array.isArray(obj.open_questions)
     ? obj.open_questions
@@ -165,6 +172,7 @@ export function normalizePlan(raw: unknown): Plan {
     summary: summary || plain_summary || "Proposed plan",
     steps,
     ...(plain_summary ? { plain_summary } : {}),
+    ...(deliverables.length ? { deliverables } : {}),
     ...(wireframe ? { wireframe } : {}),
     ...(open_questions.length ? { open_questions } : {}),
   };
@@ -180,6 +188,12 @@ const SUBMIT_PLAN_TOOL: Anthropic.Tool = {
         type: "string",
         description:
           "ONE plain-English sentence a non-technical user understands — what they'll get, not how it's built. No file names or jargon.",
+      },
+      deliverables: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "3–7 one-line outcome bullets for a non-technical reader — what the user will be able to see or do when the plan is done. Outcomes only, no file names/frameworks/jargon; skip implementation-only steps.",
       },
       summary: {
         type: "string",
@@ -408,6 +422,13 @@ export function formatPlanForExecution(plan: Plan): string {
       lines.push(`   Success: ${step.success_criteria}`);
     }
   });
+  if (plan.deliverables && plan.deliverables.length > 0) {
+    lines.push(
+      "",
+      "Outcomes promised to the user (each must visibly exist when you finish — they approved based on this list):",
+    );
+    plan.deliverables.forEach((d) => lines.push(`- ${d}`));
+  }
   if (plan.open_questions && plan.open_questions.length > 0) {
     lines.push(
       "",

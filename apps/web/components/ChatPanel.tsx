@@ -113,8 +113,6 @@ export default function ChatPanel() {
   const model = useStore((s) => s.model);
   const thinking = useStore((s) => s.thinking);
   const thinkingEnabled = useStore((s) => s.thinkingEnabled);
-  const suggestionsEnabled = useStore((s) => s.suggestionsEnabled);
-  const setSuggestionsEnabled = useStore((s) => s.setSuggestionsEnabled);
   const addUserMessage = useStore((s) => s.addUserMessage);
   const addSystem = useStore((s) => s.addSystem);
   const setBusy = useStore((s) => s.setBusy);
@@ -450,7 +448,6 @@ export default function ChatPanel() {
   }, [turns]);
   const [ghostDismissedId, setGhostDismissedId] = useState<string | null>(null);
   const ghostSuggestion: string | null =
-    suggestionsEnabled &&
     latestComplete &&
     latestComplete.id !== ghostDismissedId &&
     !busy &&
@@ -1259,13 +1256,16 @@ export default function ChatPanel() {
                 >
                   Tab
                 </button>
+                {/* Per-turn dismiss (same as Escape). The old permanent off
+                    switch is gone along with its re-enable toggle in the model
+                    menu — a persisted "off" with no way back stranded users. */}
                 <button
                   type="button"
                   className="composer-ghost-off"
                   tabIndex={-1}
-                  onClick={() => setSuggestionsEnabled(false)}
-                  title="Turn off follow-up suggestions (re-enable in the model menu)"
-                  aria-label="Turn off follow-up suggestions"
+                  onClick={() => setGhostDismissedId(latestComplete?.id ?? null)}
+                  title="Dismiss this suggestion"
+                  aria-label="Dismiss this suggestion"
                 >
                   ✕
                 </button>

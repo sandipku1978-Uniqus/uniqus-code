@@ -101,31 +101,6 @@ function persistThinkingEnabled(enabled: boolean): void {
   }
 }
 
-/**
- * Follow-up suggestion toggle (item 8): whether the post-turn ghost-text prompt
- * suggestion is shown. Account-wide, localStorage-backed, default ON. Users who
- * find the suggestions unhelpful ("a template for all projects") can turn them
- * off; re-enable from the composer model picker.
- */
-const SUGGESTIONS_ENABLED_STORAGE_KEY = "uniqus.suggestionsEnabled";
-
-function readStoredSuggestionsEnabled(): boolean {
-  if (typeof window === "undefined") return true;
-  try {
-    return window.localStorage.getItem(SUGGESTIONS_ENABLED_STORAGE_KEY) !== "false";
-  } catch {
-    return true;
-  }
-}
-
-function persistSuggestionsEnabled(enabled: boolean): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(SUGGESTIONS_ENABLED_STORAGE_KEY, enabled ? "true" : "false");
-  } catch {
-    /* private mode / quota — non-fatal */
-  }
-}
 
 /**
  * Active dashboard workspace (P3.1): `null` = the user's Personal workspace,
@@ -640,11 +615,6 @@ interface State {
    */
   thinkingEnabled: boolean;
   /**
-   * Whether post-turn follow-up prompt suggestions are shown (item 8). Persisted
-   * account-wide, default on. Gated in ChatPanel's ghost-suggestion selector.
-   */
-  suggestionsEnabled: boolean;
-  /**
    * Active dashboard workspace (P3.1): null = Personal, else an org id.
    * Account-wide, localStorage-backed; read by the ProjectPicker to scope its
    * project list + new-project creation.
@@ -784,8 +754,6 @@ interface State {
   setThinking(t: ThinkingEffort): void;
   /** Toggle extended thinking on/off; persists account-wide. */
   setThinkingEnabled(enabled: boolean): void;
-  /** Toggle post-turn follow-up suggestions on/off; persists account-wide (item 8). */
-  setSuggestionsEnabled(enabled: boolean): void;
   /** Switch the active dashboard workspace (null = Personal); persists account-wide. */
   setActiveWorkspace(id: string | null): void;
   addUserMessage(
@@ -1006,7 +974,6 @@ export const useStore = create<State>((set, get) => ({
   density: "comfortable",
   thinking: readStoredThinking(),
   thinkingEnabled: readStoredThinkingEnabled(),
-  suggestionsEnabled: readStoredSuggestionsEnabled(),
   activeWorkspaceId: readStoredWorkspace(),
   chat: [],
   tree: [],
@@ -1111,10 +1078,6 @@ export const useStore = create<State>((set, get) => ({
   setThinkingEnabled: (enabled) => {
     persistThinkingEnabled(enabled);
     set({ thinkingEnabled: enabled });
-  },
-  setSuggestionsEnabled: (enabled) => {
-    persistSuggestionsEnabled(enabled);
-    set({ suggestionsEnabled: enabled });
   },
   setActiveWorkspace: (id) => {
     persistWorkspace(id);
