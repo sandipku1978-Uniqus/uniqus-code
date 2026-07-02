@@ -157,17 +157,22 @@ export async function ping(vm: VmHandle): Promise<boolean> {
  */
 export async function pingAgent(
   vm: VmHandle,
+  readTimeoutMs = 500,
 ): Promise<"rust" | "node" | "unknown" | null> {
   try {
     // Short timeout: while the VM is still booting, the kernel will RST
     // (fast fail) or the route will timeout. Either way we want to retry
-    // quickly rather than blocking the boot loop on a dead probe.
+    // quickly rather than blocking the boot loop on a dead probe. Callers on
+    // the golden-restore path pass an even tighter cap: a probe sent before
+    // the clone re-stamps its IP hangs on ARP (kernel retries ~1/s), so a
+    // stuck probe must die fast enough for the next fresh one to catch the
+    // agent the moment it lands.
     const r = await rpc<{ ok: true; kind?: string }>(
       vm,
       "GET",
       "/health",
       undefined,
-      { readTimeoutMs: 500 },
+      { readTimeoutMs },
     );
     if (r.kind === "rust" || r.kind === "node") return r.kind;
     // An older agent without the `kind` field still passes /health; treat
@@ -274,12 +279,22 @@ export async function finalizeRestore(
     uniqus_auth?: boolean;
   },
   readTimeoutMs = 4_000,
+  connectTimeoutMs?: number,
 ): Promise<void> {
   // Send the token as a Bearer header too: the FIRST configure lands before the
   // agent enforces (golden resumes dark), but a retry lands AFTER it flipped on,
   // so the retry needs to authenticate or it'd 401 and brick the restore.
   const headers = body.auth_token ? { Authorization: `Bearer ${body.auth_token}` } : undefined;
-  await rawRequest(bootstrapIp, port, "POST", "/net/configure", body, readTimeoutMs, headers);
+  await rawRequest(
+    bootstrapIp,
+    port,
+    "POST",
+    "/net/configure",
+    body,
+    readTimeoutMs,
+    headers,
+    connectTimeoutMs,
+  );
 }
 
 /** Probe an agent at an explicit ip:port (used while waiting on a restored clone). */
@@ -292,7 +307,19 @@ export async function pingAt(ip: string, port: number, readTimeoutMs = 500): Pro
   }
 }
 
-/** Minimal HTTP helper for VM-handle-less control calls (no idle-touch). */
+/**
+ * Minimal HTTP helper for VM-handle-less control calls (no idle-touch).
+ *
+ * `connectTimeoutMs` (optional) is a SEPARATE, tighter cap that applies only
+ * until the TCP connection is established, after which the timer is raised to
+ * `readTimeoutMs`. Why: right after a golden-clone resume the first SYN is
+ * often dropped, and the kernel's initial retransmit sits at a fixed 1s RTO —
+ * so an un-capped connect quietly parks the whole restore for ~1s. A short
+ * connect cap kills the stuck attempt so the caller's retry loop can send a
+ * FRESH SYN instead of waiting out the kernel. Once connected we're on a
+ * reliable L2 hop and the handler gets the full read timeout, so a configure
+ * that's mid-work is never cancelled by the short cap.
+ */
 function rawRequest(
   host: string,
   port: number,
@@ -301,9 +328,11 @@ function rawRequest(
   body: unknown,
   readTimeoutMs: number,
   extraHeaders?: Record<string, string>,
+  connectTimeoutMs?: number,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
+    let phase: "connect" | "read" = connectTimeoutMs !== undefined ? "connect" : "read";
     const req = http.request(
       {
         host,
@@ -316,7 +345,7 @@ function rawRequest(
           ...(payload ? { "Content-Length": String(payload.length) } : {}),
           ...(extraHeaders ?? {}),
         },
-        timeout: readTimeoutMs,
+        timeout: connectTimeoutMs ?? readTimeoutMs,
       },
       (res) => {
         res.resume();
@@ -330,9 +359,23 @@ function rawRequest(
         });
       },
     );
+    if (connectTimeoutMs !== undefined) {
+      req.once("socket", (socket) => {
+        const widen = (): void => {
+          phase = "read";
+          req.setTimeout(readTimeoutMs);
+        };
+        // A pooled keep-alive socket is already connected and never emits
+        // 'connect' again — widen immediately or the whole request would run
+        // under the short connect cap.
+        if (socket.connecting) socket.once("connect", widen);
+        else widen();
+      });
+    }
     req.once("timeout", () => {
       req.destroy();
-      reject(new Error(`${method} ${host}:${port}${urlPath} read timeout (${readTimeoutMs}ms)`));
+      const cap = phase === "connect" ? connectTimeoutMs : readTimeoutMs;
+      reject(new Error(`${method} ${host}:${port}${urlPath} ${phase} timeout (${cap}ms)`));
     });
     req.once("error", reject);
     if (payload) req.write(payload);

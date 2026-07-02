@@ -728,28 +728,63 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
       // frozen in older snapshots wait 250ms). Tight 50ms retry/poll steps: this
       // window sits on the boot path AND under the bootstrap lock, so every
       // 100ms of overshoot costs every reopen and every queued restore behind it.
+      //
+      // connectTimeoutMs 100 is the load-bearing part: the first SYN after
+      // resume is usually LOST, and without a connect cap the attempt silently
+      // waits out the kernel's fixed 1s initial retransmit (this was a constant
+      // ~1.05s on every golden restore — see the per-attempt logs). Killing the
+      // stuck attempt and re-dialing sends a fresh SYN every ~150ms instead.
+      // Post-connect the call keeps the full 4s read budget, so a configure
+      // that's mid-mount is never cancelled.
       const seed = randomBytes(32).toString("base64");
+      const finalizeStart = performance.now();
+      let attempts = 0;
       let finalized = false;
       let lastErr: unknown = null;
       const fdl = Date.now() + 8_000;
       while (Date.now() < fdl) {
+        attempts += 1;
         try {
-          await finalizeRestore(BOOTSTRAP_IP, 51_000, {
-            ip: `${ip}/16`,
-            gw: gatewayIp,
-            mac,
-            mount_sandbox: true,
-            seed,
-            time_ms: Date.now(),
-            // P0.2: hand the clone its per-project token + turn enforcement on,
-            // so a golden-restored VM is as locked-down as a cold-booted one.
-            auth_token: handle.authToken,
-            uniqus_auth: AGENT_AUTH_ENFORCED,
-          });
+          await finalizeRestore(
+            BOOTSTRAP_IP,
+            51_000,
+            {
+              ip: `${ip}/16`,
+              gw: gatewayIp,
+              mac,
+              mount_sandbox: true,
+              seed,
+              time_ms: Date.now(),
+              // P0.2: hand the clone its per-project token + turn enforcement on,
+              // so a golden-restored VM is as locked-down as a cold-booted one.
+              auth_token: handle.authToken,
+              uniqus_auth: AGENT_AUTH_ENFORCED,
+            },
+            4_000,
+            100,
+          );
           finalized = true;
           break;
         } catch (err) {
           lastErr = err;
+          // Belt-and-suspenders for delivered-but-unacknowledged attempts: if a
+          // configure actually landed and only its reply was lost, the agent
+          // has re-stamped and LEFT the bootstrap IP — every bootstrap retry
+          // would then fail until the 8s deadline tears down a healthy VM. A
+          // hit on the project IP means finalize succeeded; move on. Skip the
+          // probe when the attempt died BEFORE the connection was established
+          // (the request can't have reached the agent, and each pointless
+          // probe of the still-empty project IP would cost its full 150ms cap,
+          // halving the fresh-SYN retry cadence).
+          const msg = err instanceof Error ? err.message : String(err);
+          const undelivered = /connect timeout|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH/.test(msg);
+          if (!undelivered && (await pingAgent(handle, 150)) !== null) {
+            finalized = true;
+            break;
+          }
+          console.log(
+            `[fleet ${id}] finalizeRestore attempt ${attempts} failed (${msg}) — retrying`,
+          );
           await new Promise((r) => setTimeout(r, 50));
         }
       }
@@ -759,12 +794,22 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
             `${lastErr instanceof Error ? lastErr.message : lastErr}`,
         );
       }
+      console.log(
+        `[fleet ${id}] finalizeRestore ok on attempt ${attempts} ` +
+          `(${Math.round(performance.now() - finalizeStart)}ms)`,
+      );
       // Hold the lock until the clone has actually LEFT the bootstrap identity
       // (reachable on its own project IP), so the next clone can safely reuse it.
+      // 150ms probe cap: a probe sent before the re-stamp lands hangs on ARP
+      // (kernel retries ~1/s) — it must die fast so the next fresh probe
+      // catches the agent the moment it's up.
+      const healthStart = performance.now();
+      let probes = 0;
       let healthy = false;
       const hdl = Date.now() + 8_000;
       while (Date.now() < hdl) {
-        if ((await pingAgent(handle)) !== null) {
+        probes += 1;
+        if ((await pingAgent(handle, 150)) !== null) {
           healthy = true;
           break;
         }
@@ -773,6 +818,10 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
       if (!healthy) {
         throw new Error(`restored clone unreachable on project IP ${ip} after re-stamp`);
       }
+      console.log(
+        `[fleet ${id}] agent on project IP after ${probes} probe(s) ` +
+          `(${Math.round(performance.now() - healthStart)}ms)`,
+      );
     });
     sw.phase("resume + finalizeRestore + health (bootstrap lock)");
 
