@@ -127,6 +127,34 @@ async function exists(p: string): Promise<boolean> {
 
 // ── Unified, VM-aware, serialized installer ──────────────────────────────────
 
+/**
+ * The subdirectory a run command targets, parsed from a leading `cd <dir> &&`
+ * prefix (`cd my-app && npm run dev`) — the documented convention for projects
+ * that live below the sandbox root. This is exactly the case the root-only
+ * dependency probe used to miss: for a subdirectory project the probe saw no
+ * package.json at the root, silently skipped the install, and the dev server
+ * then started dep-less and crashed at first compile ("Cannot find module
+ * 'react'") — surfacing to the user as 2 minutes of preview "warming up"
+ * flashes ending in a 502 ECONNREFUSED. Returns null for root commands,
+ * absolute paths, or anything traversal-shaped — callers then probe the root
+ * exactly as before.
+ */
+export function runCommandSubdir(command: string): string | null {
+  const m = command.match(/^\s*cd\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))\s*&&/);
+  if (!m) return null;
+  const dir = (m[1] ?? m[2] ?? m[3] ?? "").trim();
+  if (!dir || dir === "." || dir.startsWith("/") || dir.startsWith("~") || /^[A-Za-z]:/.test(dir)) {
+    return null;
+  }
+  if (dir.split(/[\\/]/).some((p) => p === "..")) return null;
+  return dir;
+}
+
+/** POSIX-quote a path for the in-VM /bin/sh (single-quote, escape embedded quotes). */
+function shq(p: string): string {
+  return `'${p.replace(/'/g, `'\\''`)}'`;
+}
+
 export interface EnsureDepsResult {
   /** Whether we actually ran an install (false = nothing to do / already present). */
   attempted: boolean;
@@ -180,6 +208,12 @@ export function ensureProjectDeps(
     onStderr?: (s: string) => void;
     /** Fired with the chosen manager right before the install command runs. */
     onStart?: (manager: "npm" | "pnpm" | "yarn") => void;
+    /**
+     * Sandbox-relative subdirectory to probe + install in, for projects that
+     * live below the sandbox root (derive it from the run command with
+     * {@link runCommandSubdir}). Null/undefined ⇒ the sandbox root, as before.
+     */
+    dir?: string | null;
   } = {},
 ): Promise<EnsureDepsResult> {
   return withInstallLock(projectId, () => ensureDepsOnce(sandbox, opts));
@@ -191,6 +225,7 @@ async function ensureDepsOnce(
     signal?: AbortSignal;
     onStderr?: (s: string) => void;
     onStart?: (manager: "npm" | "pnpm" | "yarn") => void;
+    dir?: string | null;
   },
 ): Promise<EnsureDepsResult> {
   const start = Date.now();
@@ -202,13 +237,19 @@ async function ensureDepsOnce(
     stderr: "",
   });
 
+  // Subdirectory projects (`cd my-app && npm run dev`): probe + install INSIDE
+  // that directory. A failed `cd` (dir missing) makes the probe print nothing →
+  // manager null → clean no-op, same as "no package.json".
+  const cdPrefix = opts.dir ? `cd ${shq(opts.dir)} && ` : "";
+
   if (sandbox.vm) {
     // Probe the VM filesystem: no package.json → nothing to do; a non-empty
     // node_modules → already installed; otherwise pick the manager from the
     // lockfile (mirrors needsInstall, but inside the guest).
     const probe = await sb.runCommand(
       sandbox,
-      "if [ ! -f package.json ]; then echo none; " +
+      cdPrefix +
+        "if [ ! -f package.json ]; then echo none; " +
         'elif [ -d node_modules ] && [ -n "$(ls -A node_modules 2>/dev/null)" ]; then echo present; ' +
         "elif [ -f pnpm-lock.yaml ]; then echo pnpm; " +
         "elif [ -f yarn.lock ]; then echo yarn; else echo npm; fi",
@@ -243,7 +284,12 @@ async function ensureDepsOnce(
         : manager === "pnpm"
           ? "npm_config_store_dir=/sandbox/.cache/pnpm-store npm_config_cache=/sandbox/.cache/npm"
           : "npm_config_cache=/sandbox/.cache/npm";
-    const r = await sb.runCommand(sandbox, `${cacheEnv} ${manager} ${args}`, 5 * 60_000, opts.signal);
+    const r = await sb.runCommand(
+      sandbox,
+      `${cdPrefix}${cacheEnv} ${manager} ${args}`,
+      5 * 60_000,
+      opts.signal,
+    );
     return {
       attempted: true,
       ok: r.exitCode === 0,
@@ -253,10 +299,17 @@ async function ensureDepsOnce(
     };
   }
 
-  const manager = await needsInstall(sandbox.rootDir);
+  // Host path: same subdirectory awareness, with a containment guard so a
+  // hostile `cd` prefix can never walk the install out of the sandbox mirror.
+  let hostDir = sandbox.rootDir;
+  if (opts.dir) {
+    const resolved = path.resolve(sandbox.rootDir, opts.dir);
+    if (resolved.startsWith(path.resolve(sandbox.rootDir) + path.sep)) hostDir = resolved;
+  }
+  const manager = await needsInstall(hostDir);
   if (!manager) return none();
   opts.onStart?.(manager);
-  const result = await runInstall(sandbox.rootDir, manager, opts.onStderr, opts.signal);
+  const result = await runInstall(hostDir, manager, opts.onStderr, opts.signal);
   return {
     attempted: true,
     ok: result.ok,

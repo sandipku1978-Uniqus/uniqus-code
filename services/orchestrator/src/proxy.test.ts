@@ -109,11 +109,14 @@ describe("preview warmup (first-load self-heal)", () => {
     expect(stripWarmParam("/foo")).toBe("/foo");
   });
 
-  it("warming page embeds the reload URL + auto-reloads, and stays valid JS", () => {
+  it("warming page embeds the reload URL, probes before navigating, and stays valid JS", () => {
     const reload = withWarmParam("/preview/srv_x/", 1000);
     const html = previewWarmingPage(reload, 1000);
-    expect(html).toContain("Starting your app");
+    expect(html).toContain("Waking up your app");
     expect(html).toContain(reload);
+    // Poll-in-place, navigate once: the fetch probe keys on the warming marker
+    // header instead of blind-reloading every 2s (the iframe-flash bug).
+    expect(html).toContain("x-uniqus-warming");
     expect(html).toContain("location.replace");
     // The single inline script must parse (escape/quote breakage guard).
     const body = /<script>([\s\S]*?)<\/script>/.exec(html)?.[1] ?? "";

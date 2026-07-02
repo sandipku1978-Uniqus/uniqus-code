@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { TOOLS, VISION_BRIDGE_TOOLS } from "./tools.js";
 import * as sb from "./sandbox.js";
 import type { Sandbox, ServerInfo } from "./sandbox.js";
-import { ensureProjectDeps } from "../ensureDeps.js";
+import { ensureProjectDeps, runCommandSubdir } from "../ensureDeps.js";
 import {
   normalizeMessageHistoryInPlace,
   pruneStaleImagesInPlace,
@@ -2008,8 +2008,13 @@ export async function executeTool(
         // VM-aware + serialized: in Firecracker mode this installs INSIDE the
         // VM (where the dev server runs), not on the orchestrator host. The
         // old host-only check would see a stale host node_modules and skip,
-        // leaving the VM without deps ("<binary>: not found").
-        const dep = await ensureProjectDeps(sandbox, projectId, { signal });
+        // leaving the VM without deps ("<binary>: not found"). `dir` follows a
+        // `cd <subdir> &&` command prefix so subdirectory projects get probed
+        // and installed IN the project dir, not at the (package.json-less) root.
+        const dep = await ensureProjectDeps(sandbox, projectId, {
+          signal,
+          dir: runCommandSubdir(String(args.command ?? "")),
+        });
         if (signal?.aborted) {
           throw new Error("start_server aborted by user during install");
         }

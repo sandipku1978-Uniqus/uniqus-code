@@ -407,7 +407,17 @@ export function proxyHttp(
       const start = readWarmStart(req.url ?? "") ?? Date.now();
       if (Date.now() - start < PREVIEW_WARMUP_BUDGET_MS) {
         const reloadUrl = withWarmParam(req.url ?? target.innerPath, start);
-        res.writeHead(200, { "Content-Type": "text/html", "Cache-Control": "no-store" });
+        res.writeHead(200, {
+          "Content-Type": "text/html",
+          "Cache-Control": "no-store",
+          // Marker the warming page's in-page fetch probe keys on: a probe
+          // response WITH this header means "still warming, keep polling in
+          // place"; one WITHOUT it is real content (the app came up) or the
+          // terminal error page — reload once to show it. This is what lets
+          // the page poll invisibly instead of hard-reloading the iframe
+          // every 2s (the "screen keeps flashing" complaint).
+          "X-Uniqus-Warming": "1",
+        });
         res.end(previewWarmingPage(reloadUrl, start));
         return;
       }
@@ -959,11 +969,16 @@ function escapeHtml(s: string): string {
 }
 
 /**
- * Auto-retrying "warming up" page served while a freshly-started dev server is
- * still binding/compiling (see PREVIEW_WARMUP_BUDGET_MS). It reloads itself to
- * `reloadUrl` (which carries the warmup start time) every ~2s; the moment the
- * server answers, the reload gets the real app instead of this page. After the
- * budget elapses it stops and offers a manual retry. Self-contained — no injected
+ * "Warming up" page served while a freshly-started dev server is still
+ * binding/compiling (see PREVIEW_WARMUP_BUDGET_MS). Instead of hard-reloading
+ * the iframe every ~2s (a full navigation = white flash + spinner reset each
+ * time — the "screen keeps flashing" complaint), it POLLS `reloadUrl` with an
+ * in-page fetch: a response carrying the X-Uniqus-Warming marker means "still
+ * warming — update the progress bar in place and poll again"; a response
+ * WITHOUT it is the real app (or, past the budget, the terminal error page) —
+ * navigate exactly once to show it. The copy no longer claims "first compile":
+ * this page also serves reopened projects whose server is still waking (or
+ * genuinely down), where that claim read as a lie. Self-contained — no injected
  * bridge scripts (this isn't the app's HTML). `reloadUrl`/`startMs` are
  * server-controlled (a path + a number), but reloadUrl is still JSON-stringified
  * with `<` escaped so it can never break out of the script string.
@@ -988,27 +1003,33 @@ button{margin-top:14px;background:#a78bfa;color:#0e0e14;border:0;border-radius:6
 </style></head><body>
 <div class="card">
 <div id="spin" class="spin"></div>
-<h1>Starting your app…</h1>
-<p id="msg">The first load compiles your project. This can take a few moments on a cold start.</p>
+<h1>Waking up your app…</h1>
+<p id="msg">Waiting for the dev server to answer. First-ever loads compile from scratch and can take a minute; reopened projects are usually much faster.</p>
 <div class="track" id="track"><div id="bar" class="bar"></div></div>
 <div id="giveup">
-<p style="margin-top:14px">The dev server isn't responding yet — it may still be installing or it crashed on startup.</p>
+<p style="margin-top:14px">The dev server isn't responding — it may still be installing dependencies, or it crashed on startup. Ask the agent to check the server logs.</p>
 <button id="retry">Try again</button>
 </div>
 </div>
 <script>(function(){
   var url=${safeUrl}, start=${startMs}, BUDGET=${PREVIEW_WARMUP_BUDGET_MS};
-  var elapsed=Date.now()-start;
   var bar=document.getElementById('bar');
-  if(elapsed>=0 && elapsed<BUDGET){
-    if(bar) bar.style.width=Math.min(98,(elapsed/BUDGET)*100)+'%';
-    setTimeout(function(){ location.replace(url); }, 2000);
-  } else {
+  function giveUp(){
     document.getElementById('spin').style.display='none';
     document.getElementById('msg').style.display='none';
     document.getElementById('track').style.display='none';
     document.getElementById('giveup').style.display='block';
   }
+  function tick(){
+    var elapsed=Date.now()-start;
+    if(bar) bar.style.width=Math.min(98,(elapsed/BUDGET)*100)+'%';
+    if(elapsed>=BUDGET){ giveUp(); return; }
+    fetch(url,{cache:'no-store',headers:{accept:'text/html'}}).then(function(r){
+      if(r.headers.get('x-uniqus-warming')){ setTimeout(tick,2000); return; }
+      location.replace(url);
+    }).catch(function(){ setTimeout(tick,2000); });
+  }
+  setTimeout(tick,1500);
   var b=document.getElementById('retry');
   if(b) b.onclick=function(){ location.replace(url.replace(/__uniqus_warm=\\d+/, '__uniqus_warm='+Date.now())); };
 })();</script>

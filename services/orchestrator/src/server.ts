@@ -111,7 +111,7 @@ import {
   startShareTokenSweeper,
 } from "./previewShare.js";
 import { readRunConfig, writeRunConfig, detectRunConfig } from "./runConfig.js";
-import { ensureProjectDeps } from "./ensureDeps.js";
+import { ensureProjectDeps, runCommandSubdir } from "./ensureDeps.js";
 import {
   upsertUser,
   getUserById,
@@ -2671,6 +2671,11 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     // Run click can't race the session-start auto-install or an agent-issued
     // `npm install` (concurrent installs corrupt node_modules).
     const dep = await ensureProjectDeps({ rootDir: dest, vm: runVm }, projectId, {
+      // Subdirectory projects: the stored run command carries `cd <dir> &&`;
+      // probe + install THERE, not at the root (which has no package.json —
+      // the skip that let `npx next dev` start dep-less and crash at first
+      // compile, i.e. the 2-minutes-of-warming-then-502 incident).
+      dir: runCommandSubdir(config.command),
       onStart: (mgr) => {
         // Progress notice for the busy pill — fires only when an install is
         // actually about to run (onStart is skipped when deps are present).
