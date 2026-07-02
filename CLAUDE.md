@@ -34,7 +34,12 @@
   `infra/firecracker/README.md` ("Cold start: the two paths").
 - Boot fixes are always on: no `iface eth0 inet dhcp` and the agent no longer
   `need net`s (a doomed DHCP lease used to block OpenRC ~10-15s); mutable dirs
-  are tmpfs so the base rootfs can be shared read-only.
+  are tmpfs (`/tmp /run /var/log /root`) so the base rootfs can be shared
+  read-only. `/root` on tmpfs is load-bearing: golden clones mount `/` ro, and
+  without it npm dies creating `/root/.npm` on every restored VM. The heavy
+  package caches live on the per-project disk instead (`/sandbox/.cache/*`, set
+  via agent env in BOTH main.rs and agent.mjs; `.cache` is excluded from
+  sync/pull/manifest).
 - **Golden base snapshot** (`FIRECRACKER_BASE_SNAPSHOT=1`, default OFF) makes
   new-project boots sub-second by restoring a clone of a pre-booted VM. It
   requires a **rootfs rebuild** (the golden boots the rootfs read-only and uses

@@ -47,6 +47,18 @@ const MAX_LOG = 64 * 1024;
 await fs.mkdir(SANDBOX_DIR, { recursive: true });
 process.chdir(SANDBOX_DIR);
 
+// Package-manager caches must NOT land in $HOME: on a golden-snapshot clone the
+// rootfs is mounted READ-ONLY (/root is a small tmpfs at best), and a RAM-backed
+// cache can OOM a 1 GiB guest on a big install. Point npm/yarn/pnpm at the
+// per-project /sandbox disk instead — ".cache" is excluded from storage sync,
+// the VM→host pull, and /fs/manifest, so it never pollutes the project, and it
+// persists across VM restarts so repeat installs get --prefer-offline hits.
+// Every child we spawn (run_command, start_server) inherits this env.
+// Mirrors main.rs (mirror any change into BOTH agents).
+process.env.npm_config_cache ??= path.join(SANDBOX_DIR, ".cache/npm");
+process.env.YARN_CACHE_FOLDER ??= path.join(SANDBOX_DIR, ".cache/yarn");
+process.env.npm_config_store_dir ??= path.join(SANDBOX_DIR, ".cache/pnpm-store");
+
 /**
  * Bring up eth0 from /proc/cmdline before listening. Many Firecracker CI
  * kernels are built without CONFIG_IP_PNP, so the kernel's `ip=` cmdline
@@ -216,7 +228,10 @@ async function handleRequest(req, res) {
       if (typeof body.time_ms === "number") setClock(body.time_ms);
       // Re-stamp eth0 only AFTER this reply is flushed — applyNetwork drops the
       // link + changes the MAC, killing the bootstrap connection we answer over.
-      setTimeout(() => applyNetwork(ip, gw, mac), 250);
+      // 50ms is plenty for a sub-ms L2 hop to drain the reply; this delay sits
+      // on every golden-restore boot (under the orchestrator's bootstrap lock),
+      // so the old 250ms was a fifth of a second added to every reopen.
+      setTimeout(() => applyNetwork(ip, gw, mac), 50);
       return json(res, 200, { ok: true, restamp: "scheduled" });
     }
     if (method === "GET" && url.pathname === "/fs/file") {

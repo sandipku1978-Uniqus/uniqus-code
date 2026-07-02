@@ -231,7 +231,19 @@ async function ensureDepsOnce(
         : manager === "yarn"
           ? "install --frozen-lockfile"
           : "install --no-audit --no-fund --prefer-offline";
-    const r = await sb.runCommand(sandbox, `${manager} ${args}`, 5 * 60_000, opts.signal);
+    // Inline cache override — belt-and-braces for VMs restored from snapshots
+    // whose FROZEN agent predates the agent-env fix: on a golden clone the
+    // rootfs is read-only, so the default cache at /root/.npm can't be created
+    // and the install dies with "ENOENT/EROFS: mkdir '/root/.npm'". Newer
+    // agents set this env themselves (agent.mjs / main.rs); repeating it here
+    // is harmless. ".cache" is excluded from sync/pull, so it never leaves the VM.
+    const cacheEnv =
+      manager === "yarn"
+        ? "YARN_CACHE_FOLDER=/sandbox/.cache/yarn"
+        : manager === "pnpm"
+          ? "npm_config_store_dir=/sandbox/.cache/pnpm-store npm_config_cache=/sandbox/.cache/npm"
+          : "npm_config_cache=/sandbox/.cache/npm";
+    const r = await sb.runCommand(sandbox, `${cacheEnv} ${manager} ${args}`, 5 * 60_000, opts.signal);
     return {
       attempted: true,
       ok: r.exitCode === 0,

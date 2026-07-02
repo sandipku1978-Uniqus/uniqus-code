@@ -75,6 +75,23 @@ fn main() {
         std::process::exit(1);
     }
 
+    // Package-manager caches must NOT land in $HOME: on a golden-snapshot clone
+    // the rootfs is mounted READ-ONLY (/root is a small tmpfs at best), and a
+    // RAM-backed cache can OOM a 1 GiB guest on a big install. Point npm/yarn/
+    // pnpm at the per-project /sandbox disk — ".cache" is excluded from storage
+    // sync, the VM→host pull, and /fs/manifest, and it persists across VM
+    // restarts. Every child we spawn inherits this env. Mirrors agent.mjs
+    // (mirror any change into BOTH agents).
+    if std::env::var_os("npm_config_cache").is_none() {
+        std::env::set_var("npm_config_cache", dir.join(".cache/npm"));
+    }
+    if std::env::var_os("YARN_CACHE_FOLDER").is_none() {
+        std::env::set_var("YARN_CACHE_FOLDER", dir.join(".cache/yarn"));
+    }
+    if std::env::var_os("npm_config_store_dir").is_none() {
+        std::env::set_var("npm_config_store_dir", dir.join(".cache/pnpm-store"));
+    }
+
     configure_network();
 
     let port = agent_port();
@@ -342,9 +359,12 @@ fn handle(
                 // takes the link DOWN and changes the MAC, which would kill the very
                 // connection we're answering over (we're reachable here only on the
                 // shared bootstrap IP). The orchestrator then finds us on the new
-                // per-project IP and releases the bootstrap lock.
+                // per-project IP and releases the bootstrap lock. 50ms is plenty for
+                // a sub-ms L2 hop to drain the reply; this delay sits on every
+                // golden-restore boot (under the orchestrator's bootstrap lock), so
+                // the old 250ms added a fifth of a second to every reopen.
                 thread::spawn(move || {
-                    thread::sleep(Duration::from_millis(250));
+                    thread::sleep(Duration::from_millis(50));
                     apply_network(&ip, &gw, mac.as_deref());
                 });
                 Ok(json_response(200, &json!({ "ok": true, "restamp": "scheduled" })))

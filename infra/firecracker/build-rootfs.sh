@@ -218,11 +218,20 @@ EOF
 # can be SHARED by every snapshot-restored clone (FIRECRACKER_BASE_SNAPSHOT)
 # instead of copied per project — and it's harmless in the plain read-write
 # cold-boot path too. localmount mounts these before sandbox-mount + the agent.
-mkdir -p "${MNT}/tmp" "${MNT}/run" "${MNT}/var/log"
+#
+# /root MUST be in this list: commands run as root with HOME=/root, and tools
+# write there ($HOME/.npmrc, ~/.config, ~/.cache fallbacks). On a golden clone
+# the rootfs is mounted READ-ONLY, so without a tmpfs here npm's first install
+# dies creating its cache ("ENOENT/EROFS: mkdir '/root/.npm'") on every restored
+# VM. The HEAVY caches (npm/yarn/pnpm) don't live here — the agent points them
+# at the per-project /sandbox/.cache disk so they don't eat guest RAM — this
+# tmpfs just covers the long tail of small $HOME writes.
+mkdir -p "${MNT}/tmp" "${MNT}/run" "${MNT}/var/log" "${MNT}/root"
 cat >> "${MNT}/etc/fstab" <<'EOF'
 tmpfs /tmp     tmpfs nodev,nosuid,mode=1777 0 0
 tmpfs /run     tmpfs nodev,nosuid,mode=0755 0 0
 tmpfs /var/log tmpfs nodev,nosuid,mode=0755 0 0
+tmpfs /root    tmpfs nodev,nosuid,mode=0700 0 0
 EOF
 
 # Tighten root: passwordless console for boot debugging only. SSH is disabled.

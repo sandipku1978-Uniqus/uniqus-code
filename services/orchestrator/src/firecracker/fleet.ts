@@ -724,7 +724,10 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
       await client.resumeInstance();
       // Re-stamp + mount over the bootstrap IP. Packet loss right after resume is
       // expected, so retry briefly. The agent acks immediately and re-stamps
-      // ~250ms later (it can't change its own MAC/IP while answering us).
+      // ~50ms later (it can't change its own MAC/IP while answering us; agents
+      // frozen in older snapshots wait 250ms). Tight 50ms retry/poll steps: this
+      // window sits on the boot path AND under the bootstrap lock, so every
+      // 100ms of overshoot costs every reopen and every queued restore behind it.
       const seed = randomBytes(32).toString("base64");
       let finalized = false;
       let lastErr: unknown = null;
@@ -747,7 +750,7 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
           break;
         } catch (err) {
           lastErr = err;
-          await new Promise((r) => setTimeout(r, 100));
+          await new Promise((r) => setTimeout(r, 50));
         }
       }
       if (!finalized) {
@@ -765,7 +768,7 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
           healthy = true;
           break;
         }
-        await new Promise((r) => setTimeout(r, 100));
+        await new Promise((r) => setTimeout(r, 50));
       }
       if (!healthy) {
         throw new Error(`restored clone unreachable on project IP ${ip} after re-stamp`);
@@ -803,11 +806,15 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
 const HYDRATE_MAX_FILES = 5_000;
 const HYDRATE_MAX_BYTES = 200 * 1024 * 1024;
 // Push files to the in-VM agent in parallel batches rather than one
-// round-trip at a time. Mirrors HYDRATE_BATCH_SIZE in storage/sync.ts: the
-// per-file RPC (agentRpc.pushFile) is round-trip-bound, so serial pushes made
-// hydration scale linearly with file count. Batches of 8 cut that without
-// overwhelming the agent. The per-file RPC contract is unchanged.
-const HYDRATE_PUSH_BATCH_SIZE = 8;
+// round-trip at a time. The per-file RPC (agentRpc.pushFile) is round-trip-
+// bound, so serial pushes made hydration scale linearly with file count.
+// Unlike storage/sync.ts's HYDRATE_BATCH_SIZE (capped at 8 by Supabase 429s),
+// this talks to the in-VM agent over a local L2 hop — no rate limit, and both
+// agents handle concurrent requests (Node event loop / thread-per-request) —
+// so a larger batch directly cuts reopen latency: hydration was the dominant
+// VARIANCE in golden-restore boots (60ms on small projects, 1.3s+ on larger
+// ones at batch size 8).
+const HYDRATE_PUSH_BATCH_SIZE = 24;
 
 async function hydrateInto(vm: VmHandle, hostDir: string): Promise<void> {
   const root = path.resolve(hostDir);
@@ -1004,6 +1011,36 @@ async function tryRehydrateSnapshot(opts: BootOpts): Promise<VmHandle | null> {
   const paths = snapshotPaths(opts.projectId);
   if (!(await pathExists(paths.snapshot)) || !(await pathExists(paths.memory))) {
     return null;
+  }
+  // Stale-guard, mirroring baseSnapshotMatchesRootfs: a snapshot of a GOLDEN-
+  // origin VM froze a guest with the SHARED base rootfs mounted (read-only). If
+  // rootfs.ext4 was rebuilt since (a deploy touching sandbox-agent or
+  // build-rootfs.sh), the frozen page cache no longer matches the new image and
+  // the restored guest reads garbage — EBADMSG / phantom ENOENTs on paths that
+  // exist. Golden-origin is recognizable by the ABSENCE of a per-project rootfs
+  // overlay: cold boots always create one and their snapshots reference it (a
+  // private copy a base rebuild can't touch), so those stay restorable. Clean
+  // shutdowns destroy() snapshots anyway; this guards the crash-restart path.
+  try {
+    if (!(await pathExists(projectRootImagePath(opts.projectId)))) {
+      const [snap, rootfs] = await Promise.all([
+        fs.stat(paths.snapshot),
+        fs.stat(ROOTFS_BASE_PATH),
+      ]);
+      if (rootfs.mtimeMs > snap.mtimeMs) {
+        console.warn(
+          `[fleet] per-project snapshot for ${opts.projectId.slice(0, 8)} predates the ` +
+            `rebuilt base rootfs — discarding it (restoring would corrupt the guest); ` +
+            `falling back to a fresh boot`,
+        );
+        await fs.rm(paths.snapshot, { force: true }).catch(() => {});
+        await fs.rm(paths.memory, { force: true }).catch(() => {});
+        return null;
+      }
+    }
+  } catch {
+    // stat hiccup — proceed; a genuinely broken snapshot still falls back via
+    // the loadSnapshot catch below.
   }
   const id = `vm_${opts.projectId.slice(0, 8)}_rehyd`;
   // Spawn from a per-project run dir that contains the relative "sandbox.ext4"
