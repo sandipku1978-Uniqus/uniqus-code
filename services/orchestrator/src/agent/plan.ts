@@ -11,6 +11,7 @@ import {
 } from "./autoRouter.js";
 import { getProvider, providerKeysFromEnv, type ProviderKeys } from "./providers/index.js";
 import { TOOLS } from "./tools.js";
+import { createLiveOutputEstimator } from "./liveUsage.js";
 import { executeTool, truncateToolResultText, type LoopHooks } from "./loop.js";
 import type { Sandbox } from "./sandbox.js";
 import { PLAN_DESIGN_STEP_LINE } from "./designGuidance.js";
@@ -87,6 +88,19 @@ export interface PlanOptions {
     // The provider the planner resolved to (may be any configured provider,
     // including "zai"); recordUsageEvent takes a plain string.
     provider: string;
+  }) => void;
+  /**
+   * Live token counter ONLY — fires repeatedly during the investigation with
+   * the running (partly ESTIMATED) cumulative spend so the composer's counter
+   * moves while the planner streams thinking/text (see liveUsage.ts). Never
+   * record/bill from this; `onUsage` above stays the authoritative once-at-end
+   * report.
+   */
+  onLiveUsage?: (usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
   }) => void;
 }
 
@@ -312,6 +326,19 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
   for (let iter = 0; iter < MAX_PLAN_ITERATIONS; iter++) {
     if (opts.signal?.aborted) throw new Error("aborted before plan");
 
+    // Live counter for the planning phase: prior investigation turns' banked
+    // spend + this message's real/estimated in-flight figure. Without this the
+    // counter sat flat through the whole plan (usage only banks per turn) —
+    // on GLM that's minutes of streamed thinking with zero movement.
+    const liveEst = createLiveOutputEstimator((u) => {
+      opts.onLiveUsage?.({
+        inputTokens: planUsage.inputTokens + u.inputTokens,
+        outputTokens: planUsage.outputTokens + u.outputTokens,
+        cacheReadTokens: planUsage.cacheReadTokens + u.cacheReadTokens,
+        cacheCreationTokens: planUsage.cacheCreationTokens + u.cacheCreationTokens,
+      });
+    });
+
     let turn;
     try {
       turn = await provider.streamAgentTurn({
@@ -321,14 +348,24 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
         messages,
         maxTokens: PLAN_MAX_TOKENS,
         signal: opts.signal,
-        onText: hooks.onText,
-        onThinking: hooks.onThinking,
+        onText: (t) => {
+          liveEst.addChars(t.length);
+          hooks.onText?.(t);
+        },
+        onThinking: (t) => {
+          liveEst.addChars(t.length);
+          hooks.onThinking?.(t);
+        },
         onToolCallStarted: hooks.onToolCallStarted,
         // Live partial args — without this, plan-mode tool rows sat on the
         // initial empty input until the call finished streaming.
-        onToolCallPartial: hooks.onToolCallPartial,
+        onToolCallPartial: (id, name, partial) => {
+          liveEst.addToolPartial(id, partial);
+          hooks.onToolCallPartial?.(id, name, partial);
+        },
         onToolCall: hooks.onToolCall,
         onToolResult: hooks.onToolResult,
+        onUsage: (u) => liveEst.onRealUsage(u),
       });
     } catch (err) {
       if (opts.signal?.aborted) throw new Error("aborted during plan");

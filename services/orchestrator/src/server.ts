@@ -4969,6 +4969,47 @@ async function runSession(
     ) => send({ type: "tool_result", call_id: callId, result, is_error: isError }),
   };
 
+  // The provider-native model the live spend is priced against. Known up front
+  // for an explicit pick (catalog id → bare model); for Auto it arrives via
+  // onModelResolved (set below). Rides each `usage` event so the Activity
+  // Monitor can compute a live cost client-side. Declared BEFORE the plan
+  // phase so the planner's live counter (onLiveUsage) can use the same
+  // throttled emitter.
+  let currentModel: string | undefined =
+    modelChoice && modelChoice !== "auto"
+      ? MODEL_CATALOG.find((c) => c.id === modelChoice)?.model
+      : undefined;
+
+  // Throttle the live token counter — onUsage can fire on every output-token
+  // delta (Anthropic, plus the char-based estimator ticks from liveUsage.ts).
+  // Coalesce to at most one `usage` event per ~300ms, but always remember the
+  // latest so the final figure isn't lost to the timer.
+  let latestUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+  let usageEmitTimer: NodeJS.Timeout | null = null;
+  const flushUsage = (): void => {
+    send({
+      type: "usage",
+      input_tokens: latestUsage.inputTokens,
+      output_tokens: latestUsage.outputTokens,
+      cache_read_tokens: latestUsage.cacheReadTokens,
+      cache_creation_tokens: latestUsage.cacheCreationTokens,
+      model: currentModel,
+    });
+  };
+  const emitUsage = (u: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  }): void => {
+    latestUsage = u;
+    if (usageEmitTimer) return;
+    usageEmitTimer = setTimeout(() => {
+      usageEmitTimer = null;
+      flushUsage();
+    }, 300);
+  };
+
   // Planning-phase spend (item 12): plan-mode investigation used to be entirely
   // free — its tokens were never recorded or shown. Accumulate them here, record
   // each planner run as its own billed usage event (like sub-agents do), and fold
@@ -4977,6 +5018,10 @@ async function runSession(
   let planCostUsd = 0;
   let planInputTokens = 0; // total processed (fresh + cache), matching the lead convention
   let planOutputTokens = 0;
+  // The same spend kept as a four-way split, so the LIVE counter can fold
+  // banked plan usage into the loop's emissions without misclassifying cached
+  // input as fresh (the Activity Monitor prices the buckets differently).
+  const planSplit = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
   const onPlanUsage = (u: {
     inputTokens: number;
     outputTokens: number;
@@ -4988,6 +5033,10 @@ async function runSession(
     planCostUsd += estimateTurnCostUsd(u.model, u);
     planInputTokens += u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens;
     planOutputTokens += u.outputTokens;
+    planSplit.inputTokens += u.inputTokens;
+    planSplit.outputTokens += u.outputTokens;
+    planSplit.cacheReadTokens += u.cacheReadTokens;
+    planSplit.cacheCreationTokens += u.cacheCreationTokens;
     void recordUsageEvent({
       projectId,
       userId,
@@ -5002,6 +5051,28 @@ async function runSession(
     }).catch((e) => console.error("recordUsageEvent (plan) failed:", e));
   };
 
+  // Live-counter continuity across the plan phase. A planner's live figures
+  // (partly estimated — see liveUsage.ts) ride ON TOP of whatever the loop has
+  // already emitted (nonzero for a mid-loop enter_plan_mode plan) plus any
+  // already-banked plan spend; and the loop's own emissions below fold the
+  // banked plan spend back in. Without both halves the counter would visibly
+  // reset to near zero when a planner starts, and drop again when execution
+  // begins. Display only — never recorded.
+  let lastLoopUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+  const onPlanLiveUsage = (u: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  }): void =>
+    emitUsage({
+      inputTokens: lastLoopUsage.inputTokens + planSplit.inputTokens + u.inputTokens,
+      outputTokens: lastLoopUsage.outputTokens + planSplit.outputTokens + u.outputTokens,
+      cacheReadTokens: lastLoopUsage.cacheReadTokens + planSplit.cacheReadTokens + u.cacheReadTokens,
+      cacheCreationTokens:
+        lastLoopUsage.cacheCreationTokens + planSplit.cacheCreationTokens + u.cacheCreationTokens,
+    });
+
   if (mode === "plan-then-execute") {
     const plan = await proposePlan(`${messageWithRefs}${selectedBlock}`, {
       apiKey: anthropicKey,
@@ -5015,6 +5086,7 @@ async function runSession(
       signal,
       hooks: planHooks,
       onUsage: onPlanUsage,
+      onLiveUsage: onPlanLiveUsage,
     });
     if (signal.aborted) {
       send({ type: "complete", tool_calls: 0, elapsed_ms: Date.now() - start, aborted: true });
@@ -5060,6 +5132,7 @@ async function runSession(
             signal,
             hooks: planHooks,
             onUsage: onPlanUsage,
+            onLiveUsage: onPlanLiveUsage,
           });
           if (signal.aborted) throw new Error("aborted before plan approval");
           send({ type: "plan_proposed", plan });
@@ -5123,44 +5196,6 @@ async function runSession(
       })
       .then(() => emitSynced())
       .catch((err) => console.error("sub-agent settle sync failed:", err));
-  };
-
-  // The provider-native model the live spend is priced against. Known up front
-  // for an explicit pick (catalog id → bare model); for Auto it arrives via
-  // onModelResolved (set below). Rides each `usage` event so the Activity
-  // Monitor can compute a live cost client-side.
-  let currentModel: string | undefined =
-    modelChoice && modelChoice !== "auto"
-      ? MODEL_CATALOG.find((c) => c.id === modelChoice)?.model
-      : undefined;
-
-  // Throttle the live token counter — onUsage can fire on every output-token
-  // delta (Anthropic). Coalesce to at most one `usage` event per ~300ms, but
-  // always remember the latest so the final figure isn't lost to the timer.
-  let latestUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
-  let usageEmitTimer: NodeJS.Timeout | null = null;
-  const flushUsage = (): void => {
-    send({
-      type: "usage",
-      input_tokens: latestUsage.inputTokens,
-      output_tokens: latestUsage.outputTokens,
-      cache_read_tokens: latestUsage.cacheReadTokens,
-      cache_creation_tokens: latestUsage.cacheCreationTokens,
-      model: currentModel,
-    });
-  };
-  const emitUsage = (u: {
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    cacheCreationTokens: number;
-  }): void => {
-    latestUsage = u;
-    if (usageEmitTimer) return;
-    usageEmitTimer = setTimeout(() => {
-      usageEmitTimer = null;
-      flushUsage();
-    }, 300);
   };
 
   // Pre-run checkpoint (A5): a clean rollback point capturing sandbox state
@@ -5252,7 +5287,18 @@ async function runSession(
         done: frame.done,
         flow_name: flowName,
       }),
-    onUsage: emitUsage,
+    // Loop live counter: remember the loop's own figure (the base a mid-loop
+    // planner's live emissions ride on) and fold in banked plan spend so the
+    // counter doesn't drop when execution takes over from a plan phase.
+    onUsage: (u) => {
+      lastLoopUsage = u;
+      emitUsage({
+        inputTokens: u.inputTokens + planSplit.inputTokens,
+        outputTokens: u.outputTokens + planSplit.outputTokens,
+        cacheReadTokens: u.cacheReadTokens + planSplit.cacheReadTokens,
+        cacheCreationTokens: u.cacheCreationTokens + planSplit.cacheCreationTokens,
+      });
+    },
     requestUserAnswer: registerUserAnswer,
     requestPlan,
     // Permission gating (the composer's mode dropdown). The loop reads the live

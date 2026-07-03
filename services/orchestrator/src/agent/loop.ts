@@ -8,6 +8,7 @@ import {
   pruneStaleImagesInPlace,
 } from "./messageHistory.js";
 import { maybeCompact, type CompactionResult } from "./compact.js";
+import { createLiveOutputEstimator } from "./liveUsage.js";
 import {
   formatAccountPromptForPrompt,
   formatDesignSystemForPrompt,
@@ -1149,6 +1150,23 @@ export async function runAgentLoop(
     // dominant cause of runaway input tokens.
     pruneStaleImagesInPlace(messages);
 
+    // Live output estimation between real usage reports (see liveUsage.ts:
+    // most providers only report output tokens at message END, so the counter
+    // sat flat through long thinking phases — worst on GLM). Estimated ticks
+    // and real reports ride the same aggregation below. Note: on a mid-stream
+    // abort, `inflight` (banked by finish()) may hold an estimated figure —
+    // deliberately: the provider bills a severed stream's thinking too, so an
+    // estimate is closer to the truth than the zero we recorded before.
+    const liveEst = createLiveOutputEstimator((u) => {
+      inflight = u;
+      opts.onUsage?.({
+        inputTokens: usageIn + u.inputTokens,
+        outputTokens: usageOut + u.outputTokens,
+        cacheReadTokens: usageCacheRead + u.cacheReadTokens,
+        cacheCreationTokens: usageCacheCreate + u.cacheCreationTokens,
+      });
+    });
+
     // Stream one assistant turn through the resolved provider. The adapter
     // emits text + tool-start hooks as content arrives (so large write_file
     // calls don't look like a black hole) and returns the assistant content
@@ -1180,26 +1198,32 @@ export async function runAgentLoop(
         thinkingEffort: opts.thinkingEffort,
         thinkingEnabled: opts.thinkingEnabled,
         signal: opts.signal,
-        onText: opts.onText,
-        onThinking: opts.onThinking,
+        // Streamed content also feeds the live output-token estimate, so the
+        // counter moves DURING a long thinking/text stream instead of only at
+        // message end.
+        onText: (t) => {
+          liveEst.addChars(t.length);
+          opts.onText?.(t);
+        },
+        onThinking: (t) => {
+          liveEst.addChars(t.length);
+          opts.onThinking?.(t);
+        },
         onToolCallStarted: opts.onToolCallStarted,
-        onToolCallPartial: opts.onToolCallPartial,
+        onToolCallPartial: (id, name, partial) => {
+          liveEst.addToolPartial(id, partial);
+          opts.onToolCallPartial?.(id, name, partial);
+        },
         onToolCall: opts.onToolCall,
         onToolResult: opts.onToolResult,
         // Live counter: forward the committed-plus-in-flight token split so the
         // Activity Monitor can show In / Cached / Out separately and price the
         // live spend. The composer's "X in" re-combines fresh+cache for its
         // "total processed input" figure. Also stash the call-local figure so an
-        // abort can bank it (see finish).
-        onUsage: (u) => {
-          inflight = u;
-          opts.onUsage?.({
-            inputTokens: usageIn + u.inputTokens,
-            outputTokens: usageOut + u.outputTokens,
-            cacheReadTokens: usageCacheRead + (u.cacheReadTokens ?? 0),
-            cacheCreationTokens: usageCacheCreate + (u.cacheCreationTokens ?? 0),
-          });
-        },
+        // abort can bank it (see finish). A REAL report from the adapter is
+        // authoritative (it includes thinking): it resets the char estimate,
+        // and later estimates build on top of it.
+        onUsage: (u) => liveEst.onRealUsage(u),
       });
     } catch (err) {
       // Treat as "aborted" only when the user actually pressed Stop: either the
