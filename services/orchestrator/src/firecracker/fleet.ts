@@ -300,6 +300,10 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
   await ensureBridge();
   console.log(`[fleet ${id}] step 3/8: bridge ${BRIDGE_NAME} verified`);
   await ensureTapDevice(tapName);
+  // Cold boots probe /health while the guest is still down; seeding the pair
+  // keeps those early probes from wedging the neighbor entry INCOMPLETE and
+  // costing an extra ARP-retransmit second once the guest is finally up.
+  await preseedNeighbor(ip, mac);
   console.log(`[fleet ${id}] step 4/8: tap ${tapName} attached to bridge`);
   sw.phase("network/tap setup");
 
@@ -681,6 +685,10 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
 
   await ensureBridge();
   await ensureTapDevice(tapName);
+  // The clone answers on the frozen bootstrap pair first (finalizeRestore),
+  // then re-stamps onto this project's pair (health probes) — seed both so
+  // neither phase ever waits on ARP discovery.
+  await Promise.all([preseedNeighbor(BOOTSTRAP_IP, BOOTSTRAP_MAC), preseedNeighbor(ip, mac)]);
   sw.phase("network/tap setup");
   const fc = await spawnFirecracker({ socketPath: apiSocket, cwd: runDir });
   sw.phase("firecracker spawn");
@@ -1124,6 +1132,9 @@ async function tryRehydrateSnapshot(opts: BootOpts): Promise<VmHandle | null> {
   try {
     await ensureBridge();
     await ensureTapDevice(tapName);
+    // Rehydrated VMs resume already on their project pair; seed it so the
+    // first post-resume probe doesn't stall on ARP like the golden path did.
+    await preseedNeighbor(ip, mac);
     fc = await spawnFirecracker({ socketPath: apiSocket, cwd: runDir });
     const client = new FirecrackerClient(apiSocket);
     await client.loadSnapshot({
@@ -1662,6 +1673,31 @@ async function ensureTapDevice(tapName: string): Promise<void> {
 
 async function teardownTap(tapName: string): Promise<void> {
   await runCmdResult("ip", ["link", "del", tapName]);
+}
+
+/**
+ * Pre-seed the bridge's neighbor (ARP) table with a guest IP→MAC pair we
+ * assigned ourselves — there is nothing for ARP to discover. Without this,
+ * the first probe of a not-yet-up guest leaves the entry INCOMPLETE and every
+ * follow-up SYN queues behind the kernel's fixed 1s ARP retransmit
+ * (retrans_time_ms) instead of triggering a new request — the residual ~1s of
+ * every golden restore after the TCP connect cap landed. `nud reachable`, not
+ * `permanent`: the entry ages to STALE and self-corrects via normal ARP
+ * afterwards. Best-effort (runCmdResult never throws) — without it resolution
+ * still works, just up to ~1s slower.
+ */
+async function preseedNeighbor(ip: string, mac: string): Promise<void> {
+  await runCmdResult("ip", [
+    "neigh",
+    "replace",
+    ip,
+    "lladdr",
+    mac,
+    "dev",
+    BRIDGE_NAME,
+    "nud",
+    "reachable",
+  ]);
 }
 
 async function runCmdResult(
