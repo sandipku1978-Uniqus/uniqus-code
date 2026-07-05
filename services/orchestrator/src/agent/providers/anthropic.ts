@@ -46,12 +46,17 @@ function applyEffort(
 }
 
 // Non-standard fields other adapters stamp onto content blocks for their own
-// round-tripping: Gemini's `thought_signature` (3.x multi-turn reasoning — now
-// on BOTH tool_use AND text blocks) and OpenAI's `openai_reasoning` (encrypted
-// reasoning replay, on tool_use). The Messages API 400s on unknown block fields
-// ("Extra inputs are not permitted"), so they must be removed before a
-// conversation that switched to Claude reaches the API.
-const FOREIGN_BLOCK_FIELDS = ["thought_signature", "openai_reasoning"] as const;
+// round-tripping: Gemini's `thought_signature` + `thought_signature_model`
+// (3.x multi-turn reasoning — on BOTH tool_use AND text blocks; the model
+// stamp gates same-model signature replay) and OpenAI's `openai_reasoning`
+// (encrypted reasoning replay, on tool_use). The Messages API 400s on unknown
+// block fields ("Extra inputs are not permitted"), so they must be removed
+// before a conversation that switched to Claude reaches the API.
+const FOREIGN_BLOCK_FIELDS = [
+  "thought_signature",
+  "thought_signature_model",
+  "openai_reasoning",
+] as const;
 
 /**
  * Strip provider-specific extras the canonical history may carry that the

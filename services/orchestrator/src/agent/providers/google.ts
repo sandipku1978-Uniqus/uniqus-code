@@ -32,7 +32,14 @@ import type {
  * Gemini 2.5 uses `thinkingConfig.thinkingBudget` (tokens) — sending a budget
  * to a 3.x model degrades it, so we branch on the model. Thought signatures
  * returned on function-call parts are preserved across turns (required for
- * 3.x multi-turn function calling).
+ * 3.x multi-turn function calling). Signatures are encrypted reasoning state
+ * VALID ONLY FOR THE MODEL THAT MINTED THEM: each block records its minting
+ * model (`thought_signature_model`) and replay is same-model only — replaying
+ * a 3.5 Flash signature into 3.1 Pro isn't rejected on text parts (validation
+ * there is lax), it silently poisons the reasoning state and the model can
+ * derail into regurgitating unrelated pretraining data. On a model switch,
+ * function-call parts get Google's documented dummy bypass signature and text
+ * parts drop theirs (per the Gemini 3 docs' "switching between models" rule).
  *
  * Image previews: image blocks inside a tool_result (e.g. the screenshot tool)
  * are forwarded as inlineData parts alongside the functionResponse, so the
@@ -102,6 +109,16 @@ export function thinkingConfigFor(
   if (!effort) return undefined;
   return { ...base, thinkingBudget: GEMINI_2_5_BUDGET[effort] };
 }
+
+/**
+ * Google's documented bypass for Gemini 3's strict thought-signature
+ * validation on function-call parts, prescribed exactly for our case: "If you
+ * are switching between models … you will not have a valid signature. To
+ * bypass strict validation in these specific scenarios, populate the field
+ * with this specific dummy string." A REAL foreign signature must never be
+ * sent instead — see the adapter doc comment.
+ */
+export const FOREIGN_SIGNATURE_BYPASS = "context_engineering_is_the_way_to_go";
 
 /** Default model backing the analyze_image vision bridge (override via env). */
 export const VISION_BRIDGE_MODEL = "gemini-3.5-flash";
@@ -203,7 +220,7 @@ export class GoogleAdapter implements ModelProviderAdapter {
   }
 
   async streamAgentTurn(p: StreamTurnParams): Promise<StreamTurnResult> {
-    const contents = toGeminiContents(p.messages);
+    const contents = toGeminiContents(p.messages, p.model);
     const thinkingConfig = thinkingConfigFor(p.model, p.thinkingEffort, p.thinkingEnabled !== false);
     // Built-in Google Search grounding (3.x only — 2.5 can't combine it with
     // function calling). Needs includeServerSideToolInvocations or 3.x 400s.
@@ -247,7 +264,6 @@ export class GoogleAdapter implements ModelProviderAdapter {
     // we can (a) split thought-summary parts from the answer text and (b) read
     // the thoughtSignature that rides alongside each function-call part.
     const surfaceSearch = (detail: unknown, result: string): void => {
-      if (searchSurfaced) return;
       searchSurfaced = true;
       const sid = this.nextSyntheticId("search");
       p.onToolCallStarted?.(sid, "web_search");
@@ -257,14 +273,35 @@ export class GoogleAdapter implements ModelProviderAdapter {
 
     for await (const chunk of stream) {
       if (p.signal?.aborted) break;
-      // Server-side Google Search grounding — surface the queries as a
-      // web_search activity row (parity with the other providers).
+      // groundingMetadata fallback — some models only report searches here (and
+      // typically only on the final chunk). Skipped when toolCall parts already
+      // surfaced the same searches with richer per-call queries (3.5 Flash).
       const queries = chunk.candidates?.[0]?.groundingMetadata?.webSearchQueries;
-      if (queries && queries.length > 0) surfaceSearch({ queries }, queries.join("\n"));
+      if (queries && queries.length > 0 && !searchSurfaced)
+        surfaceSearch({ queries }, queries.join("\n"));
 
       const parts = chunk.candidates?.[0]?.content?.parts;
       if (parts) {
         for (const part of parts) {
+          // Server-side tool executions stream as toolCall/toolResponse parts
+          // (3.5 Flash surfaces googleSearch THIS way — as verified against the
+          // live API; groundingMetadata only arrives on the last chunk, if at
+          // all). Surface each search with its real queries; never execute
+          // these. Handled BEFORE the text/functionCall branches: these parts
+          // carry their own thoughtSignatures, which must not be captured as
+          // the answer-text signature below (and are deliberately not
+          // persisted — they belong to server-tool parts we don't replay).
+          const serverCall = (
+            part as { toolCall?: { toolType?: string; args?: { queries?: string[] } } }
+          ).toolCall;
+          if (serverCall) {
+            if (String(serverCall.toolType ?? "").startsWith("GOOGLE_SEARCH")) {
+              const q = serverCall.args?.queries ?? [];
+              surfaceSearch({ queries: q }, q.join("\n") || "Searched the web.");
+            }
+            continue;
+          }
+          if ((part as { toolResponse?: unknown }).toolResponse) continue;
           if (part.text) {
             // `thought: true` → reasoning trace; otherwise it's answer text.
             if (part.thought) p.onThinking?.(part.text);
@@ -333,10 +370,15 @@ export class GoogleAdapter implements ModelProviderAdapter {
     const content: Anthropic.ContentBlockParam[] = [];
     if (text) {
       const textBlock: Record<string, unknown> = { type: "text", text };
-      // Non-standard field, preserved verbatim through history and re-attached
+      // Non-standard fields, preserved verbatim through history and re-attached
       // to the Gemini text part next turn (toGeminiContents); stripped before
-      // other providers' APIs (see anthropic.ts stripForeignFields).
-      if (textSignature) textBlock.thought_signature = textSignature;
+      // other providers' APIs (see anthropic.ts stripForeignFields). The
+      // minting model rides along because a signature is only valid for the
+      // model that produced it — replay is same-model gated.
+      if (textSignature) {
+        textBlock.thought_signature = textSignature;
+        textBlock.thought_signature_model = p.model;
+      }
       content.push(textBlock as unknown as Anthropic.TextBlockParam);
     }
     const toolCalls: StreamTurnResult["toolCalls"] = [];
@@ -345,9 +387,13 @@ export class GoogleAdapter implements ModelProviderAdapter {
         string,
         unknown
       >;
-      // Non-standard field, preserved verbatim through history; re-attached to
-      // the Gemini functionCall part on the next turn. Ignored by other providers.
-      if (c.signature) block.thought_signature = c.signature;
+      // Non-standard fields, preserved verbatim through history; re-attached to
+      // the Gemini functionCall part on the next turn (same-model only — see
+      // replaySignature). Ignored by other providers.
+      if (c.signature) {
+        block.thought_signature = c.signature;
+        block.thought_signature_model = p.model;
+      }
       content.push(block as unknown as Anthropic.ToolUseBlockParam);
       p.onToolCall?.(c.id, c.name, c.args);
       toolCalls.push({ id: c.id, name: c.name, input: c.args });
@@ -362,7 +408,7 @@ export class GoogleAdapter implements ModelProviderAdapter {
   }
 
   async callForcedTool(p: ForcedToolParams): Promise<unknown> {
-    const contents = toGeminiContents(p.messages);
+    const contents = toGeminiContents(p.messages, p.model);
     const response = await this.ai.models.generateContent({
       model: p.model,
       contents,
@@ -419,7 +465,34 @@ export function toGeminiFunctionDeclarations(tools: Anthropic.Tool[]): Array<Rec
   }));
 }
 
-export function toGeminiContents(messages: Anthropic.MessageParam[]): Array<Record<string, unknown>> {
+/**
+ * The signature to replay for a history block, if any. Same-model signatures
+ * pass through verbatim. A signature minted by a DIFFERENT Gemini model is
+ * invalid for this one (encrypted state, per the Gemini 3 docs' model-switch
+ * rule): on function-call parts — where 3.x strictly validates presence — it
+ * is replaced with Google's documented dummy bypass; on text parts it is
+ * simply dropped. Blocks stamped before minting models were recorded
+ * (`thought_signature` without `thought_signature_model`) are treated as
+ * same-model — the pre-fix status quo, correct for the common single-model
+ * conversation; every new block is stamped.
+ */
+function replaySignature(
+  block: { thought_signature?: string; thought_signature_model?: string },
+  model: string,
+  kind: "text" | "fn",
+): string | undefined {
+  const sig = block.thought_signature;
+  if (!sig) return undefined;
+  const mint = block.thought_signature_model;
+  if (!mint || mint === model) return sig;
+  return kind === "fn" ? FOREIGN_SIGNATURE_BYPASS : undefined;
+}
+
+export function toGeminiContents(
+  messages: Anthropic.MessageParam[],
+  /** The model this request targets — gates signature replay (same-model only). */
+  model: string,
+): Array<Record<string, unknown>> {
   // tool_use id → function name, so tool_results can be matched back to calls.
   const idToName = new Map<string, string>();
   for (const msg of messages) {
@@ -441,8 +514,9 @@ export function toGeminiContents(messages: Anthropic.MessageParam[]): Array<Reco
           if (b.type === "text") {
             const part: Record<string, unknown> = { text: b.text };
             // Echo back the answer's thought signature captured on the way out,
-            // so 3.x keeps its reasoning context across the multi-turn loop.
-            const sig = (b as { thought_signature?: string }).thought_signature;
+            // so 3.x keeps its reasoning context across the multi-turn loop —
+            // but only to the model that minted it (see replaySignature).
+            const sig = replaySignature(b as unknown as Record<string, string | undefined>, model, "text");
             if (sig) part.thoughtSignature = sig;
             parts.push(part);
           } else if (b.type === "tool_use") {
@@ -450,8 +524,9 @@ export function toGeminiContents(messages: Anthropic.MessageParam[]): Array<Reco
               functionCall: { name: b.name, args: (b.input ?? {}) as object },
             };
             // Echo back the thought signature captured on the way out, so 3.x
-            // multi-turn function calling keeps its reasoning context.
-            const sig = (b as { thought_signature?: string }).thought_signature;
+            // multi-turn function calling keeps its reasoning context — same-
+            // model only; a foreign one becomes the documented dummy bypass.
+            const sig = replaySignature(b as unknown as Record<string, string | undefined>, model, "fn");
             if (sig) part.thoughtSignature = sig;
             parts.push(part);
           }

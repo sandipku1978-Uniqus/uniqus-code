@@ -155,7 +155,17 @@
     `thinkingConfig.thinkingBudget` (tokens) on **2.5** — sending a budget to a
     3.x model degrades it. Thought signatures on function-call parts are
     preserved across turns (`tool_use.thought_signature`), required for 3.x
-    multi-turn function calling.
+    multi-turn function calling — **but only for the model that minted them**:
+    each block also records `thought_signature_model`, and on a mid-chat model
+    switch (e.g. 3.5 Flash → 3.1 Pro) replay swaps function-call signatures
+    for Google's documented dummy (`context_engineering_is_the_way_to_go`) and
+    drops text-part ones. The API silently ACCEPTS a foreign signature (no
+    400) and can degrade all the way to regurgitating unrelated pretraining
+    data. Also: server-side googleSearch on **3.5 Flash** streams as
+    `toolCall`/`toolResponse` parts (`toolType:"GOOGLE_SEARCH_WEB"`), NOT via
+    `groundingMetadata` (that only shows on the final chunk, if at all) — the
+    adapter surfaces those parts as web_search rows and must not capture their
+    thoughtSignatures as the answer-text signature.
   - **Z.ai (GLM)** → top-level `reasoning_effort` (low/medium→`"high"`,
     high→`"max"`; medium must NOT be "max") + `thinking:{type:"enabled"}` on Chat
     Completions; see the Z.ai bullet above.

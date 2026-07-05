@@ -37,7 +37,9 @@
       "mcp__claude_ai_Tiny_Fish__search",
       "Read(//c/Users/Aarav/Downloads/**)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "WebFetch(domain:status.hetzner.com)"
+      "WebFetch(domain:status.hetzner.com)",
+      "WebFetch(domain:ai.google.dev)",
+      "WebFetch(domain:developers.openai.com)"
     ],
     "additionalDirectories": [
       "c:\\Users\\thech\\AppData\\Local\\Temp\\uniqus-shot",

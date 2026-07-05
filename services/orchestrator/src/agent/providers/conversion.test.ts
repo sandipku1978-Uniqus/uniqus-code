@@ -7,13 +7,20 @@ import {
   toTokenUsage,
 } from "./openai.js";
 import {
+  FOREIGN_SIGNATURE_BYPASS,
   mapStopReason,
   sanitizeSchema,
   thinkingConfigFor,
-  toGeminiContents,
+  toGeminiContents as toGeminiContentsFor,
   toGeminiFunctionDeclarations,
 } from "./google.js";
 import { mapZaiFinish, toChatMessages, toChatTools, zaiTokenUsage } from "./zai.js";
+
+// Most Gemini conversion tests target one model; signature-replay gating tests
+// (cross-model thought signatures) call toGeminiContentsFor directly.
+const GEMINI_TEST_MODEL = "gemini-3.5-flash";
+const toGeminiContents = (messages: Anthropic.MessageParam[]): Array<Record<string, unknown>> =>
+  toGeminiContentsFor(messages, GEMINI_TEST_MODEL);
 
 // These tests pin the canonical (Anthropic-shaped) ↔ provider-shape message and
 // tool conversions. They run purely on the helper functions — no SDK client, no
@@ -678,5 +685,56 @@ describe("google · text thought signature round-trip", () => {
     const part = (contents[0].parts as Array<Record<string, unknown>>)[0];
     expect(part).toEqual({ text: "hi" });
     expect("thoughtSignature" in part).toBe(false);
+  });
+});
+
+describe("google · cross-model thought-signature gating", () => {
+  const textBlock = (mint?: string) =>
+    ({
+      type: "text",
+      text: "All done.",
+      thought_signature: "TXTSIG",
+      ...(mint ? { thought_signature_model: mint } : {}),
+    }) as unknown as Anthropic.ContentBlockParam;
+  const toolBlock = (mint?: string) =>
+    ({
+      type: "tool_use",
+      id: "call_1",
+      name: "read_file",
+      input: { path: "a.ts" },
+      thought_signature: "FNSIG",
+      ...(mint ? { thought_signature_model: mint } : {}),
+    }) as unknown as Anthropic.ContentBlockParam;
+
+  it("replays signatures stamped by the SAME model verbatim", () => {
+    const contents = toGeminiContentsFor(
+      [{ role: "assistant", content: [textBlock("gemini-3.5-flash"), toolBlock("gemini-3.5-flash")] }],
+      "gemini-3.5-flash",
+    );
+    const parts = contents[0].parts as Array<Record<string, unknown>>;
+    expect(parts[0].thoughtSignature).toBe("TXTSIG");
+    expect(parts[1].thoughtSignature).toBe("FNSIG");
+  });
+
+  it("drops a FOREIGN text signature and swaps a foreign functionCall signature for the documented dummy", () => {
+    // A 3.5 Flash signature is encrypted state 3.1 Pro can't decode — replaying
+    // it verbatim poisons the new model's reasoning (the regurgitation bug).
+    const contents = toGeminiContentsFor(
+      [{ role: "assistant", content: [textBlock("gemini-3.5-flash"), toolBlock("gemini-3.5-flash")] }],
+      "gemini-3.1-pro-preview-customtools",
+    );
+    const parts = contents[0].parts as Array<Record<string, unknown>>;
+    expect("thoughtSignature" in parts[0]).toBe(false);
+    expect(parts[1].thoughtSignature).toBe(FOREIGN_SIGNATURE_BYPASS);
+  });
+
+  it("treats legacy unstamped signatures as same-model (pre-fix status quo)", () => {
+    const contents = toGeminiContentsFor(
+      [{ role: "assistant", content: [textBlock(), toolBlock()] }],
+      "gemini-3.1-pro-preview-customtools",
+    );
+    const parts = contents[0].parts as Array<Record<string, unknown>>;
+    expect(parts[0].thoughtSignature).toBe("TXTSIG");
+    expect(parts[1].thoughtSignature).toBe("FNSIG");
   });
 });
