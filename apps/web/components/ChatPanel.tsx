@@ -16,6 +16,7 @@ import { useStore, AGENT_PREVIEW_TAB, type ChatItem, type SelectedElement } from
 import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
 import { useIsMobile } from "@/lib/use-is-mobile";
 import { errorCopyFor } from "@/lib/errorCopy";
+import { lineDiffStats } from "@/lib/lineDiff";
 import { connect, send } from "@/lib/ws-client";
 import PlanReview from "./PlanReview";
 import ChatSessionDropdown from "./ChatSessionDropdown";
@@ -2591,29 +2592,87 @@ function describeTool(
 
 /**
  * Live +/− line estimate for a STILL-STREAMING write_file/edit_file call,
- * computed from the partial input (content / old_string / new_string). Ticks
- * up as the args stream in (the store re-upserts the row every ~60ms), then is
- * replaced by the authoritative editStats when the result lands. write_file
- * can't know removals live (the old file isn't in the input), so it shows only
- * the growing +N.
+ * replaced by the authoritative editStats when the result lands.
+ *
+ * edit_file runs a REAL line diff of the (complete) old_string against the
+ * partial new_string — raw string sizes systematically overshot, because
+ * old_string is padded with unchanged context lines for uniqueness and
+ * new_string repeats them, so the badge counted to +27 −22 and then snapped
+ * to the true +7 −4. Diffed, the + ticks only on genuinely NEW lines and is
+ * monotonic (appending a line can raise the LCS by at most 1), converging on
+ * the final figure. The − side is unknowable mid-stream (old lines match the
+ * yet-unstreamed tail of new_string), so it's omitted until the result lands.
+ * The trailing partial line of new_string is excluded so a half-typed line
+ * doesn't flicker between "added" and "matched" on every fragment.
+ *
+ * write_file can't know removals live either (the old file isn't in the
+ * input), so it keeps the growing +N of the streamed content.
  */
 function liveDiffEstimate(
   name: string,
   input: unknown,
 ): { added?: number; removed?: number } | null {
   const a = (input ?? {}) as Record<string, unknown>;
-  const lines = (v: unknown): number | undefined =>
-    typeof v === "string" && v.length > 0 ? v.split("\n").length : undefined;
   if (name === "write_file") {
-    const added = lines(a.content);
-    return added !== undefined ? { added } : null;
+    const c = a.content;
+    return typeof c === "string" && c.length > 0 ? { added: c.split("\n").length } : null;
   }
   if (name === "edit_file") {
-    const removed = lines(a.old_string);
-    const added = lines(a.new_string);
-    return removed !== undefined || added !== undefined ? { added, removed } : null;
+    const oldS = a.old_string;
+    const newS = a.new_string;
+    // Until new_string starts streaming there's nothing meaningful to diff
+    // (old_string alone would read as "everything removed").
+    if (typeof oldS !== "string" || typeof newS !== "string" || newS.length === 0) return null;
+    const lastNl = newS.lastIndexOf("\n");
+    const stable = lastNl >= 0 ? newS.slice(0, lastNl) : "";
+    if (!stable) return null;
+    return { added: lineDiffStats(oldS, stable).added };
   }
   return null;
+}
+
+/**
+ * Rolling numeric counter (the Codex-style tick): tweens between values over
+ * ~220ms instead of jumping, so a streaming diff badge counts up smoothly and
+ * the settle to the authoritative figure reads as a deliberate roll, not a
+ * glitch. Interruptible mid-tween (new values retarget from the currently
+ * displayed number); renders the target immediately under reduced motion.
+ */
+function AnimatedCount({ value }: { value: number }) {
+  const [display, setDisplay] = useState(value);
+  const displayRef = useRef(value);
+  const rafRef = useRef<number | null>(null);
+  useEffect(() => {
+    const from = displayRef.current;
+    if (from === value) return;
+    if (
+      typeof window === "undefined" ||
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+    ) {
+      displayRef.current = value;
+      setDisplay(value);
+      return;
+    }
+    const start = performance.now();
+    const DUR_MS = 220;
+    const tick = (now: number): void => {
+      const t = Math.min(1, (now - start) / DUR_MS);
+      const eased = 1 - (1 - t) ** 3;
+      const v = Math.round(from + (value - from) * eased);
+      displayRef.current = v;
+      setDisplay(v);
+      rafRef.current = t < 1 ? requestAnimationFrame(tick) : null;
+    };
+    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    };
+  }, [value]);
+  return <>{display}</>;
 }
 
 function ToolCard({
@@ -2662,15 +2721,30 @@ function ToolCard({
           {(diffAdded !== undefined || diffRemoved !== undefined) && (
             <span
               className="tool-diff"
-              style={{ fontSize: 11, fontFamily: "ui-monospace,Menlo,Consolas,monospace", whiteSpace: "nowrap" }}
+              data-est={!hasResult ? "true" : undefined}
+              style={{
+                fontSize: 11,
+                fontFamily: "ui-monospace,Menlo,Consolas,monospace",
+                fontVariantNumeric: "tabular-nums",
+                whiteSpace: "nowrap",
+              }}
               title={
                 hasResult
                   ? `${diffAdded ?? 0} added, ${diffRemoved ?? 0} removed`
-                  : `~${diffAdded ?? 0} added, ~${diffRemoved ?? 0} removed (streaming)`
+                  : `~${diffAdded ?? 0} added so far (streaming — removals settle when the edit lands)`
               }
             >
-              <span style={{ color: "var(--conf-high, #3ea76a)" }}>+{diffAdded ?? 0}</span>{" "}
-              <span style={{ color: "var(--conf-medium, #d98a3d)" }}>−{diffRemoved ?? 0}</span>
+              {diffAdded !== undefined && (
+                <span style={{ color: "var(--conf-high, #3ea76a)" }}>
+                  +<AnimatedCount value={diffAdded} />
+                </span>
+              )}
+              {diffAdded !== undefined && diffRemoved !== undefined && " "}
+              {diffRemoved !== undefined && (
+                <span style={{ color: "var(--conf-medium, #d98a3d)" }}>
+                  −<AnimatedCount value={diffRemoved} />
+                </span>
+              )}
             </span>
           )}
           <span className={`status ${!hasResult ? "run" : isError ? "err" : "ok"}`}>

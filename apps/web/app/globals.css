@@ -1774,6 +1774,9 @@ section.band .sub {
   white-space: nowrap;
 }
 .tool-card .tool-diff { flex-shrink: 0; }
+/* Still-streaming diff badge: a live estimate, not the authoritative figure —
+   dimmed until the edit lands, when the numbers roll to the real +A −R. */
+.tool-card .tool-diff[data-est="true"] { opacity: 0.65; }
 .tool-card .status { margin-left: auto; flex-shrink: 0; }
 .tool-card .status.ok { color: var(--conf-high); }
 .tool-card .status.err { color: var(--conf-low); }
