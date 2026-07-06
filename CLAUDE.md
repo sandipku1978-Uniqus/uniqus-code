@@ -156,12 +156,20 @@
     3.x model degrades it. Thought signatures on function-call parts are
     preserved across turns (`tool_use.thought_signature`), required for 3.x
     multi-turn function calling — **but only for the model that minted them**:
-    each block also records `thought_signature_model`, and on a mid-chat model
-    switch (e.g. 3.5 Flash → 3.1 Pro) replay swaps function-call signatures
-    for Google's documented dummy (`context_engineering_is_the_way_to_go`) and
-    drops text-part ones. The API silently ACCEPTS a foreign signature (no
-    400) and can degrade all the way to regurgitating unrelated pretraining
-    data. Also: server-side googleSearch on **3.5 Flash** streams as
+    each block also records `thought_signature_model`, and whenever a
+    function-call block lacks a signature valid for the TARGET 3.x model, replay
+    substitutes Google's documented dummy (`context_engineering_is_the_way_to_go`)
+    on the function-call part and drops text-part signatures. That covers BOTH:
+    a mid-chat Gemini→Gemini switch (e.g. 3.5 Flash → 3.1 Pro, foreign signature)
+    AND a switch to Gemini from any non-Gemini provider (GLM/Anthropic/OpenAI —
+    those turns carry NO signature at all; `replaySignature` in `google.ts`
+    treats "no signature" the same as "foreign"). The API silently ACCEPTS a
+    foreign/missing signature (no 400) and — because 3.x strictly needs one
+    PRESENT on function-call parts — poisons the reasoning state, degrading all
+    the way to repeating one line forever or regurgitating unrelated pretraining
+    data. (Observed: after a GLM→3.5-Flash switch the model looped "call
+    analyze_image" while running `sleep 1`.) 2.5 doesn't use signatures, so the
+    dummy is 3.x-only. Also: server-side googleSearch on **3.5 Flash** streams as
     `toolCall`/`toolResponse` parts (`toolType:"GOOGLE_SEARCH_WEB"`), NOT via
     `groundingMetadata` (that only shows on the final chunk, if at all) — the
     adapter surfaces those parts as web_search rows and must not capture their
@@ -178,6 +186,27 @@
   **Auto** default for the agent/plan roles to GLM-5.2 (get the key from the Z.ai
   Open Platform → API Keys; per-token pricing ≈ $1.40/$4.40 per Mtok in/out).
   Missing key ⇒ a clear "set X" error for that turn only.
+
+## Guest signup abuse protection (Cloudflare Turnstile)
+- The anonymous guest endpoints (`POST /api/guest` + `/api/guest/restore`) are
+  gated by **Cloudflare Turnstile**, on top of the existing per-IP rate-limit.
+  The token is minted by the widget in the browser (`apps/web/components/Turnstile.tsx`,
+  rendered in `GuestLoginActions`) and relayed browser → web route → orchestrator
+  as `captcha_token`. It is **verified at the orchestrator** (`auth/turnstile.ts`,
+  wired in `server.ts`), NOT in the web route, because `api.…/api/guest` is
+  directly reachable and bypasses the web relay — the web route is not a trust
+  boundary. `remoteip` is deliberately not sent to siteverify (the orchestrator
+  only sees the web app's egress IP and doesn't trust XFF).
+- **Two env vars, must be set together:** `NEXT_PUBLIC_TURNSTILE_SITE_KEY` on
+  **Vercel** (public, the widget) and `TURNSTILE_SECRET_KEY` on **Hetzner** (the
+  orchestrator's siteverify secret). Get both from the Cloudflare dash →
+  Turnstile → add a widget.
+- **Ships dark, fails closed.** With `TURNSTILE_SECRET_KEY` unset the orchestrator
+  skips the check entirely (pre-CAPTCHA behavior — safe for local dev). Once set
+  it enforces and FAILS CLOSED: a missing/invalid token, a non-2xx from
+  Cloudflare, or a siteverify timeout all 403 the signup. Because it's all-or-
+  nothing, a site key with no server secret (or vice-versa) breaks signup — keep
+  them in lockstep.
 
 ## Monorepo
 - Workspaces: `apps/*`, `services/*`, `packages/*`. Typecheck with

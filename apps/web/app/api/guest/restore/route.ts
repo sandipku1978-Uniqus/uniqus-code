@@ -10,14 +10,18 @@ import { orchestratorFetch } from "@/lib/orchestrator-server";
 export async function POST(req: Request) {
   const incoming = (await req.json().catch(() => ({}))) as {
     recovery_code?: unknown;
+    captcha_token?: unknown;
   };
   const recoveryCode =
     typeof incoming.recovery_code === "string" ? incoming.recovery_code : "";
+  // Relayed to the orchestrator, which verifies it (see the signup route).
+  const captchaToken =
+    typeof incoming.captcha_token === "string" ? incoming.captcha_token : "";
 
   const upstream = await orchestratorFetch("/api/guest/restore", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ recovery_code: recoveryCode }),
+    body: JSON.stringify({ recovery_code: recoveryCode, captcha_token: captchaToken }),
   });
   const body = (await upstream.json().catch(() => ({}))) as {
     display_name?: string;

@@ -196,6 +196,7 @@ import {
   handleGuestMerge,
   handleGuestRecoveryCode,
 } from "./auth/guest.js";
+import { turnstileConfigured, verifyTurnstile } from "./auth/turnstile.js";
 import {
   ensureBucket,
   listAll as storageListAll,
@@ -951,9 +952,25 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (req.url === "/api/guest" && req.method === "POST") {
     // Blunt anonymous floods of throwaway guest rows (M-8). Generous on purpose:
     // legit signups normally arrive relayed through the web app (one egress IP),
-    // so this only trips a hammering single source. A real fix is CAPTCHA/PoW.
+    // so this only trips a hammering single source. The real fix is the CAPTCHA
+    // below; the rate-limit stays as defense-in-depth (and covers a ship-dark
+    // deploy where Turnstile isn't provisioned yet).
     if (!rateLimitOk(`guest-create:${clientIp(req)}`, 30, 5 * 60 * 1000)) {
       return json(res, 429, { error: "too many requests — please wait a moment and try again" });
+    }
+    // Cloudflare Turnstile. Verified HERE (not the web app) because this
+    // endpoint is directly reachable and bypasses the web relay. Ships dark —
+    // skipped when TURNSTILE_SECRET_KEY is unset — and fails closed once set:
+    // a missing/invalid token or an unreachable siteverify denies the signup.
+    if (turnstileConfigured()) {
+      const body = await readJsonBody<{ captcha_token?: string }>(req).catch(
+        () => ({}) as { captcha_token?: string },
+      );
+      const verdict = await verifyTurnstile(body.captcha_token);
+      if (!verdict.ok) {
+        console.warn(`guest-create: captcha rejected (${verdict.reason})`);
+        return json(res, 403, { error: "captcha verification failed — please try again" });
+      }
     }
     return await handleGuestCreate(res);
   }
@@ -964,9 +981,19 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (!rateLimitOk(`guest-restore:${clientIp(req)}`, 30, 5 * 60 * 1000)) {
       return json(res, 429, { error: "too many requests — please wait a moment and try again" });
     }
-    const body = await readJsonBody<{ recovery_code?: string }>(req).catch(
-      () => ({}) as { recovery_code?: string },
+    // One body read carries both the recovery code and the Turnstile token.
+    const body = await readJsonBody<{ recovery_code?: string; captcha_token?: string }>(req).catch(
+      () => ({}) as { recovery_code?: string; captcha_token?: string },
     );
+    // Same CAPTCHA gate as signup (ship-dark, fails closed) — restore is equally
+    // anonymous and equally worth shielding from automated code-guessing.
+    if (turnstileConfigured()) {
+      const verdict = await verifyTurnstile(body.captcha_token);
+      if (!verdict.ok) {
+        console.warn(`guest-restore: captcha rejected (${verdict.reason})`);
+        return json(res, 403, { error: "captcha verification failed — please try again" });
+      }
+    }
     return await handleGuestRestore(res, body.recovery_code ?? "");
   }
 

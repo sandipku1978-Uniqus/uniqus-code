@@ -1021,14 +1021,20 @@ export interface GuestCreateResult {
  * web app's WORKOS_COOKIE_DOMAIN — otherwise the cookie is host-only to the
  * orchestrator and the dashboard never sees it. Returns the one-time code.
  */
-export const createGuestApi = async (): Promise<GuestCreateResult> => {
+export const createGuestApi = async (
+  captchaToken?: string | null,
+): Promise<GuestCreateResult> => {
   const res = await fetch("/api/guest", {
     method: "POST",
     credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ captcha_token: captchaToken ?? "" }),
   });
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`guest signup failed: ${body || res.statusText}`);
+    // Surface the server's friendly message (e.g. the CAPTCHA rejection) rather
+    // than the raw JSON envelope.
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `guest signup failed: ${res.statusText}`);
   }
   return (await res.json()) as GuestCreateResult;
 };
@@ -1047,6 +1053,7 @@ export class RestoreError extends Error {
 /** Re-attach to an existing guest account via its recovery code. */
 export const restoreGuestApi = async (
   recoveryCode: string,
+  captchaToken?: string | null,
 ): Promise<{ display_name: string | null }> => {
   let res: Response;
   try {
@@ -1054,7 +1061,7 @@ export const restoreGuestApi = async (
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ recovery_code: recoveryCode }),
+      body: JSON.stringify({ recovery_code: recoveryCode, captcha_token: captchaToken ?? "" }),
     });
   } catch {
     // Network failure (offline, DNS, CORS) — status 0 signals "transient".

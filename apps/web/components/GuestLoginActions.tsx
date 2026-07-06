@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Modal from "./Modal";
+import Turnstile, { turnstileEnabled, type TurnstileHandle } from "./Turnstile";
 import { createGuestApi, restoreGuestApi, RestoreError } from "@/lib/api";
 
 /**
@@ -27,6 +28,13 @@ export default function GuestLoginActions({
   const [copied, setCopied] = useState(false);
   const [restoreOpen, setRestoreOpen] = useState(false);
   const [restoreCode, setRestoreCode] = useState("");
+  // Cloudflare Turnstile token, shared by the create + restore flows (a user
+  // does one at a time; we reset the widget after each attempt to re-mint).
+  // Stays null — and the flows stay gated — until the widget solves. When
+  // Turnstile isn't configured (`turnstileEnabled` false), the token is ignored.
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+  const captchaRef = useRef<TurnstileHandle>(null);
+  const captchaReady = !turnstileEnabled || !!captchaToken;
 
   async function copyCode(): Promise<void> {
     if (!newCode) return;
@@ -66,12 +74,14 @@ export default function GuestLoginActions({
     setBusy(true);
     setError(null);
     try {
-      const r = await createGuestApi();
+      const r = await createGuestApi(captchaToken);
       setNewCode(r.recovery_code);
       setBusy(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
+      // The token is single-use — mint a fresh one so a retry isn't rejected.
+      captchaRef.current?.reset();
     }
   }
 
@@ -83,7 +93,7 @@ export default function GuestLoginActions({
     setBusy(true);
     setError(null);
     try {
-      await restoreGuestApi(code);
+      await restoreGuestApi(code, captchaToken);
       router.push("/projects");
     } catch (err) {
       // Distinguish a genuinely unknown code from a transient failure so a
@@ -93,10 +103,14 @@ export default function GuestLoginActions({
         setError(
           "That recovery code isn't recognised. Check for typos — it looks like UNIQUS-GUEST-XXXX-…",
         );
+      } else if (status === 403) {
+        setError("Couldn't verify you're human. Please try again.");
       } else {
         setError("We couldn't reach the server. Check your connection and try again.");
       }
       setBusy(false);
+      // The token is single-use — mint a fresh one so a retry isn't rejected.
+      captchaRef.current?.reset();
     }
   }
 
@@ -154,14 +168,17 @@ export default function GuestLoginActions({
           <button
             type="button"
             onClick={startGuest}
-            disabled={busy}
+            disabled={busy || !captchaReady}
             className="btn-ghost"
             style={{ width: "100%", padding: "10px 12px", fontSize: 13 }}
           >
             {busy && !restoreOpen
               ? "Creating guest account…"
-              : "Continue as a guest"}
+              : !captchaReady
+                ? "Verifying you're human…"
+                : "Continue as a guest"}
           </button>
+          <Turnstile ref={captchaRef} onToken={setCaptchaToken} action="guest" />
           <p
             style={{
               fontSize: 11,
@@ -202,7 +219,7 @@ export default function GuestLoginActions({
               <button
                 type="submit"
                 className="btn-primary"
-                disabled={busy || !restoreCode.trim()}
+                disabled={busy || !restoreCode.trim() || !captchaReady}
                 style={{ fontSize: 12 }}
               >
                 Restore

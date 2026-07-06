@@ -10,7 +10,17 @@ import { orchestratorFetch } from "@/lib/orchestrator-server";
  * the cookie spans app. + api. the way AuthKit's wos-session does.
  */
 export async function POST(req: Request) {
-  const upstream = await orchestratorFetch("/api/guest", { method: "POST" });
+  // Relay the Cloudflare Turnstile token the browser solved. The orchestrator —
+  // not this route — verifies it, because api.…/api/guest is directly reachable
+  // and this relay isn't a trust boundary.
+  const incoming = (await req.json().catch(() => ({}))) as { captcha_token?: unknown };
+  const captchaToken =
+    typeof incoming.captcha_token === "string" ? incoming.captcha_token : "";
+  const upstream = await orchestratorFetch("/api/guest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ captcha_token: captchaToken }),
+  });
   const body = (await upstream.json().catch(() => ({}))) as {
     recovery_code?: string;
     display_name?: string;
