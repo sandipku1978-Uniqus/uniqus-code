@@ -327,7 +327,15 @@ describe("google · toGeminiContents", () => {
     expect(contents).toEqual([
       {
         role: "model",
-        parts: [{ functionCall: { name: "read_file", args: { path: "a.txt" } } }],
+        parts: [
+          {
+            functionCall: { name: "read_file", args: { path: "a.txt" } },
+            // This call carries no thought_signature (as if minted by a
+            // non-Gemini provider); on a 3.x target it gets the documented
+            // dummy bypass so Gemini's reasoning state isn't poisoned.
+            thoughtSignature: FOREIGN_SIGNATURE_BYPASS,
+          },
+        ],
       },
       {
         role: "user",
@@ -736,5 +744,43 @@ describe("google · cross-model thought-signature gating", () => {
     const parts = contents[0].parts as Array<Record<string, unknown>>;
     expect(parts[0].thoughtSignature).toBe("TXTSIG");
     expect(parts[1].thoughtSignature).toBe("FNSIG");
+  });
+
+  // A turn from ANY non-Gemini provider (GLM / Anthropic / OpenAI) carries NO
+  // thought_signature at all — there is no per-provider tag, just the absence of
+  // a signature. Before the fix, replaying its function calls into Gemini 3.x
+  // sent a bare functionCall part, which silently poisoned the model's reasoning
+  // and it looped forever (the GLM→Gemini "call analyze_image / sleep 1" derail).
+  // A signature-less function call must get the documented dummy bypass, same as
+  // a foreign one. The fix is general across BOTH axes: any source provider (the
+  // `bareCall` below stands in for all of them) and EVERY 3.x target model.
+  const bareText = { type: "text", text: "Let me verify." } as unknown as Anthropic.ContentBlockParam;
+  const bareCall = {
+    type: "tool_use",
+    id: "call_1",
+    name: "analyze_image",
+    input: { path: "shot.png", question: "does it render?" },
+  } as unknown as Anthropic.ContentBlockParam;
+
+  // Both current 3.x catalog ids — proves the fix isn't coupled to 3.5 Flash.
+  for (const target of ["gemini-3.5-flash", "gemini-3.1-pro-preview-customtools"]) {
+    it(`gives a signature-less function call (non-Gemini turn) the dummy bypass on ${target}`, () => {
+      const contents = toGeminiContentsFor(
+        [{ role: "assistant", content: [bareText, bareCall] }],
+        target,
+      );
+      const parts = contents[0].parts as Array<Record<string, unknown>>;
+      expect("thoughtSignature" in parts[0]).toBe(false); // text part: dropped
+      expect(parts[1].thoughtSignature).toBe(FOREIGN_SIGNATURE_BYPASS); // fn part: dummy
+    });
+  }
+
+  it("sends no signature for a signature-less function call on 2.5 (2.5 ignores signatures)", () => {
+    const contents = toGeminiContentsFor(
+      [{ role: "assistant", content: [bareCall] }],
+      "gemini-2.5-pro",
+    );
+    const part = (contents[0].parts as Array<Record<string, unknown>>)[0];
+    expect("thoughtSignature" in part).toBe(false);
   });
 });
