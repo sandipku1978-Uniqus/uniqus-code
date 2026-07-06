@@ -83,6 +83,33 @@ const PROJECT_MODES = [
   },
 ] as const;
 
+const DASHBOARD_TOOLS = [
+  {
+    title: "Templates",
+    body: "Start a new project from a working example instead of a blank page.",
+  },
+  {
+    title: "Databases",
+    body: "Connect a Supabase project in a couple of clicks — Uniqus provisions the database and stores the keys — then browse tables, preview data, and run SQL without leaving the dashboard.",
+  },
+  {
+    title: "Design Systems",
+    body: "Generate a full design-token set — colors, type, components — from a brief, an existing project, a live URL, a Figma file, or an upload, with a live preview styled in your own tokens.",
+  },
+  {
+    title: "Skills library",
+    body: "Save reusable skills at the account level — curated starter packs or your own — and mark any to auto-apply to every new project. Separate from a project's own Skills doc under Configure.",
+  },
+  {
+    title: "Knowledge",
+    body: "Attach PDFs, spreadsheets, and Word docs as reference material the agent can read across your projects.",
+  },
+  {
+    title: "Teams",
+    body: "Invite teammates to a project as owner, admin, editor, or viewer, leave comments, and share an organization workspace.",
+  },
+] as const;
+
 const WORKSPACE_AREAS = [
   {
     title: "Chat",
@@ -112,11 +139,13 @@ const WORKSPACE_AREAS = [
 
 const AGENT_CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ["Plan", "Ask Uniqus to inspect the project with read-only tools and propose editable steps before it changes files — you watch it investigate in real time. New projects start this way by default."],
-  ["Execute", "Let the agent act immediately for small, clear changes."],
+  ["Ask before edits", "Pause for your approval before each edit, command, or risky operation."],
+  ["Auto-accept edits", "Edits and routine commands run right away; the agent still pauses for anything dangerous or expensive."],
+  ["Full autonomy", "Run everything without asking, with no safety prompts. Switch between any of the four modes at any time, even mid-turn, from the composer."],
   ["Files", "Attach images, PDFs, CSVs, design references, or other files the agent should use as evidence."],
   ["@ file", "Reference exact project files so the agent reads the right code before editing."],
   ["/ commands", "Run built-in or project slash commands from the composer."],
-  ["Model", "Stay on Auto, or pick Claude, GPT, or Gemini for this turn and dial thinking effort from low to high."],
+  ["Model", "Stay on Auto — which routes each step to whichever configured model fits best — or pin Claude, GLM, GPT, or Gemini for this turn and dial thinking effort from low to max."],
   ["Stop", "Cancel the current turn. Work already written to disk is kept, so you can redirect from there."],
 ];
 
@@ -137,7 +166,7 @@ const CONFIG_ITEMS = [
   },
   {
     title: "Default model",
-    body: "Set Auto or choose a specific provider/model in Settings — Anthropic, OpenAI, or Google. You can also override the model and thinking effort per turn from the chat composer.",
+    body: "Set Auto or choose a specific provider/model in Settings — Anthropic, Z.ai, OpenAI, or Google. You can also override the model and thinking effort per turn from the chat composer.",
   },
   {
     title: "Custom prompts",
@@ -316,6 +345,21 @@ export default function DocsPage() {
                 straight to the agent. Use <em>Upload .zip</em> or <em>Clone GitHub</em>{" "}
                 when you already have code to edit, run, and (for GitHub) push back.
               </div>
+              <div className="docs-subhead">
+                <h3>Your dashboard has more than projects</h3>
+                <p>
+                  Alongside your project list, the sidebar has account-wide tools you&rsquo;ll
+                  use across every project.
+                </p>
+              </div>
+              <div className="mk-grid cols-3">
+                {DASHBOARD_TOOLS.map((item) => (
+                  <article className="mk-card" key={item.title}>
+                    <h3>{item.title}</h3>
+                    <p>{item.body}</p>
+                  </article>
+                ))}
+              </div>
             </div>
           </section>
 
@@ -372,6 +416,22 @@ export default function DocsPage() {
                   <p>
                     Clear removes the conversation history for that session. It does not
                     delete sandbox files, so the code remains available.
+                  </p>
+                </article>
+                <article className="mk-card">
+                  <h3>Sub-agents &amp; Activity</h3>
+                  <p>
+                    For multi-part builds, Uniqus can spawn sub-agents that work
+                    concurrently on different pieces. The Activity tab shows live
+                    token/cost stats, sub-agent progress, and your task list as a turn
+                    runs.
+                  </p>
+                </article>
+                <article className="mk-card">
+                  <h3>Generate images</h3>
+                  <p>
+                    Ask for an image and Uniqus generates or edits one directly, then
+                    uses the result immediately in your project.
                   </p>
                 </article>
               </div>
@@ -464,7 +524,7 @@ export default function DocsPage() {
               </p>
             </div>
             <div className="docs-stack">
-              <div className="mk-grid cols-2">
+              <div className="mk-grid cols-3">
                 <article className="mk-card">
                   <h3>Create a GitHub repo</h3>
                   <p>
@@ -480,10 +540,18 @@ export default function DocsPage() {
                     in the same flow.
                   </p>
                 </article>
+                <article className="mk-card">
+                  <h3>Take it with you</h3>
+                  <p>
+                    Download the whole project as a zip, drop your live app into any
+                    page with an embed snippet, or share a preview link that expires
+                    and can be revoked — no sign-in required for the person viewing it.
+                  </p>
+                </article>
               </div>
               <div className="docs-callout neutral">
-                Guest work is saved on this device. Sign in with Google to keep it
-                permanently across devices and to unlock GitHub and publishing.
+                Guest work is saved on this device. Sign in to keep it permanently
+                across devices and to unlock GitHub and publishing.
               </div>
             </div>
           </section>

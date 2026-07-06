@@ -18,9 +18,11 @@ database (`auth/encrypt.ts`):
   decode to exactly 32 bytes.
 - Per-value random 12-byte IV (NIST SP 800-38D), 16-byte GCM auth tag.
 - On-disk layout (base64): `IV (12) || TAG (16) || CIPHERTEXT`.
-- The **same key** wraps every third-party OAuth token (GitHub, Vercel) and the
-  guest recovery codes — one env var, one blast radius. `encrypt.ts` documents
-  this tradeoff and leaves room to split per-provider keys later.
+- The **same key** wraps every third-party OAuth token (GitHub, Vercel,
+  Supabase, Figma), the guest recovery codes, and bring-your-own-key provider
+  API keys (Anthropic/OpenAI/Google, in `account_provider_keys`) — one env
+  var, one blast radius. `encrypt.ts` documents this tradeoff and leaves room
+  to split per-provider keys later.
 
 `upsertSecret` calls `encryptToken` before the row is written;
 `getSecretValue` calls `decryptToken` on read. **The DB (Supabase/Postgres)

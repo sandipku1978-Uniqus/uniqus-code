@@ -7,9 +7,9 @@
  *   1. Client / TLS edge      — browser over TLS 1.3.
  *   2. Orchestrator           — auth, provider routing (router.ts), server-side
  *                               secret decrypt (secrets.ts, AES-256-GCM).
- *   3. Firecracker fleet      — one microVM per project; today all VMs share a
- *                               single bridge (fcbr0, 172.16/16) with masquerade
- *                               egress; in-VM sandbox-agent on :51000.
+ *   3. Sandbox fleet          — one isolated microVM per project; today all VMs
+ *                               share a single bridge (fcbr0, 172.16/16) with
+ *                               masquerade egress; in-VM sandbox-agent on :51000.
  *   4. Data stores            — project_secrets (AES-256-GCM at rest),
  *                               audit_events, messages.
  *
@@ -38,20 +38,20 @@ const LANE_CONTENT = [
     title: "Auth · routing · secret decrypt",
     lines: [
       "Verifies your session, routes the turn to",
-      "Anthropic / OpenAI / Google, and decrypts",
-      "secrets server-side (AES-256-GCM).",
+      "Anthropic / Z.ai / OpenAI / Google, and",
+      "decrypts secrets server-side (AES-256-GCM).",
     ],
   },
   {
     id: "fleet",
     accent: "var(--brand-purple-hi)",
-    label: "Firecracker fleet",
+    label: "Sandbox fleet",
     title: "One microVM per project",
     lines: [
       "Each project gets its own microVM with an",
-      "in-VM agent on :51000. Today every VM shares",
-      "one bridge (fcbr0, 172.16/16) — per-project",
-      "network isolation is on the roadmap.",
+      "in-VM agent on :51000. VMs share one bridge",
+      "(172.16/16), but VM-to-VM traffic on it is",
+      "dropped, so projects stay isolated from each other.",
     ],
   },
   {
@@ -122,7 +122,7 @@ export default function ArchitectureDiagram() {
           A request travels from your browser over TLS 1.3 to the orchestrator,
           which authenticates you, routes the turn to a model provider, and
           decrypts secrets server-side. The orchestrator drives a per-project
-          Firecracker microVM (one VM per project, all VMs currently on a single
+          isolated microVM (one VM per project, all VMs currently on a single
           shared bridge) and persists encrypted secrets, audit events, and
           messages to the data stores.
         </desc>

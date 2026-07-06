@@ -76,7 +76,7 @@ export const POSTS: Post[] = [
   },
   {
     slug: "built-in-web-search-across-providers",
-    title: "Built-in web search across Claude, GPT, and Gemini",
+    title: "Built-in web search across Claude, GLM, GPT, and Gemini",
     excerpt:
       "Your coding agent can look things up while it works — current docs, API shapes, package versions — using each provider's own server-side search.",
     date: "May 14, 2026",
@@ -87,11 +87,11 @@ export const POSTS: Post[] = [
     content: [
       {
         type: "p",
-        text: "Models have a training cutoff, but the web doesn't stop. A library ships a breaking change, an API renames a field, a framework deprecates a pattern — and an agent working from memory will confidently get it wrong. So we wired built-in web search into all three providers, using each one's own server-side search rather than a bolted-on scraper.",
+        text: "Models have a training cutoff, but the web doesn't stop. A library ships a breaking change, an API renames a field, a framework deprecates a pattern — and an agent working from memory will confidently get it wrong. So we wired built-in web search into all four providers, using each one's own server-side search rather than a bolted-on scraper.",
       },
       {
         type: "h2",
-        text: "One capability, three implementations",
+        text: "One capability, four implementations",
       },
       {
         type: "p",
@@ -101,6 +101,7 @@ export const POSTS: Post[] = [
         type: "ul",
         items: [
           "Claude uses its server-side web_search tool directly.",
+          "GLM searches through its own built-in web_search tool.",
           "GPT searches through the Responses API's built-in web_search tool.",
           "Gemini 3.x uses Google Search grounding alongside its function calling.",
         ],
@@ -225,7 +226,7 @@ export const POSTS: Post[] = [
     slug: "why-we-let-you-pick-the-ai",
     title: "Why we let you pick the AI for each step",
     excerpt:
-      "Claude, GPT, or Gemini — and an Auto mode that routes for you. No single model is best at everything, so we don't pretend otherwise.",
+      "Claude, GLM, GPT, or Gemini — and an Auto mode that routes for you. No single model is best at everything, so we don't pretend otherwise.",
     date: "April 2, 2026",
     author: "The Uniqus Code team",
     readingTime: "6 min read",
@@ -238,11 +239,11 @@ export const POSTS: Post[] = [
       },
       {
         type: "h2",
-        text: "Three providers, one workspace",
+        text: "Four providers, one workspace",
       },
       {
         type: "p",
-        text: "Uniqus Code runs on Claude, GPT, and Gemini, with a curated list of the models actually worth using for serious coding. You can set a default for your account or override it per turn from the composer — switch models mid-conversation without losing context.",
+        text: "Uniqus Code runs on Claude, GLM, GPT, and Gemini, with a curated list of the models actually worth using for serious coding. You can set a default for your account or override it per turn from the composer — switch models mid-conversation without losing context.",
       },
       {
         type: "h2",
@@ -263,9 +264,9 @@ export const POSTS: Post[] = [
       {
         type: "ul",
         items: [
-          "Pick Claude, GPT, or Gemini per turn or per account.",
+          "Pick Claude, GLM, GPT, or Gemini per turn or per account.",
           "Auto mode routes to a strong default when you don't want to decide.",
-          "Tune reasoning effort — low, medium, or high — to trade speed for depth.",
+          "Tune reasoning effort — from low up to max — to trade speed for depth.",
           "Add your own provider keys; they stay encrypted and out of the model's view.",
         ],
       },

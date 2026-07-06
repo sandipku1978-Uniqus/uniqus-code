@@ -131,7 +131,7 @@ const VALUES: { icon: Icon; iconClass: string; title: string; body: string }[] =
     icon: "audit",
     iconClass: "purple",
     title: "Audit logs & role-based access",
-    body: "Secret, connector, and checkpoint actions are already recorded with who did what and when. Org-wide audit views and roles — deciding who can build, who can ship, and who can manage billing and secrets — are rolling out; talk to us about early access.",
+    body: "Secret, connector, and checkpoint actions are already recorded with who did what and when, and every project and organization already supports owner/admin/editor/viewer roles you can invite teammates into. A stitched-together, org-wide audit view across every project is rolling out; talk to us about early access.",
   },
   {
     icon: "vm",
@@ -162,7 +162,7 @@ const VALUES: { icon: Icon; iconClass: string; title: string; body: string }[] =
 const STATS = [
   { num: "1 VM", lbl: "per project — fully isolated, no shared tenancy" },
   { num: "4", lbl: "model providers: Claude, GLM, GPT & Gemini" },
-  { num: "WorkOS", lbl: "enterprise auth today; SAML + SCIM and org roles on the roadmap" },
+  { num: "WorkOS", lbl: "enterprise auth today; SAML + SCIM on the roadmap" },
   { num: "Plan-first", lbl: "the agent proposes before it changes anything" },
 ];
 
@@ -205,9 +205,9 @@ const ROWS: {
     iconClass: "cyan",
     eyebrow: "Your providers",
     title: "Bring your own model keys",
-    body: "On our enterprise roadmap: route usage through your organization’s own Anthropic, Z.ai, OpenAI, or Google accounts and contracts, while Auto mode still picks the right model for each step. Talk to us if per-org keys are a requirement for your rollout.",
+    body: "Anthropic, OpenAI, and Google keys are already bring-your-own in Settings: add your key and every call — including planning and history compaction — bills your provider account instead of ours, while Auto mode still picks the right model for each step. GLM keys aren’t wired up for BYOK yet, and org-wide managed keys enforced across every seat are on our enterprise roadmap; talk to us if that’s a rollout requirement.",
     checks: [
-      "Per-org keys for Claude, GLM, GPT & Gemini — coming soon",
+      "Bring-your-own Anthropic, OpenAI & Google keys — live in Settings today",
       "Built-in web search across all four providers",
       "Set an account-wide default model and thinking effort",
     ],

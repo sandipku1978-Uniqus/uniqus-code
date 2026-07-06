@@ -1,11 +1,14 @@
 import Link from "next/link";
 import BrandLockup from "@/components/BrandLockup";
+import NavExploreMenu from "@/components/NavExploreMenu";
 
 /**
  * Top navigation for marketing sub-pages. Mirrors the landing-page nav but
  * with cross-page links instead of in-page anchors. Auth-aware CTAs are
  * resolved once by the `(marketing)` layout and passed down, so a signed-in
- * visitor is sent to their dashboard rather than back through sign-in.
+ * visitor is sent to their dashboard rather than back through sign-in. The
+ * trailing Explore dropdown (NavExploreMenu) surfaces every other marketing
+ * page — previously reachable only from the footer at the bottom of a page.
  */
 
 const NAV_LINKS: { label: string; href: string }[] = [
@@ -15,6 +18,7 @@ const NAV_LINKS: { label: string; href: string }[] = [
   { label: "Enterprise", href: "/enterprise" },
   { label: "Docs", href: "/docs" },
 ];
+const NAV_HREFS = NAV_LINKS.map((l) => l.href);
 
 export default function MarketingNav({
   signedIn,
@@ -36,6 +40,7 @@ export default function MarketingNav({
             {link.label}
           </Link>
         ))}
+        <NavExploreMenu excludeHrefs={NAV_HREFS} />
       </div>
       <div className="right">
         {!signedIn && (

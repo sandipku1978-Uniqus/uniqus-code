@@ -9,9 +9,16 @@ can use as a sandbox fleet.
 
 - `host-setup.sh` — installs Firecracker + builds the bridge / NAT / KVM
   permissions. **Run once on a fresh box.**
+- `host-net.sh` + `uniqus-firecracker-net.service` — recreate the `fcbr0`
+  bridge, IP forwarding, and NAT/isolation iptables rules. The bridge device
+  itself doesn't survive a reboot, so the systemd unit re-runs this on every
+  boot, ordered before `uniqus-orchestrator`, so a reboot self-heals.
 - `build-rootfs.sh` — produces `/var/lib/uniqus/firecracker/rootfs.ext4`
-  (Alpine + Node + Python + Go + the in-VM agent). Re-run any time you
-  update [`services/sandbox-agent/`](../../services/sandbox-agent/).
+  (Alpine + Node + Python + Go + the in-VM agent). Re-run any time you update
+  [`services/sandbox-agent/`](../../services/sandbox-agent/) or this script
+  itself.
+- `SECURITY.md` — the trust-boundary/isolation story; this file is bring-up +
+  operational latency only.
 
 ## One-shot bring-up (Hetzner CX/AX, Ubuntu 22.04+)
 
@@ -41,13 +48,25 @@ FIRECRACKER_IDLE_PAUSE_MS=300000
 
 ## What this gives you
 
-- Per-project Alpine microVM, ~125 ms boot cold, ~5 ms resume from pause.
-- Per-VM `/sandbox` ext4 image at `/var/lib/uniqus/firecracker/<projectId>.sandbox.ext4`.
+- Per-project Alpine microVM. Cold boot is ~3-8s with the always-on boot
+  fixes below (down from ~15-20s pre-fix), sub-second on a fresh project via
+  the opt-in golden base snapshot, and sub-millisecond to resume an
+  already-running VM from an in-memory pause (see "New-project cold start"
+  and "Idle lifecycle" below for the full breakdown).
+- Per-VM `/sandbox` ext4 image at
+  `/var/lib/uniqus/firecracker/<projectId>.sandbox.ext4` — sparse, default
+  8 GiB, tunable via `FIRECRACKER_SANDBOX_SIZE` (truncate-style size, e.g.
+  `"16G"`; existing images are grown offline with `truncate` + `resize2fs`).
 - Static-IP VM with a 172.16/16 private IP, NAT'd egress through the host NIC.
   There is **no DHCP** on the bridge: the agent configures eth0 itself from the
   kernel cmdline (`uniqus_ip`/`uniqus_gw`). A stray `iface eth0 inet dhcp` in the
   guest used to make `udhcpc` block OpenRC ~10-15s waiting for a lease that never
   comes — the single biggest chunk of the old ~18s cold start, now removed.
+- The bridge's neighbor (ARP) table is pre-seeded with each VM's IP→MAC pair
+  on every boot/restore — we assign both, so there's nothing for ARP to
+  discover. Without this, the first health probe of a not-yet-up guest wedges
+  the neighbor entry INCOMPLETE and every follow-up probe queues behind the
+  kernel's fixed ~1s ARP retransmit instead of re-ARPing.
 - Idle VMs auto-pause after `FIRECRACKER_IDLE_PAUSE_MS` (default 5 min).
 - KVM access scoped to the `kvm` group; orchestrator runs as a non-root
   user added to that group by `host-setup.sh`.
@@ -79,8 +98,11 @@ A brand-NEW project has no per-project VM or snapshot, so it hits `bootNew()` �
 the only path that governs new-project latency. Two changes attack it:
 
 1. **Boot fixes (always on).** No DHCP stall (see "What this gives you"); the
-   agent owns eth0; `/tmp`, `/run`, `/var/log` are tmpfs so the base rootfs is
-   never written after boot. A cold boot drops from ~15-20s to ~3-8s.
+   agent owns eth0; `/tmp`, `/run`, `/var/log`, `/root` are tmpfs so the base
+   rootfs is never written after boot. `/root` is load-bearing: golden clones
+   mount `/` read-only, and without a writable `/root` npm's first install
+   dies creating `/root/.npm` on every restored VM. A cold boot drops from
+   ~15-20s to ~3-8s.
 2. **Golden base snapshot (opt-in: `FIRECRACKER_BASE_SNAPSHOT=1`).** On startup
    the fleet boots ONE VM to "agent ready" on the **read-only, shared** base
    rootfs and snapshots it. Every new project then restores a clone from that
@@ -96,7 +118,7 @@ the only path that governs new-project latency. Two changes attack it:
    holding a global lock so only one clone wears the bootstrap identity at a time
    — calls the agent's **`POST /net/configure`** over the bootstrap IP to mount
    the project disk, reseed RNG, fix the clock, and re-stamp eth0 to the
-   project's own MAC/IP. The agent acks first and re-stamps ~250ms later (it
+   project's own MAC/IP. The agent acks first and re-stamps ~50ms later (it
    can't reconfigure the link it's answering over). On ANY failure the fleet
    falls back to the cold-boot path, so the flag is safe to ship dark.
 
@@ -133,8 +155,12 @@ journalctl -u uniqus-orchestrator -f | grep '\[fleet'
 ```
 
 Tunable: `FIRECRACKER_BOOTSTRAP_IP` (default `172.16.255.254`, reserved out of
-the project IP range). Delete `…/firecracker/base/` to force a golden rebuild
-after a rootfs change.
+the project IP range). The fleet auto-detects a stale golden snapshot (rootfs
+mtime newer than the snapshot — e.g. after `build-rootfs.sh` re-runs) and
+regenerates it on the next new project, since a stale snapshot's frozen ext4
+blocks no longer line up with the rebuilt rootfs and surface in-guest as `npm`
+failing with `EBADMSG`. Delete `…/firecracker/base/` yourself only to force a
+rebuild without touching the rootfs.
 
 ## What's deliberately not here yet
 
@@ -149,9 +175,6 @@ after a rootfs change.
   no shared identity, no lock) — Firecracker's documented clone model.
 - **Falco / per-VM cgroups / egress allowlist** beyond a basic
   link-local-blocking rule. Plan §6 (Risk #2) — Phase-3.
-- **Public preview routing**. The dev server starts inside the VM; the
-  orchestrator's preview proxy still talks to `127.0.0.1:port`. Bridging
-  the proxy to per-VM IPs is a small follow-up but not in this commit.
 - **WireGuard** between the orchestrator host and the VM host. Today the
   setup assumes orchestrator + Firecracker run on the same box; for a
   separated topology you'll want to wrap the AF_UNIX vsock socket in a
@@ -167,6 +190,7 @@ after a rootfs change.
   with `mount -o loop` and tail the file). Usually a missing package or
   the agent crashed at boot.
 - "agent did not answer /health within 10s": vsock is not enabled in the
-  kernel, OR the agent crashed. The shipped kernel
-  (`vmlinux-5.10.225` from the Firecracker CI bucket) has vsock built-in;
-  if you swap kernels, make sure `CONFIG_VHOST_VSOCK=y`.
+  kernel, OR the agent crashed. `host-setup.sh` auto-resolves the latest
+  `vmlinux-5.10.x` build from the Firecracker CI bucket (not a pinned patch
+  level — the bucket prunes old builds) and every 5.10.x build has vsock
+  built-in; if you swap kernels, make sure `CONFIG_VHOST_VSOCK=y`.

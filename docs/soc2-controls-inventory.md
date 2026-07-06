@@ -2,7 +2,7 @@
 
 **Document type:** Internal security process documentation
 **Status:** Pre-audit self-assessment (Type I readiness)
-**Last reviewed:** 2026-06-09
+**Last reviewed:** 2026-07-05
 **Owner:** Engineering / Security
 
 ---
@@ -51,22 +51,24 @@ the objective. **Gap** = no implemented control today.
 | Criterion | Control objective | Current mechanism (file path) | Status |
 |---|---|---|---|
 | CC6.1 | Secrets/credentials encrypted at rest | AES-256-GCM, random 12-byte IV, 16-byte auth tag, 256-bit key from `OAUTH_TOKEN_ENCRYPTION_KEY`. Layout `IV‖TAG‖CIPHERTEXT` base64. `services/orchestrator/src/auth/encrypt.ts` (`encryptToken`/`decryptToken`) | Implemented |
-| CC6.1 | Project secrets stored encrypted, never exposed to the VM/agent | `project_secrets.encrypted_value` (`services/orchestrator/src/db/schema.sql` ~258–309); decrypted server-side only; connectors pass ephemeral handles, never plaintext, to the agent loop | Implemented |
-| CC6.1 | Per-tenant authorization on data access | Every project route resolves through `getProject(id, ownerId)`, which filters `.eq("owner_id", ownerId)` (`services/orchestrator/src/db/projects.ts` ~105–114). Database tables have RLS enabled (`schema.sql`) | Implemented |
+| CC6.1 | Project secrets stored encrypted, never exposed to the VM/agent | `project_secrets.encrypted_value` (`services/orchestrator/src/db/schema.sql` ~263–296); decrypted server-side only; connectors pass ephemeral handles, never plaintext, to the agent loop | Implemented |
+| CC6.1 | Per-tenant authorization on data access | Owner-only routes resolve through `getProject(id, ownerId)`, which filters `.eq("owner_id", ownerId)`; member-accessible routes instead call `getProjectForUser(id, userId, minRole)`, which falls back to a `project_members`/`org_members` role check (`services/orchestrator/src/db/projects.ts` ~210–263). Database tables have RLS enabled (`schema.sql`) | Implemented |
 | CC6.1 | Tenant isolation of compute | One Firecracker microVM per project + per-project sandbox directories (`services/orchestrator/src/firecracker/fleet.ts`). VMs share the `fcbr0` bridge, but VM↔VM traffic is dropped at L3 via `br_netfilter` + an `fcbr0→fcbr0` DROP rule (`infra/firecracker/host-setup.sh`; re-asserted at runtime by `fleet.ts` `ensureVmIsolation`) | Implemented in code (P0.3) — requires `host-setup.sh` re-run + host validation that a peer-IP connection fails |
 | CC6.6 | Restrict outbound egress (anti-SSRF) | `services/orchestrator/src/connectors/ssrfGuard.ts` blocks private/loopback/link-local/CGNAT/multicast/fleet-bridge ranges (IPv4 **and** IPv6, reasoning over raw bytes to defeat alternate spellings), re-validates **every** redirect hop, and strips credential headers on cross-origin redirects. `http` connector additionally requires `allowed_secret_hosts` | Implemented |
-| CC6.6 | Restrict inbound access to the in-VM agent | The sandbox-agent on `0.0.0.0:51000` requires a per-VM bearer token on every non-`/health` request, validated in constant time (`services/sandbox-agent/src/main.rs` ~259–282; `src/agent.mjs` ~174–181). Enforcement is **mandatory** — hard-coded on at boot (`fleet.ts` `AGENT_AUTH_ENFORCED`), re-provisioned + enforced on golden-snapshot clones via `/net/configure`. Combined with the L2 isolation above (CC6.1), a peer VM can neither route to nor authenticate against another tenant's agent | Implemented (P0.1/P0.2/P0.3) |
+| CC6.6 | Restrict inbound access to the in-VM agent | The sandbox-agent on `0.0.0.0:51000` requires a per-VM bearer token on every non-`/health` request, validated in constant time (`services/sandbox-agent/src/main.rs` ~290–311; `src/agent.mjs` ~190–197). Enforcement is **mandatory** — hard-coded on at boot (`fleet.ts` `AGENT_AUTH_ENFORCED`), re-provisioned + enforced on golden-snapshot clones via `/net/configure`. Combined with the L2 isolation above (CC6.1), a peer VM can neither route to nor authenticate against another tenant's agent | Implemented (P0.1/P0.2/P0.3) |
 | CC6.7 | Protect data in transit | TLS 1.3 on both public domains: `app.uniqus-code.com` (Vercel) and `api2.uniqus-code.com` (Hetzner) | Implemented |
-| CC6.7 | Scope preview access to authorized holders | 128-bit unguessable capability `serverId`; preview cookie is `HttpOnly; Secure; SameSite=None; Max-Age=3600` (`services/orchestrator/src/proxy.ts` ~53–61) | Implemented |
-| CC6.1/6.3 | Role-based access control, SSO, provisioning/deprovisioning | No `members`/`roles` tables; no SAML/SSO/SCIM backend. Access is single-owner per project | **Gap (see §3)** |
+| CC6.7 | Scope preview access to authorized holders | 128-bit unguessable capability `serverId`; preview cookie is `HttpOnly; Secure; SameSite=None; Max-Age=3600` (`services/orchestrator/src/proxy.ts` ~78–86) | Implemented |
+| CC6.1/6.3 | Role-based access control for shared projects/orgs | `project_members` / `org_members` tables (`owner`/`admin`/`editor`/`viewer`, `schema.sql` ~589–611). Every membership route resolves the caller's effective role via `getProjectRole`/`getProjectForUser` before acting, with a privilege-escalation guard (a member can never grant a role above their own) (`services/orchestrator/src/collabRoutes.ts`, `services/orchestrator/src/db/members.ts`) | Implemented |
+| CC6.1/6.3 | SSO, SAML, SCIM provisioning/deprovisioning | No SAML/SSO/SCIM backend. Authentication is WorkOS AuthKit (email/OAuth) plus guest accounts only; no enterprise identity-provider integration | **Gap (see §3)** |
 
 ### CC7 — System operations (monitoring, logging, incident response)
 
 | Criterion | Control objective | Current mechanism (file path) | Status |
 |---|---|---|---|
-| CC7.2 | Log security-relevant events | `audit_events` table (`schema.sql` ~315–334) + `services/orchestrator/src/db/audit.ts`. Logs `secret_read` / `secret_write` / `secret_delete`, `connector_invoke` / `connector_invoke_error`, `checkpoint_create` / `checkpoint_restore`. `user_id` captured for secret/connector events; events are project-scoped | Partial |
-| CC7.2 | Make audit trail reviewable | `GET /api/projects/:id/audit`, owner-scoped via `getProject` before `listAudit` (`services/orchestrator/src/server.ts` ~1262–1271) | Partial — project-scoped only; no org-level view |
-| CC7.2 | Log authentication, authorization, plan, and deploy events | Not logged. The audit log does **not** record logins, plan generation/execution, deploys, or role changes; there is no org-level audit | **Gap (see §3)** |
+| CC7.2 | Log security-relevant events | `audit_events` table (`schema.sql` ~337–360, kind check widened ~703–724) + `services/orchestrator/src/db/audit.ts`. Actively logs `secret_read` / `secret_write` / `secret_delete`, `connector_invoke` / `connector_invoke_error`, `checkpoint_create` / `checkpoint_restore`, `member_invite` / `member_remove` / `role_change`, `org_create` / `org_update`, `project_update`, `github_action`, `db_lifecycle`. `user_id` captured for these events; events are project-scoped (org-level events use `project_id: null`) | Partial |
+| CC7.2 | Make audit trail reviewable | `GET /api/projects/:id/audit`, role-aware via `getProjectForUser(id, userId, "viewer")` before `listAudit` — any project member (not just the owner) can read it (`services/orchestrator/src/server.ts` ~1848–1858) | Partial — project-scoped only; no org-level view |
+| CC7.2 | Log role/membership changes | `member_invite` / `member_remove` / `role_change` events are recorded on both project- and org-membership routes (`services/orchestrator/src/collabRoutes.ts`) | Implemented |
+| CC7.2 | Log authentication, plan, and deploy events | Not logged. The `AuditKind` enum already reserves `login`/`logout`/`deploy`/`project_create`/`project_delete`/`preview_share` values (`services/orchestrator/src/db/audit.ts`) but no call site emits them yet; there is also no org-level audit view | **Gap (see §3)** |
 | CC7.2 | Continuous monitoring & alerting | No monitoring, metrics-based alerting, or anomaly detection is configured | **Gap (see §3)** |
 | CC7.3/7.4/7.5 | Incident detection, response, and recovery | No documented incident-response runbook, on-call rotation, or breach-notification procedure | **Gap (see §3)** |
 | CC7.1 | Vulnerability detection & management | No vulnerability-management program, dependency-scanning policy, or third-party penetration test completed | **Gap (see §3)** |
@@ -147,9 +149,11 @@ CC7.3–CC7.5.
 
 ### P4 — Expand the audit log
 
-Add `login`, `plan_create`/`plan_execute`, `deploy`, and role/permission-change
-events, and add an **org-level** audit view (currently project-scoped only).
-Required to make CC7.2 more than Partial.
+Role/permission-change events (`member_invite`, `member_remove`, `role_change`)
+are already logged. Still missing: `login`, `plan_create`/`plan_execute`, and
+`deploy` events (the `AuditKind` values exist but nothing emits them yet), and
+an **org-level** audit view (currently project-scoped only). Required to make
+CC7.2 more than Partial.
 
 ### P5 — Sub-processor register
 
@@ -162,11 +166,12 @@ Establish dependency scanning + a remediation SLA, then commission an
 independent penetration test. **Do P0 first** — pentesting the current
 sandbox-agent would only re-confirm a known critical.
 
-### P7 — SSO / SAML / SCIM / RBAC backend
+### P7 — SSO / SAML / SCIM
 
-Introduce `members`/`roles` tables, role-based authorization, SSO/SAML, and SCIM
-provisioning/deprovisioning. Closes the CC6 access-control gap and aligns the
-product with its marketing.
+Project/org membership and role-based authorization (`owner`/`admin`/`editor`/
+`viewer`) already ship in code (§2, CC6.1/6.3). What remains is enterprise
+identity: SSO/SAML and SCIM provisioning/deprovisioning on top of WorkOS
+AuthKit. Closes the last piece of the CC6 access-control gap.
 
 ### P8 — Change-management hardening
 
@@ -183,7 +188,8 @@ internal tracking.
 
 | Sub-processor | Purpose | Data shared |
 |---|---|---|
-| Anthropic | Coding-agent LLM inference (default provider) | Prompts, project code/context sent in the turn, agent outputs |
+| Anthropic | Coding-agent LLM inference (default / terminal-fallback provider, always configured) | Prompts, project code/context sent in the turn, agent outputs |
+| Z.ai | LLM inference when a user selects a GLM model (or Auto routes a turn to it) | Prompts, project code/context for that turn, outputs |
 | OpenAI | LLM inference when a user selects an OpenAI model | Prompts, project code/context for that turn, outputs |
 | Google | LLM inference when a user selects a Gemini model | Prompts, project code/context for that turn, outputs |
 | Vercel | Front-end hosting (`app.uniqus-code.com`) | Web traffic, request metadata for the web app |
@@ -212,8 +218,11 @@ claims**:
   traffic is dropped (§3, P0). The platform should not represent its tenant
   isolation as independently verified until the isolation rules are deployed to
   every host and a peer-to-peer reachability test is run there.
-- **No SSO/SAML/SCIM/RBAC** backend exists. Any marketing implying enterprise
-  access controls is ahead of the implementation.
+- **No SSO/SAML/SCIM.** Project/org membership with role-based access
+  (`owner`/`admin`/`editor`/`viewer`) does exist in code (§2, CC6.1/6.3), but
+  there is no enterprise identity-provider integration (SSO/SAML) or
+  automated user provisioning/deprovisioning (SCIM). Any marketing implying
+  enterprise SSO/SCIM is ahead of the implementation.
 - **No data-retention/purge policy** is enforced; data persists for the life of
   the account and is removed only by cascade on deletion.
 - **No monitoring/alerting and no incident-response runbook** are in place.

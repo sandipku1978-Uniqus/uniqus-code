@@ -231,12 +231,14 @@ export default function WorkspacesPage() {
               <p>
                 A live preview sits beside the workspace and updates as the app
                 changes — so you watch it come together instead of guessing.
-                The agent can screenshot its own work to check the result,
-                catch a layout glitch, and fix it before you ever notice.
+                Ask the agent to try a flow and it can drive the preview
+                itself — clicking, filling in forms, navigating between pages —
+                then report back console errors and layout glitches it caught
+                along the way, narrating each step live as it goes.
               </p>
               <ul className="mk-checks">
                 <li>Live preview alongside your code</li>
-                <li>The agent screenshots and reviews its own output</li>
+                <li>The agent can click through and test your app itself</li>
                 <li>Point at the preview to leave a note on the UI</li>
               </ul>
             </div>

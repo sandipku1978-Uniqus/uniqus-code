@@ -29,9 +29,15 @@ hardware-virtualization boundary (KVM), not a container namespace.
 
 ## Network setup (tap + bridge + NAT)
 
-`host-setup.sh` creates a single Linux bridge `fcbr0` at `172.16.0.1/16` and an
-iptables MASQUERADE so VM egress NATs out the host's external NIC
-(`EXT_IFACE`). Per-VM, `fleet.ts`:
+`host-setup.sh` installs the idempotent `host-net.sh`, which creates a single
+Linux bridge `fcbr0` at `172.16.0.1/16` and an iptables MASQUERADE so VM
+egress NATs out the host's external NIC (`EXT_IFACE`). The bridge device is
+runtime-only state that doesn't survive a reboot, so `host-net.sh` also runs
+on every boot via the `uniqus-firecracker-net.service` unit (ordered before
+the orchestrator), and `fleet.ts` re-asserts the same rules best-effort at
+startup — a reboot or a host that predates a rule change self-heals instead of
+leaving every sandbox start failing with "bridge fcbr0 is missing". Per-VM,
+`fleet.ts`:
 
 - `allocateNetwork(projectId)` hashes the projectId (SHA-256) into a static
   `172.16.a.b/16` address, a locally-administered MAC (`02:fc:<hash>`), and a
@@ -54,21 +60,28 @@ wider allocation space, or netns-per-VM) before it is safe.
 
 ## What is and isn't firewalled
 
-From `host-setup.sh` (iptables, persisted via `netfilter-persistent`):
+From `host-net.sh` (iptables, persisted via `netfilter-persistent`, guarded
+with `iptables -C` so re-runs are no-ops):
 
 - **Allowed:** `fcbr0 → EXT_IFACE` FORWARD (egress) and the
   RELATED,ESTABLISHED return path. VMs reach the public internet, NAT'd.
-- **Blocked:** `fcbr0 → 169.254.169.254` is DROP'd — the cloud metadata
-  endpoint, the classic SSRF credential-theft target.
+- **Blocked:**
+  - `fcbr0 → 169.254.169.254` is DROP'd — the cloud metadata
+    endpoint, the classic SSRF credential-theft target.
+  - **VM ↔ VM on the bridge (P0.3).** `br_netfilter` + `net.bridge.bridge-nf-call-iptables=1`
+    make bridged frames traverse `FORWARD` (a Linux bridge otherwise switches
+    peer frames at L2 without consulting iptables at all), then
+    `fcbr0 → fcbr0` is DROP'd. One project's `172.16.x.y` cannot reach
+    another's over the shared bridge. `host-setup.sh`/`host-net.sh` install
+    this at provisioning time and on every boot; `fleet.ts`'s
+    `ensureVmIsolation()` also re-asserts it (best-effort) at orchestrator
+    startup so a host whose rules predate this fix, or were flushed, still
+    gets isolation without a manual re-run.
 - **NOT firewalled (current gaps):**
   - **No egress allowlist.** A VM can reach any public host (and any service
     the host NIC can route to that isn't explicitly dropped). The README calls
     out that only "a basic link-local-blocking rule" exists; a real egress
     allowlist is Phase-3 (Plan §6, Risk #2).
-  - **VM ↔ VM on the bridge.** All VMs share `fcbr0`. There is no rule
-    isolating one project's `172.16.x.y` from another's, so cross-VM traffic on
-    the bridge is **not blocked today**. (Single-tenant-per-host or
-    netns-per-VM would close this.)
   - **VM → host services** beyond the metadata-endpoint DROP are not broadly
     restricted. Adjust the FORWARD rules per deployment if the host runs other
     private services.
@@ -80,9 +93,15 @@ From `host-setup.sh` (iptables, persisted via `netfilter-persistent`):
   binary, or a Node fallback if cargo is absent at build time). SSH is
   disabled; root has its password cleared **only** for passwordless serial
   console boot-debugging — there is no network login path.
-- **Mutable dirs are tmpfs** (`/tmp`, `/run`, `/var/log`) so the base rootfs is
-  never written after boot. This is what lets a single base image be shared
-  **read-only** across clones.
+- **Mutable dirs are tmpfs** (`/tmp`, `/run`, `/var/log`, `/root`) so the base
+  rootfs is never written after boot. `/root` is load-bearing, not incidental:
+  commands run as root with `HOME=/root`, and on a golden clone the rootfs is
+  mounted read-only, so without this tmpfs npm's first install dies creating
+  its cache (`EROFS`/`ENOENT` on `/root/.npm`) on every restored VM. The heavy
+  npm/yarn/pnpm caches don't live on this tmpfs — the agent points them at the
+  per-project `/sandbox/.cache` disk instead so they don't eat guest RAM; this
+  tmpfs only covers the long tail of small `$HOME` writes. Together these are
+  what let a single base image be shared **read-only** across clones.
 - **Cold-boot path** copies the base rootfs to a per-project overlay
   (`copyOnWrite`, reflink when available) — that overlay is writable and
   per-project, cleaned up on `destroy`/`reclaim`.
@@ -101,11 +120,13 @@ From `host-setup.sh` (iptables, persisted via `netfilter-persistent`):
 ## Per-project disk
 
 Each VM mounts its own `/sandbox` ext4 image
-(`<projectId>.sandbox.ext4`, 1 GiB sparse, `mkfs.ext4` on first boot — see
+(`<projectId>.sandbox.ext4`, 8 GiB sparse by default — tunable via
+`FIRECRACKER_SANDBOX_SIZE` — `mkfs.ext4` on first boot; see
 `ensureSandboxImage`). It is a **separate virtio-blk device** from the rootfs
 and is per-project, so one project's files never live in another's disk. There
-is **no automatic grow path** yet (a >80%-full grow is noted as Phase-3); a
-project that fills 1 GiB will hit ENOSPC inside the VM.
+is **no automatic grow path**: existing images are grown offline on the host
+(`truncate` + `e2fsck` + `resize2fs` while the VM is stopped). A project that
+fills its image will hit ENOSPC inside the VM.
 
 ## GC / retention (what gets freed, when)
 
@@ -134,10 +155,12 @@ thresholds are env-tunable:
 ## Honest summary of current gaps
 
 - **/16 IP collision** at ~256 projects/host, no retry (above).
-- **No egress allowlist**; only the metadata endpoint is DROP'd.
-- **No VM↔VM bridge isolation** — all VMs share `fcbr0`.
+- **No egress allowlist**; only the metadata endpoint is DROP'd. (VM↔VM
+  traffic on the shared bridge *is* blocked — see "What is and isn't
+  firewalled" — but any external host is reachable.)
 - **No per-VM cgroups** (CPU/disk IO weighting) and **no Falco / runtime
   syscall monitoring** — Plan §6 Risk #2, Phase-3.
-- **No automatic sandbox-disk grow** (1 GiB fixed today).
+- **No automatic sandbox-disk grow** (8 GiB fixed per project today; existing
+  images are grown manually, offline).
 - The host setup **assumes orchestrator and Firecracker run on the same box**.
   A split topology needs the vsock/AF_UNIX path wrapped in WireGuard (README).

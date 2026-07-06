@@ -6,7 +6,7 @@ work reads as one product. It is portable: paste it into any tool (Claude,
 ChatGPT, Gemini, a designer brief) — every value below is inline, no lookups
 required.
 
-Distilled from three sources of truth:
+Distilled from four sources of truth:
 
 - Marketing — [apps/web/app/page.tsx](../apps/web/app/page.tsx),
   [apps/web/app/(marketing)/layout.tsx](../apps/web/app/(marketing)/layout.tsx)
@@ -143,9 +143,9 @@ the default tell):
 
 | Surface | Size | Weight | Tracking |
 |---|---|---|---|
-| Marketing hero `h1` | `clamp(40px, 5vw, 60px)` | 500 | `-0.025em` |
+| Marketing hero `h1` | `clamp(44px, 7vw, 86px)` | 700 | `-0.02em` |
 | Marketing section `h2` | `clamp(32px, 4vw, 56px)` | 650 | `0`, `text-wrap: balance`, `max-width: 18ch` |
-| Marketing split-band `h2` | `clamp(44px, 6vw, 78px)` | 650 | tight |
+| Marketing split-band `h2` | `clamp(32px, 4vw, 56px)` | 650 | `0` |
 | CTA / bottom `h2` | `clamp(44px, 5.5vw, 74px)` | 760 | `0` |
 | Dashboard `h1` | `clamp(34px, 4.4vw, 56px)` | 500 | `-0.025em` |
 | Marquee words | `clamp(17px, 2vw, 28px)` | 750 | `0` |

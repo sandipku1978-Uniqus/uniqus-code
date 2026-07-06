@@ -38,10 +38,12 @@ const TOPICS: Topic[] = [
         q: "Do I need an account to try it?",
         a: (
           <>
-            No. You can start as a guest and your work is saved on your device. When
-            you create an account you can carry that guest project forward, so nothing
-            is lost. Signing in also unlocks reopening projects across devices and
-            multiple concurrent workspaces.
+            No. You can start as a guest and your work is saved on your device —
+            grab the one-time recovery code from the guest banner if you ever need to
+            pick that account back up on another device or browser. When you create
+            an account you can carry that guest project forward, so nothing is lost.
+            Signing in also unlocks reopening projects across devices and multiple
+            concurrent workspaces.
           </>
         ),
       },
@@ -49,11 +51,14 @@ const TOPICS: Topic[] = [
         q: "What is plan mode?",
         a: (
           <>
-            Before the agent changes anything, it can lay out a plan — the files
-            it intends to touch and the steps it&rsquo;ll take — so you can review
-            and adjust the direction first. It keeps the AI out in the open instead
-            of silently rewriting your project, and it&rsquo;s especially useful for
-            larger features.
+            Before the agent changes anything, it can investigate your codebase and
+            lay out a plan in plain English — a &ldquo;what you&rsquo;ll get&rdquo;
+            list and a wireframe up front, with every technical detail (files, steps,
+            success criteria) one click away behind a &ldquo;Technical
+            details&rdquo; toggle. It keeps the AI out in the open instead of
+            silently rewriting your project. Plan is one of four permission modes —
+            alongside Ask before edits, Auto-accept, and Full autonomy — and you can
+            switch between them mid-conversation as the work changes shape.
           </>
         ),
       },
@@ -91,10 +96,11 @@ const TOPICS: Topic[] = [
         q: "Can I use my own model API keys?",
         a: (
           <>
-            Yes, on Team and Enterprise. Add your Anthropic, OpenAI, Google, or Z.ai key in
-            Settings and that usage is billed by the provider directly. Your keys are
-            encrypted at rest and are never displayed back in full or exposed to the
-            agent.
+            Yes, on every plan — Free included, as long as you&rsquo;ve signed up for a
+            full account (guest sessions can&rsquo;t yet). Add your Anthropic, OpenAI, or
+            Google key in Settings and that usage is billed by the provider directly.
+            Your keys are encrypted at rest and are never displayed back in full or
+            exposed to the agent.
           </>
         ),
       },
@@ -190,8 +196,10 @@ const TOPICS: Topic[] = [
             (Claude), Z.ai (GLM), OpenAI (GPT), and Google (Gemini) — in the
             composer&rsquo;s model picker, or set an account-wide default in Settings.
             The default is{" "}
-            <strong>Auto</strong>, which routes each step to a strong general-purpose
-            model so you don&rsquo;t have to think about it.
+            <strong>Auto</strong>, which sizes up each step and routes it to
+            whichever configured model fits best — a fast model for a quick edit,
+            a stronger reasoner for a hard problem — so you don&rsquo;t have to think
+            about it.
           </>
         ),
       },
@@ -199,8 +207,9 @@ const TOPICS: Topic[] = [
         q: "What does the thinking-effort setting do?",
         a: (
           <>
-            Thinking effort (low / medium / high) controls how much reasoning the model
-            puts into a turn before it acts. Higher effort is better for tricky, multi-step
+            Thinking effort is a slider from low up through max — the exact rungs
+            offered depend on the model you&rsquo;ve picked, since not every provider
+            supports the very top end. Higher effort is better for tricky, multi-step
             changes; lower is faster for small edits. It&rsquo;s a per-turn control in the
             model picker with a default in Settings, and it applies across all four
             providers.
@@ -223,11 +232,12 @@ const TOPICS: Topic[] = [
         q: "Do I need my own API key to switch models?",
         a: (
           <>
-            On Free, Auto routing works without any key of your own. To pick specific
-            OpenAI, Google, or Z.ai models, add that provider&rsquo;s key in Settings (Team and
-            Enterprise). If a key is missing for a model you choose, you&rsquo;ll get a
-            clear &ldquo;set X&rdquo; message for that turn only — the rest of your work
-            keeps going.
+            No — every plan can pick any model on our shared keys, no setup required.
+            Adding your own Anthropic, OpenAI, or Google key in Settings is optional; it
+            just moves that provider&rsquo;s usage onto your own billing instead of ours.
+            If a key is ever missing for a model you choose, you&rsquo;ll get a clear
+            &ldquo;set X&rdquo; message for that turn only — the rest of your work keeps
+            going.
           </>
         ),
       },
@@ -305,9 +315,9 @@ const TOPICS: Topic[] = [
         a: (
           <>
             Give it a more specific instruction, or switch to plan mode so you can steer
-            the approach before it acts. Bumping thinking effort to high helps on gnarly,
-            multi-step problems. You can also try a different model from the picker — each
-            provider has its own strengths.
+            the approach before it acts. Bumping thinking effort up toward high or max
+            helps on gnarly, multi-step problems. You can also try a different model from
+            the picker — each provider has its own strengths.
           </>
         ),
       },

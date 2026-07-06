@@ -16,6 +16,7 @@ const TIERS = [
     features: [
       { label: "Unlimited public-idea projects", on: true },
       { label: "Auto model routing (Claude, GPT, Gemini, GLM)", on: true },
+      { label: "Bring your own model API keys", on: true },
       { label: "One private workspace at a time", on: true },
       { label: "Live preview + plan mode", on: true },
       { label: "Built-in web search", on: true },
@@ -33,7 +34,6 @@ const TIERS = [
     features: [
       { label: "Everything in Free", on: true },
       { label: "Concurrent private workspaces", on: true },
-      { label: "Bring your own model API keys (coming soon)", on: true },
       { label: "GitHub sync + one-click deploys", on: true },
       { label: "Skills, secrets & design packs", on: true },
       { label: "Checkpoints & rewind history", on: true },
@@ -48,9 +48,9 @@ const TIERS = [
     cta: { label: "Contact sales", href: "/enterprise", primary: false },
     features: [
       { label: "Everything in Team", on: true },
-      { label: "SSO / SAML & SCIM — set up in onboarding", on: true },
+      { label: "SSO today via WorkOS — SAML & SCIM on our roadmap", on: true },
       { label: "Dedicated VM capacity & SLAs", on: true },
-      { label: "Org audit views & roles — set up in onboarding", on: true },
+      { label: "Org audit views & roles — rolling out, early access", on: true },
       { label: "DPA, security review & invoicing", on: true },
       { label: "Dedicated success manager", on: true },
     ],
@@ -63,7 +63,7 @@ const COMPARE: { group: string; rows: { label: string; free: string; team: strin
     rows: [
       { label: "Private workspaces", free: "1", team: "Unlimited", ent: "Unlimited" },
       { label: "Auto model routing", free: "yes", team: "yes", ent: "yes" },
-      { label: "Bring your own API keys", free: "no", team: "Soon", ent: "Soon" },
+      { label: "Bring your own API keys", free: "yes", team: "yes", ent: "yes" },
       { label: "Built-in web search", free: "yes", team: "yes", ent: "yes" },
     ],
   },
@@ -78,8 +78,9 @@ const COMPARE: { group: string; rows: { label: string; free: string; team: strin
   {
     group: "Team & security",
     rows: [
-      { label: "SSO / SAML & SCIM", free: "no", team: "no", ent: "Onboarding" },
-      { label: "Org audit views & roles", free: "no", team: "no", ent: "Onboarding" },
+      { label: "SSO (WorkOS)", free: "no", team: "no", ent: "yes" },
+      { label: "SAML / SCIM", free: "no", team: "no", ent: "Roadmap" },
+      { label: "Org audit views & roles", free: "no", team: "no", ent: "Early access" },
       { label: "Audit trail (secrets, connectors, checkpoints)", free: "yes", team: "yes", ent: "yes" },
       { label: "Encrypted secrets", free: "yes", team: "yes", ent: "yes" },
       { label: "Support", free: "Community", team: "Priority email", ent: "Dedicated" },
@@ -98,11 +99,11 @@ const FAQ = [
   },
   {
     q: "Can I use my own model API keys?",
-    a: "Bring-your-own keys are coming to Team and Enterprise: you'll add your own Anthropic, OpenAI, Google, or Z.ai keys in Settings, usage will be billed by those providers directly, and your keys will stay encrypted. Want early access? Reach out through the Enterprise page.",
+    a: "Yes, on every plan — Free included, as long as you've signed up for a full account (guest sessions can't yet). Add your own Anthropic, OpenAI, or Google key in Settings and usage for that provider bills to your account directly — keys stay encrypted at rest and are never shown back in full. Z.ai (GLM) keys aren't supported yet. Need per-org keys for a whole team? Reach out through the Enterprise page.",
   },
   {
     q: "What happens to my guest work if I sign up?",
-    a: "Guest projects are saved on your device. When you create an account, you can carry that work forward so nothing is lost.",
+    a: "Guest accounts need no Google or email sign-in — you get a one-time recovery code to restore your projects on another device. When you create a full account, your guest projects carry over automatically so nothing is lost.",
   },
   {
     q: "Do you offer discounts for startups or education?",

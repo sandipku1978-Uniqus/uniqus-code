@@ -72,7 +72,7 @@ const WHY: { icon: Icon; iconClass: string; title: string; body: string }[] = [
     icon: "rocket",
     iconClass: "grad",
     title: "Work on a frontier AI product",
-    body: "Uniqus Code turns plain-English ideas into running apps inside private cloud workspaces. You'll ship at the edge of what coding agents can do — routing across Claude, GPT, and Gemini, plan mode, live previews, and more.",
+    body: "Uniqus Code turns plain-English ideas into running apps inside private cloud workspaces. You'll ship at the edge of what coding agents can do — routing across Claude, GLM, GPT, and Gemini, plan mode, live previews, and more.",
   },
   {
     icon: "team",

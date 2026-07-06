@@ -6115,6 +6115,75 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 .marketing-shell .topnav .links a:hover { color: var(--mk-text); }
 .marketing-shell .hero::before { display: none; }
 
+/* "Explore" nav dropdown (NavExploreMenu) — every marketing page one click
+   from the top nav instead of only reachable via the footer. */
+.nav-explore { display: flex; }
+.nav-explore-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--mk-muted);
+  cursor: pointer;
+  transition: color var(--dur-base) ease;
+}
+.nav-explore-trigger svg { transition: transform var(--dur-base) ease; }
+.nav-explore-trigger:hover,
+.nav-explore-trigger.open { color: var(--mk-text); }
+.nav-explore-trigger.open svg { transform: rotate(180deg); }
+/* Popover portals this panel to <body>, escaping .marketing-shell — the only
+   place --mk-* custom properties are declared — so it can't just reference
+   var(--mk-*) and inherit them. Redeclare the concrete values locally (mirroring
+   .marketing-shell's own dark/light sets above) so the panel is self-contained
+   wherever it lands in the DOM. :root[data-theme="light"] still matches, since
+   that attribute lives on <html>, an ancestor of the portal target either way. */
+.nav-explore-panel {
+  --mk-panel-solid: #12131c;
+  --mk-line: rgba(255, 255, 255, 0.11);
+  --mk-text: #f4f2ee;
+  --mk-muted: #a8a39b;
+  --mk-dim: #716d66;
+  z-index: 60;
+  display: grid;
+  grid-auto-flow: column;
+  gap: 28px;
+  padding: 18px 20px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--mk-line);
+  background: var(--mk-panel-solid);
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+:root[data-theme="light"] .nav-explore-panel {
+  --mk-panel-solid: #ffffff;
+  --mk-line: rgba(26, 24, 32, 0.13);
+  --mk-text: #191820;
+  --mk-muted: #625f68;
+  --mk-dim: #8b8790;
+}
+.nav-explore-col { display: flex; flex-direction: column; gap: 2px; min-width: 128px; }
+.nav-explore-heading {
+  font-family: var(--font-mono-stack);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--mk-dim);
+  margin-bottom: 8px;
+}
+.nav-explore-col a {
+  padding: 5px 0;
+  font-size: 13px;
+  color: var(--mk-muted);
+  transition: color var(--dur-base) ease;
+}
+.nav-explore-col a:hover { color: var(--mk-text); }
+
 .marketing-shell .hero {
   position: relative;
   min-height: min(760px, calc(100svh - 24px));
@@ -8770,16 +8839,68 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   border-color: color-mix(in srgb, var(--brand-magenta) 40%, var(--mk-line));
 }
 
-/* ── Changelog timeline ────────────────────────────────────────────────── */
-.changelog { display: grid; gap: 8px; }
-.changelog-entry {
+/* ── Changelog ─────────────────────────────────────────────────────────────
+   Asymmetric split (sticky ver/date rail + content column), the same pattern
+   as /docs's mk-docs, plus a card-based timeline so each release reads as a
+   distinct, scannable unit instead of a bare list separated by hairlines. */
+.mk-changelog-layout {
   display: grid;
-  grid-template-columns: 160px minmax(0, 1fr);
-  gap: 32px;
-  padding: 32px 0;
-  border-top: 1px solid var(--mk-line);
+  grid-template-columns: minmax(0, 0.22fr) minmax(0, 1fr);
+  gap: 48px;
+  align-items: start;
 }
-.changelog-entry:first-child { border-top: 0; }
+.changelog-nav {
+  position: sticky;
+  top: 96px;
+  align-self: start;
+  max-height: calc(100vh - 120px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-right: 4px;
+}
+.changelog-nav .label-eyebrow { margin-bottom: 10px; }
+.changelog-nav a {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 12px;
+  border-left: 2px solid var(--mk-line);
+  text-decoration: none;
+  transition: background var(--dur-base) ease, border-color var(--dur-base) ease;
+}
+.changelog-nav a .ver {
+  font-family: var(--font-mono-stack);
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--mk-muted);
+}
+.changelog-nav a .date {
+  font-size: 11px;
+  color: var(--mk-dim);
+  letter-spacing: 0.03em;
+}
+.changelog-nav a:hover { background: color-mix(in srgb, var(--mk-text) 5%, transparent); }
+.changelog-nav a.active { border-left-color: var(--brand-magenta); background: color-mix(in srgb, var(--brand-magenta) 8%, transparent); }
+.changelog-nav a.active .ver { color: var(--mk-text); }
+
+.changelog { display: grid; gap: 20px; }
+.changelog-entry {
+  scroll-margin-top: 96px;
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr);
+  gap: 28px;
+  padding: 28px;
+  border: 1px solid var(--mk-line);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--mk-panel-solid) 64%, transparent);
+  transition: border-color var(--dur-base) var(--ease-out);
+}
+.changelog-entry:hover,
+.changelog-entry:target {
+  border-color: color-mix(in srgb, var(--brand-magenta) 36%, var(--mk-line-strong));
+}
 .changelog-date {
   font-family: var(--font-mono-stack);
   font-size: 12px;
@@ -8794,8 +8915,8 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   border-radius: var(--radius-full);
   color: var(--mk-muted);
 }
-.changelog-body h3 { margin: 0 0 12px; font-size: 19px; font-weight: 650; }
-.changelog-body ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.changelog-body h3 { margin: 0 0 14px; font-size: 19px; font-weight: 650; }
+.changelog-body ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 11px; }
 .changelog-body li { display: flex; gap: 10px; align-items: flex-start; color: var(--mk-muted); font-size: 14px; line-height: 1.55; }
 .change-tag {
   flex: none;
@@ -8810,6 +8931,21 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 .change-tag.new { background: color-mix(in srgb, var(--mk-green) 22%, transparent); color: var(--mk-green); }
 .change-tag.improved { background: color-mix(in srgb, var(--mk-cyan) 22%, transparent); color: var(--mk-cyan); }
 .change-tag.fixed { background: color-mix(in srgb, var(--mk-amber) 22%, transparent); color: var(--mk-amber); }
+
+@media (max-width: 980px) {
+  .mk-changelog-layout { grid-template-columns: 1fr; gap: 24px; }
+  .changelog-nav {
+    position: static;
+    top: auto;
+    max-height: none;
+    flex-direction: row;
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+  .changelog-nav .label-eyebrow { width: 100%; margin-bottom: 4px; }
+  .changelog-nav a { flex-direction: row; align-items: baseline; gap: 6px; border-left: none; border: 1px solid var(--mk-line); border-radius: var(--radius-full); }
+  .changelog-nav a.active { border-color: color-mix(in srgb, var(--brand-magenta) 50%, var(--mk-line)); }
+}
 
 /* ── Blog ──────────────────────────────────────────────────────────────── */
 .post-grid {
@@ -9103,7 +9239,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   .mk-grid.cols-2,
   .mk-grid.cols-3,
   .mk-grid.cols-4 { grid-template-columns: 1fr; }
-  .changelog-entry { grid-template-columns: 1fr; gap: 12px; }
+  .changelog-entry { grid-template-columns: 1fr; gap: 14px; padding: 20px; }
   .field-row { grid-template-columns: 1fr; }
   .post-card.lead .post-thumb { aspect-ratio: 16 / 9; }
   .mk-cta-band { padding: 44px 24px; }

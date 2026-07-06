@@ -159,6 +159,11 @@ const EFFORTS: { level: string; tone: string; body: string }[] = [
     tone: "Hard problems",
     body: "More room to think through tricky rebuilds, gnarly bugs, and decisions where one wrong turn costs you an afternoon.",
   },
+  {
+    level: "X-High / Max",
+    tone: "Go all in",
+    body: "The deepest rungs, for the models that support them — for when you want the model to spare no reasoning before it acts.",
+  },
 ];
 
 const COMPARE: {
@@ -176,7 +181,7 @@ const COMPARE: {
     gemini: "yes",
   },
   {
-    feature: "Thinking effort (low / med / high)",
+    feature: "Thinking effort (low → max)",
     claude: "yes",
     glm: "yes",
     gpt: "yes",
@@ -192,8 +197,8 @@ const COMPARE: {
   {
     feature: "Works on Auto",
     claude: "yes",
-    glm: "yes",
-    gpt: "yes",
+    glm: "no",
+    gpt: "no",
     gemini: "yes",
   },
 ];
@@ -304,16 +309,18 @@ export default function ModelsPage() {
               <h3>Dial in how hard it thinks</h3>
               <p>
                 Thinking effort is a per-turn control over how much the model
-                reasons before it answers — low, medium, or high. Set it right in
-                the composer for a single turn, or pick an account-wide default in
-                Settings. New projects start on medium, which fits most building
-                work. Reach for high when a task is genuinely hard, or low when you
-                just want a quick pass.
+                reasons before it answers — a full slider from low up through max,
+                scoped to whatever rungs the current model actually supports. Set
+                it right in the composer for a single turn, or pick an account-wide
+                default in Settings. New projects start on medium, which fits most
+                building work. Reach for high (or beyond, up to max on models that
+                go that far) when a task is genuinely hard, or low when you just
+                want a quick pass.
               </p>
               <ul className="mk-checks">
                 <li>Per-turn control, set in the composer&rsquo;s model picker</li>
                 <li>Account-wide default in Settings — defaults to medium</li>
-                <li>Works across all four providers</li>
+                <li>Works across all four providers, each scoped to its own range</li>
               </ul>
             </div>
             <div className="mk-row-art">
@@ -499,6 +506,11 @@ export default function ModelsPage() {
             </tbody>
           </table>
         </div>
+        <p className="mk-lede" style={{ marginTop: 16, fontSize: 14 }}>
+          All four are always available to pick yourself, per turn or as your
+          account default — Auto currently chooses between Claude and Gemini
+          automatically, with GLM and GPT support on the way.
+        </p>
       </section>
 
       {/* Closing note: curated selection */}

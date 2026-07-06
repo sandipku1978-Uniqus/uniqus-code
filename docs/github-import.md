@@ -48,18 +48,29 @@ re-prompts for reconnection.
 
 - **SSRF / local-file guard:** `validateCloneUrl` (server.ts) rejects anything
   that isn't `https://` **before** the project is created — no `file://`, no
-  arbitrary scheme, hostname required. https-only also means PAT injection
-  (which only runs for https URLs) covers every path that reaches `git clone`.
+  arbitrary scheme, hostname required — then resolves the hostname
+  (`assertPublicHost`, shared with the outbound connector SSRF guard) and
+  rejects it if any resolved address is private, loopback, link-local, CGNAT,
+  cloud-metadata, or the Firecracker fleet bridge, so a clone can't be used to
+  probe the orchestrator's internal network. https-only also means PAT
+  injection (which only runs for https URLs) covers every path that reaches
+  `git clone`.
 - **Shallow clone:** `git clone --depth 1`, optionally `--branch <branch>`.
 - **Auth:** a PAT (or the resolved OAuth token) is injected as
   `https://x-access-token:<token>@github.com/…`; it is scrubbed from any error
   output (`x-access-token:***@`) and never logged.
 - **Oversize guard:** after clone, the tree is walked; if it exceeds
   `MAX_CLONE_SIZE` (500 MB) the import **throws** and the caller rolls back the
-  project (`rollbackImport`), so a giant repo can't fill the host disk.
-- `.git/` is **removed after clone** — the user gets the source tree, not the
-  history. (Re-introducing git tracking is noted as the Phase-3
-  bidirectional-sync work.)
+  project (`rollbackImport`), so a giant repo can't fill the host disk. A
+  `preserveGit` clone (below) counts its retained `.git` history toward the
+  same cap.
+- `.git/` is **removed after clone by default** — the user gets the source
+  tree, not the history. `importGithub` also accepts an opt-in `preserveGit`
+  flag (passed through the API as `preserve_git`) that instead does a full
+  clone, keeps `.git`, and captures the checked-out branch + PAT-scrubbed
+  origin remote URL for the project. This isn't exposed as a toggle in the
+  import UI yet, so in practice today's import always strips history; pull/
+  push-back and PR creation/merge are still not implemented either way.
 - If `git` is missing on the orchestrator host, the error tells the operator to
   add it to the build image rather than surfacing a raw `spawn git ENOENT`.
 
@@ -71,7 +82,10 @@ the repo's default branch. The repo picker surfaces each repo's
 `default_branch` (from `listUserRepos`). Note the **clone branch and the
 linked branch are tracked separately**: cloning checks out `branch`, while the
 project's `linked_branch` column (schema.sql) records the branch the project is
-associated with for the All Projects view.
+associated with for the All Projects view. The linked branch can also be
+changed after import: `POST /api/projects/:id/branch` (the workspace's branch
+switcher) updates `linked_branch` directly — it's bookkeeping only and does
+not re-clone, fetch, or check out anything in the sandbox.
 
 ## What's persisted
 
@@ -82,21 +96,29 @@ associated with for the All Projects view.
   (resolved from the OAuth picker's `repo_full_name` or parsed from the URL via
   `parseGithubFullName`). Linking is **best-effort** — a link failure does not
   fail the import, since the clone already succeeded.
-- The import response returns `{ files_imported, total_bytes, stripped_root }`.
+- The import response returns
+  `{ files_imported, total_bytes, stripped_root }`, plus `current_branch` and
+  `remote_url` when the (currently API-only) `preserve_git` clone mode was
+  used.
 
 The DB columns involved (`schema.sql`): `projects.github_repo_url`,
-`github_repo_full_name`, `linked_branch`. A separate "Create GitHub repo"
-action (`createUserRepo` in `github.ts`) creates a fresh **private** repo and
-links it the same way.
+`github_repo_full_name`, `linked_branch`, and `github_remote_url` (the
+PAT-scrubbed origin URL captured by a `preserve_git` clone; null otherwise). A
+separate "Create GitHub repo" action (`createUserRepo` in `github.ts`) creates
+a fresh **private** repo and links it the same way.
 
 ## Current limitations
 
-- **Not PR-native and not bidirectional.** Import is a one-time clone; `.git`
-  is discarded. There is no pull/push-back, no branch tracking against the
-  remote, and no PR creation/merge flow yet — all Phase-3
-  ("GitHub bidirectional sync"), explicitly called out in `import.ts` and
-  `github.ts`.
-- **Read-only OAuth in practice.** Even though `repo` scope is granted, no code
-  path writes to the imported repo today.
+- **Not PR-native and not bidirectional.** Even with the `preserve_git` clone
+  mode (which keeps `.git` and records the checked-out branch + origin remote —
+  see "GitHub clone" above), there is still no pull/fetch from the remote, no
+  push-back, and no PR creation/merge flow. Switching a project's tracked
+  branch (`linked_branch`) is bookkeeping only, not a real git operation.
+- **Read-only OAuth in practice.** Even though `repo` scope is granted, the
+  OAuth token from this flow is never used to write to the imported repo. A
+  separate GitHub *connector* (`connectors/github.ts`) can create branches and
+  open pull requests, but it authenticates with its own `GITHUB_TOKEN` project
+  secret, not this OAuth token — see
+  [`docs/connector-security.md`](./connector-security.md).
 - **SSH clone URLs ignore the PAT** (`git@github.com:…`) — only `https://`
   clones authenticate; SSH would need host SSH-key setup, which isn't wired.

@@ -3,6 +3,7 @@ import { withAuth } from "@workos-inc/authkit-nextjs";
 import BrandLockup from "@/components/BrandLockup";
 import GuestBanner from "@/components/GuestBanner";
 import LandingPrompt from "@/components/LandingPrompt";
+import NavExploreMenu from "@/components/NavExploreMenu";
 import SiteFooter from "@/components/SiteFooter";
 import { getGuestSession } from "@/lib/guest-server";
 
@@ -32,6 +33,7 @@ export default async function MarketingPage() {
           <Link href="/pricing">Pricing</Link>
           <a href="#trust">Trust</a>
           <Link href="/docs">Docs</Link>
+          <NavExploreMenu excludeHrefs={["/pricing", "/docs", "/models", "/workspaces"]} />
         </div>
         <div className="right">
           {!user && (

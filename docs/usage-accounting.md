@@ -37,12 +37,15 @@ The provider adapters populate all four (`loop.ts`'s `usage` shape carries
 `ModelPrice` in **USD per 1,000,000 tokens**: a base `{ input, output }`, an
 optional per-model `{ cacheRead, cacheWrite }` override, and an optional
 `longContext` band. Current bases include `claude-opus-4-8` (`{5, 25}`),
-`claude-sonnet-4-6` (`{3, 15}`), `gpt-5.5` (`{1.25, 10}`), `gpt-5.5-pro`
-(`{15, 120}`), `gemini-3.1-pro-preview-customtools` (`{2, 12}`), and others.
-Unknown model ids fall back to `DEFAULT_PRICE` (`{ input: 3, output: 15 }`).
+`claude-sonnet-4-6` (`{3, 15}`), `glm-5.2` (`{1.4, 4.4}`, Z.ai), `gpt-5.5`
+(`{1.25, 10}`), `gpt-5.5-pro` (`{15, 120}`), `gemini-3.1-pro-preview-customtools`
+(`{2, 12}`), and others. Unknown model ids fall back to `DEFAULT_PRICE`
+(`{ input: 3, output: 15 }`).
 
 Cache rates default to multiples of the model's fresh `input` rate (a model only
-sets `cacheRead`/`cacheWrite` when its cache pricing diverges):
+sets `cacheRead`/`cacheWrite` when its cache pricing diverges — e.g. `glm-5.2`
+sets `cacheRead: 0.26`, since Z.ai's cached-input rate is ~0.26× fresh input,
+not the 0.1× default; it has no separate cache-write line):
 
 - `CACHE_READ_MULTIPLIER = 0.1` — a cache read is ~10% of fresh input. Accurate
   across providers for the cache tokens we measure (Anthropic 0.1×, OpenAI 0.1×,
@@ -57,7 +60,7 @@ exceeds a threshold — Anthropic/Google at 200K, OpenAI at 272K — repricing t
 WHOLE turn at ~2× input / ~1.5× output. The `above` rates are stored absolutely
 but track the ×2 / ×1.5 multiples of the base (e.g. Gemini 3.1 Pro 2/12 → 4/18).
 Models whose context can't exceed the threshold (Opus, 200K) or that price flat
-(Flash, the `*-pro` single tier) have no band.
+(Flash, the `*-pro` single tier, or GLM-5.2's 1M-token window) have no band.
 
 These are **best-effort estimates for the dashboard, not a billing figure** —
 the source comments say so, and prices must be updated as providers change them.

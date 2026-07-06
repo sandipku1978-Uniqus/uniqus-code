@@ -37,6 +37,7 @@ export const FOOTER_COLUMNS: FooterColumn[] = [
     title: "Resources",
     links: [
       { label: "Docs", href: "/docs" },
+      { label: "Security", href: "/security" },
       { label: "Support", href: "/support" },
       { label: "Community", href: "/community" },
       { label: "Status", href: "/status" },
@@ -45,7 +46,6 @@ export const FOOTER_COLUMNS: FooterColumn[] = [
   {
     title: "Legal",
     links: [
-      { label: "Security", href: "/security" },
       { label: "Privacy", href: "https://uniqus.com" },
       { label: "Terms", href: "https://uniqus.com" },
       { label: "Report abuse", href: "https://uniqus.com" },

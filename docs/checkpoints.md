@@ -68,6 +68,17 @@ noted as Phase-3 and is not implemented yet.
 `{ sha, short_sha, message, created_at }`. `clearCheckpoints` removes the
 entire shadow dir.
 
+## Diff preview
+
+`getCheckpointDiff(sandboxDir, projectId, sha)` computes the change a single
+checkpoint introduced — `git diff <sha>~1 <sha>` against the shadow repo, or
+against git's well-known empty-tree object (`4b825dc6…`) when `sha` is the
+first commit and has no parent. It returns the unified diff text (capped at
+256 KB, with a `truncated` flag past that) plus a per-file numstat
+(`{ path, added, removed }`). Read-only — it never touches the work-tree. This
+is what backs the UI's "what changed" view, letting a user preview a diff
+before choosing to restore to that checkpoint.
+
 ## Audit
 
 Checkpoint create/restore are part of the `audit_events` `kind` enum

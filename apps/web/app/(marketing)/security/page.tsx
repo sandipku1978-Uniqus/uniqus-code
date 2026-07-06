@@ -84,7 +84,7 @@ const PRACTICES: { icon: Icon; iconClass: string; title: string; body: string }[
     icon: "shield",
     iconClass: "cyan",
     title: "Guardrails on risky moves",
-    body: "Anything destructive or hard to undo is flagged for your approval instead of being pushed through quietly. The agent plans before it changes anything.",
+    body: "By default, anything destructive or hard to undo is flagged for your approval instead of being pushed through quietly. Four permission modes — Plan, Ask before edits, Auto-accept, and Full autonomy — let you dial in how much the agent can do without checking in, and you can switch modes mid-conversation.",
   },
   {
     icon: "eye",
@@ -132,7 +132,7 @@ const FAQ = [
   },
   {
     q: "Who are your sub-processors?",
-    a: "Anthropic, Z.ai, OpenAI, and Google process model requests; Vercel hosts the web app and Hetzner runs the orchestrator and isolated VMs; Supabase is our database; and WorkOS handles authentication and SSO. We only use a provider when the feature you've turned on requires it — for example, your turn only reaches Z.ai, OpenAI, or Google if you select one of their models.",
+    a: "Anthropic, Z.ai, OpenAI, and Google process model requests; Vercel hosts the web app, and our own infrastructure runs the orchestrator and each project's isolated sandbox; Supabase is our database; and WorkOS handles authentication and SSO. We only use a provider when the feature you've turned on requires it — for example, your turn only reaches Z.ai, OpenAI, or Google if you select one of their models.",
   },
   {
     q: "How is my data encrypted?",
@@ -231,7 +231,7 @@ export default function SecurityPage() {
           </p>
           <h3>Isolation by design</h3>
           <p>
-            Each project runs in its own Firecracker microVM with a dedicated
+            Each project runs in its own isolated microVM with a dedicated
             filesystem and sandbox. The in-VM agent requires a per-project token,
             and VM-to-VM traffic across the shared egress bridge is dropped &mdash;
             so a bug, a runaway script, or a risky command in one project

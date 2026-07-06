@@ -6,33 +6,19 @@ export const metadata = {
     "A current snapshot of Uniqus Code service health: the web app, orchestrator API, workspaces, model routing, live previews, deploys, and GitHub sync.",
 };
 
-const LAST_CHECKED = "June 2026";
+const LAST_CHECKED = "July 2026";
 
 const COMPONENTS = [
   { name: "Web app", note: "Dashboard, editor, and marketing site" },
   { name: "Orchestrator API", note: "Project sessions and the agent loop" },
-  { name: "Workspaces (VMs)", note: "Private per-project virtual machines" },
+  { name: "Workspaces (VMs)", note: "Private per-project isolated sandboxes" },
   { name: "Model routing — Anthropic", note: "Claude models and Auto routing" },
+  { name: "Model routing — Z.ai", note: "GLM models and the vision bridge" },
   { name: "Model routing — OpenAI", note: "GPT models via the Responses API" },
   { name: "Model routing — Google", note: "Gemini models and grounding" },
   { name: "Live previews", note: "In-browser preview of your running app" },
   { name: "Deploys", note: "One-click Vercel deploys" },
   { name: "GitHub sync", note: "Two-way sync with your repositories" },
-];
-
-// 30 bars per component; a couple of `.d` (partial-degraded) bars keep the
-// snapshot honest rather than a flat wall of green.
-type Bar = { d?: boolean };
-const bars = (dips: number[]): Bar[] =>
-  Array.from({ length: 30 }, (_, i) => (dips.includes(i) ? { d: true } : {}));
-
-const UPTIME = [
-  { name: "Web app", pct: "99.99%", bars: bars([]) },
-  { name: "Orchestrator API", pct: "99.98%", bars: bars([19]) },
-  { name: "Workspaces (VMs)", pct: "99.95%", bars: bars([7, 23]) },
-  { name: "Model routing", pct: "99.97%", bars: bars([12]) },
-  { name: "Live previews", pct: "99.96%", bars: bars([4, 25]) },
-  { name: "Deploys", pct: "99.99%", bars: bars([]) },
 ];
 
 export default function StatusPage() {
@@ -93,39 +79,12 @@ export default function StatusPage() {
       <section className="mk-page narrow">
         <div className="mk-section-head">
           <span className="label-eyebrow">Uptime</span>
-          <h2>Last 90 days.</h2>
+          <h2>Building our track record.</h2>
           <p>
-            Recent availability across the systems that keep your projects
-            building and shipping. A couple of dips reflect brief partial
-            slowdowns we recovered from.
+            Uniqus Code is pre-launch, so we don&rsquo;t have a public uptime
+            history yet. Once we&rsquo;re generally available, this page will
+            show real availability trends for each system above.
           </p>
-        </div>
-        <div className="mk-grid cols-3">
-          {UPTIME.map((u) => (
-            <article className="mk-card" key={u.name}>
-              <h3>{u.name}</h3>
-              <div
-                className="uptime-bar"
-                style={{ margin: "14px 0 12px" }}
-                role="img"
-                aria-label={`${u.name}: ${u.pct} uptime over the last 90 days`}
-              >
-                {u.bars.map((b, i) => (
-                  <i key={i} className={b.d ? "d" : undefined} />
-                ))}
-              </div>
-              <p
-                style={{
-                  fontFamily: "var(--font-mono-stack)",
-                  fontSize: 12,
-                  letterSpacing: "0.04em",
-                  color: "var(--mk-muted)",
-                }}
-              >
-                {u.pct} uptime
-              </p>
-            </article>
-          ))}
         </div>
       </section>
 

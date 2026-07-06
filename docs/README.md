@@ -12,11 +12,17 @@ implemented, the doc says so explicitly.
   and the honest list of current gaps. (Operational/latency detail:
   [Firecracker README](../infra/firecracker/README.md).)
 - [Connector security](./connector-security.md) — first-party connectors
-  (http/slack/postgres/github), server-side secret resolution (the agent
-  passes names, not values), and audit logging of every invocation.
+  (http/slack/postgres/github/supabase/stripe), server-side secret resolution
+  (the agent passes names, not values), and audit logging of every invocation.
 - [Secret handling](./secret-handling.md) — per-project secrets: AES-256-GCM at
   rest, per-env scoping (default/development/staging/production), values never
   returned to the model, and the audit trail.
+- [SOC 2 controls inventory](./soc2-controls-inventory.md) — an internal,
+  code-grounded self-assessment mapping existing controls to the SOC 2 Trust
+  Services Criteria (CC1–CC8). Explicitly **not** a certification or completed
+  audit — it says so — and lists the open gaps (SSO/SAML/RBAC, monitoring &
+  alerting, incident response, data retention) ahead of an external
+  examination.
 
 ## Platform features
 
@@ -31,3 +37,9 @@ implemented, the doc says so explicitly.
 - [Supported stacks & limits](./supported-stacks-and-limits.md) — detected
   project types (Node/Python/Go/static; Next/Vite via package.json) and
   runtime ceilings (VM memory, ext4 sizing, hydration/import caps).
+- [Private cloud / self-hosting your generated app](./private-cloud-deploy.md)
+  — how to take a Uniqus-built app off Uniqus-hosted infrastructure: GitHub
+  publish to your own CI/CD, or a generated Dockerfile + deploy bundle you
+  build and run on your own registry/cluster. Honest about scope — the
+  control plane itself (orchestrator, VM fleet, web app) isn't self-hostable
+  today.
