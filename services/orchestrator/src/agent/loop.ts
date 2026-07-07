@@ -689,6 +689,17 @@ export interface LoopResult {
     costUsd: number;
   };
   /**
+   * Estimated USD spend of AUXILIARY model calls this turn — image generation
+   * (generate_image), the vision bridge (analyze_image & friends), and PDF OCR.
+   * These are extra billed model calls that the lead's own token `usage` above
+   * does NOT capture (a text-only GLM turn can fire many analyze_image bridge
+   * calls, each a real Gemini/GLM-5V charge). Each is already recorded as its
+   * own usage_event for the account rollup; this field lets the `complete`
+   * marker fold the same spend into the turn's shown cost so the per-turn
+   * estimate stops under-counting whenever those tools ran. Absent when zero.
+   */
+  auxCostUsd?: number;
+  /**
    * Why the final iteration ended, when known (e.g. "max_tokens" on a truncated
    * answer, "refusal"). Lets the server surface truncation/refusal on the
    * `complete` marker instead of reporting every finish as clean. Undefined on
@@ -798,6 +809,7 @@ export async function runAgentLoop(
               costUsd: subAgentCostUsd,
             }
           : undefined,
+      auxCostUsd: auxCostUsd || undefined,
       stopReason,
     };
   };
@@ -922,6 +934,11 @@ export async function runAgentLoop(
   let subAgentCostUsd = 0;
   let subAgentInputTokens = 0;
   let subAgentOutputTokens = 0;
+  // Aggregate spend of auxiliary model calls (image gen / vision bridge / OCR)
+  // this turn, priced per-model as each fires. Folded onto the LoopResult so the
+  // complete marker's shown cost includes them — they're extra billed calls the
+  // lead's token `usage` never sees (see LoopResult.auxCostUsd).
+  let auxCostUsd = 0;
 
   // Push one sub-agent's current state to the Activity Monitor. Emitted on
   // spawn, model-resolution, each tool call, and settlement — NOT per usage
@@ -1064,7 +1081,10 @@ export async function runAgentLoop(
               recordSubAgentUsage(opts.projectId ?? null, opts.userId ?? null, sub.provider, sub.model, sub.usage);
               subAgentInputTokens += sub.usage.inputTokens;
               subAgentOutputTokens += sub.usage.outputTokens;
-              subAgentCostUsd += estimateTurnCostUsd(sub.model, sub.usage);
+              // The sub-agent's own token cost PLUS any auxiliary model calls it
+              // made (image gen / vision bridge / OCR) — otherwise a sub-agent
+              // that generates images shows only its text cost in the turn total.
+              subAgentCostUsd += estimateTurnCostUsd(sub.model, sub.usage) + (sub.auxCostUsd ?? 0);
               // Fold the sub-agent's file changes into THIS turn's changeset so
               // the "What changed" list + the server's checkpoint/sync see them.
               for (const f of sub.changedFiles) {
@@ -1467,6 +1487,9 @@ export async function runAgentLoop(
           hasVision,
           runSubAgents,
           awaitSubAgents,
+          (cost) => {
+            auxCostUsd += cost;
+          },
         );
         // Multimodal results (e.g. screenshots) include image content blocks.
         if (result && typeof result === "object" && (result as any).__multimodal) {
@@ -1746,6 +1769,8 @@ function isBuildCommand(command: string): boolean {
  * correct and precise — these are extra billed model calls, invisible to the
  * turn's own token usage. Priced by estimateTurnCostUsd at the sub-model's
  * MODEL_PRICING rate (gemini-3.5-flash / glm-5v-turbo / glm-ocr are all priced).
+ * Returns the estimated USD cost (0 when there's no usage to price) so the caller
+ * can also fold it into the turn's aux-cost total for the complete marker.
  */
 function recordBridgeUsage(
   projectId: string | null,
@@ -1753,20 +1778,24 @@ function recordBridgeUsage(
   provider: string,
   model: string,
   usage: TokenUsage | undefined,
-): void {
-  if (!projectId || !userId || !usage) return;
-  void recordUsageEvent({
-    projectId,
-    userId,
-    provider,
-    model,
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-    cacheReadTokens: usage.cacheReadTokens ?? 0,
-    cacheCreationTokens: usage.cacheCreationTokens ?? 0,
-    costUsd: estimateTurnCostUsd(model, usage),
-    elapsedMs: 0,
-  }).catch(() => {});
+): number {
+  if (!usage) return 0;
+  const costUsd = estimateTurnCostUsd(model, usage);
+  if (projectId && userId) {
+    void recordUsageEvent({
+      projectId,
+      userId,
+      provider,
+      model,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cacheReadTokens: usage.cacheReadTokens ?? 0,
+      cacheCreationTokens: usage.cacheCreationTokens ?? 0,
+      costUsd,
+      elapsedMs: 0,
+    }).catch(() => {});
+  }
+  return costUsd;
 }
 
 /**
@@ -1951,6 +1980,13 @@ export async function executeTool(
    * in scope there) and wired ONLY for a top-level turn.
    */
   awaitSubAgents?: (ids?: string[]) => Promise<string>,
+  /**
+   * Reports the estimated USD cost of an auxiliary model call made while running
+   * this tool — image generation, the vision bridge, or PDF OCR. The loop
+   * accumulates these into the turn's auxCostUsd so the complete marker's shown
+   * cost includes them (they're separate billed calls the token usage misses).
+   */
+  onAuxCost?: (costUsd: number) => void,
 ): Promise<string | { __multimodal: true; content: unknown[]; __imagePaths?: string[] }> {
   const args = input as Record<string, any>;
   switch (name) {
@@ -2253,7 +2289,9 @@ export async function executeTool(
         inputImagePath: typeof args.input_image === "string" ? args.input_image : undefined,
       });
       // Image output is billed per image — record it as its own usage event so
-      // the dashboard reflects the spend (separate from the turn's token usage).
+      // the dashboard reflects the spend (separate from the turn's token usage),
+      // AND fold it into the turn's aux cost so the complete marker's shown price
+      // includes the images (they'd otherwise be invisible in the per-turn est.).
       if (projectId && userId) {
         void recordUsageEvent({
           projectId,
@@ -2266,6 +2304,7 @@ export async function executeTool(
           elapsedMs: 0,
         }).catch(() => {});
       }
+      onAuxCost?.(gen.estimated_cost_usd);
       // Hand the FIRST image back as a preview the agent can SEE (so it can judge
       // the result) plus the path(s) to reference from the app's code.
       const previewImg = await readAssetBase64(sandbox.rootDir, gen.images[0].asset_path).catch(
@@ -2593,7 +2632,7 @@ export async function executeTool(
                 file: fileUrl,
                 signal,
               });
-              recordBridgeUsage(projectId, userId, "zai", "glm-ocr", ocr.usage);
+              onAuxCost?.(recordBridgeUsage(projectId, userId, "zai", "glm-ocr", ocr.usage));
               if (ocr.markdown.trim()) {
                 return `Asset ${args.name} (${mime}) — OCR text (GLM-OCR):\n\n${ocr.markdown}`;
               }
@@ -2612,7 +2651,7 @@ export async function executeTool(
                 thinking: "low",
                 signal,
               });
-              recordBridgeUsage(projectId, userId, "google", ocr.model, ocr.usage);
+              onAuxCost?.(recordBridgeUsage(projectId, userId, "google", ocr.model, ocr.usage));
               if (ocr.text.trim()) {
                 return `Asset ${args.name} (${mime}) — OCR text (Gemini):\n\n${ocr.text}`;
               }
@@ -2673,7 +2712,9 @@ export async function executeTool(
             system: spec.system,
             signal,
           });
-      recordBridgeUsage(projectId, userId, googleApiKey ? "google" : "zai", bridge.model, bridge.usage);
+      onAuxCost?.(
+        recordBridgeUsage(projectId, userId, googleApiKey ? "google" : "zai", bridge.model, bridge.usage),
+      );
       return `Vision analysis (${name}) of ${spec.paths.join(", ")}:\n\n${bridge.text}`;
     }
     case "enter_plan_mode": {

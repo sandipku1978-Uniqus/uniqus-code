@@ -466,6 +466,30 @@ const ENTRIES: Entry[] = [
       },
     ],
   },
+  {
+    id: "v0-18",
+    date: "Jul 2026",
+    ver: "v0.18",
+    title: "The numbers add up",
+    changes: [
+      {
+        tag: "fixed",
+        text: "Per-run cost estimates are more accurate: generating images, reading images, and reading documents now count toward the cost shown for a turn instead of being invisible, and several model prices were corrected against each provider's current published rates.",
+      },
+      {
+        tag: "fixed",
+        text: "After you rewind to an earlier checkpoint, the agent now re-reads your files before editing instead of acting on changes that were rolled back.",
+      },
+      {
+        tag: "improved",
+        text: "Deleting a large project now shows a spinner and keeps the dialog open until it finishes, so it no longer looks like nothing happened.",
+      },
+      {
+        tag: "improved",
+        text: "The \"Reconnected — your build kept running\" banner can now be dismissed and clears itself automatically.",
+      },
+    ],
+  },
 ];
 
 const DISPLAY_ENTRIES = [...ENTRIES].reverse();

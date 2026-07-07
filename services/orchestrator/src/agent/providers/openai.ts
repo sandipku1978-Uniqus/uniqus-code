@@ -46,11 +46,6 @@ import type {
  * as before). Images in plain user messages are forwarded the same way.
  */
 
-/** GPT-5.5 Pro supports the Responses API, but not streaming. */
-function supportsStreaming(model: string): boolean {
-  return model !== "gpt-5.5-pro";
-}
-
 /**
  * Build the `reasoning` request field from the thinking-effort control. The
  * `*-pro` models only accept "high" (low/medium 400), so clamp them. `summary:
@@ -92,10 +87,6 @@ export class OpenAIAdapter implements ModelProviderAdapter {
   }
 
   async streamAgentTurn(p: StreamTurnParams): Promise<StreamTurnResult> {
-    if (!supportsStreaming(p.model)) {
-      return this.completeAgentTurn(p);
-    }
-
     const reasoning = reasoningParam(p.model, p.thinkingEffort, p.thinkingEnabled !== false);
     const stream = await this.client.responses.create(
       {
@@ -255,78 +246,6 @@ export class OpenAIAdapter implements ModelProviderAdapter {
       toolCalls.push({ id: c.callId, name: c.name, input });
     }
 
-    return {
-      content,
-      stopReason: toolCalls.length > 0 ? "tool_use" : truncated ? "max_tokens" : "end_turn",
-      toolCalls,
-      usage,
-    };
-  }
-
-  private async completeAgentTurn(p: StreamTurnParams): Promise<StreamTurnResult> {
-    const reasoning = reasoningParam(p.model, p.thinkingEffort, p.thinkingEnabled !== false);
-    const response = await this.client.responses.create(
-      {
-        model: p.model,
-        instructions: p.system,
-        input: toResponsesInput(p.messages),
-        tools: toResponsesTools(p.tools, true),
-        max_output_tokens: p.maxTokens,
-        store: false,
-        ...(reasoning
-          ? { reasoning, include: ["reasoning.encrypted_content" as const] }
-          : {}),
-      },
-      p.signal ? { signal: p.signal } : undefined,
-    );
-
-    let text = "";
-    const content: Anthropic.ContentBlockParam[] = [];
-    const toolCalls: StreamTurnResult["toolCalls"] = [];
-    // Output items arrive in order: a reasoning item precedes the function_call
-    // it reasoned out. Track the most recent so we can pair them for round-trip.
-    let pendingReasoning: ReasoningRef | undefined;
-    for (const item of response.output ?? []) {
-      if (item.type === "message") {
-        for (const part of item.content) {
-          if (part.type === "output_text") text += part.text;
-        }
-      } else if (item.type === "function_call") {
-        const input = safeParseJson(item.arguments, item.name);
-        content.push(toolUseBlock(item.call_id, item.name, input, pendingReasoning));
-        pendingReasoning = undefined;
-        p.onToolCallStarted?.(item.call_id, item.name);
-        p.onToolCall?.(item.call_id, item.name, input);
-        toolCalls.push({ id: item.call_id, name: item.name, input });
-      } else if (item.type === "web_search_call") {
-        const query = webSearchQuery(item);
-        p.onToolCallStarted?.(item.id, "web_search");
-        p.onToolResult?.(
-          item.id,
-          "web_search",
-          { query },
-          query ? `Searched the web: ${query}` : "Searched the web.",
-          false,
-        );
-      } else if (item.type === "reasoning") {
-        for (const s of item.summary) p.onThinking?.(s.text);
-        pendingReasoning = reasoningRefOf(item);
-      }
-    }
-    if (text) {
-      content.unshift({ type: "text", text });
-      p.onText?.(text);
-    }
-
-    let usage: TokenUsage | undefined;
-    if (response.usage) {
-      usage = toTokenUsage(response.usage);
-      p.onUsage?.(usage);
-    }
-
-    const truncated =
-      response.status === "incomplete" &&
-      response.incomplete_details?.reason === "max_output_tokens";
     return {
       content,
       stopReason: toolCalls.length > 0 ? "tool_use" : truncated ? "max_tokens" : "end_turn",

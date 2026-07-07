@@ -55,26 +55,27 @@
 
 ## Model providers (multi-provider agent)
 - The coding agent runs on a model resolved by `services/orchestrator/src/agent/router.ts`.
-  Default is **Auto**. `router.ts` gives Auto a STATIC floor (**GLM-5.2** when a
-  Z.ai key is set, else **Claude Opus** — so Auto is never broken on an
-  orchestrator without the key; the switch flips on the moment `ZAI_API_KEY` is
-  deployed). On top of that floor, the agent loop + plan mode run **task-aware
-  Auto** (`services/orchestrator/src/agent/autoRouter.ts`): per turn it
-  classifies the request into one of three tiers and routes to the model whose
-  strengths fit, **across all configured providers** (each provider has a home
-  tier so its key gets real traffic):
+  Default is **Auto**. `router.ts` gives Auto a STATIC floor of **Claude** (the
+  `AUTO` map — regardless of whether a Z.ai key is set). On top of that floor,
+  the agent loop + plan mode run **task-aware Auto**
+  (`services/orchestrator/src/agent/autoRouter.ts`): per turn it classifies the
+  request into one of three tiers and routes to the model whose strengths fit.
+  **Auto routes across Anthropic + Google ONLY** — GLM (zai) and OpenAI are
+  excluded from Auto "for now" (still selectable via the manual picker; to
+  re-add, see the NOTE blocks in `router.ts` / `autoRouter.ts`). Home tiers:
+  Gemini owns `quick` (and much of vision), Anthropic owns `standard` / `hard`,
+  with Gemini Pro as a `hard` alternate:
   - **quick** (trivial edits / explicitly speed-sensitive) → the FASTEST model,
-    **Gemini 3.5 Flash** leading. GLM is deliberately excluded here — its
-    1M-context first-token latency is the opposite of "quick". Falls back to
-    Sonnet (the always-present Anthropic safety net) when no Google key.
-  - **standard** (routine features) → **GLM-5.2** (cost-effective frontier
-    coding); Sonnet/Flash when no Z.ai key.
+    **Gemini 3.5 Flash** leading; falls back to **Sonnet 4.6** (the
+    always-present Anthropic safety net) when no Google key.
+  - **standard** (routine features) → **Claude Sonnet 4.6** leading, then
+    Gemini 3.5 Flash / Opus 4.8.
   - **hard** (debug / architecture / cross-cutting / long briefs) → the strongest
-    reasoner: **Opus › GPT-5.5 › Gemini Pro › GLM**.
+    reasoner: **Opus 4.8 › Gemini 3.1 Pro › Sonnet 4.6**.
   - **vision** overlay: image-heavy turns prefer a NATIVELY-multimodal model
-    (Gemini/Claude/GPT) over text-only GLM (which would lean on the
-    analyze_image bridge); falls through to GLM+bridge only if no native-vision
-    key is set.
+    (**Gemini/Claude**). GLM's analyze_image bridge is no longer part of Auto
+    (GLM is manual-pick only); the bridge still exists for a manually selected
+    GLM turn.
   Heuristics decide clear cases for free; a tiny Haiku `classify` call does a
   3-way (QUICK/STANDARD/HARD) tiebreak only when ambiguous (plan mode skips it,
   biasing ambiguous→hard). Routing is constrained to providers with a configured
@@ -82,9 +83,10 @@
   always resolves), marks picks `overridden:false` (no "results may vary"
   notice), and on any failure keeps the static floor — it can't break a turn. An
   explicit per-turn pick or `UNIQUS_MODEL_<ROLE>` env pin (`overridden:true`)
-  bypasses task routing entirely. **NOTE: Gemini/OpenAI routing only kicks in
-  when `GOOGLE_API_KEY`/`OPENAI_API_KEY` are set on the orchestrator** — without
-  them Auto picks among Anthropic + GLM only. Users override per-turn / as an account default via
+  bypasses task routing entirely. **NOTE: Google routing only kicks in when
+  `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) is set on the orchestrator** — without
+  it Auto stays entirely on Anthropic (the floor + the fallback in every tier);
+  GLM and OpenAI never enter Auto regardless of their keys. Users override per-turn / as an account default via
   the composer + Settings "Default model" picker (Anthropic, Z.ai, OpenAI,
   Google). The curated, selectable list is `MODEL_CATALOG` in `packages/api-types`
   — the single source of truth shared by the UI and the router. Low tiers (Haiku,
@@ -182,9 +184,9 @@
   also used for compaction and the internal compact/classify/design roles).
   `ZAI_API_KEY` (or `GLM_API_KEY`), `OPENAI_API_KEY`, and `GOOGLE_API_KEY`
   (or `GEMINI_API_KEY`) are **optional** — only needed when a user picks that
-  provider's model. Note `ZAI_API_KEY` is special: setting it also flips the
-  **Auto** default for the agent/plan roles to GLM-5.2 (get the key from the Z.ai
-  Open Platform → API Keys; per-token pricing ≈ $1.40/$4.40 per Mtok in/out).
+  provider's model. (`ZAI_API_KEY` no longer changes **Auto** — GLM is excluded
+  from Auto routing and is manual-pick only; get the key from the Z.ai Open
+  Platform → API Keys, per-token pricing ≈ $1.40/$4.40 per Mtok in/out.)
   Missing key ⇒ a clear "set X" error for that turn only.
 
 ## Guest signup abuse protection (Cloudflare Turnstile)

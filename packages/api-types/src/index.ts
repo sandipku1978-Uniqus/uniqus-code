@@ -325,34 +325,38 @@ export const MODEL_PRICING: Record<string, ModelPrice> = {
   // track any base-price edit (e.g. Gemini 3.1 Pro 2/12 → 4/18, matching docs).
   // Anthropic
   "claude-opus-4-8": { input: 5, output: 25 },
-  "claude-sonnet-4-6": {
-    input: 3,
-    output: 15,
-    longContext: { thresholdTokens: 200_000, above: { input: 6, output: 22.5 } },
-  },
+  // Sonnet 4.6 prices its full 1M context FLAT — the >200K premium (2× in / 1.5×
+  // out) that Sonnet 4/4.5 charged under the `context-1m` beta does NOT apply to
+  // the 4.6 generation (verified 2026-07-07 vs the Anthropic models overview;
+  // Opus 4.8 is likewise flat). The old band over-priced every >200K Sonnet turn.
+  "claude-sonnet-4-6": { input: 3, output: 15 },
   // Z.ai (GLM) — source: z.ai published API rates as of 2026-06-18. Cached input
   // is ~0.26 (not the 0.1× default), so set it explicitly; GLM has no separate
   // cache-write line. Flat-priced (no long-context band) despite the 1M window.
   "glm-5.2": { input: 1.4, output: 4.4, cacheRead: 0.26 },
-  // OpenAI
+  // OpenAI — rates re-verified against developers.openai.com/api/docs/pricing
+  // on 2026-07-07 (the prior 1.25/10 figures were stale — a ~4× undercount on
+  // gpt-5.5). Base `input` is the fresh rate; cached input is the 0.1× default,
+  // which reproduces OpenAI's published cached rates exactly at BOTH tiers
+  // (gpt-5.5: $0.50 base = 5×0.1, $1.00 long-context = 10×0.1). gpt-5.3-codex
+  // has NO long-context band per the docs.
   "gpt-5.5": {
-    input: 1.25,
-    output: 10,
-    longContext: { thresholdTokens: 272_000, above: { input: 2.5, output: 15 } },
+    input: 5,
+    output: 30,
+    longContext: { thresholdTokens: 272_000, above: { input: 10, output: 45 } },
   },
-  "gpt-5.5-pro": { input: 15, output: 120 },
-  "gpt-5.3-codex": {
-    input: 1.25,
-    output: 10,
-    longContext: { thresholdTokens: 272_000, above: { input: 2.5, output: 15 } },
-  },
+  "gpt-5.3-codex": { input: 1.75, output: 14 },
   // Google
   "gemini-3.1-pro-preview-customtools": {
     input: 2,
     output: 12,
     longContext: { thresholdTokens: 200_000, above: { input: 4, output: 18 } },
   },
-  "gemini-3.5-flash": { input: 0.3, output: 2.5 },
+  // 3.5 Flash: $1.50/$9.00 (cached $0.15 = 0.1×), verified 2026-07-07 vs
+  // ai.google.dev/gemini-api/docs/pricing. The prior $0.30/$2.50 were Gemini
+  // *2.5* Flash's rates — a copy-paste that was never repriced (a ~5× input
+  // undercount on the model that leads Auto's `quick` tier). No long-context band.
+  "gemini-3.5-flash": { input: 1.5, output: 9 },
   "gemini-2.5-pro": {
     input: 1.25,
     output: 10,

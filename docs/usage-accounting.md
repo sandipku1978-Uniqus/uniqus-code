@@ -38,7 +38,7 @@ The provider adapters populate all four (`loop.ts`'s `usage` shape carries
 optional per-model `{ cacheRead, cacheWrite }` override, and an optional
 `longContext` band. Current bases include `claude-opus-4-8` (`{5, 25}`),
 `claude-sonnet-4-6` (`{3, 15}`), `glm-5.2` (`{1.4, 4.4}`, Z.ai), `gpt-5.5`
-(`{1.25, 10}`), `gpt-5.5-pro` (`{15, 120}`), `gemini-3.1-pro-preview-customtools`
+(`{5, 30}`), `gemini-3.1-pro-preview-customtools`
 (`{2, 12}`), and others. Unknown model ids fall back to `DEFAULT_PRICE`
 (`{ input: 3, output: 15 }`).
 

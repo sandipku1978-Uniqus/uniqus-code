@@ -780,6 +780,9 @@ export default function ProjectPicker({
       setEditing(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      // Rethrow so the DeleteDialog clears its pending/spinner state and
+      // re-enables the button for a retry (on success the dialog unmounts).
+      throw err;
     }
   }
 
@@ -2426,27 +2429,63 @@ function DeleteDialog({
 }: {
   project: ProjectSummary;
   onCancel: () => void;
-  onConfirm: () => void;
+  onConfirm: () => void | Promise<void>;
 }) {
   const [confirmName, setConfirmName] = useState("");
+  // Deleting a large project can take ~15s server-side; without a pending state
+  // the button just sat there after the click. Track it so we can disable the
+  // actions and show an inline spinner until the delete resolves.
+  const [deleting, setDeleting] = useState(false);
   const matches = confirmName.trim() === project.name;
+
+  async function handleConfirm(): Promise<void> {
+    if (deleting || !matches) return;
+    setDeleting(true);
+    try {
+      await onConfirm();
+      // Success: the parent unmounts this dialog — leave `deleting` true so the
+      // button stays disabled + spinning through the unmount (no flicker back).
+    } catch {
+      // Failed: re-enable so the user can retry (handleDelete already surfaced
+      // the error banner).
+      setDeleting(false);
+    }
+  }
+
   return (
     <Modal
       title={`Delete "${project.name}"?`}
       width={420}
-      onClose={onCancel}
+      // Block dismissal (X / backdrop) while the delete is in flight so the
+      // dialog + spinner stay put until it resolves.
+      onClose={deleting ? () => {} : onCancel}
       footer={
         <div className="proj-dialog-actions">
-          <button type="button" onClick={onCancel} className="btn-ghost">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={deleting}
+            className="btn-ghost"
+          >
             Cancel
           </button>
           <button
             type="button"
-            onClick={onConfirm}
-            disabled={!matches}
+            onClick={() => void handleConfirm()}
+            disabled={!matches || deleting}
+            aria-busy={deleting}
             className="btn-danger"
+            // btn-danger isn't a flex box, so give the spinner + label inline
+            // layout (the .ds-spinner span needs a flex parent to size/space).
+            style={{ display: "inline-flex", alignItems: "center", gap: 6, justifyContent: "center" }}
           >
-            Delete project
+            {deleting ? (
+              <>
+                <span className="ds-spinner" aria-hidden="true" /> Deleting…
+              </>
+            ) : (
+              "Delete project"
+            )}
           </button>
         </div>
       }

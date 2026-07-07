@@ -40,75 +40,12 @@ const EXAMPLE_PROMPTS = [
   "Create a budget vs. actuals dashboard by department with variance highlights and a month filter.",
 ];
 
-/**
- * Whimsical "working" words cycled in the composer status strip while a turn
- * runs — mimics Claude Code's rotating gerunds. Kept on the professional side
- * of cute. A real server progress note (e.g. "Installing dependencies…")
- * overrides the cycling when one is present (see ChatPanel's inFlightProgress).
- */
-const WORKING_WORDS = [
-  "Working",
-  "Thinking",
-  "Cooking",
-  "Crafting",
-  "Brewing",
-  "Pondering",
-  "Computing",
-  "Conjuring",
-  "Tinkering",
-  "Composing",
-  "Noodling",
-  "Synthesizing",
-  "Assembling",
-  "Percolating",
-];
-
-/**
- * The pinned "agent working" strip shown just above the composer: a small
- * Uniqus mark that eases through each spin (slow at the upright top, quick
- * through the bottom — see `.working-spinner` / `working-spin` in globals.css)
- * plus a status word. When `label` is null the whimsical words cycle every
- * ~2.4s; otherwise the (informative) server label is shown verbatim. Mounting
- * resets to the first word, so each new turn opens on "Working…".
- */
-const WorkingStatus = memo(function WorkingStatus({
-  label,
-}: {
-  label: string | null;
-}) {
-  const [i, setI] = useState(0);
-  useEffect(() => {
-    if (label) return; // real progress shown — don't cycle over it
-    const id = setInterval(
-      () => setI((n) => (n + 1) % WORKING_WORDS.length),
-      2400,
-    );
-    return () => clearInterval(id);
-  }, [label]);
-  const text = label ?? `${WORKING_WORDS[i]}…`;
-  return (
-    <div className="composer-working" role="status" aria-live="polite">
-      <img
-        className="working-spinner"
-        src="/brand/uniqus-small-logo-color.png"
-        alt=""
-        aria-hidden="true"
-        width={16}
-        height={16}
-      />
-      {/* keyed on the text so each swap re-triggers the subtle fade-in */}
-      <span className="composer-working-label" key={text}>
-        {text}
-      </span>
-    </div>
-  );
-});
-
 export default function ChatPanel() {
   const chat = useStore((s) => s.chat);
   const busy = useStore((s) => s.busy);
   const installInProgress = useStore((s) => s.installInProgress);
   const runReattaching = useStore((s) => s.runReattaching);
+  const setRunReattaching = useStore((s) => s.setRunReattaching);
   const mode = useStore((s) => s.mode);
   const permissionMode = useStore((s) => s.permissionMode);
   const model = useStore((s) => s.model);
@@ -246,6 +183,18 @@ export default function ChatPanel() {
     });
     clearBriefFiles();
   }, [project, briefFiles, clearBriefFiles]);
+
+  // The "Reconnected — your build kept running" banner is a one-time
+  // reassurance, not a live-status banner. It's normally cleared by the run's
+  // `complete`/`error` event, but if the run already finished before we
+  // reattached (or that event never lands) it would otherwise stick forever
+  // with no way to close it. Auto-expire it after a few seconds so it always
+  // goes away on its own; the ✕ below lets the user dismiss it immediately.
+  useEffect(() => {
+    if (!runReattaching) return;
+    const id = setTimeout(() => setRunReattaching(false), 7000);
+    return () => clearTimeout(id);
+  }, [runReattaching, setRunReattaching]);
 
   // Adopt one-shot text staged from outside the composer (plan "Reject &
   // revise" seeds a revision prompt; the preview error panel stages a fix
@@ -426,14 +375,6 @@ export default function ChatPanel() {
   // assistant text / tool cards land, that note is stale, so we return null and
   // the strip falls back to its cycling whimsical words. (Mirrors the guard the
   // old in-stream thinking pill used.)
-  const inFlightProgress = useMemo<string | null>(() => {
-    const last = turns[turns.length - 1];
-    if (!last || last.complete) return null;
-    if (last.body.some((i) => i.kind !== "system")) return null;
-    const sys = [...last.body].reverse().find((i) => i.kind === "system");
-    return sys && sys.kind === "system" ? sys.content : null;
-  }, [turns]);
-
   // GRIPE 10 — single ghost-text follow-up suggestion (replaces the old
   // follow-up chips). The first suggestion of the most-recently completed turn
   // is offered as dimmed text overlaid on the empty composer; Tab (or a click)
@@ -924,9 +865,6 @@ export default function ChatPanel() {
             </ErrorBoundary>
           );
         })}
-        {/* The "agent working" indicator now lives as a pinned strip just
-            above the composer (see <WorkingStatus/> below) — Claude-Code style —
-            instead of an in-stream pill, so it stays put while output scrolls. */}
       </div>
 
       {/* Agent task list — collapsible, above the composer (shared component). */}
@@ -1028,6 +966,25 @@ export default function ChatPanel() {
           <span style={{ flex: 1 }}>
             Reconnected — your build kept running while you were away.
           </span>
+          <button
+            type="button"
+            onClick={() => setRunReattaching(false)}
+            title="Dismiss"
+            aria-label="Dismiss"
+            style={{
+              flex: "0 0 auto",
+              background: "transparent",
+              border: "none",
+              color: "inherit",
+              cursor: "pointer",
+              fontSize: 16,
+              lineHeight: 1,
+              padding: "0 2px",
+              opacity: 0.7,
+            }}
+          >
+            ×
+          </button>
         </div>
       )}
 
@@ -1042,12 +999,6 @@ export default function ChatPanel() {
             {installInProgress.command}
           </code>
         </div>
-      )}
-
-      {/* Pinned "working" strip — shown for the whole turn, but yields the
-          spotlight to the dedicated install / reattach banners above. */}
-      {busy && !installInProgress && !runReattaching && (
-        <WorkingStatus label={inFlightProgress} />
       )}
 
       <div

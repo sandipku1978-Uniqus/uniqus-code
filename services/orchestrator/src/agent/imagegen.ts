@@ -34,12 +34,22 @@ const DEFAULT_MODEL = "nano-banana-2";
 /**
  * Practical per-image USD estimates for the usage dashboard. Image output is
  * actually billed by output tokens at the image rate; these are per-image
- * approximations (Pro renders larger by default, so it's pricier) — an estimate,
- * NOT an exact invoice.
+ * approximations for the STANDARD (1K–2K) output tier the tool produces by
+ * default — an estimate, NOT an exact invoice. 4K output costs materially more
+ * (flash ≈ $0.15, pro ≈ $0.24), so a turn that renders 4K is under-counted here.
+ *
+ * Source: Google Gemini API image pricing, verified 2026-07-07. The prior
+ * $0.04 flash / $0.13 pro figures under-billed the DEFAULT model by ~40–70%
+ * (flash-3.1 is $0.067/img at 1K, not $0.04) — the single biggest per-image
+ * under-estimate. Pro is $0.134 at 1K–2K (was $0.13). Keep these dated and
+ * re-check when Google reprices the image models.
  */
 const PER_IMAGE_USD: Record<string, number> = {
-  "gemini-3.1-flash-image-preview": 0.04,
-  "gemini-3-pro-image-preview": 0.13,
+  // Nano Banana 2 (Gemini 3.1 Flash Image) — the default model. $0.067 at 1K.
+  "gemini-3.1-flash-image-preview": 0.067,
+  // Nano Banana Pro (Gemini 3 Pro Image) — $0.134 at 1K–2K, $0.24 at 4K.
+  "gemini-3-pro-image-preview": 0.134,
+  // Nano Banana (Gemini 2.5 Flash Image) — $0.039 at 1K (unchanged; verified).
   "gemini-2.5-flash-image": 0.039,
 };
 
@@ -168,7 +178,7 @@ export async function generateImage(opts: GenerateImageOpts): Promise<GenerateIm
   return {
     images,
     model: modelId,
-    estimated_cost_usd: (PER_IMAGE_USD[modelId] ?? 0.04) * images.length,
+    estimated_cost_usd: (PER_IMAGE_USD[modelId] ?? 0.067) * images.length,
     note: note.trim() || undefined,
   };
 }

@@ -39,7 +39,8 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:status.hetzner.com)",
       "WebFetch(domain:ai.google.dev)",
-      "WebFetch(domain:developers.openai.com)"
+      "WebFetch(domain:developers.openai.com)",
+      "WebFetch(domain:same.new)"
     ],
     "additionalDirectories": [
       "c:\\Users\\thech\\AppData\\Local\\Temp\\uniqus-shot",
