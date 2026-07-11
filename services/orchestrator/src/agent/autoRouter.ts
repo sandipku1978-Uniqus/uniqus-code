@@ -62,6 +62,25 @@ export interface AutoSignals {
 export interface PickOptions {
   /** Anthropic key for the Haiku tiebreak; omitted ⇒ heuristic-only. */
   anthropicKey?: string;
+  /** Privacy-safe timing/outcome hook for the optional classifier call. */
+  onClassifier?: (result: { timedOut: boolean; succeeded: boolean }) => void;
+  /** Billed classifier usage, including a response that arrives after timeout. */
+  onClassifierUsage?: (usage: {
+    provider: "anthropic";
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  }) => void;
+}
+
+const DEFAULT_CLASSIFIER_TIMEOUT_MS = 1_500;
+
+function classifierTimeoutMs(): number {
+  const configured = Number(process.env.AUTO_CLASSIFIER_TIMEOUT_MS);
+  if (!Number.isFinite(configured)) return DEFAULT_CLASSIFIER_TIMEOUT_MS;
+  return Math.max(250, Math.min(4_000, Math.round(configured)));
 }
 
 /** Which providers can we route to right now? (A key implies usable.) */
@@ -264,6 +283,7 @@ export function mapToModel(
 export interface AutoPick extends ResolvedModel {
   tier: "quick" | "standard" | "hard";
   vision: boolean;
+  source: "heuristic" | "classifier";
 }
 
 /**
@@ -276,15 +296,30 @@ export async function pickAutoModel(
   opts: PickOptions = {},
 ): Promise<AutoPick | null> {
   let tier = classifyTaskHeuristic(signals.userMessage);
+  let source: AutoPick["source"] = "heuristic";
 
   // Plan mode is reasoning-heavy by nature — resolve ambiguity toward the
   // stronger model rather than paying for a tiebreak.
   if (role === "plan" && tier === "ambiguous") tier = "hard";
 
   if (tier === "ambiguous") {
-    tier =
-      (await classifyTierLLM(signals.userMessage, signals.previousUserMessage, opts.anthropicKey)) ??
-      "standard";
+    const classified = await classifyTierLLM(
+      signals.userMessage,
+      signals.previousUserMessage,
+      opts.anthropicKey,
+      opts.onClassifier,
+      opts.onClassifierUsage,
+    );
+    if (classified) {
+      source = "classifier";
+      tier = classified;
+    } else {
+      // The classifier remains the ambiguous-case tiebreak. If it is absent,
+      // times out, or returns an invalid label, the actual decision is still
+      // the conservative heuristic default and should be attributed as such;
+      // the separate classifier call/timeout counters retain the failed attempt.
+      tier = "standard";
+    }
   }
 
   // `tier` is guaranteed non-ambiguous here — the block above resolved it.
@@ -295,7 +330,7 @@ export async function pickAutoModel(
     `[auto-router] ${role} → ${picked.provider}:${picked.model} ` +
       `(tier=${resolvedTier}${signals.hasImages ? ", vision" : ""})`,
   );
-  return { ...picked, tier: resolvedTier, vision: signals.hasImages };
+  return { ...picked, tier: resolvedTier, vision: signals.hasImages, source };
 }
 
 /**
@@ -307,6 +342,8 @@ async function classifyTierLLM(
   userMessage: string,
   previousUserMessage?: string,
   apiKey?: string,
+  onClassifier?: (result: { timedOut: boolean; succeeded: boolean }) => void,
+  onClassifierUsage?: PickOptions["onClassifierUsage"],
 ): Promise<"quick" | "standard" | "hard" | null> {
   if (!apiKey) return null;
   const system =
@@ -330,8 +367,16 @@ async function classifyTierLLM(
   }Request to classify:\n${userMessage.slice(0, 4000)}`;
   try {
     const client = new Anthropic({ apiKey });
+    const classifierModel = ensureAnthropic("classify");
+    const controller = new AbortController();
+    let usageReported = false;
+    const reportUsage = (usage: Parameters<NonNullable<PickOptions["onClassifierUsage"]>>[0]) => {
+      if (usageReported) return;
+      usageReported = true;
+      onClassifierUsage?.(usage);
+    };
     const call = client.messages.create({
-      model: ensureAnthropic("classify"),
+      model: classifierModel,
       max_tokens: 4,
       system,
       messages: [
@@ -340,23 +385,71 @@ async function classifyTierLLM(
         // the API 400s on a trailing-whitespace assistant turn).
         { role: "assistant", content: "Classification:" },
       ],
+    }, { signal: controller.signal }).then((response) => {
+      const usage = response.usage;
+      reportUsage({
+        provider: "anthropic",
+        model: classifierModel,
+        inputTokens: usage.input_tokens ?? 0,
+        outputTokens: usage.output_tokens ?? 0,
+        cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+        cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
+      });
+      return response;
     });
     // Cap the tiebreak so a slow classify call can't stall the turn start.
-    const response = await Promise.race([
-      call,
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), 4000)),
-    ]);
-    if (!response) return null;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const timeoutResult = new Promise<null>((resolve) => {
+      timeout = setTimeout(() => {
+        resolve(null);
+        controller.abort(new Error("routing classifier timeout"));
+      }, classifierTimeoutMs());
+    });
+    let response;
+    try {
+      response = await Promise.race([call, timeoutResult]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+    if (!response) {
+      // An aborted timeout may not carry authoritative provider usage. Record a
+      // conservative bounded estimate so cost-per-task does not silently omit
+      // the classifier simply because its response missed the latency budget.
+      reportUsage({
+        provider: "anthropic",
+        model: classifierModel,
+        inputTokens: Math.ceil((system.length + content.length) / 3.3),
+        outputTokens: 4,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      });
+      onClassifier?.({ timedOut: true, succeeded: false });
+      return null;
+    }
     const text = response.content
       .filter((b): b is Anthropic.TextBlock => b.type === "text")
       .map((b) => b.text)
       .join("")
       .toUpperCase();
-    if (text.includes("HARD")) return "hard";
-    if (text.includes("QUICK")) return "quick";
-    if (text.includes("STANDARD") || text.includes("ROUTINE")) return "standard";
+    if (text.includes("HARD")) {
+      onClassifier?.({ timedOut: false, succeeded: true });
+      return "hard";
+    }
+    if (text.includes("QUICK")) {
+      onClassifier?.({ timedOut: false, succeeded: true });
+      return "quick";
+    }
+    if (text.includes("STANDARD") || text.includes("ROUTINE")) {
+      onClassifier?.({ timedOut: false, succeeded: true });
+      return "standard";
+    }
+    onClassifier?.({ timedOut: false, succeeded: false });
     return null;
   } catch (err) {
+    const aborted =
+      err instanceof Error &&
+      (err.name === "AbortError" || err.message.includes("routing classifier timeout"));
+    onClassifier?.({ timedOut: aborted, succeeded: false });
     console.warn(
       `[auto-router] tiebreak classify failed; using heuristic default:`,
       err instanceof Error ? err.message : err,

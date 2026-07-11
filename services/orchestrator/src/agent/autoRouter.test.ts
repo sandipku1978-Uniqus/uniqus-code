@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { ProviderName } from "./providers/types.js";
 import {
   classifyTaskHeuristic,
@@ -6,6 +6,7 @@ import {
   availableProvidersFromKeys,
   turnReferencesImage,
   lastUserMessageText,
+  pickAutoModel,
 } from "./autoRouter.js";
 
 const set = (...p: ProviderName[]): Set<ProviderName> => new Set(p);
@@ -146,6 +147,36 @@ describe("mapToModel — multi-provider, cost-aware policy", () => {
     expect(mapToModel("hard", false, openaiOnly)).toBeNull();
     expect(mapToModel("quick", false, openaiOnly)).toBeNull();
     expect(mapToModel("standard", false, openaiOnly)).toBeNull();
+  });
+});
+
+describe("pickAutoModel attribution", () => {
+  it("attributes an unavailable classifier fallback to the heuristic default", async () => {
+    const picked = await pickAutoModel(
+      "agent",
+      {
+        userMessage: "Add recent orders with pagination",
+        hasImages: false,
+        availableProviders: ANTHROPIC_ONLY,
+      },
+      {},
+    );
+    expect(picked).toMatchObject({ tier: "standard", source: "heuristic" });
+  });
+
+  it("keeps plan-mode ambiguous work on its hard heuristic without classifying", async () => {
+    const onClassifier = vi.fn();
+    const picked = await pickAutoModel(
+      "plan",
+      {
+        userMessage: "Add recent orders with pagination",
+        hasImages: false,
+        availableProviders: ANTHROPIC_ONLY,
+      },
+      { onClassifier },
+    );
+    expect(picked).toMatchObject({ tier: "hard", source: "heuristic" });
+    expect(onClassifier).not.toHaveBeenCalled();
   });
 });
 

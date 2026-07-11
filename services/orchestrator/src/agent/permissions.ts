@@ -46,6 +46,7 @@ const READ_ONLY_TOOLS = new Set<string>([
   "list_background",
   "read_background_log",
   "todo_write",
+  "load_capabilities",
   "screenshot_preview",
   "interact_preview",
   // Vision bridge (reads an image, asks a vision model) — part of the verify

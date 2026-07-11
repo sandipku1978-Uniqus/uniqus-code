@@ -23,6 +23,7 @@ const SKIP_DIRS = new Set([
 const SKIP_FILES = new Set([".DS_Store", "Thumbs.db"]);
 const SKIP_EXTENSIONS = new Set([".pyc", ".log"]);
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
+const DELETE_BATCH_SIZE = 100;
 /**
  * Concurrency for {@link ProjectSync.hydrateFromStorage}. 8 is the sweet spot
  * we measured: above ~10 the Supabase Storage API starts returning 429s on
@@ -42,9 +43,16 @@ function shouldSync(relPath: string): boolean {
   return true;
 }
 
+function isMissingPath(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
 class ProjectSync {
   private manifest = new Map<string, number>(); // relPath → mtimeMs
-  private syncInFlight = false;
+  private syncInFlight: Promise<number> | null = null;
+  /** At most one follow-up walk is needed no matter how many callers coalesce. */
+  private syncAgain = false;
 
   constructor(
     private readonly sandboxDir: string,
@@ -53,10 +61,12 @@ class ProjectSync {
 
   /** Walk local sandbox and snapshot mtimes. Call after WS connect. */
   async initialize(): Promise<void> {
-    this.manifest.clear();
-    await this.walkLocal(this.sandboxDir, async (rel, mtimeMs) => {
-      this.manifest.set(rel, mtimeMs);
+    const next = new Map<string, number>();
+    const complete = await this.walkLocal(this.sandboxDir, async (rel, mtimeMs) => {
+      next.set(rel, mtimeMs);
     });
+    if (!complete) throw new Error("project sync initialization walk was incomplete");
+    this.manifest = next;
   }
 
   isLocalEmpty(): boolean {
@@ -116,8 +126,14 @@ class ProjectSync {
     let stat;
     try {
       stat = await fs.stat(fullLocal);
-    } catch {
-      return; // file doesn't exist (deleted between write and sync)
+    } catch (error) {
+      if (isMissingPath(error) && this.manifest.has(relPath)) {
+        await storage.remove(this.projectId, [relPath]);
+        this.manifest.delete(relPath);
+        return;
+      }
+      if (isMissingPath(error)) return;
+      throw error;
     }
     if (stat.size > MAX_FILE_SIZE) return;
     const content = await fs.readFile(fullLocal);
@@ -128,25 +144,98 @@ class ProjectSync {
   /**
    * Walk local sandbox; push files with mtime newer than our manifest.
    * Used after run_command (which may have created/modified arbitrary files).
-   * Coalesces concurrent calls — only one walk runs at a time per project.
+   * Concurrent callers share one pass sequence. A call arriving mid-walk asks
+   * for one coalesced follow-up pass, which catches files created after the
+   * first directory snapshot; every caller awaits that follow-up. Upload errors
+   * are reported only after the walk finishes, while successful paths still
+   * advance the manifest and failed paths remain dirty for a later retry.
    */
-  async syncChanges(): Promise<number> {
-    if (this.syncInFlight) return 0;
-    this.syncInFlight = true;
-    let count = 0;
+  syncChanges(): Promise<number> {
+    if (this.syncInFlight) {
+      this.syncAgain = true;
+      return this.syncInFlight;
+    }
+    const run = this.runSyncPasses();
+    this.syncInFlight = run;
+    return run;
+  }
+
+  private async runSyncPasses(): Promise<number> {
+    let total = 0;
+    let lastFailure: unknown = null;
     try {
-      await this.walkLocal(this.sandboxDir, async (rel, mtimeMs) => {
-        const last = this.manifest.get(rel);
-        if (last !== undefined && mtimeMs <= last) return;
+      do {
+        this.syncAgain = false;
         try {
-          await this.syncFile(rel);
-          count++;
-        } catch (err) {
-          console.error(`syncChanges ${rel} failed:`, err);
+          total += await this.runSyncPass();
+          lastFailure = null;
+        } catch (error) {
+          lastFailure = error;
         }
-      });
+      } while (this.syncAgain);
+      if (lastFailure) throw lastFailure;
+      return total;
     } finally {
-      this.syncInFlight = false;
+      this.syncInFlight = null;
+    }
+  }
+
+  private async runSyncPass(): Promise<number> {
+    let count = 0;
+    const failures: Error[] = [];
+    const seen = new Set<string>();
+    const complete = await this.walkLocal(this.sandboxDir, async (rel, mtimeMs) => {
+      const last = this.manifest.get(rel);
+      if (last !== undefined && mtimeMs <= last) return;
+      try {
+        await this.syncFile(rel);
+        count++;
+      } catch (err) {
+        console.error(`syncChanges ${rel} failed:`, err);
+        const detail = err instanceof Error ? err.message : String(err);
+        failures.push(new Error(`${rel}: ${detail}`, { cause: err }));
+      }
+    }, seen);
+    if (!complete) {
+      failures.push(
+        new Error("local file walk was incomplete; remote deletion reconciliation was skipped"),
+      );
+    } else {
+      const missing: string[] = [];
+      for (const rel of this.manifest.keys()) {
+        if (seen.has(rel)) continue;
+        const full = path.resolve(this.sandboxDir, rel);
+        try {
+          const stat = await fs.stat(full);
+          if (stat.isFile()) continue;
+        } catch (error) {
+          if (!isMissingPath(error)) {
+            const detail = error instanceof Error ? error.message : String(error);
+            failures.push(new Error(`${rel}: deletion check failed: ${detail}`, { cause: error }));
+            continue;
+          }
+        }
+        missing.push(rel);
+      }
+      for (let i = 0; i < missing.length; i += DELETE_BATCH_SIZE) {
+        const batch = missing.slice(i, i + DELETE_BATCH_SIZE);
+        try {
+          await storage.remove(this.projectId, batch);
+          for (const rel of batch) this.manifest.delete(rel);
+          count += batch.length;
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          failures.push(
+            new Error(`delete batch (${batch.length} files): ${detail}`, { cause: error }),
+          );
+        }
+      }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        `syncChanges failed for ${failures.length} file${failures.length === 1 ? "" : "s"}`,
+      );
     }
     return count;
   }
@@ -154,28 +243,34 @@ class ProjectSync {
   private async walkLocal(
     dir: string,
     visit: (relPath: string, mtimeMs: number) => Promise<void>,
-  ): Promise<void> {
+    seen?: Set<string>,
+  ): Promise<boolean> {
     let entries;
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
     } catch {
-      return;
+      return false;
     }
+    let complete = true;
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
       const rel = path.relative(this.sandboxDir, full).replaceAll(path.sep, "/");
       if (!shouldSync(rel)) continue;
       if (entry.isDirectory()) {
-        await this.walkLocal(full, visit);
+        if (!(await this.walkLocal(full, visit, seen))) complete = false;
       } else if (entry.isFile()) {
         try {
           const stat = await fs.stat(full);
+          seen?.add(rel);
           if (stat.size <= MAX_FILE_SIZE) {
             await visit(rel, stat.mtimeMs);
           }
-        } catch {}
+        } catch {
+          complete = false;
+        }
       }
     }
+    return complete;
   }
 }
 

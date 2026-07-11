@@ -3,8 +3,10 @@ import {
   MODEL_CATALOG,
   MODEL_PRICING,
   DEFAULT_PRICE,
+  clampThinkingEffort,
   estimateCostUsd,
   estimateTurnCostUsd,
+  thinkingEffortsForModel,
 } from "@uniqus/api-types";
 
 // Guards the per-run / per-account cost estimate (C5). A catalogued model that
@@ -31,6 +33,52 @@ describe("MODEL_PRICING completeness", () => {
       expect(p.input).toBeGreaterThan(0);
       expect(p.output).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("GPT-5.6 catalog integration", () => {
+  it("offers Sol and Terra with provider-native model ids", () => {
+    expect(MODEL_CATALOG).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "openai:gpt-5.6-sol",
+          model: "gpt-5.6-sol",
+          label: "GPT-5.6 Sol",
+        }),
+        expect.objectContaining({
+          id: "openai:gpt-5.6-terra",
+          model: "gpt-5.6-terra",
+          label: "GPT-5.6 Terra",
+        }),
+      ]),
+    );
+  });
+
+  it("exposes max reasoning only for OpenAI models that actually support it", () => {
+    expect(thinkingEffortsForModel("openai:gpt-5.6-sol")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    expect(thinkingEffortsForModel("openai:gpt-5.6-terra")).toContain("max");
+    expect(thinkingEffortsForModel("openai:gpt-5.5")).not.toContain("max");
+    expect(clampThinkingEffort("max", "openai:gpt-5.6-sol")).toBe("max");
+    expect(clampThinkingEffort("max", "openai:gpt-5.5")).toBe("xhigh");
+  });
+
+  it("prices both models including OpenAI's >272K long-context band", () => {
+    expect(MODEL_PRICING["gpt-5.6-sol"]).toEqual({
+      input: 5,
+      output: 30,
+      longContext: { thresholdTokens: 272_000, above: { input: 10, output: 45 } },
+    });
+    expect(MODEL_PRICING["gpt-5.6-terra"]).toEqual({
+      input: 2.5,
+      output: 15,
+      longContext: { thresholdTokens: 272_000, above: { input: 5, output: 22.5 } },
+    });
   });
 });
 

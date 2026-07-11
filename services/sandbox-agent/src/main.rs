@@ -12,7 +12,9 @@
 // Endpoints:
 //   GET  /health                     → { ok: true, kind: "rust" }
 //   GET  /fs/file?path=…             → { content } (+&encoding=base64 → { content, encoding: "base64" };
-//                                       +&offset=&limit= line range → { content, total_lines })
+//                                       +&offset=&limit= line range; +&max_bytes= response cap;
+//                                       +&head_tail=1 retains both ends of a full read;
+//                                       text responses include total/returned bytes + truncated)
 //   PUT  /fs/file                    body: { path, content, encoding? }
 //   GET  /fs/manifest                → { files: [{ path, size, mtime_ms }] } (storage-sync exclusions applied)
 //   POST /fs/edit                    body: { path, old_string, new_string }
@@ -25,13 +27,14 @@
 
 use regex::{Regex, RegexBuilder};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{Shutdown, TcpStream};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -40,6 +43,20 @@ use tiny_http::{Header, Method, Request, Response, Server};
 const SANDBOX_DIR_DEFAULT: &str = "/sandbox";
 const HALF_MAX: usize = 8 * 1024;
 const MAX_LOG: usize = 64 * 1024;
+/// Absolute text-read ceiling. The orchestrator asks for a smaller 30 KiB
+/// window on model tool calls, while internal predeploy/diff readers retain the
+/// established 256 KiB window. Both are enforced before the RPC response.
+const MAX_TEXT_READ_BYTES: usize = 256 * 1024;
+const READ_GAP_RESERVE_BYTES: usize = 256;
+/// Search keeps a bounded first+tail window. The gap/status annotations fit in
+/// the remaining space below the 32 KiB tool-result ceiling.
+const GREP_HEAD_BYTES: usize = 20 * 1024;
+const GREP_TAIL_BYTES: usize = 8 * 1024;
+const MAX_GREP_LINE_BYTES: usize = 7 * 1024;
+/// 0 unknown, 1 available, 2 unavailable. Avoid a failed exec on every search
+/// in the dependency-free production rootfs while still preferring rg when a
+/// custom image provides it.
+static RG_AVAILABILITY: AtomicU8 = AtomicU8::new(0);
 
 fn sandbox_dir() -> PathBuf {
     PathBuf::from(std::env::var("UNIQUS_SANDBOX_DIR").unwrap_or_else(|_| SANDBOX_DIR_DEFAULT.into()))
@@ -384,31 +401,64 @@ fn handle(
                         &json!({ "content": base64_encode(&bytes), "encoding": "base64" }),
                     ))
                 } else {
-                    let content = fs::read_to_string(&full)
-                        .map_err(|e| AgentError::Io(format!("read {}: {}", p, e)))?;
-                    // Line-range read: slice in-guest so we don't ship a huge
-                    // file across RPC just to window it. We split on '\n' (a
-                    // trailing newline yields a phantom empty last line) so the
-                    // total_lines count matches the orchestrator/host counting.
+                    let response_cap = query
+                        .get("max_bytes")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .map(|n| n.clamp(1, MAX_TEXT_READ_BYTES as i64) as usize)
+                        .unwrap_or(MAX_TEXT_READ_BYTES);
+                    let head_tail = query
+                        .get("head_tail")
+                        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                        .unwrap_or(false);
                     let offset = query.get("offset").and_then(|s| s.parse::<usize>().ok());
                     let limit = query.get("limit").and_then(|s| s.parse::<usize>().ok());
                     if offset.is_some() || limit.is_some() {
-                        let lines: Vec<&str> = content.split('\n').collect();
-                        let total = lines.len();
+                        // Range reads remain line-addressable. The selected
+                        // range is capped before serialization; metadata tells
+                        // the host exactly what was selected and returned.
                         let start = offset.unwrap_or(1).max(1);
                         let count = limit.unwrap_or(2000).max(1);
-                        let sliced = if start > total {
-                            String::new()
-                        } else {
-                            let end = (start - 1 + count).min(total);
-                            lines[start - 1..end].join("\n")
-                        };
+                        let range = read_bounded_line_range(
+                            &full,
+                            &p,
+                            start,
+                            count,
+                            response_cap,
+                        )?;
                         Ok(json_response(
                             200,
-                            &json!({ "content": sliced, "total_lines": total }),
+                            &json!({
+                                "content": range.content,
+                                "total_lines": range.total_lines,
+                                "known_lines": range.known_lines,
+                                "has_more": range.has_more,
+                                "total_bytes": range.total_bytes,
+                                "returned_bytes": range.returned_bytes,
+                                "selected_bytes": range.selected_bytes,
+                                "truncated": range.truncated,
+                                "range_start": start,
+                                "range_end": range.returned_end_line,
+                                "requested_end": range.requested_end_line,
+                            }),
                         ))
                     } else {
-                        Ok(json_response(200, &json!({ "content": content })))
+                        // Default reads are capped in-guest so a multi-megabyte
+                        // file never crosses the VM RPC only to be truncated by
+                        // the agent loop. Binary sync uses the separate base64
+                        // capability above and deliberately remains uncapped.
+                        let read = read_text_window(&full, &p, response_cap, head_tail)?;
+                        Ok(json_response(
+                            200,
+                            &json!({
+                                "content": read.content,
+                                "total_bytes": read.total_bytes,
+                                "returned_bytes": read.returned_bytes,
+                                "head_bytes": read.head_bytes,
+                                "tail_bytes": read.tail_bytes,
+                                "omitted_bytes": read.omitted_bytes,
+                                "truncated": read.truncated,
+                            }),
+                        ))
                     }
                 }
             }
@@ -482,7 +532,16 @@ fn handle(
                     .unwrap_or(false);
                 let literal = body.get("literal").and_then(|v| v.as_bool()).unwrap_or(false);
                 let matches = grep_walk(&pattern, sub.as_deref(), ci, literal)?;
-                Ok(json_response(200, &json!({ "matches": matches })))
+                Ok(json_response(200, &json!({
+                    "matches": matches.matches,
+                    "total_matches": matches.total_matches,
+                    "returned_matches": matches.returned_matches,
+                    "omitted_matches": matches.omitted_matches,
+                    "head_matches": matches.head_matches,
+                    "tail_matches": matches.tail_matches,
+                    "truncated": matches.truncated,
+                    "line_truncations": matches.line_truncations,
+                })))
             }
             (Method::Post, "/exec/run") => {
                 let body = read_body(&mut req)?;
@@ -754,6 +813,279 @@ fn truncate_for_response(s: &str) -> String {
     )
 }
 
+struct TextWindowRead {
+    content: String,
+    total_bytes: u64,
+    returned_bytes: usize,
+    head_bytes: usize,
+    tail_bytes: usize,
+    omitted_bytes: u64,
+    truncated: bool,
+}
+
+/// Read a bounded UTF-8 window from a text file. Model-facing full reads retain
+/// both the head and true file tail; internal callers keep the legacy head-only
+/// behavior. Binary storage synchronization uses the separate base64 path.
+fn read_text_window(
+    full: &Path,
+    display_path: &str,
+    cap: usize,
+    head_tail: bool,
+) -> Result<TextWindowRead, AgentError> {
+    let total_bytes = fs::metadata(full)
+        .map_err(|e| AgentError::Io(format!("stat {}: {}", display_path, e)))?
+        .len();
+    let use_head_tail = head_tail
+        && total_bytes > cap as u64
+        && cap >= READ_GAP_RESERVE_BYTES.saturating_mul(2);
+    let data_budget = if use_head_tail {
+        cap - READ_GAP_RESERVE_BYTES
+    } else {
+        cap
+    };
+    let head_budget = if use_head_tail {
+        data_budget.saturating_mul(2) / 3
+    } else {
+        data_budget
+    };
+    let tail_budget = if use_head_tail {
+        data_budget - head_budget
+    } else {
+        0
+    };
+
+    let mut file = File::open(full)
+        .map_err(|e| AgentError::Io(format!("read {}: {}", display_path, e)))?;
+    let head_request = (head_budget + 3).min(total_bytes as usize);
+    let mut head_buffer = Vec::with_capacity(head_request);
+    Read::by_ref(&mut file)
+        .take(head_request as u64)
+        .read_to_end(&mut head_buffer)
+        .map_err(|e| AgentError::Io(format!("read {}: {}", display_path, e)))?;
+    let mut head_end = head_budget.min(head_buffer.len());
+    while head_end > 0
+        && head_end < head_buffer.len()
+        && (head_buffer[head_end] & 0b1100_0000) == 0b1000_0000
+    {
+        head_end -= 1;
+    }
+    let head = std::str::from_utf8(&head_buffer[..head_end])
+        .map_err(|e| {
+            AgentError::Io(format!(
+                "read {}: stream did not contain valid UTF-8: {}",
+                display_path, e
+            ))
+        })?
+        .to_string();
+    let head_bytes = head.len();
+
+    if !use_head_tail {
+        let omitted_bytes = total_bytes.saturating_sub(head_end as u64);
+        return Ok(TextWindowRead {
+            content: head,
+            total_bytes,
+            returned_bytes: head_bytes,
+            head_bytes,
+            tail_bytes: 0,
+            omitted_bytes,
+            truncated: omitted_bytes > 0,
+        });
+    }
+
+    let tail_offset = total_bytes.saturating_sub(tail_budget as u64);
+    file.seek(SeekFrom::Start(tail_offset))
+        .map_err(|e| AgentError::Io(format!("seek {}: {}", display_path, e)))?;
+    let mut tail_buffer = Vec::with_capacity(tail_budget);
+    file.take(tail_budget as u64)
+        .read_to_end(&mut tail_buffer)
+        .map_err(|e| AgentError::Io(format!("read {}: {}", display_path, e)))?;
+    let mut tail_start = 0usize;
+    while tail_start < tail_buffer.len()
+        && (tail_buffer[tail_start] & 0b1100_0000) == 0b1000_0000
+    {
+        tail_start += 1;
+    }
+    let tail_source = &tail_buffer[tail_start..];
+    let tail = std::str::from_utf8(tail_source)
+        .map_err(|e| {
+            AgentError::Io(format!(
+                "read {}: stream did not contain valid UTF-8: {}",
+                display_path, e
+            ))
+        })?
+        .to_string();
+    let tail_bytes = tail.len();
+    let omitted_bytes = total_bytes
+        .saturating_sub(head_end as u64)
+        .saturating_sub(tail_source.len() as u64);
+    let marker = format!(
+        "\n\n[... {} bytes omitted from the middle ...]\n\n",
+        omitted_bytes
+    );
+    let content = format!("{}{}{}", head, marker, tail);
+    let returned_bytes = content.len();
+    Ok(TextWindowRead {
+        content,
+        total_bytes,
+        returned_bytes,
+        head_bytes,
+        tail_bytes,
+        omitted_bytes,
+        truncated: omitted_bytes > 0,
+    })
+}
+
+struct BoundedLineRange {
+    content: String,
+    total_bytes: u64,
+    total_lines: Option<usize>,
+    known_lines: usize,
+    has_more: bool,
+    selected_bytes: usize,
+    returned_bytes: usize,
+    returned_end_line: Option<usize>,
+    requested_end_line: Option<usize>,
+    truncated: bool,
+}
+
+/// Stream a 1-based line window while retaining only its bounded prefix.
+/// Stop as soon as the requested window or byte cap is resolved so an early
+/// range read does not scan the rest of a multi-gigabyte file for line count.
+fn read_bounded_line_range(
+    full: &Path,
+    display_path: &str,
+    start: usize,
+    count: usize,
+    cap: usize,
+) -> Result<BoundedLineRange, AgentError> {
+    let desired_end_line = start.saturating_add(count.saturating_sub(1));
+    let store_limit = cap.saturating_add(3);
+    let total_bytes = fs::metadata(full)
+        .map_err(|e| AgentError::Io(format!("stat {}: {}", display_path, e)))?
+        .len();
+    let file = File::open(full)
+        .map_err(|e| AgentError::Io(format!("read {}: {}", display_path, e)))?;
+    let mut reader = BufReader::new(file);
+    let mut out: Vec<u8> = Vec::with_capacity(store_limit);
+    let mut selected_bytes = 0usize;
+    let mut line_no = 1usize;
+    let mut stopped_early = false;
+
+    'scan: loop {
+        let consumed = {
+            let chunk = reader
+                .fill_buf()
+                .map_err(|e| AgentError::Io(format!("read {}: {}", display_path, e)))?;
+            if chunk.is_empty() {
+                break;
+            }
+            let mut pos = 0usize;
+            while pos < chunk.len() {
+                let newline = chunk[pos..]
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map(|relative| pos + relative);
+                let end = newline.unwrap_or(chunk.len());
+                if line_no >= start && line_no <= desired_end_line {
+                    append_range_bytes(
+                        &mut out,
+                        &mut selected_bytes,
+                        &chunk[pos..end],
+                        store_limit,
+                    );
+                    if out.len() >= store_limit {
+                        stopped_early = true;
+                        break 'scan;
+                    }
+                }
+                let Some(newline) = newline else {
+                    break;
+                };
+                if line_no >= start && line_no < desired_end_line {
+                    append_range_bytes(
+                        &mut out,
+                        &mut selected_bytes,
+                        &chunk[newline..newline + 1],
+                        store_limit,
+                    );
+                    if out.len() >= store_limit {
+                        stopped_early = true;
+                        break 'scan;
+                    }
+                }
+                let completed_line = line_no;
+                line_no = line_no.saturating_add(1);
+                pos = newline + 1;
+                if completed_line >= desired_end_line {
+                    stopped_early = true;
+                    break 'scan;
+                }
+            }
+            chunk.len()
+        };
+        reader.consume(consumed);
+    }
+
+    let total_lines = (!stopped_early).then_some(line_no);
+    let known_lines = line_no;
+    let requested_end_line = if total_lines.is_none() {
+        Some(desired_end_line)
+    } else if start > known_lines {
+        None
+    } else {
+        Some(desired_end_line.min(known_lines))
+    };
+    let mut source_end = cap.min(out.len());
+    while source_end > 0
+        && source_end < out.len()
+        && (out[source_end] & 0b1100_0000) == 0b1000_0000
+    {
+        source_end -= 1;
+    }
+    let content = std::str::from_utf8(&out[..source_end])
+        .map_err(|e| {
+            AgentError::Io(format!(
+                "read {}: stream did not contain valid UTF-8: {}",
+                display_path, e
+            ))
+        })?
+        .to_string();
+    let returned_end_line = requested_end_line.map(|requested_end| {
+        let returned_newlines = out[..source_end]
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count();
+        requested_end.min(start.saturating_add(returned_newlines))
+    });
+    let returned_bytes = content.len();
+    Ok(BoundedLineRange {
+        content,
+        total_bytes,
+        total_lines,
+        known_lines,
+        has_more: stopped_early,
+        selected_bytes,
+        returned_bytes,
+        returned_end_line,
+        requested_end_line,
+        truncated: selected_bytes > source_end,
+    })
+}
+
+fn append_range_bytes(
+    out: &mut Vec<u8>,
+    selected_bytes: &mut usize,
+    bytes: &[u8],
+    store_limit: usize,
+) {
+    *selected_bytes = selected_bytes.saturating_add(bytes.len());
+    if out.len() >= store_limit {
+        return;
+    }
+    let keep = bytes.len().min(store_limit - out.len());
+    out.extend_from_slice(&bytes[..keep]);
+}
+
 /// /fs/manifest walk (C-18 VM→host pull). The skip list mirrors the
 /// orchestrator's storage-sync exclusions (storage/sync.ts SKIP_DIRS) so the
 /// pull diff and the Storage push agree on what counts as project state.
@@ -855,7 +1187,7 @@ fn grep_walk(
     sub: Option<&str>,
     ci: bool,
     literal: bool,
-) -> Result<String, AgentError> {
+) -> Result<GrepOutput, AgentError> {
     let mut fell_back = false;
     let matcher = if literal {
         literal_matcher(pattern, ci)
@@ -873,21 +1205,270 @@ fn grep_walk(
         Some(p) if !p.is_empty() => resolve_sandbox(p)?,
         _ => root.clone(),
     };
-    let mut out: Vec<String> = Vec::new();
-    walk(&target, &root, &matcher, &mut out);
-    let note = if fell_back {
-        "[pattern is not a valid regex — searched as a literal substring]\n"
-    } else {
-        ""
-    };
-    Ok(if out.is_empty() {
-        format!("{}(no matches)", note)
-    } else {
-        format!("{}{}", note, out.join("\n"))
-    })
+    // Prefer ripgrep when the guest image happens to provide it, but never
+    // assume that dependency exists. Spawn/parse/regex incompatibilities fall
+    // back to the equivalent built-in walker below.
+    let effective_literal = matches!(matcher, Matcher::Literal { .. });
+    let results = grep_with_ripgrep(pattern, &target, &root, ci, effective_literal)
+        .unwrap_or_else(|| {
+            let mut bounded = BoundedMatches::new();
+            walk(&target, &root, &matcher, &mut bounded);
+            bounded
+        });
+    Ok(results.finish(fell_back))
 }
 
-fn walk(dir: &Path, root: &Path, re: &Matcher, out: &mut Vec<String>) {
+struct BoundedMatches {
+    head: Vec<String>,
+    tail: VecDeque<String>,
+    head_bytes: usize,
+    tail_bytes: usize,
+    collecting_head: bool,
+    total_matches: usize,
+    line_truncations: usize,
+}
+
+struct GrepOutput {
+    matches: String,
+    total_matches: usize,
+    returned_matches: usize,
+    omitted_matches: usize,
+    head_matches: usize,
+    tail_matches: usize,
+    truncated: bool,
+    line_truncations: usize,
+}
+
+impl BoundedMatches {
+    fn new() -> Self {
+        Self {
+            head: Vec::new(),
+            tail: VecDeque::new(),
+            head_bytes: 0,
+            tail_bytes: 0,
+            collecting_head: true,
+            total_matches: 0,
+            line_truncations: 0,
+        }
+    }
+
+    fn push(&mut self, line: String) {
+        self.total_matches = self.total_matches.saturating_add(1);
+        let (line, shortened) = cap_grep_line(&line);
+        if shortened {
+            self.line_truncations = self.line_truncations.saturating_add(1);
+        }
+        let stored_bytes = line.len().saturating_add(1);
+        if self.collecting_head
+            && self.head_bytes.saturating_add(stored_bytes) <= GREP_HEAD_BYTES
+        {
+            self.head_bytes += stored_bytes;
+            self.head.push(line);
+            return;
+        }
+
+        self.collecting_head = false;
+        while self.tail_bytes.saturating_add(stored_bytes) > GREP_TAIL_BYTES {
+            let Some(dropped) = self.tail.pop_front() else {
+                break;
+            };
+            self.tail_bytes = self.tail_bytes.saturating_sub(dropped.len().saturating_add(1));
+        }
+        if stored_bytes <= GREP_TAIL_BYTES {
+            self.tail_bytes += stored_bytes;
+            self.tail.push_back(line);
+        }
+    }
+
+    fn finish(self, fell_back: bool) -> GrepOutput {
+        let head_matches = self.head.len();
+        let tail_matches = self.tail.len();
+        let returned_matches = head_matches + tail_matches;
+        let omitted_matches = self.total_matches.saturating_sub(returned_matches);
+        let truncated = omitted_matches > 0 || self.line_truncations > 0;
+        let prefix = if fell_back {
+            "[pattern is not a valid regex — searched as a literal substring]\n"
+        } else {
+            ""
+        };
+
+        let mut body = String::new();
+        if self.total_matches == 0 {
+            body.push_str("(no matches)");
+        } else {
+            body.push_str(&self.head.join("\n"));
+            if omitted_matches > 0 {
+                if !body.is_empty() {
+                    body.push('\n');
+                }
+                body.push_str(&format!(
+                    "[... {} middle matches omitted from the bounded guest response ...]",
+                    omitted_matches
+                ));
+            }
+            if !self.tail.is_empty() {
+                if !body.is_empty() {
+                    body.push('\n');
+                }
+                body.push_str(&self.tail.into_iter().collect::<Vec<_>>().join("\n"));
+            }
+        }
+
+        if omitted_matches > 0 {
+            body.push_str(&format!(
+                "\n\n[search truncated: showing first {} and last {} of {} matches ({} omitted). Narrow the pattern or path.]",
+                head_matches, tail_matches, self.total_matches, omitted_matches
+            ));
+        }
+        if self.line_truncations > 0 {
+            body.push_str(&format!(
+                "\n\n[{} matching line(s) shortened to {} bytes each.]",
+                self.line_truncations, MAX_GREP_LINE_BYTES
+            ));
+        }
+
+        GrepOutput {
+            matches: format!("{}{}", prefix, body),
+            total_matches: self.total_matches,
+            returned_matches,
+            omitted_matches,
+            head_matches,
+            tail_matches,
+            truncated,
+            line_truncations: self.line_truncations,
+        }
+    }
+}
+
+fn cap_grep_line(line: &str) -> (String, bool) {
+    if line.len() <= MAX_GREP_LINE_BYTES {
+        return (line.to_string(), false);
+    }
+    const MARKER: &str = " ... [matching line truncated]";
+    let budget = MAX_GREP_LINE_BYTES.saturating_sub(MARKER.len());
+    let end = floor_boundary(line, budget);
+    (format!("{}{}", &line[..end], MARKER), true)
+}
+
+/// Stream ripgrep's JSON events into the same bounded collector as the fallback
+/// walker. `None` means rg was unavailable or could not preserve the requested
+/// semantics, so the caller transparently uses the built-in search.
+fn grep_with_ripgrep(
+    pattern: &str,
+    target: &Path,
+    root: &Path,
+    ci: bool,
+    literal: bool,
+) -> Option<BoundedMatches> {
+    if RG_AVAILABILITY.load(Ordering::Relaxed) == 2 {
+        return None;
+    }
+    let target_arg = target
+        .strip_prefix(root)
+        .ok()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    // The legacy walker skips hidden/node_modules ENTRIES, but an explicitly
+    // selected target beneath one of those directories is still searchable.
+    // rg globs would exclude that target itself, so use the walker for this
+    // uncommon case to preserve the existing policy exactly.
+    if target_arg.components().any(|component| match component {
+        Component::Normal(name) => {
+            let name = name.to_string_lossy();
+            name == "node_modules" || name.starts_with('.')
+        }
+        _ => false,
+    }) {
+        return None;
+    }
+    let mut command = Command::new("rg");
+    command
+        .current_dir(root)
+        .args([
+            "--json",
+            "--no-config",
+            "--no-ignore",
+            "--hidden",
+            "--glob",
+            "!**/node_modules",
+            "--glob",
+            "!**/node_modules/**",
+            "--glob",
+            "!**/.*",
+            "--glob",
+            "!**/.*/**",
+            "--color=never",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if ci {
+        command.arg("--ignore-case");
+    }
+    if literal {
+        command.arg("--fixed-strings");
+    }
+    command.arg("--").arg(pattern).arg(target_arg);
+
+    let mut child = match command.spawn() {
+        Ok(child) => {
+            RG_AVAILABILITY.store(1, Ordering::Relaxed);
+            child
+        }
+        Err(err) => {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                RG_AVAILABILITY.store(2, Ordering::Relaxed);
+            }
+            return None;
+        }
+    };
+    let stdout = child.stdout.take()?;
+    let mut bounded = BoundedMatches::new();
+    let mut parse_failed = false;
+    for line in BufReader::new(stdout).lines() {
+        let Ok(line) = line else {
+            parse_failed = true;
+            break;
+        };
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            parse_failed = true;
+            break;
+        };
+        if event.get("type").and_then(Value::as_str) != Some("match") {
+            continue;
+        }
+        let data = &event["data"];
+        let Some(rel) = data["path"]["text"].as_str() else {
+            parse_failed = true;
+            break;
+        };
+        let Some(line_no) = data["line_number"].as_u64() else {
+            parse_failed = true;
+            break;
+        };
+        let Some(source) = data["lines"]["text"].as_str() else {
+            parse_failed = true;
+            break;
+        };
+        let rel = rel.strip_prefix("./").unwrap_or(rel);
+        bounded.push(format!("{}:{}: {}", rel, line_no, source.trim()));
+    }
+    if parse_failed {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+    let status = child.wait().ok()?;
+    if !matches!(status.code(), Some(0) | Some(1)) {
+        return None;
+    }
+    Some(bounded)
+}
+
+fn walk(dir: &Path, root: &Path, re: &Matcher, out: &mut BoundedMatches) {
+    if fs::metadata(dir).map(|meta| meta.is_file()).unwrap_or(false) {
+        scan_grep_file(dir, root, re, out);
+        return;
+    }
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -907,20 +1488,27 @@ fn walk(dir: &Path, root: &Path, re: &Matcher, out: &mut Vec<String>) {
             walk(&full, root, re, out);
             continue;
         }
-        let text = match fs::read_to_string(&full) {
-            Ok(t) => t,
-            Err(_) => continue, // binary or unreadable
+        scan_grep_file(&full, root, re, out);
+    }
+}
+
+fn scan_grep_file(full: &Path, root: &Path, re: &Matcher, out: &mut BoundedMatches) {
+    let file = match File::open(full) {
+        Ok(file) => file,
+        Err(_) => return, // binary or unreadable
+    };
+    for (i, line) in BufReader::new(file).lines().enumerate() {
+        let Ok(line) = line else {
+            break; // invalid UTF-8 or unreadable: preserve old skip behavior
         };
-        for (i, line) in text.lines().enumerate() {
-            if re.is_match(line) {
-                let rel = full.strip_prefix(root).unwrap_or(&full);
-                out.push(format!(
-                    "{}:{}: {}",
-                    rel.display(),
-                    i + 1,
-                    line.trim()
-                ));
-            }
+        if re.is_match(&line) {
+            let rel = full.strip_prefix(root).unwrap_or(full);
+            out.push(format!(
+                "{}:{}: {}",
+                rel.display(),
+                i + 1,
+                line.trim()
+            ));
         }
     }
 }
@@ -1393,6 +1981,138 @@ mod tests {
         assert_eq!(ceil_boundary(s, 2), 4);
         assert_eq!(floor_boundary(s, 99), s.len());
         assert_eq!(ceil_boundary(s, 99), s.len());
+    }
+
+    #[test]
+    fn bounded_full_read_keeps_utf8_head_and_true_tail() {
+        let file = std::env::temp_dir().join(format!(
+            "uniqus-read-window-test-{}",
+            std::process::id()
+        ));
+        let content = format!("HEAD→\n{}\nTAIL→", "x".repeat(40 * 1024));
+        fs::write(&file, content).unwrap();
+
+        let read = read_text_window(&file, "test.txt", 30 * 1024, true).unwrap();
+        assert!(read.truncated);
+        assert!(read.content.starts_with("HEAD→"));
+        assert!(read.content.ends_with("TAIL→"));
+        assert!(read.content.contains("bytes omitted from the middle"));
+        assert!(read.head_bytes > read.tail_bytes);
+        assert!(read.tail_bytes > 0);
+        assert!(read.returned_bytes <= 30 * 1024);
+
+        let head_only = read_text_window(&file, "test.txt", 30 * 1024, false).unwrap();
+        assert_eq!(head_only.tail_bytes, 0);
+        assert!(!head_only.content.contains("TAIL→"));
+
+        fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn bounded_line_range_preserves_coordinates_and_reports_truncation() {
+        let content = (1..=20)
+            .map(|n| format!("line-{n}-{}", "x".repeat(20)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let file = std::env::temp_dir().join(format!(
+            "uniqus-range-window-test-{}",
+            std::process::id()
+        ));
+        fs::write(&file, &content).unwrap();
+        let range = read_bounded_line_range(&file, "range.txt", 3, 10, 80).unwrap();
+        assert_eq!(range.total_lines, None);
+        assert!(range.known_lines >= 3);
+        assert!(range.known_lines < 20);
+        assert!(range.has_more);
+        assert_eq!(range.total_bytes, content.len() as u64);
+        assert_eq!(range.requested_end_line, Some(12));
+        assert!(range.returned_end_line.unwrap() < 12);
+        assert!(range.truncated);
+        assert!(range.selected_bytes > range.returned_bytes);
+        assert!(range.returned_bytes <= 80);
+        assert!(range.content.starts_with("line-3-"));
+
+        let through_eof = read_bounded_line_range(&file, "range.txt", 18, 10, 200).unwrap();
+        assert_eq!(through_eof.total_lines, Some(20));
+        assert_eq!(through_eof.known_lines, 20);
+        assert!(!through_eof.has_more);
+        assert_eq!(through_eof.requested_end_line, Some(20));
+        fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn bounded_matches_keep_first_and_tail_with_explicit_counts() {
+        let mut bounded = BoundedMatches::new();
+        for n in 0..120 {
+            bounded.push(format!("file.txt:{}: hit-{n:03}-{}", n + 1, "x".repeat(300)));
+        }
+        let result = bounded.finish(false);
+        assert_eq!(result.total_matches, 120);
+        assert!(result.truncated);
+        assert!(result.omitted_matches > 0);
+        assert_eq!(
+            result.returned_matches + result.omitted_matches,
+            result.total_matches
+        );
+        assert!(result.matches.contains("hit-000"));
+        assert!(result.matches.contains("hit-119"));
+        assert!(result.matches.contains("middle matches omitted"));
+        assert!(result.matches.contains("search truncated"));
+        assert!(result.matches.len() < 32 * 1024);
+    }
+
+    #[test]
+    fn grep_line_cap_is_utf8_safe_and_reported() {
+        let mut bounded = BoundedMatches::new();
+        bounded.push(format!("file:1: {}", "→".repeat(MAX_GREP_LINE_BYTES)));
+        let result = bounded.finish(false);
+        assert_eq!(result.line_truncations, 1);
+        assert!(result.truncated);
+        assert!(result.matches.contains("matching line truncated"));
+        assert!(result.matches.contains("matching line(s) shortened"));
+    }
+
+    #[test]
+    fn fallback_walk_keeps_dotfile_and_node_modules_ignore_policy() {
+        let root = std::env::temp_dir().join(format!(
+            "uniqus-grep-test-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+        fs::create_dir_all(root.join(".hidden")).unwrap();
+        fs::write(root.join("visible.txt"), "literal [ marker").unwrap();
+        fs::write(root.join("node_modules/ignored.txt"), "literal [ marker").unwrap();
+        fs::write(root.join(".hidden/ignored.txt"), "literal [ marker").unwrap();
+
+        let matcher = literal_matcher("[", false);
+        let mut bounded = BoundedMatches::new();
+        walk(&root, &root, &matcher, &mut bounded);
+        let result = bounded.finish(true);
+        assert_eq!(result.total_matches, 1);
+        assert!(result.matches.contains("visible.txt:1: literal [ marker"));
+        assert!(!result.matches.contains("ignored.txt"));
+        assert!(result.matches.contains("pattern is not a valid regex"));
+
+        let mut explicit_file = BoundedMatches::new();
+        walk(&root.join("visible.txt"), &root, &matcher, &mut explicit_file);
+        let explicit_file = explicit_file.finish(false);
+        assert_eq!(explicit_file.total_matches, 1);
+        assert!(explicit_file.matches.contains("visible.txt:1: literal [ marker"));
+
+        let mut explicit_hidden = BoundedMatches::new();
+        walk(
+            &root.join(".hidden"),
+            &root,
+            &matcher,
+            &mut explicit_hidden,
+        );
+        let explicit_hidden = explicit_hidden.finish(false);
+        assert_eq!(explicit_hidden.total_matches, 1);
+        assert!(explicit_hidden.matches.contains(".hidden/ignored.txt"));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

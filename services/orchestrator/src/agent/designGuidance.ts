@@ -1,10 +1,12 @@
 /**
- * Always-on visual-design guidance for the coding agent.
+ * Full visual-design guidance for UI-capable coding-agent profiles.
  *
  * This is the product's differentiator: the agent's default output must look
  * designed — distinctive, intentional, finished — not "functional template".
- * It is part of the base system prompt for EVERY turn (cache-friendly: stable
- * text, same position), on all three providers.
+ * It remains present in the complete legacy/fail-open prompt and is preloaded
+ * for every explicit frontend/design task. Non-UI progressive profiles omit it
+ * until the model requests the `design` capability; once loaded, it stays
+ * appended for the rest of the turn.
  *
  * Precedence (encoded in §10 below): an attached <design_system> block, the
  * user's project skills / applied skill packs, and explicit user direction all

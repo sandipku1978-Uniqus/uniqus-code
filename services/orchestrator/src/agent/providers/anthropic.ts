@@ -4,11 +4,37 @@ import { CITATIONS_BLOCK_FIELD, normalizeCitations } from "../citations.js";
 import { webSearchToolForModel } from "../tools.js";
 import { parsePartialJson } from "./partialJson.js";
 import type {
+  BillableToolUsage,
   ForcedToolParams,
   ModelProviderAdapter,
   StreamTurnParams,
   StreamTurnResult,
 } from "./types.js";
+
+const ANTHROPIC_WEB_SEARCH_USD = 0.01;
+
+/**
+ * Anthropic reports the authoritative number of billed searches in the final
+ * Messages usage object (`server_tool_use.web_search_requests`). Each request
+ * is $10 / 1,000 and errored searches are excluded by Anthropic, so this value
+ * is exact rather than inferred from streamed content blocks.
+ * https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool#usage-and-pricing
+ */
+export function anthropicWebSearchBillableUsage(usage: {
+  server_tool_use?: { web_search_requests?: number } | null;
+}): BillableToolUsage | undefined {
+  const reported = usage.server_tool_use?.web_search_requests;
+  const units = typeof reported === "number" && Number.isFinite(reported)
+    ? Math.max(0, Math.trunc(reported))
+    : 0;
+  if (units === 0) return undefined;
+  return {
+    kind: "web_search",
+    units,
+    costUsd: units * ANTHROPIC_WEB_SEARCH_USD,
+    accuracy: "exact",
+  };
+}
 
 /**
  * Map the thinking-effort control to Claude's `effort` levels (low/medium/high
@@ -272,6 +298,8 @@ export class AnthropicAdapter implements ModelProviderAdapter {
       cacheCreationTokens: fu.cache_creation_input_tokens ?? 0,
     };
     p.onUsage?.(finalUsage);
+    const billableWebSearch = anthropicWebSearchBillableUsage(fu);
+    if (billableWebSearch) p.onBillableToolUsage?.(billableWebSearch);
 
     const toolCalls: StreamTurnResult["toolCalls"] = [];
     for (const block of finalMessage.content) {
@@ -314,7 +342,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
     };
   }
 
-  async callForcedTool(p: ForcedToolParams): Promise<unknown> {
+  async callForcedTool(p: ForcedToolParams) {
     const response = await this.client.messages.create(
       {
         model: p.model,
@@ -326,11 +354,21 @@ export class AnthropicAdapter implements ModelProviderAdapter {
       },
       p.signal ? { signal: p.signal } : undefined,
     );
+    const usage = {
+      inputTokens: response.usage.input_tokens ?? 0,
+      outputTokens: response.usage.output_tokens ?? 0,
+      cacheReadTokens: response.usage.cache_read_input_tokens ?? 0,
+      cacheCreationTokens: response.usage.cache_creation_input_tokens ?? 0,
+    };
+    p.onUsage?.(usage);
     const block = response.content.find((b) => b.type === "tool_use");
     if (!block || block.type !== "tool_use" || block.name !== p.tool.name) {
       throw new Error(`Model did not return a ${p.tool.name} tool call`);
     }
-    return block.input;
+    return {
+      input: block.input,
+      usage,
+    };
   }
 }
 

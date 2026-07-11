@@ -1,5 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { DesignTokens, ModelChoice, Plan, PlanStep } from "@uniqus/api-types";
+import {
+  estimateTurnCostUsd,
+  type DesignTokens,
+  type ModelChoice,
+  type Plan,
+  type PlanStep,
+} from "@uniqus/api-types";
 import { normalizeMessageHistory } from "./messageHistory.js";
 import {
   formatAccountPromptForPrompt,
@@ -14,7 +20,13 @@ import {
   turnReferencesImage,
   lastUserMessageText,
 } from "./autoRouter.js";
-import { getProvider, providerKeysFromEnv, type ProviderKeys } from "./providers/index.js";
+import {
+  getProvider,
+  providerKeysFromEnv,
+  type BillableToolUsage,
+  type ProviderKeys,
+  type TokenUsage,
+} from "./providers/index.js";
 import { TOOLS } from "./tools.js";
 import { createLiveOutputEstimator } from "./liveUsage.js";
 import {
@@ -22,8 +34,20 @@ import {
   truncateToolResultText,
   type LoopHooks,
 } from "./loop.js";
-import type { Sandbox, ServerInfo } from "./sandbox.js";
+import {
+  isSandboxTextResult,
+  sandboxTextWasTruncated,
+  type Sandbox,
+  type ServerInfo,
+} from "./sandbox.js";
 import { PLAN_DESIGN_STEP_LINE } from "./designGuidance.js";
+import {
+  estimateFixedPromptTokens,
+  estimateMessageChars,
+  estimateMessageTokens,
+} from "./compact.js";
+import type { RunMetricsCollector } from "../telemetry/runMetrics.js";
+import { recordUsageEvent } from "../db/usage.js";
 
 const PLAN_SYSTEM_PROMPT_BASE = `You are an AI software engineer in plan mode. The user has described what they want built; your job is to INSPECT the project as needed and then produce a structured plan, NOT to execute it.
 
@@ -61,6 +85,17 @@ const PLAN_READONLY_TOOL_NAMES = new Set([
   "knowledge_search",
 ]);
 
+// `read_asset` is read-only in the permission sense but may trigger paid OCR
+// and emit a usage row, so it remains a serial barrier rather than creating a
+// four-call model/cost burst. The rest are side-effect-free investigation reads.
+const PLAN_PARALLEL_TOOL_NAMES = new Set([
+  "read_file",
+  "list_dir",
+  "grep",
+  "list_assets",
+  "knowledge_search",
+]);
+
 /** Hooks to stream the planner's investigation (text, reasoning, tool activity). */
 export type PlanHooks = Pick<
   LoopHooks,
@@ -92,6 +127,8 @@ export interface PlanOptions {
   signal?: AbortSignal;
   /** Stream the planner's progress to the client (same events as the agent loop). */
   hooks?: PlanHooks;
+  /** Privacy-safe run metrics collector owned and persisted by the caller. */
+  metrics?: RunMetricsCollector;
   /**
    * Fired once when the plan finishes, with the tokens the planning phase spent
    * (summed across the investigation turns) plus the model/provider it ran on.
@@ -107,6 +144,8 @@ export interface PlanOptions {
     // The provider the planner resolved to (may be any configured provider,
     // including "zai"); recordUsageEvent takes a plain string.
     provider: string;
+    /** Fixed provider-side fee (for example built-in web search). */
+    costUsd?: number;
   }) => void;
   /**
    * Live token counter ONLY — fires repeatedly during the investigation with
@@ -125,6 +164,53 @@ export interface PlanOptions {
 
 const MAX_PLAN_ITERATIONS = 16;
 const PLAN_MAX_TOKENS = 8192;
+const MAX_PARALLEL_PLAN_READS = 4;
+
+/**
+ * Run contiguous groups of independent reads concurrently while preserving
+ * their original result order. Anything not explicitly marked parallel-safe
+ * is a barrier: all earlier reads settle before it starts, and later reads wait
+ * for it. Keeping this scheduler generic makes its ordering/concurrency
+ * contract easy to verify without invoking a real sandbox or provider.
+ */
+export async function mapPlannerCallsWithBarriers<TCall, TResult>(
+  calls: readonly TCall[],
+  isParallelSafe: (call: TCall) => boolean,
+  execute: (call: TCall, index: number) => Promise<TResult>,
+  maxConcurrency = MAX_PARALLEL_PLAN_READS,
+): Promise<TResult[]> {
+  const concurrency =
+    Number.isFinite(maxConcurrency) && maxConcurrency > 0 ? Math.floor(maxConcurrency) : 1;
+  const results = new Array<TResult>(calls.length);
+
+  const runParallelGroup = async (start: number, end: number): Promise<void> => {
+    let next = start;
+    const worker = async (): Promise<void> => {
+      while (next < end) {
+        const index = next++;
+        results[index] = await execute(calls[index]!, index);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, end - start) }, () => worker()),
+    );
+  };
+
+  let index = 0;
+  while (index < calls.length) {
+    if (!isParallelSafe(calls[index]!)) {
+      results[index] = await execute(calls[index]!, index);
+      index++;
+      continue;
+    }
+
+    const start = index;
+    while (index < calls.length && isParallelSafe(calls[index]!)) index++;
+    await runParallelGroup(start, index);
+  }
+
+  return results;
+}
 
 /**
  * The model fills in the submit_plan tool, but a model CAN return a malformed
@@ -339,18 +425,63 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
   // plan mode leans toward the stronger reasoner. Best-effort; keeps the static
   // default on any failure. See agent/autoRouter.ts.
   if (!resolved.overridden) {
-    const picked = await pickAutoModel(
-      "plan",
-      {
-        userMessage,
-        previousUserMessage: lastUserMessageText(opts.history),
-        hasImages: turnReferencesImage(userMessage, opts.history),
-        availableProviders: availableProvidersFromKeys(keys),
-      },
-      { anthropicKey: keys.anthropic },
-    );
-    if (picked) resolved = picked;
+    let classifierCalled = false;
+    const pick = () =>
+      pickAutoModel(
+        "plan",
+        {
+          userMessage,
+          previousUserMessage: lastUserMessageText(opts.history),
+          hasImages: turnReferencesImage(userMessage, opts.history),
+          availableProviders: availableProvidersFromKeys(keys),
+        },
+        {
+          anthropicKey: keys.anthropic,
+          onClassifier: (result) => {
+            classifierCalled = true;
+            opts.metrics?.recordRoutingClassifier({ timedOut: result.timedOut });
+          },
+          onClassifierUsage: (usage) => {
+            const reported = {
+              ...usage,
+              provider: usage.provider as string,
+            };
+            opts.metrics?.recordProviderCall({ usage: reported });
+            if (opts.onUsage) {
+              // Route the classifier through the same authoritative callback as
+              // planner calls so its tokens and cost reach both usage_events and
+              // the user-visible per-turn estimate exactly once.
+              opts.onUsage(reported);
+            } else if (opts.projectId && opts.userId && opts.metrics?.runId) {
+              void recordUsageEvent({
+                projectId: opts.projectId,
+                userId: opts.userId,
+                runId: opts.metrics.runId,
+                provider: reported.provider,
+                model: reported.model,
+                inputTokens: reported.inputTokens,
+                outputTokens: reported.outputTokens,
+                cacheReadTokens: reported.cacheReadTokens,
+                cacheCreationTokens: reported.cacheCreationTokens,
+                costUsd: estimateTurnCostUsd(reported.model, reported),
+                elapsedMs: 0,
+              }).catch(() => console.error("recordUsageEvent (plan classifier) failed"));
+            }
+          },
+        },
+      );
+    const picked = opts.metrics ? await opts.metrics.measure("routing", pick) : await pick();
+    if (picked) {
+      resolved = picked;
+      opts.metrics?.setRoute(picked.tier, picked.source ?? (classifierCalled ? "classifier" : "heuristic"));
+    } else {
+      opts.metrics?.setRoute("unknown", "static_fallback");
+    }
+  } else {
+    const explicitChoice = !!opts.modelChoice && opts.modelChoice !== "auto";
+    opts.metrics?.setRoute("manual", explicitChoice ? "manual" : "environment");
   }
+  opts.metrics?.setPhaseModel("planner", resolved.provider, resolved.model);
   const provider = getProvider(resolved.provider, keys);
   const hooks = opts.hooks ?? {};
 
@@ -367,10 +498,13 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
     ...(opts.history ?? []),
     { role: "user", content: userMessage },
   ]);
+  const planToolSchemaChars = JSON.stringify(planTools).length;
+  const fixedPromptTokens = estimateFixedPromptTokens(system, planTools);
 
   // Accumulate the planning phase's token spend across investigation turns so the
-  // server can bill it + fold it into the turn cost (item 12 — plan work used to
-  // be free). Reported once via opts.onUsage on the way out.
+  // live estimator can show cumulative work. Each provider call is reported
+  // separately via opts.onUsage so long-context pricing remains per-call and a
+  // later planner failure cannot erase earlier billed investigation turns.
   const planUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
   const bankUsage = (u?: {
     inputTokens: number;
@@ -384,34 +518,82 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
     planUsage.cacheReadTokens += u.cacheReadTokens ?? 0;
     planUsage.cacheCreationTokens += u.cacheCreationTokens ?? 0;
   };
-  const reportUsage = (): void => {
+  const reportUsage = (usage?: TokenUsage): void => {
+    if (!usage) return;
     if (
-      planUsage.inputTokens ||
-      planUsage.outputTokens ||
-      planUsage.cacheReadTokens ||
-      planUsage.cacheCreationTokens
+      usage.inputTokens ||
+      usage.outputTokens ||
+      usage.cacheReadTokens ||
+      usage.cacheCreationTokens
     ) {
-      opts.onUsage?.({ ...planUsage, model: resolved.model, provider: resolved.provider });
+      opts.onUsage?.({
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cacheReadTokens: usage.cacheReadTokens ?? 0,
+        cacheCreationTokens: usage.cacheCreationTokens ?? 0,
+        model: resolved.model,
+        provider: resolved.provider,
+      });
+    }
+  };
+  const reportBillableToolUsage = (billable: BillableToolUsage): void => {
+    const costUsd = Number.isFinite(billable.costUsd)
+      ? Math.max(0, billable.costUsd)
+      : 0;
+    opts.metrics?.recordBillableToolUsage(billable.units, billable.accuracy);
+    if (costUsd <= 0) return;
+    const event = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      model: resolved.model,
+      provider: resolved.provider,
+      costUsd,
+    };
+    if (opts.onUsage) {
+      opts.onUsage(event);
+    } else if (opts.projectId && opts.metrics?.runId) {
+      void recordUsageEvent({
+        projectId: opts.projectId,
+        userId: opts.userId ?? null,
+        runId: opts.metrics.runId,
+        provider: resolved.provider,
+        model: resolved.model,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd,
+        elapsedMs: 0,
+      }).catch(() => console.error("recordUsageEvent (plan provider tool fee) failed"));
     }
   };
 
   for (let iter = 0; iter < MAX_PLAN_ITERATIONS; iter++) {
     if (opts.signal?.aborted) throw new Error("aborted before plan");
-
-    // Live counter for the planning phase: prior investigation turns' banked
-    // spend + this message's real/estimated in-flight figure. Without this the
-    // counter sat flat through the whole plan (usage only banks per turn) —
-    // on GLM that's minutes of streamed thinking with zero movement.
-    const liveEst = createLiveOutputEstimator((u) => {
-      opts.onLiveUsage?.({
-        inputTokens: planUsage.inputTokens + u.inputTokens,
-        outputTokens: planUsage.outputTokens + u.outputTokens,
-        cacheReadTokens: planUsage.cacheReadTokens + u.cacheReadTokens,
-        cacheCreationTokens: planUsage.cacheCreationTokens + u.cacheCreationTokens,
-      });
+    opts.metrics?.increment("iterationCount");
+    const messageChars = estimateMessageChars(messages);
+    opts.metrics?.observeContextSize({
+      systemPromptChars: system.length,
+      toolSchemaChars: planToolSchemaChars,
+      messageChars,
+      estimatedContextTokens: fixedPromptTokens + estimateMessageTokens(messages),
     });
 
+    // Emit only this call's in-flight figure. Completed calls are already sent
+    // through onUsage and banked by the server; adding planUsage here as well
+    // made every prior planner call appear twice in the live counter.
+    const liveEst = createLiveOutputEstimator((u) => opts.onLiveUsage?.(u));
+
     let turn;
+    let inflightUsage: TokenUsage | undefined;
+    const providerStartedAt = performance.now();
+    let providerTtftMs: number | undefined;
+    const markProviderFirstDelta = (): void => {
+      if (providerTtftMs === undefined) providerTtftMs = performance.now() - providerStartedAt;
+    };
+    const stopModelPhase = opts.metrics?.startPhase("model");
     try {
       turn = await provider.streamAgentTurn({
         model: resolved.model,
@@ -421,36 +603,62 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
         maxTokens: PLAN_MAX_TOKENS,
         signal: opts.signal,
         onText: (t) => {
+          markProviderFirstDelta();
           liveEst.addChars(t.length);
           hooks.onText?.(t);
         },
         onThinking: (t) => {
+          markProviderFirstDelta();
           liveEst.addChars(t.length);
           hooks.onThinking?.(t);
         },
-        onToolCallStarted: hooks.onToolCallStarted,
+        onToolCallStarted: (id, name) => {
+          markProviderFirstDelta();
+          hooks.onToolCallStarted?.(id, name);
+        },
         // Live partial args — without this, plan-mode tool rows sat on the
         // initial empty input until the call finished streaming.
         onToolCallPartial: (id, name, partial) => {
+          markProviderFirstDelta();
           liveEst.addToolPartial(id, partial);
           hooks.onToolCallPartial?.(id, name, partial);
         },
-        onToolCall: hooks.onToolCall,
-        onToolResult: hooks.onToolResult,
-        onUsage: (u) => liveEst.onRealUsage(u),
+        onToolCall: (id, name, input) => {
+          markProviderFirstDelta();
+          hooks.onToolCall?.(id, name, input);
+        },
+        onToolResult: (id, name, input, result, isError) => {
+          markProviderFirstDelta();
+          hooks.onToolResult?.(id, name, input, result, isError);
+        },
+        onUsage: (u) => {
+          inflightUsage = u;
+          liveEst.onRealUsage(u);
+        },
+        onBillableToolUsage: reportBillableToolUsage,
       });
     } catch (err) {
+      stopModelPhase?.();
+      bankUsage(inflightUsage);
+      reportUsage(inflightUsage);
+      opts.metrics?.recordProviderCall({
+        ttftMs: providerTtftMs,
+        error: !opts.signal?.aborted,
+        usage: inflightUsage,
+      });
       if (opts.signal?.aborted) throw new Error("aborted during plan");
       throw err;
     }
+    stopModelPhase?.();
+    opts.metrics?.recordProviderCall({ ttftMs: providerTtftMs, usage: turn.usage });
     bankUsage(turn.usage);
+    reportUsage(turn.usage);
 
     messages.push({ role: "assistant", content: turn.content });
 
     // The model submitted its plan — done.
     const submitted = turn.toolCalls.find((c) => c.name === "submit_plan");
     if (submitted) {
-      reportUsage();
       return normalizePlan(submitted.input);
     }
 
@@ -458,65 +666,133 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
     if (turn.toolCalls.length === 0) break;
 
     // Execute the read-only investigation tools and feed results back.
-    const toolResults: Anthropic.ToolResultBlockParam[] = [];
-    for (const call of turn.toolCalls) {
-      if (opts.signal?.aborted) throw new Error("aborted during plan");
-      try {
-        const result = await executeTool(
-          opts.sandbox,
-          call.name,
-          call.input,
-          call.id,
-          opts.projectId ?? null,
-          null,
-          undefined,
-          opts.signal,
-          undefined,
-          undefined,
-          undefined,
-          opts.userId ?? null,
-        );
-        if (result && typeof result === "object" && (result as { __multimodal?: boolean }).__multimodal) {
-          const mm = result as { content: Array<{ type: string; [k: string]: unknown }> };
-          const textSummary = mm.content.find((b) => b.type === "text") as { text: string } | undefined;
-          hooks.onToolResult?.(call.id, call.name, call.input, textSummary?.text ?? "(image)", false);
-          toolResults.push({
+    const toolResults = await mapPlannerCallsWithBarriers(
+      turn.toolCalls,
+      (call) => PLAN_PARALLEL_TOOL_NAMES.has(call.name),
+      async (call): Promise<Anthropic.ToolResultBlockParam> => {
+        if (opts.signal?.aborted) throw new Error("aborted during plan");
+        const stopToolPhase = opts.metrics?.startPhase("tool");
+        try {
+          // Provider adapters should only return tools we advertised, but keep
+          // plan mode read-only even if a malformed/provider-native response
+          // invents a mutating tool name.
+          if (!PLAN_READONLY_TOOL_NAMES.has(call.name)) {
+            throw new Error(`Tool '${call.name}' is not available in plan mode.`);
+          }
+          const result = await executeTool(
+            opts.sandbox,
+            call.name,
+            call.input,
+            call.id,
+            opts.projectId ?? null,
+            null,
+            undefined,
+            opts.signal,
+            undefined,
+            undefined,
+            undefined,
+            opts.userId ?? null,
+          );
+          if (
+            result &&
+            typeof result === "object" &&
+            (result as { __multimodal?: boolean }).__multimodal
+          ) {
+            const mm = result as { content: Array<{ type: string; [k: string]: unknown }> };
+            const textSummary = mm.content.find((b) => b.type === "text") as
+              | { text: string }
+              | undefined;
+            hooks.onToolResult?.(
+              call.id,
+              call.name,
+              call.input,
+              textSummary?.text ?? "(image)",
+              false,
+            );
+            opts.metrics?.recordToolCall();
+            return {
+              type: "tool_result",
+              tool_use_id: call.id,
+              content: mm.content as unknown as Anthropic.ToolResultBlockParam["content"],
+            };
+          }
+
+          const sandboxText = isSandboxTextResult(result) ? result : null;
+          const raw =
+            (sandboxText?.text ??
+              (typeof result === "string" ? result : JSON.stringify(result))) ||
+            "(no output)";
+          const text = truncateToolResultText(raw);
+          hooks.onToolResult?.(call.id, call.name, call.input, text, false);
+          opts.metrics?.recordToolCall({
+            truncated:
+              (sandboxText !== null && sandboxTextWasTruncated(sandboxText)) ||
+              text.length !== raw.length,
+          });
+          return { type: "tool_result", tool_use_id: call.id, content: text };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          hooks.onToolResult?.(call.id, call.name, call.input, msg, true);
+          opts.metrics?.recordToolCall({ error: true });
+          return {
             type: "tool_result",
             tool_use_id: call.id,
-            content: mm.content as unknown as Anthropic.ToolResultBlockParam["content"],
-          });
-        } else {
-          const text = truncateToolResultText(
-            (typeof result === "string" ? result : JSON.stringify(result)) || "(no output)",
-          );
-          hooks.onToolResult?.(call.id, call.name, call.input, text, false);
-          toolResults.push({ type: "tool_result", tool_use_id: call.id, content: text });
+            content: `Error: ${msg}`,
+            is_error: true,
+          };
+        } finally {
+          stopToolPhase?.();
         }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        hooks.onToolResult?.(call.id, call.name, call.input, msg, true);
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: call.id,
-          content: `Error: ${msg}`,
-          is_error: true,
-        });
-      }
-    }
+      },
+    );
     messages.push({ role: "user", content: toolResults });
   }
 
   // Fallback: the model investigated but didn't submit (or hit the cap) — force
   // a structured plan so the user always gets one.
-  const forced = await provider.callForcedTool({
-    model: resolved.model,
-    system,
-    tool: SUBMIT_PLAN_TOOL,
-    messages: normalizeMessageHistory(messages),
-    maxTokens: 4096,
-    signal: opts.signal,
+  const forcedMessages = normalizeMessageHistory(messages);
+  const forcedMessageChars = estimateMessageChars(forcedMessages);
+  opts.metrics?.observeContextSize({
+    systemPromptChars: system.length,
+    toolSchemaChars: JSON.stringify(SUBMIT_PLAN_TOOL).length,
+    messageChars: forcedMessageChars,
+    estimatedContextTokens:
+      estimateFixedPromptTokens(system, [SUBMIT_PLAN_TOOL]) + estimateMessageTokens(forcedMessages),
   });
-  reportUsage();
+  const stopForcedModelPhase = opts.metrics?.startPhase("model");
+  let forced: unknown;
+  let forcedUsage: TokenUsage | undefined;
+  try {
+    const forcedResult = await provider.callForcedTool({
+      model: resolved.model,
+      system,
+      tool: SUBMIT_PLAN_TOOL,
+      messages: forcedMessages,
+      maxTokens: 4096,
+      signal: opts.signal,
+      // A provider can receive (and bill) a response that fails its forced-call
+      // validation. Capture usage before validation so the catch path can still
+      // meter that call instead of silently making malformed output free.
+      onUsage: (usage) => {
+        forcedUsage = usage;
+      },
+    });
+    forced = forcedResult.input;
+    forcedUsage = forcedResult.usage ?? forcedUsage;
+    bankUsage(forcedUsage);
+    reportUsage(forcedUsage);
+    opts.metrics?.recordProviderCall({ usage: forcedUsage });
+  } catch (err) {
+    stopForcedModelPhase?.();
+    bankUsage(forcedUsage);
+    reportUsage(forcedUsage);
+    opts.metrics?.recordProviderCall({
+      error: !opts.signal?.aborted,
+      usage: forcedUsage,
+    });
+    throw err;
+  }
+  stopForcedModelPhase?.();
   return normalizePlan(forced);
 }
 

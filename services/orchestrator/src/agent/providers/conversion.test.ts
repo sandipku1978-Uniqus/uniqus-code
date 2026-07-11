@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
 import {
+  reasoningParam,
   safeParseJson,
   toResponsesInput,
   toResponsesTools,
@@ -41,6 +42,44 @@ const TOOL: Anthropic.Tool = {
 // =============================================================================
 // OpenAI (Responses API) conversions
 // =============================================================================
+
+describe("openai · reasoningParam", () => {
+  it("passes GPT-5.6 max through and pins reasoning to the current user turn", () => {
+    expect(reasoningParam("gpt-5.6-sol", "max")).toEqual({
+      effort: "max",
+      summary: "auto",
+      context: "current_turn",
+    });
+    expect(reasoningParam("gpt-5.6-terra", "xhigh")).toEqual({
+      effort: "xhigh",
+      summary: "auto",
+      context: "current_turn",
+    });
+  });
+
+  it("maps the thinking toggle to each model generation's supported floor", () => {
+    expect(reasoningParam("gpt-5.6-sol", "high", false)).toEqual({
+      effort: "none",
+      summary: "auto",
+      context: "current_turn",
+    });
+    expect(reasoningParam("gpt-5.5", "high", false)).toEqual({
+      effort: "none",
+      summary: "auto",
+    });
+    expect(reasoningParam("gpt-5.3-codex", "high", false)).toEqual({
+      effort: "low",
+      summary: "auto",
+    });
+  });
+
+  it("keeps the pre-5.6 max-to-xhigh compatibility clamp", () => {
+    expect(reasoningParam("gpt-5.5", "max")).toEqual({
+      effort: "xhigh",
+      summary: "auto",
+    });
+  });
+});
 
 describe("openai · toResponsesTools", () => {
   it("maps Anthropic tools to Responses function tools", () => {
@@ -256,6 +295,21 @@ describe("openai · toTokenUsage", () => {
       outputTokens: 200,
       cacheReadTokens: 750,
       cacheCreationTokens: 0,
+    });
+  });
+
+  it("separates GPT-5.6 cache writes from fresh input", () => {
+    const usage = toTokenUsage({
+      input_tokens: 1000,
+      output_tokens: 200,
+      input_tokens_details: { cached_tokens: 600, cache_write_tokens: 250 },
+    } as Parameters<typeof toTokenUsage>[0]);
+
+    expect(usage).toEqual({
+      inputTokens: 150,
+      outputTokens: 200,
+      cacheReadTokens: 600,
+      cacheCreationTokens: 250,
     });
   });
 

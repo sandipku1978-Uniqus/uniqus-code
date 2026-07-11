@@ -7,12 +7,15 @@ import { safeParseJson } from "./openai.js";
 import { parsePartialJson } from "./partialJson.js";
 import { DEFAULT_VISION_BRIDGE_SYSTEM } from "./types.js";
 import type {
+  BillableToolUsage,
   ForcedToolParams,
   ModelProviderAdapter,
   StreamTurnParams,
   StreamTurnResult,
   TokenUsage,
 } from "./types.js";
+
+const ZAI_WEB_SEARCH_USD = 0.01;
 
 /**
  * Z.ai (GLM) adapter — OpenAI-style Chat Completions (`/paas/v4/chat/completions`).
@@ -182,6 +185,25 @@ interface GlmWebSearchResult {
 }
 
 /**
+ * Z.ai charges $0.01 per built-in web-search use, not per returned result. Its
+ * Chat Completions response exposes results but no authoritative tool-usage
+ * counter, so a non-empty result array proves one use while the count remains
+ * an estimate. Never multiply by result count: `count:"5"` only controls how
+ * many documents that one search returns.
+ * https://docs.z.ai/guides/overview/pricing#built-in-tools
+ * https://docs.z.ai/api-reference/llm/chat-completion
+ */
+export function zaiWebSearchBillableUsage(results: unknown): BillableToolUsage | undefined {
+  if (!Array.isArray(results) || results.length === 0) return undefined;
+  return {
+    kind: "web_search",
+    units: 1,
+    costUsd: ZAI_WEB_SEARCH_USD,
+    accuracy: "estimated",
+  };
+}
+
+/**
  * Map GLM's search results to canonical citations. GLM gives no offsets into
  * the answer — it writes its own `[n]` markers inline instead — so these are
  * un-anchored and ordered by `refer`, which is exactly the numbering the model
@@ -284,7 +306,8 @@ export class ZaiAdapter implements ModelProviderAdapter {
     // chunk that carries them (we asked for it via search_result:"True").
     let webSearch: GlmWebSearchResult[] = [];
 
-    for await (const chunk of stream) {
+    try {
+      for await (const chunk of stream) {
       // With include_usage, the final chunk carries usage and has no choices.
       if (chunk.usage) {
         usage = zaiTokenUsage(chunk.usage);
@@ -333,6 +356,12 @@ export class ZaiAdapter implements ModelProviderAdapter {
         }
       }
       if (choice.finish_reason) finish = choice.finish_reason;
+      }
+    } finally {
+      // Z.ai exposes only result presence, so retain that estimated fee even if
+      // a subsequent stream event fails after the search already occurred.
+      const billableWebSearch = zaiWebSearchBillableUsage(webSearch);
+      if (billableWebSearch) p.onBillableToolUsage?.(billableWebSearch);
     }
 
     const content: Anthropic.ContentBlockParam[] = [];
@@ -356,7 +385,7 @@ export class ZaiAdapter implements ModelProviderAdapter {
     };
   }
 
-  async callForcedTool(p: ForcedToolParams): Promise<unknown> {
+  async callForcedTool(p: ForcedToolParams) {
     const response = await this.client.chat.completions.create(
       {
         model: p.model,
@@ -367,6 +396,8 @@ export class ZaiAdapter implements ModelProviderAdapter {
       },
       p.signal ? { signal: p.signal } : undefined,
     );
+    const usage = toTokenUsage(response.usage);
+    if (usage) p.onUsage?.(usage);
     const call = response.choices?.[0]?.message?.tool_calls?.find(
       (c): c is OpenAI.Chat.Completions.ChatCompletionMessageFunctionToolCall =>
         c.type === "function" && c.function.name === p.tool.name,
@@ -374,7 +405,10 @@ export class ZaiAdapter implements ModelProviderAdapter {
     if (!call) {
       throw new Error(`Model did not return a ${p.tool.name} tool call`);
     }
-    return safeParseJson(call.function.arguments);
+    return {
+      input: safeParseJson(call.function.arguments),
+      usage,
+    };
   }
 }
 

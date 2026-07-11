@@ -1,4 +1,11 @@
 import type Anthropic from "@anthropic-ai/sdk";
+import {
+  CAPABILITY_DEFINITIONS,
+  CAPABILITY_IDS,
+  formatCapabilityCatalog,
+  type AgentProfile,
+  type CapabilityId,
+} from "./profiles.js";
 
 /**
  * Anthropic's server-side web search tool. The model calls it; Anthropic runs
@@ -692,3 +699,127 @@ export const TOOLS: Anthropic.Tool[] = [
     },
   },
 ];
+
+/**
+ * The small, always-visible escape hatch for a progressive tool profile.
+ * Loading is monotonic for the turn: requested schemas are appended after the
+ * existing list, never removed/reordered, which retains the longest possible
+ * provider prompt-cache prefix.
+ */
+export const LOAD_CAPABILITIES_TOOL: Anthropic.Tool = {
+  name: "load_capabilities",
+  description:
+    "Load one or more currently omitted capability groups for the rest of this turn. " +
+    "This expands BOTH the relevant operating guidance and typed tool schemas; it never removes capabilities already loaded. " +
+    "Use it whenever the task grows into a domain whose tools are not currently visible. Available groups:\n" +
+    formatCapabilityCatalog(),
+  input_schema: {
+    type: "object",
+    properties: {
+      groups: {
+        type: "array",
+        items: { type: "string", enum: [...CAPABILITY_IDS] },
+        description: "One or more capability group ids to load for the remainder of this turn.",
+      },
+    },
+    required: ["groups"],
+  },
+};
+
+const CORE_PROGRESSIVE_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "read_file",
+  "write_file",
+  "edit_file",
+  "run_command",
+  "list_dir",
+  "grep",
+  "todo_write",
+  // These are included only when their hooks exist (loop.ts applies the final
+  // gate), but keeping them in the core preserves the agent's ability to ask or
+  // plan without first loading an unrelated domain pack.
+  "enter_plan_mode",
+  "ask_user",
+]);
+
+export interface CapabilityLoadResult {
+  added: CapabilityId[];
+  alreadyLoaded: CapabilityId[];
+}
+
+export interface CapabilityToolState {
+  readonly progressive: boolean;
+  /** Snapshot of schemas in provider order. */
+  tools(): Anthropic.Tool[];
+  /** Monotonic expansion; additions are appended in canonical group order. */
+  load(ids: readonly CapabilityId[]): CapabilityLoadResult;
+  loadedCapabilities(): CapabilityId[];
+}
+
+/**
+ * Build the provider-visible tool surface for one turn.
+ *
+ * Legacy profiles return the historical TOOLS order byte-for-byte (plus the
+ * existing vision bridge when required). Progressive profiles keep a fixed
+ * core, preload canonical high-confidence groups, and expose
+ * load_capabilities. Later additions append after that escape hatch so every
+ * previously sent tool definition remains an unchanged prefix.
+ */
+export function createCapabilityToolState(
+  profile: AgentProfile,
+  hasVisionBridge: boolean,
+): CapabilityToolState {
+  if (profile.mode === "legacy") {
+    const complete = [...TOOLS, ...(hasVisionBridge ? VISION_BRIDGE_TOOLS : [])];
+    return {
+      progressive: false,
+      tools: () => complete.slice(),
+      load: () => ({ added: [], alreadyLoaded: [...CAPABILITY_IDS] }),
+      loadedCapabilities: () => [...CAPABILITY_IDS],
+    };
+  }
+
+  const visible: Anthropic.Tool[] = [];
+  const visibleNames = new Set<string>();
+  const loaded = new Set<CapabilityId>();
+
+  const appendTool = (tool: Anthropic.Tool): void => {
+    if (visibleNames.has(tool.name)) return;
+    visibleNames.add(tool.name);
+    visible.push(tool);
+  };
+  TOOLS.filter((tool) => CORE_PROGRESSIVE_TOOL_NAMES.has(tool.name)).forEach(appendTool);
+
+  const appendCapability = (id: CapabilityId): void => {
+    if (loaded.has(id)) return;
+    loaded.add(id);
+    const names = new Set(CAPABILITY_DEFINITIONS[id].toolNames);
+    TOOLS.filter((tool) => names.has(tool.name)).forEach(appendTool);
+    if (id === "vision" && hasVisionBridge) VISION_BRIDGE_TOOLS.forEach(appendTool);
+  };
+
+  // Canonicalize the initial profile regardless of how its caller assembled it.
+  const initial = new Set(profile.capabilities);
+  CAPABILITY_IDS.filter((id) => initial.has(id)).forEach(appendCapability);
+  appendTool(LOAD_CAPABILITIES_TOOL);
+
+  return {
+    progressive: true,
+    tools: () => visible.slice(),
+    load: (ids) => {
+      const wanted = new Set(ids);
+      const added: CapabilityId[] = [];
+      const alreadyLoaded: CapabilityId[] = [];
+      for (const id of CAPABILITY_IDS) {
+        if (!wanted.has(id)) continue;
+        if (loaded.has(id)) {
+          alreadyLoaded.push(id);
+          continue;
+        }
+        appendCapability(id);
+        added.push(id);
+      }
+      return { added, alreadyLoaded };
+    },
+    loadedCapabilities: () => CAPABILITY_IDS.filter((id) => loaded.has(id)),
+  };
+}

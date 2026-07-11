@@ -6,12 +6,104 @@ import { endIndexOfSpan, normalizeCitations } from "../citations.js";
 import type Anthropic from "@anthropic-ai/sdk";
 import type { Citation, ThinkingEffort } from "@uniqus/api-types";
 import type {
+  BillableToolUsage,
   ForcedToolParams,
   ModelProviderAdapter,
   StreamTurnParams,
   StreamTurnResult,
   TokenUsage,
 } from "./types.js";
+
+const GEMINI_WEB_SEARCH_LIST_USD = 0.014;
+
+/** Add Google's billable, non-empty search queries without collapsing repeats. */
+export function collectGeminiWebSearchQueries(
+  target: string[],
+  queries: unknown,
+): void {
+  if (!Array.isArray(queries)) return;
+  for (const query of queries) {
+    if (typeof query !== "string") continue;
+    const trimmed = query.trim();
+    if (trimmed) target.push(trimmed);
+  }
+}
+
+function queryMultiplicities(queries: Iterable<string>): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const raw of queries) {
+    const query = raw.trim();
+    if (!query) continue;
+    counts.set(query, (counts.get(query) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * Merge two cumulative representations using the greater multiplicity of each
+ * query. Gemini can repeat grounding metadata across chunks and can expose the
+ * same execution in both a server-tool part and terminal grounding metadata.
+ * Taking a multiset maximum removes those duplicate representations while
+ * retaining two genuine executions of identical query text.
+ */
+export function mergeGeminiWebSearchQueries(
+  target: string[],
+  queries: unknown,
+): void {
+  const incoming: string[] = [];
+  collectGeminiWebSearchQueries(incoming, queries);
+  const currentCounts = queryMultiplicities(target);
+  const incomingCounts = queryMultiplicities(incoming);
+  for (const [query, count] of incomingCounts) {
+    const missing = Math.max(0, count - (currentCounts.get(query) ?? 0));
+    for (let i = 0; i < missing; i++) target.push(query);
+  }
+}
+
+export interface GeminiWebSearchEvidence {
+  /** Queries observed on streamed server-tool executions. Repeats are real. */
+  executedQueries: Iterable<string>;
+  /** Cumulative terminal grounding representation of those executions. */
+  groundingQueries?: Iterable<string>;
+  /** Search executions whose query args were not exposed by the SDK. */
+  unknownExecutions?: number;
+}
+
+/**
+ * Gemini 3 bills each individual non-empty query the model executes. The same
+ * query can appear first in streamed toolCall args and again in the terminal
+ * groundingMetadata, so callers pass both representations for one response.
+ * A multiset maximum de-duplicates representations without collapsing genuine
+ * repeated searches with identical text. Units are
+ * observable exactly; cost is deliberately marked estimated because Google's
+ * 5,000-search monthly allowance is account-wide and absent from the response,
+ * making the eventual invoice charge unknowable here. `costUsd` is list cost.
+ * https://ai.google.dev/gemini-api/docs/google-search#pricing
+ * https://ai.google.dev/gemini-api/docs/pricing#gemini-3.1-pro-preview
+ */
+export function geminiWebSearchBillableUsage(
+  evidence: GeminiWebSearchEvidence,
+): BillableToolUsage | undefined {
+  const executed = queryMultiplicities(evidence.executedQueries);
+  const grounded = queryMultiplicities(evidence.groundingQueries ?? []);
+  let representedUnits = 0;
+  for (const query of new Set([...executed.keys(), ...grounded.keys()])) {
+    representedUnits += Math.max(executed.get(query) ?? 0, grounded.get(query) ?? 0);
+  }
+  const unknownExecutions = Math.max(0, Math.floor(evidence.unknownExecutions ?? 0));
+  const units = Math.max(
+    representedUnits,
+    [...executed.values()].reduce((sum, count) => sum + count, 0) + unknownExecutions,
+    [...grounded.values()].reduce((sum, count) => sum + count, 0),
+  );
+  if (units === 0) return undefined;
+  return {
+    kind: "web_search",
+    units,
+    costUsd: units * GEMINI_WEB_SEARCH_LIST_USD,
+    accuracy: "estimated",
+  };
+}
 
 /**
  * Google Gemini adapter (@google/genai — function calling + streaming).
@@ -300,6 +392,12 @@ export class GoogleAdapter implements ModelProviderAdapter {
     let searchSurfaced = false;
     // Grounding metadata (the cited sources), kept from whichever chunk carries it.
     let grounding: GroundingMetadata | undefined;
+    // Gemini can expose the same executed query in both a streamed server-tool
+    // call and final grounding metadata. Billing is per unique non-empty query,
+    // so collect a single trimmed union for the whole provider response.
+    const executedSearchQueries: string[] = [];
+    const groundingSearchQueries: string[] = [];
+    let unknownSearchExecutions = 0;
 
     // Iterate raw parts (not the chunk.text / chunk.functionCalls accessors) so
     // we can (a) split thought-summary parts from the answer text and (b) read
@@ -312,7 +410,8 @@ export class GoogleAdapter implements ModelProviderAdapter {
       p.onToolResult?.(sid, "web_search", detail, result, false);
     };
 
-    for await (const chunk of stream) {
+    try {
+      for await (const chunk of stream) {
       if (p.signal?.aborted) break;
       // groundingMetadata fallback — some models only report searches here (and
       // typically only on the final chunk). Skipped when toolCall parts already
@@ -324,6 +423,7 @@ export class GoogleAdapter implements ModelProviderAdapter {
       if (gm?.groundingChunks?.length || gm?.groundingSupports?.length) grounding = gm;
 
       const queries = gm?.webSearchQueries;
+      mergeGeminiWebSearchQueries(groundingSearchQueries, queries);
       if (queries && queries.length > 0 && !searchSurfaced)
         surfaceSearch({ queries }, queries.join("\n"));
 
@@ -344,6 +444,7 @@ export class GoogleAdapter implements ModelProviderAdapter {
           if (serverCall) {
             if (String(serverCall.toolType ?? "").startsWith("GOOGLE_SEARCH")) {
               const q = serverCall.args?.queries ?? [];
+              collectGeminiWebSearchQueries(executedSearchQueries, q);
               surfaceSearch({ queries: q }, q.join("\n") || "Searched the web.");
             }
             continue;
@@ -373,6 +474,7 @@ export class GoogleAdapter implements ModelProviderAdapter {
           // (googleSearch, included via includeServerSideToolInvocations). Show
           // it as web_search and do NOT hand it to the loop to execute.
           if (!ourTools.has(name)) {
+            unknownSearchExecutions++;
             surfaceSearch({ name }, "Searched the web.");
             continue;
           }
@@ -409,6 +511,16 @@ export class GoogleAdapter implements ModelProviderAdapter {
         };
         p.onUsage?.(usage);
       }
+      }
+    } finally {
+      // Queries already surfaced by the provider remain list-cost evidence even
+      // if a later stream chunk fails or the user aborts the response.
+      const billableWebSearch = geminiWebSearchBillableUsage({
+        executedQueries: executedSearchQueries,
+        groundingQueries: groundingSearchQueries,
+        unknownExecutions: unknownSearchExecutions,
+      });
+      if (billableWebSearch) p.onBillableToolUsage?.(billableWebSearch);
     }
     if (p.signal?.aborted) {
       throw new Error("aborted");
@@ -456,7 +568,7 @@ export class GoogleAdapter implements ModelProviderAdapter {
     };
   }
 
-  async callForcedTool(p: ForcedToolParams): Promise<unknown> {
+  async callForcedTool(p: ForcedToolParams) {
     const contents = toGeminiContents(p.messages, p.model);
     const response = await this.ai.models.generateContent({
       model: p.model,
@@ -474,11 +586,25 @@ export class GoogleAdapter implements ModelProviderAdapter {
         },
       },
     });
+    const um = response.usageMetadata;
+    const cached = um?.cachedContentTokenCount ?? 0;
+    const usage = um
+      ? {
+          inputTokens: Math.max(0, (um.promptTokenCount ?? 0) - cached),
+          outputTokens: (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0),
+          cacheReadTokens: cached,
+          cacheCreationTokens: 0,
+        }
+      : undefined;
+    if (usage) p.onUsage?.(usage);
     const call = response.functionCalls?.[0];
     if (!call || call.name !== p.tool.name) {
       throw new Error(`Model did not return a ${p.tool.name} tool call`);
     }
-    return call.args ?? {};
+    return {
+      input: call.args ?? {},
+      usage,
+    };
   }
 }
 

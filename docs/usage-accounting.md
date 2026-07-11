@@ -37,7 +37,8 @@ The provider adapters populate all four (`loop.ts`'s `usage` shape carries
 `ModelPrice` in **USD per 1,000,000 tokens**: a base `{ input, output }`, an
 optional per-model `{ cacheRead, cacheWrite }` override, and an optional
 `longContext` band. Current bases include `claude-opus-4-8` (`{5, 25}`),
-`claude-sonnet-4-6` (`{3, 15}`), `glm-5.2` (`{1.4, 4.4}`, Z.ai), `gpt-5.5`
+`claude-sonnet-4-6` (`{3, 15}`), `glm-5.2` (`{1.4, 4.4}`, Z.ai),
+`gpt-5.6-sol` (`{5, 30}`), `gpt-5.6-terra` (`{2.5, 15}`), `gpt-5.5`
 (`{5, 30}`), `gemini-3.1-pro-preview-customtools`
 (`{2, 12}`), and others. Unknown model ids fall back to `DEFAULT_PRICE`
 (`{ input: 3, output: 15 }`).
@@ -50,9 +51,9 @@ not the 0.1× default; it has no separate cache-write line):
 - `CACHE_READ_MULTIPLIER = 0.1` — a cache read is ~10% of fresh input. Accurate
   across providers for the cache tokens we measure (Anthropic 0.1×, OpenAI 0.1×,
   Gemini's *implicit* cache is a 90% discount = 0.1×).
-- `CACHE_WRITE_MULTIPLIER = 1.25` — a cache write (Anthropic, the one-time cost
-  of populating the 5-minute cache) is 1.25× fresh input. (The 1-hour cache, 2×,
-  isn't used.)
+- `CACHE_WRITE_MULTIPLIER = 1.25` — measured cache writes are 1.25× fresh
+  input for Anthropic's 5-minute cache and GPT-5.6 prompt caching. (Anthropic's
+  1-hour cache, 2×, isn't used.)
 
 **Long-context bands** (`longContext: { thresholdTokens, above }`): providers
 charge a premium once a turn's *prompt* (fresh input + both cache buckets)

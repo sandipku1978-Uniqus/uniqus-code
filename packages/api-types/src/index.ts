@@ -102,7 +102,7 @@ export type ModelProvider = "anthropic" | "openai" | "google" | "zai";
  * What model the coding agent should use for a turn.
  * - `"auto"` (the default): the orchestrator picks the strongest sensible
  *   model per role. Never resolves to a low/cheap tier.
- * - A catalog `id` ("<provider>:<model>", e.g. "openai:gpt-5.5"): an explicit
+ * - A catalog `id` ("<provider>:<model>", e.g. "openai:gpt-5.6-sol"): an explicit
  *   override chosen via the Advanced model picker. "results may vary" applies.
  */
 export type ModelChoice = "auto" | string;
@@ -110,7 +110,7 @@ export type ModelChoice = "auto" | string;
 /**
  * Per-turn reasoning/thinking effort for the agent. Maps to each provider's
  * native control: Anthropic `output_config.effort` (low→max), OpenAI
- * `reasoning_effort` (clamped to high), Gemini `thinkingConfig`. Account-wide
+ * `reasoning.effort`, Gemini `thinkingConfig`. Account-wide
  * default like the model choice; also overridable per turn from the composer.
  *
  * The full scale is `low`→`max`, but not every provider accepts every rung —
@@ -158,8 +158,9 @@ export const THINKING_EFFORTS: ThinkingEffort[] = ["low", "medium", "high", "xhi
  *   `xhigh`/`max` ⇒ "max"), so we expose only `high`→`max`: the two reasoning
  *   tiers that actually differ. Showing five rungs would be a lie — `low` and
  *   `medium` are indistinguishable from `high` on the wire.
- * - **OpenAI** (`reasoning.effort`) tops out at `xhigh` on the current GPT-5.x
- *   models (there is no `max`), so we expose `low`→`xhigh` and hide only `max`.
+ * - **OpenAI** (`reasoning.effort`) is model-specific: GPT-5.6 exposes the full
+ *   `low`→`max` scale, while the older selectable GPT-5.x models top out at
+ *   `xhigh` and therefore hide only `max`.
  * - **Google** caps out at `high` (`thinkingLevel` has no xhigh/max), so we hide
  *   the top two rungs.
  * - **Auto / unknown** shows the full scale — Auto may resolve to any provider,
@@ -168,15 +169,18 @@ export const THINKING_EFFORTS: ThinkingEffort[] = ["low", "medium", "high", "xhi
  * @param choice a MODEL_CATALOG id ("<provider>:<model>"), "auto", or a bare id.
  */
 export function thinkingEffortsForModel(choice: string): ThinkingEffort[] {
+  const option = MODEL_CATALOG.find((m) => m.id === choice);
   const provider =
     choice === "auto" || !choice
       ? undefined
-      : MODEL_CATALOG.find((m) => m.id === choice)?.provider;
+      : option?.provider;
   switch (provider) {
     case "zai":
       return ["high", "max"];
     case "openai":
-      return ["low", "medium", "high", "xhigh"];
+      return option?.model.startsWith("gpt-5.6")
+        ? ["low", "medium", "high", "xhigh", "max"]
+        : ["low", "medium", "high", "xhigh"];
     case "google":
       return ["low", "medium", "high"];
     case "anthropic":
@@ -253,6 +257,22 @@ export const MODEL_CATALOG: ReadonlyArray<ModelOption> = [
   },
   // ── OpenAI ──
   {
+    id: "openai:gpt-5.6-sol",
+    provider: "openai",
+    model: "gpt-5.6-sol",
+    label: "GPT-5.6 Sol",
+    description: "OpenAI's frontier model for complex professional work.",
+    tier: "frontier",
+  },
+  {
+    id: "openai:gpt-5.6-terra",
+    provider: "openai",
+    model: "gpt-5.6-terra",
+    label: "GPT-5.6 Terra",
+    description: "GPT-5.6 intelligence balanced for lower cost.",
+    tier: "high",
+  },
+  {
     id: "openai:gpt-5.5",
     provider: "openai",
     model: "gpt-5.5",
@@ -310,7 +330,7 @@ export interface ModelRates {
   output: number;
   /** $/1M cache-read tokens. Omit ⇒ `input × CACHE_READ_MULTIPLIER`. */
   cacheRead?: number;
-  /** $/1M cache-write tokens (Anthropic). Omit ⇒ `input × CACHE_WRITE_MULTIPLIER`. */
+  /** $/1M cache-write tokens. Omit ⇒ `input × CACHE_WRITE_MULTIPLIER`. */
   cacheWrite?: number;
 }
 
@@ -368,12 +388,21 @@ export const MODEL_PRICING: Record<string, ModelPrice> = {
   // is ~0.26 (not the 0.1× default), so set it explicitly; GLM has no separate
   // cache-write line. Flat-priced (no long-context band) despite the 1M window.
   "glm-5.2": { input: 1.4, output: 4.4, cacheRead: 0.26 },
-  // OpenAI — rates re-verified against developers.openai.com/api/docs/pricing
-  // on 2026-07-07 (the prior 1.25/10 figures were stale — a ~4× undercount on
-  // gpt-5.5). Base `input` is the fresh rate; cached input is the 0.1× default,
-  // which reproduces OpenAI's published cached rates exactly at BOTH tiers
-  // (gpt-5.5: $0.50 base = 5×0.1, $1.00 long-context = 10×0.1). gpt-5.3-codex
-  // has NO long-context band per the docs.
+  // OpenAI — rates re-verified against developers.openai.com/api/docs/models on
+  // 2026-07-11. Base `input` is the fresh rate; cached input is the 0.1×
+  // default, which reproduces OpenAI's published cached rates exactly at BOTH
+  // tiers. GPT-5.6 also bills cache writes at 1.25× fresh input, matching the
+  // shared default. gpt-5.3-codex has NO long-context band per the docs.
+  "gpt-5.6-sol": {
+    input: 5,
+    output: 30,
+    longContext: { thresholdTokens: 272_000, above: { input: 10, output: 45 } },
+  },
+  "gpt-5.6-terra": {
+    input: 2.5,
+    output: 15,
+    longContext: { thresholdTokens: 272_000, above: { input: 5, output: 22.5 } },
+  },
   "gpt-5.5": {
     input: 5,
     output: 30,
@@ -416,8 +445,8 @@ export const DEFAULT_PRICE: ModelRates = { input: 3, output: 15 };
  * Cache-token price multipliers relative to the model's fresh `input` rate, used
  * when a model's pricing doesn't override `cacheRead` / `cacheWrite`. A cache
  * READ is ~10% of fresh input across providers (Anthropic 0.1×, OpenAI 0.1×,
- * Gemini's implicit cache is a 90% discount = 0.1×); a cache WRITE (Anthropic —
- * the one-time cost of populating the 5-minute cache) is 1.25× fresh input.
+ * Gemini's implicit cache is a 90% discount = 0.1×); measured cache WRITEs
+ * (Anthropic and GPT-5.6) are 1.25× fresh input.
  * Best-effort, not a billing figure.
  */
 export const CACHE_READ_MULTIPLIER = 0.1;
@@ -573,8 +602,8 @@ export type ClientEvent =
       /**
        * Whether extended thinking is enabled for this turn (the composer's
        * on/off toggle). Omitted or `true` ⇒ thinking on at `thinking` effort;
-       * `false` ⇒ the adapter disables reasoning (Anthropic `thinking:disabled`,
-       * GLM thinking off, OpenAI `minimal`, Gemini lowest) for a faster turn.
+       * `false` ⇒ the adapter selects its lowest supported reasoning setting
+       * (Anthropic/GLM off, OpenAI model-specific `none`/`low`, Gemini lowest).
        */
       thinking_enabled?: boolean;
       attachments?: UploadedFileSummary[];

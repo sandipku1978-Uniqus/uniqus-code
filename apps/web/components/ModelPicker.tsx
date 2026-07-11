@@ -54,8 +54,9 @@ function useMounted(): boolean {
  *
  * "Auto" lets the orchestrator pick the strongest model per task; any explicit
  * pick is the Advanced override. The effort slider is ADAPTIVE — it renders only
- * the rungs the selected model actually supports (Claude low→max; GLM high/max;
- * OpenAI/Gemini low→high) via `thinkingEffortsForModel`.
+ * the rungs the selected model actually supports (Claude and GPT-5.6 low→max;
+ * older OpenAI models low→xhigh; GLM high/max; Gemini low→high) via
+ * `thinkingEffortsForModel`.
  */
 export default function ModelPicker({
   variant = "compact",

@@ -518,6 +518,34 @@ const ENTRIES: Entry[] = [
       },
     ],
   },
+  {
+    id: "v0-20",
+    date: "Jul 2026",
+    ver: "v0.20",
+    title: "A faster, steadier agent",
+    changes: [
+      {
+        tag: "new",
+        text: "GPT-5.6 Sol and GPT-5.6 Terra are now available in the model picker, with the full reasoning range on both models.",
+      },
+      {
+        tag: "improved",
+        text: "The agent now starts eligible tasks with a smaller, task-matched toolkit and loads specialized capabilities only when needed, cutting prompt overhead while keeping the full toolset within reach.",
+      },
+      {
+        tag: "improved",
+        text: "Independent code reads can run in parallel, while large files, searches, and command output are trimmed intelligently so one oversized result cannot crowd out the rest of the work.",
+      },
+      {
+        tag: "improved",
+        text: "Long conversations compact around each model's real context window and reuse that compacted history after reconnecting, reducing repeated work on later turns.",
+      },
+      {
+        tag: "fixed",
+        text: "File changes and chat history are saved more reliably at the end of every turn, including interrupted runs and background tasks that hit a provider or persistence error.",
+      },
+    ],
+  },
 ];
 
 const DISPLAY_ENTRIES = [...ENTRIES].reverse();

@@ -3,10 +3,13 @@ import {
   AGENT_TYPES,
   AGENT_TYPE_KEYS,
   MAX_SUB_AGENTS_PER_CALL,
+  MAX_SUB_AGENTS_PER_TURN,
   buildSubAgentPreamble,
   parseAgentSpecs,
   formatSubAgentReports,
   SPAWN_AGENTS_TOOL,
+  SUBAGENT_BLOCKED_TOOLS,
+  subAgentExecutionBudgetForCohort,
   type SubAgentRunReport,
 } from "./subagents.js";
 
@@ -73,6 +76,56 @@ describe("buildSubAgentPreamble", () => {
   it("omits the instructions block when none given", () => {
     const plain = buildSubAgentPreamble(AGENT_TYPES.general);
     expect(plain).not.toMatch(/Additional instructions/);
+  });
+
+  it("advertises safe capability expansion to specialized workers", () => {
+    expect(buildSubAgentPreamble(AGENT_TYPES.backend)).toContain("load_capabilities");
+  });
+});
+
+describe("sub-agent harness profiles", () => {
+  it("keeps general on the complete legacy surface", () => {
+    expect(AGENT_TYPES.general.capabilities).toBe("all");
+    expect(AGENT_TYPES.general.guidance).toBe("all");
+    expect(AGENT_TYPES.general.executionBudget).toBeNull();
+  });
+
+  it("gives explicit roles lean relevant profiles and generous hard budgets", () => {
+    expect(AGENT_TYPES.audit.capabilities).toEqual(["knowledge"]);
+    expect(AGENT_TYPES.frontend.guidance).toContain("design");
+    expect(AGENT_TYPES.backend.capabilities).toContain("integrations");
+    for (const key of ["audit", "design", "frontend", "backend", "database", "research"]) {
+      const budget = AGENT_TYPES[key].executionBudget;
+      expect(budget?.maxIterations).toBeGreaterThanOrEqual(48);
+      expect(budget?.maxOutputTokens).toBeGreaterThanOrEqual(96_000);
+      expect(budget?.maxWallTimeMs).toBeGreaterThanOrEqual(10 * 60_000);
+    }
+  });
+
+  it("has a turn-wide cap that cannot be bypassed with repeated spawn calls", () => {
+    expect(MAX_SUB_AGENTS_PER_TURN).toBeGreaterThan(MAX_SUB_AGENTS_PER_CALL);
+    expect(MAX_SUB_AGENTS_PER_TURN).toBeLessThanOrEqual(MAX_SUB_AGENTS_PER_CALL * 2);
+  });
+
+  it("does not let capability expansion bypass lead-owned preview actions", () => {
+    for (const name of [
+      "start_server",
+      "stop_server",
+      "screenshot_preview",
+      "interact_preview",
+      "run_flow",
+      "save_flow",
+    ]) {
+      expect(SUBAGENT_BLOCKED_TOOLS.has(name)).toBe(true);
+    }
+  });
+
+  it("keeps treatment-only execution limits out of legacy control workers", () => {
+    expect(subAgentExecutionBudgetForCohort(AGENT_TYPES.backend, "treatment")).toBe(
+      AGENT_TYPES.backend.executionBudget,
+    );
+    expect(subAgentExecutionBudgetForCohort(AGENT_TYPES.backend, "control")).toBeNull();
+    expect(subAgentExecutionBudgetForCohort(AGENT_TYPES.backend, "ineligible")).toBeNull();
   });
 });
 

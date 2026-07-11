@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { normalizePlan } from "./plan.js";
+import { mapPlannerCallsWithBarriers, normalizePlan } from "./plan.js";
 
 describe("normalizePlan — defends the UI against malformed model output", () => {
   it("passes a well-formed plan through unchanged", () => {
@@ -79,5 +79,58 @@ describe("normalizePlan — defends the UI against malformed model output", () =
     expect(
       normalizePlan({ summary: "x", steps: [], open_questions: "not an array" }).open_questions,
     ).toBeUndefined();
+  });
+});
+
+describe("mapPlannerCallsWithBarriers", () => {
+  it("bounds parallel reads and preserves provider result order", async () => {
+    const calls = [18, 2, 12, 1, 8, 3];
+    let active = 0;
+    let peak = 0;
+
+    const results = await mapPlannerCallsWithBarriers(
+      calls,
+      () => true,
+      async (delay, index) => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        active--;
+        return `result-${index}`;
+      },
+      2,
+    );
+
+    expect(peak).toBe(2);
+    expect(results).toEqual(calls.map((_, index) => `result-${index}`));
+  });
+
+  it("waits at non-read barriers before starting the following read group", async () => {
+    const calls = [
+      { name: "read-a", safe: true },
+      { name: "read-b", safe: true },
+      { name: "barrier", safe: false },
+      { name: "read-c", safe: true },
+    ];
+    const events: string[] = [];
+
+    const results = await mapPlannerCallsWithBarriers(
+      calls,
+      (call) => call.safe,
+      async (call) => {
+        events.push(`start:${call.name}`);
+        await new Promise((resolve) => setTimeout(resolve, call.name === "read-a" ? 8 : 1));
+        events.push(`end:${call.name}`);
+        return call.name;
+      },
+      4,
+    );
+
+    const barrierStart = events.indexOf("start:barrier");
+    const barrierEnd = events.indexOf("end:barrier");
+    expect(barrierStart).toBeGreaterThan(events.indexOf("end:read-a"));
+    expect(barrierStart).toBeGreaterThan(events.indexOf("end:read-b"));
+    expect(events.indexOf("start:read-c")).toBeGreaterThan(barrierEnd);
+    expect(results).toEqual(calls.map((call) => call.name));
   });
 });

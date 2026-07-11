@@ -5,12 +5,42 @@ import { normalizeCitations } from "../citations.js";
 import { lastRealUserTurnIndex } from "../messageHistory.js";
 import { parsePartialJson } from "./partialJson.js";
 import type {
+  BillableToolUsage,
   ForcedToolParams,
   ModelProviderAdapter,
   StreamTurnParams,
   StreamTurnResult,
   TokenUsage,
 } from "./types.js";
+
+const OPENAI_WEB_SEARCH_USD = 0.01;
+
+/**
+ * Count completed Responses output items that represent an actual web search.
+ * Open/page-find items are navigation within search results, not additional
+ * search tool calls. IDs are de-duplicated because a streamed item can be seen
+ * more than once by defensive/replayed consumers. We intentionally do not
+ * filter on `status`: OpenAI's public price is per tool call, and the caller's
+ * required accounting contract counts a done search action regardless of the
+ * terminal status carried by that item.
+ * https://platform.openai.com/docs/api-reference/responses-streaming/response/output_item/done
+ * https://openai.com/api/pricing/#built-in-tools
+ */
+export function openAIWebSearchBillableUsage(
+  items: Iterable<Pick<OpenAI.Responses.ResponseFunctionWebSearch, "id" | "action">>,
+): BillableToolUsage | undefined {
+  const ids = new Set<string>();
+  for (const item of items) {
+    if (item.action?.type === "search" && item.id) ids.add(item.id);
+  }
+  if (ids.size === 0) return undefined;
+  return {
+    kind: "web_search",
+    units: ids.size,
+    costUsd: ids.size * OPENAI_WEB_SEARCH_USD,
+    accuracy: "exact",
+  };
+}
 
 /**
  * OpenAI adapter — Responses API (`/v1/responses`).
@@ -49,35 +79,57 @@ import type {
  */
 
 /**
- * Build the `reasoning` request field from the thinking-effort control. The
- * `*-pro` models only accept "high" (low/medium 400), so clamp them. `summary:
+ * Build the `reasoning` request field from the thinking-effort control. GPT-5.6
+ * adds a real `max` rung, while every generation has its own lowest supported
+ * effort for the thinking toggle. The `*-pro` models only accept "high"
+ * (low/medium 400), so clamp them. `summary:
  * "auto"` asks for a reasoning summary we stream as the thinking trace — OpenAI
  * downgrades it to the richest level the org is entitled to, so an org that
  * isn't verified for reasoning summaries simply yields no summary deltas (the
  * thinking trace is empty) rather than an error. That, or running on a stale
  * deploy that predates this wiring, is the usual reason OpenAI shows no thinking.
  */
-function reasoningParam(
+export function reasoningParam(
   model: string,
   effort: ThinkingEffort | undefined,
   enabled = true,
 ): OpenAI.Responses.ResponseCreateParams["reasoning"] | undefined {
-  // GPT-5.x always reasons — the on/off toggle can only floor it: "minimal" is
-  // the lowest reasoning_effort the Responses API accepts.
-  if (!enabled) return { effort: "minimal", summary: "auto" };
+  const isGpt56 = /^gpt-5\.6(?:$|-)/.test(model);
+  // This app's toggle maps to the model's lowest supported effort. GPT-5.5/5.6
+  // accept `none`, GPT-5.3 Codex bottoms out at `low`, and legacy/freeform models
+  // retain the older `minimal` fallback. A legacy `*-pro` slug accepts only high.
+  if (!enabled) {
+    const floor = model.includes("-pro")
+      ? "high"
+      : /^gpt-5\.(?:5|6)(?:$|-)/.test(model)
+        ? "none"
+        : /^gpt-5\.3-codex(?:$|-)/.test(model)
+          ? "low"
+          : "minimal";
+    return {
+      effort: floor,
+      summary: "auto",
+      ...(isGpt56 ? { context: "current_turn" as const } : {}),
+    };
+  }
   if (!effort) return undefined;
-  // Current GPT-5.x models accept low/medium/high/xhigh (xhigh is the ceiling —
-  // there is NO "max"), so pass low→xhigh straight through and map our top rung
-  // `max` down to `xhigh`. `*-pro` models only accept "high" (low/medium/xhigh
-  // 400), so clamp those. `xhigh` is model-dependent on OpenAI's side; the
-  // composer only offers it for OpenAI, and Auto-resolved-to-OpenAI requests at
-  // `max` land on `xhigh` here.
+  // GPT-5.6 accepts the full low→max scale. Older GPT-5.x models still cap at
+  // xhigh, so only those downgrade our shared max rung. `*-pro` model slugs use
+  // their legacy fixed-high behavior; GPT-5.6 pro is a reasoning mode, not a
+  // separate model slug, and is intentionally not enabled by this picker.
   const level = model.includes("-pro")
     ? "high"
-    : effort === "max"
+    : effort === "max" && !isGpt56
       ? "xhigh"
       : effort;
-  return { effort: level as NonNullable<OpenAI.Responses.ResponseCreateParams["reasoning"]>["effort"], summary: "auto" };
+  return {
+    effort: level,
+    summary: "auto",
+    // The adapter deliberately replays encrypted reasoning only within the
+    // active user turn. Make GPT-5.6's persisted-reasoning policy match that
+    // boundary explicitly instead of leaving it to the model's `auto` default.
+    ...(isGpt56 ? { context: "current_turn" as const } : {}),
+  };
 }
 
 export class OpenAIAdapter implements ModelProviderAdapter {
@@ -130,8 +182,17 @@ export class OpenAIAdapter implements ModelProviderAdapter {
     let pendingReasoning: ReasoningRef | undefined;
     // Web sources cited this turn, read off the terminal response.completed.
     let citations: Citation[] = [];
+    // Only `response.output_item.done` carries the final action shape needed to
+    // distinguish a billable search from open_page/find_in_page navigation.
+    // Keep all such items and de-duplicate by id once, after the response ends.
+    const billableWebSearchItems: OpenAI.Responses.ResponseFunctionWebSearch[] = [];
+    const reportBillableWebSearch = (): void => {
+      const billable = openAIWebSearchBillableUsage(billableWebSearchItems);
+      if (billable) p.onBillableToolUsage?.(billable);
+    };
 
-    for await (const event of stream) {
+    try {
+      for await (const event of stream) {
       // Function-call argument deltas — the live path for showing a call's file
       // name / command as it streams. Handled before the typed switch because
       // the SDK's event union may not expose this variant across versions.
@@ -174,7 +235,13 @@ export class OpenAIAdapter implements ModelProviderAdapter {
           // The SDK does NOT throw for this (the error nests under `response`,
           // not the top-level `data.error` the raw stream watches), so without
           // this case the stream just ends and the turn looks like a silent
-          // empty success. Throw so the loop's existing catch path surfaces it.
+          // empty success. A failed Response can still carry authoritative,
+          // billable usage; report it before throwing so the loop's error path
+          // does not have to fall back to its output-only live estimate.
+          if (event.response.usage) {
+            usage = toTokenUsage(event.response.usage);
+            p.onUsage?.(usage);
+          }
           const err = event.response.error;
           throw new Error(
             `OpenAI response failed${err?.code ? ` (${err.code})` : ""}: ${
@@ -227,6 +294,7 @@ export class OpenAIAdapter implements ModelProviderAdapter {
             // (before the first call) to avoid a duplicate-id 400.
             pendingReasoning = undefined;
           } else if (event.item.type === "web_search_call") {
+            billableWebSearchItems.push(event.item);
             const query = webSearchQuery(event.item);
             p.onToolCall?.(event.item.id, "web_search", { query });
             p.onToolResult?.(
@@ -239,6 +307,11 @@ export class OpenAIAdapter implements ModelProviderAdapter {
           }
           break;
       }
+      }
+    } finally {
+      // A completed search action can be billable even if a later stream event
+      // fails. Report the de-duplicated actions observed so far on every exit.
+      reportBillableWebSearch();
     }
 
     const content: Anthropic.ContentBlockParam[] = [];
@@ -260,28 +333,38 @@ export class OpenAIAdapter implements ModelProviderAdapter {
     };
   }
 
-  async callForcedTool(p: ForcedToolParams): Promise<unknown> {
-    const response = await this.client.responses.create({
-      model: p.model,
-      instructions: p.system,
-      input: toResponsesInput(p.messages),
-      tools: toResponsesTools([p.tool], false),
-      tool_choice: { type: "function", name: p.tool.name },
-      max_output_tokens: p.maxTokens,
-      store: false,
-    });
+  async callForcedTool(p: ForcedToolParams) {
+    const response = await this.client.responses.create(
+      {
+        model: p.model,
+        instructions: p.system,
+        input: toResponsesInput(p.messages),
+        tools: toResponsesTools([p.tool], false),
+        tool_choice: { type: "function", name: p.tool.name },
+        max_output_tokens: p.maxTokens,
+        store: false,
+      },
+      p.signal ? { signal: p.signal } : undefined,
+    );
+    const usage = response.usage ? toTokenUsage(response.usage) : undefined;
+    if (usage) p.onUsage?.(usage);
     const call = (response.output ?? []).find((i) => i.type === "function_call");
     if (!call || call.type !== "function_call" || call.name !== p.tool.name) {
       throw new Error(`Model did not return a ${p.tool.name} tool call`);
     }
-    return safeParseJson(call.arguments);
+    return {
+      input: safeParseJson(call.arguments),
+      usage,
+    };
   }
 }
 
 /** Best-effort search query from a web_search_call item's action, for display. */
 function webSearchQuery(item: OpenAI.Responses.ResponseFunctionWebSearch): string {
-  const action = item.action as { query?: unknown } | undefined;
-  return typeof action?.query === "string" ? action.query : "";
+  if (item.action.type !== "search") return "";
+  const queries = item.action.queries?.filter((q) => typeof q === "string" && q.trim());
+  if (queries && queries.length > 0) return queries.join("\n");
+  return typeof item.action.query === "string" ? item.action.query : "";
 }
 
 export function safeParseJson(s: string, toolName?: string): unknown {
@@ -336,11 +419,9 @@ function toolUseBlock(
 
 /**
  * Normalize OpenAI usage to our canonical shape. OpenAI's `input_tokens` is the
- * TOTAL prompt and INCLUDES cached tokens; `cached_tokens` is the cached subset.
- * We subtract to report the fresh (full-price) remainder, and surface the cached
- * portion separately so the dashboard prices it at the discounted rate instead
- * of billing every replayed prefix token at full price. OpenAI auto-caches with
- * no separate write line, so cacheCreationTokens is 0.
+ * TOTAL prompt and includes both cache reads and GPT-5.6 cache writes. Subtract
+ * both subsets to report the fresh remainder, then surface each bucket separately
+ * so the dashboard applies the discounted read and 1.25x write rates correctly.
  */
 /**
  * Pull the web sources out of a completed Responses turn. Each `output_text`
@@ -372,11 +453,12 @@ export function citationsFromResponse(response: OpenAI.Responses.Response): Cita
 
 export function toTokenUsage(u: OpenAI.Responses.ResponseUsage): TokenUsage {
   const cached = u.input_tokens_details?.cached_tokens ?? 0;
+  const written = u.input_tokens_details?.cache_write_tokens ?? 0;
   return {
-    inputTokens: Math.max(0, (u.input_tokens ?? 0) - cached),
+    inputTokens: Math.max(0, (u.input_tokens ?? 0) - cached - written),
     outputTokens: u.output_tokens ?? 0,
     cacheReadTokens: cached,
-    cacheCreationTokens: 0,
+    cacheCreationTokens: written,
   };
 }
 

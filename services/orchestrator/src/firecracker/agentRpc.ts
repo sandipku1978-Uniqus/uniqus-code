@@ -32,32 +32,115 @@ interface CommandResult {
   exitCode: number | null;
 }
 
-export async function readFile(
+interface TextReadResponse {
+  content: string;
+  total_lines?: number | null;
+  known_lines?: number;
+  has_more?: boolean;
+  total_bytes?: number;
+  returned_bytes?: number;
+  selected_bytes?: number;
+  head_bytes?: number;
+  tail_bytes?: number;
+  omitted_bytes?: number;
+  truncated?: boolean;
+  range_start?: number;
+  range_end?: number | null;
+  requested_end?: number | null;
+}
+
+export interface RpcTextResult {
+  text: string;
+  truncated: boolean;
+}
+
+export async function readFileResult(
   vm: VmHandle,
   p: string,
-  opts?: { offset?: number; limit?: number },
-): Promise<string> {
+  opts?: { offset?: number; limit?: number; maxBytes?: number; headTail?: boolean },
+): Promise<RpcTextResult> {
   let url = `/fs/file?path=${encodeURIComponent(p)}`;
   const range = opts && (opts.offset !== undefined || opts.limit !== undefined);
   if (range) {
-    if (opts!.offset !== undefined) url += `&offset=${Math.floor(opts!.offset)}`;
+    if (opts!.offset !== undefined)
+      url += `&offset=${Math.floor(opts!.offset)}`;
     if (opts!.limit !== undefined) url += `&limit=${Math.floor(opts!.limit)}`;
   }
-  const r = await rpc<{ content: string; total_lines?: number }>(vm, "GET", url);
-  // Range reads: the agent slices in-guest and reports total_lines so we can
-  // render an accurate [lines X–Y of N] header (mirrors sandbox.sliceLines).
-  if (range && typeof r.total_lines === "number") {
-    const start = Math.max(1, Math.floor(opts!.offset ?? 1));
-    const total = r.total_lines;
-    if (start > total) return `[file has ${total} line(s); offset ${start} is past the end]`;
-    const count = Math.max(1, Math.floor(opts!.limit ?? 2000));
-    const end = Math.min(total, start + count - 1);
-    return `[lines ${start}–${end} of ${total}]\n${r.content}`;
+  if (opts?.maxBytes !== undefined) {
+    url += `&max_bytes=${Math.max(1, Math.floor(opts.maxBytes))}`;
   }
-  return r.content;
+  if (opts?.headTail === true) url += "&head_tail=1";
+  const r = await rpc<TextReadResponse>(vm, "GET", url);
+  // Range reads are sliced in-guest. The agent stops once the requested
+  // window/cap is resolved, so total_lines is nullable and known_lines is a
+  // lower bound unless the scan necessarily reached EOF.
+  if (
+    range &&
+    (typeof r.total_lines === "number" || typeof r.known_lines === "number")
+  ) {
+    const start = Math.max(1, Math.floor(opts!.offset ?? 1));
+    const total = typeof r.total_lines === "number" ? r.total_lines : null;
+    const knownLines = Math.max(
+      1,
+      r.known_lines ?? total ?? r.range_end ?? start,
+    );
+    if (total !== null && start > total) {
+      return {
+        text: `[file has ${total} line(s); offset ${start} is past the end]`,
+        truncated: false,
+      };
+    }
+    const count = Math.max(1, Math.floor(opts!.limit ?? 2000));
+    const requestedEnd =
+      typeof r.requested_end === "number"
+        ? r.requested_end
+        : Math.min(total ?? knownLines, start + count - 1);
+    const returnedEnd =
+      typeof r.range_end === "number"
+        ? Math.max(start, r.range_end)
+        : requestedEnd;
+    const selectedSize =
+      typeof r.selected_bytes === "number"
+        ? `at least ${r.selected_bytes}`
+        : "an unknown number of";
+    const note = r.truncated
+      ? `\n\n[... selected range truncated in the sandbox: ${selectedSize} bytes selected, showing the first ${r.returned_bytes ?? Buffer.byteLength(r.content)} bytes through line ${returnedEnd}. Reduce limit or request a narrower range. ...]`
+      : "";
+    const totalLabel = total === null ? `at least ${knownLines}` : String(total);
+    return {
+      text: `[lines ${start}–${returnedEnd} of ${totalLabel}]\n${r.content}${note}`,
+      truncated: r.truncated === true,
+    };
+  }
+  if (r.truncated) {
+    const returned = r.returned_bytes ?? Buffer.byteLength(r.content);
+    const detail =
+      typeof r.tail_bytes === "number" && r.tail_bytes > 0
+        ? `showing the first ${r.head_bytes ?? "unknown"} and last ${r.tail_bytes} bytes (${r.omitted_bytes ?? "unknown"} omitted)`
+        : `showing the first ${r.head_bytes ?? returned} bytes`;
+    return {
+      text:
+        r.content +
+        `\n\n[... file truncated in the sandbox: ${r.total_bytes ?? "unknown"} bytes total, ${detail}. Pass offset/limit to read a specific line range. ...]`,
+      truncated: true,
+    };
+  }
+  return { text: r.content, truncated: false };
 }
 
-export async function writeFile(vm: VmHandle, p: string, content: string): Promise<void> {
+export async function readFile(
+  vm: VmHandle,
+  p: string,
+  opts?: { offset?: number; limit?: number; maxBytes?: number; headTail?: boolean },
+): Promise<string> {
+  return (await readFileResult(vm, p, opts)).text;
+}
+
+export async function writeFile(
+  vm: VmHandle,
+  p: string,
+  content: string,
+): Promise<void> {
   await rpc(vm, "PUT", "/fs/file", { path: p, content });
 }
 
@@ -67,7 +150,11 @@ export async function editFile(
   oldString: string,
   newString: string,
 ): Promise<void> {
-  await rpc(vm, "POST", "/fs/edit", { path: p, old_string: oldString, new_string: newString });
+  await rpc(vm, "POST", "/fs/edit", {
+    path: p,
+    old_string: oldString,
+    new_string: newString,
+  });
 }
 
 export async function listDir(vm: VmHandle, p?: string): Promise<string[]> {
@@ -79,24 +166,37 @@ export async function listDir(vm: VmHandle, p?: string): Promise<string[]> {
   return r.entries;
 }
 
+export async function grepResult(
+  vm: VmHandle,
+  pattern: string,
+  p?: string,
+  opts?: { caseInsensitive?: boolean; literal?: boolean },
+): Promise<RpcTextResult> {
+  const r = await rpc<{
+    matches: string;
+    total_matches?: number;
+    returned_matches?: number;
+    omitted_matches?: number;
+    head_matches?: number;
+    tail_matches?: number;
+    truncated?: boolean;
+    line_truncations?: number;
+  }>(vm, "POST", "/fs/grep", {
+    pattern,
+    path: p ?? null,
+    case_insensitive: opts?.caseInsensitive === true,
+    literal: opts?.literal === true,
+  });
+  return { text: r.matches, truncated: r.truncated === true };
+}
+
 export async function grep(
   vm: VmHandle,
   pattern: string,
   p?: string,
   opts?: { caseInsensitive?: boolean; literal?: boolean },
 ): Promise<string> {
-  const r = await rpc<{ matches: string }>(
-    vm,
-    "POST",
-    "/fs/grep",
-    {
-      pattern,
-      path: p ?? null,
-      case_insensitive: opts?.caseInsensitive === true,
-      literal: opts?.literal === true,
-    },
-  );
-  return r.matches;
+  return (await grepResult(vm, pattern, p, opts)).text;
 }
 
 export async function runCommand(
@@ -137,7 +237,11 @@ export async function stopServer(vm: VmHandle, id: string): Promise<void> {
   await rpc(vm, "POST", "/exec/stop-server", { id });
 }
 
-export async function readServerLog(vm: VmHandle, id: string, maxBytes: number): Promise<string> {
+export async function readServerLog(
+  vm: VmHandle,
+  id: string,
+  maxBytes: number,
+): Promise<string> {
   const r = await rpc<{ log: string }>(
     vm,
     "GET",
@@ -196,9 +300,15 @@ export interface VmFileEntry {
  * predate the endpoint — callers fall back to an exec-based walk.
  */
 export async function manifest(vm: VmHandle): Promise<VmFileEntry[]> {
-  const r = await rpc<{ files: VmFileEntry[] }>(vm, "GET", "/fs/manifest", undefined, {
-    readTimeoutMs: 20_000,
-  });
+  const r = await rpc<{ files: VmFileEntry[] }>(
+    vm,
+    "GET",
+    "/fs/manifest",
+    undefined,
+    {
+      readTimeoutMs: 20_000,
+    },
+  );
   return Array.isArray(r.files) ? r.files : [];
 }
 
@@ -208,7 +318,10 @@ export async function manifest(vm: VmHandle): Promise<VmFileEntry[]> {
  * treating that UTF-8-mangled text as file content would corrupt binaries.
  * Callers fall back to a chunked in-guest `dd | base64` exec read.
  */
-export async function readFileBinary(vm: VmHandle, p: string): Promise<Buffer | null> {
+export async function readFileBinary(
+  vm: VmHandle,
+  p: string,
+): Promise<Buffer | null> {
   const r = await rpc<{ content: string; encoding?: string }>(
     vm,
     "GET",
@@ -284,7 +397,9 @@ export async function finalizeRestore(
   // Send the token as a Bearer header too: the FIRST configure lands before the
   // agent enforces (golden resumes dark), but a retry lands AFTER it flipped on,
   // so the retry needs to authenticate or it'd 401 and brick the restore.
-  const headers = body.auth_token ? { Authorization: `Bearer ${body.auth_token}` } : undefined;
+  const headers = body.auth_token
+    ? { Authorization: `Bearer ${body.auth_token}` }
+    : undefined;
   await rawRequest(
     bootstrapIp,
     port,
@@ -298,7 +413,11 @@ export async function finalizeRestore(
 }
 
 /** Probe an agent at an explicit ip:port (used while waiting on a restored clone). */
-export async function pingAt(ip: string, port: number, readTimeoutMs = 500): Promise<boolean> {
+export async function pingAt(
+  ip: string,
+  port: number,
+  readTimeoutMs = 500,
+): Promise<boolean> {
   try {
     await rawRequest(ip, port, "GET", "/health", undefined, readTimeoutMs);
     return true;
@@ -331,8 +450,10 @@ function rawRequest(
   connectTimeoutMs?: number,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
-    let phase: "connect" | "read" = connectTimeoutMs !== undefined ? "connect" : "read";
+    const payload =
+      body === undefined ? undefined : Buffer.from(JSON.stringify(body));
+    let phase: "connect" | "read" =
+      connectTimeoutMs !== undefined ? "connect" : "read";
     const req = http.request(
       {
         host,
@@ -352,7 +473,9 @@ function rawRequest(
         res.on("end", () => {
           const status = res.statusCode ?? 0;
           if (status >= 400 || status === 0) {
-            reject(new Error(`${method} ${host}:${port}${urlPath} → HTTP ${status}`));
+            reject(
+              new Error(`${method} ${host}:${port}${urlPath} → HTTP ${status}`),
+            );
           } else {
             resolve();
           }
@@ -375,7 +498,11 @@ function rawRequest(
     req.once("timeout", () => {
       req.destroy();
       const cap = phase === "connect" ? connectTimeoutMs : readTimeoutMs;
-      reject(new Error(`${method} ${host}:${port}${urlPath} ${phase} timeout (${cap}ms)`));
+      reject(
+        new Error(
+          `${method} ${host}:${port}${urlPath} ${phase} timeout (${cap}ms)`,
+        ),
+      );
     });
     req.once("error", reject);
     if (payload) req.write(payload);
@@ -406,7 +533,8 @@ function rpc<T = void>(
   touchVm(vm.projectId);
   return new Promise<T>((resolve, reject) => {
     const readTimeout = opts.readTimeoutMs ?? 30_000;
-    const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
+    const payload =
+      body === undefined ? undefined : Buffer.from(JSON.stringify(body));
     const req = http.request({
       host: vm.ip,
       port: vm.agentPort,
@@ -443,7 +571,9 @@ function rpc<T = void>(
       opts.signal.addEventListener("abort", onAbort, { once: true });
     }
 
-    req.once("timeout", () => fail(new Error(`read timeout (${readTimeout}ms)`)));
+    req.once("timeout", () =>
+      fail(new Error(`read timeout (${readTimeout}ms)`)),
+    );
     req.once("error", fail);
 
     req.once("response", (res) => {
@@ -458,7 +588,9 @@ function rpc<T = void>(
         const status = res.statusCode ?? 0;
         if (status >= 400 || status === 0) {
           reject(
-            new Error(`[vm ${vm.id}] ${method} ${path}: HTTP ${status}: ${text.slice(0, 500)}`),
+            new Error(
+              `[vm ${vm.id}] ${method} ${path}: HTTP ${status}: ${text.slice(0, 500)}`,
+            ),
           );
           return;
         }

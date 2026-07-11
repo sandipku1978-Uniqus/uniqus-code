@@ -158,15 +158,54 @@ const IMAGE_STRIP_STUB =
   "[screenshot omitted from context to save tokens — re-run the tool if you need to see it again]";
 
 /**
+ * Return a shallow-cloned message with base64 image blocks removed only from
+ * tool results. Text blocks are retained verbatim because they carry the
+ * sandbox asset path used by transcript replay and future targeted reads.
+ */
+function withoutToolResultImages(
+  message: Anthropic.MessageParam,
+): Anthropic.MessageParam {
+  if (!Array.isArray(message.content)) return message;
+  let changed = false;
+  const content = message.content.map((block) => {
+    if (!isToolResultBlock(block) || !Array.isArray(block.content)) return block;
+    if (!block.content.some((item) => isBlock(item) && item.type === "image")) {
+      return block;
+    }
+    changed = true;
+    const kept = block.content.filter(
+      (item) => !(isBlock(item) && item.type === "image"),
+    );
+    return {
+      ...block,
+      content: kept.length > 0 ? kept : [{ type: "text", text: IMAGE_STRIP_STUB }],
+    } as Anthropic.ToolResultBlockParam;
+  });
+  return changed
+    ? ({ ...message, content } as Anthropic.MessageParam)
+    : message;
+}
+
+/**
+ * Build the DB representation after a live turn without mutating the model's
+ * in-memory history. The active model keeps current screenshots for visual
+ * reasoning; durable chat rows keep only replay-relevant text/path metadata.
+ */
+export function sanitizeMessagesForPersistence(
+  messages: readonly Anthropic.MessageParam[],
+): Anthropic.MessageParam[] {
+  return messages.map(withoutToolResultImages);
+}
+
+/**
  * Drop base64 image blocks from tool_results that belong to PRIOR turns,
  * keeping only the current turn's images (everything after the last real user
  * message). Screenshots/read_asset images are ~100-400 KB of base64 each;
- * without this they sit in history, get persisted, and are re-sent on every
- * one of the loop's iterations and every subsequent turn — the main driver of
- * runaway input-token usage. The agent still sees images on the turn it
- * captured them; older ones become a short text stub it can refresh on demand.
- * Mutates in place (the live history array), so the pruned form is also what
- * gets persisted.
+ * without this they are re-sent on every one of the loop's iterations and every
+ * subsequent turn — the main driver of runaway input-token usage. The agent
+ * still sees images on the turn it captured them; older ones become a short
+ * text stub it can refresh on demand. DB persistence is sanitized separately by
+ * sanitizeMessagesForPersistence so current-turn visual context stays intact.
  */
 export function pruneStaleImagesInPlace(messages: Anthropic.MessageParam[]): void {
   const lastUserTurn = lastRealUserTurnIndex(messages);
@@ -174,20 +213,7 @@ export function pruneStaleImagesInPlace(messages: Anthropic.MessageParam[]): voi
 
   for (let i = 0; i < lastUserTurn; i++) {
     const msg = messages[i];
-    if (!Array.isArray(msg.content)) continue;
-    let changed = false;
-    const content = msg.content.map((block) => {
-      if (!isBlock(block) || block.type !== "tool_result") return block;
-      const tr = block as Anthropic.ToolResultBlockParam;
-      if (!Array.isArray(tr.content)) return block;
-      if (!tr.content.some((c) => isBlock(c) && c.type === "image")) return block;
-      changed = true;
-      const kept = tr.content.filter((c) => !(isBlock(c) && c.type === "image"));
-      return {
-        ...tr,
-        content: kept.length > 0 ? kept : [{ type: "text", text: IMAGE_STRIP_STUB }],
-      } as Anthropic.ToolResultBlockParam;
-    });
-    if (changed) messages[i] = { ...msg, content } as Anthropic.MessageParam;
+    const sanitized = withoutToolResultImages(msg);
+    if (sanitized !== msg) messages[i] = sanitized;
   }
 }

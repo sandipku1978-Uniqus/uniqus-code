@@ -216,9 +216,17 @@ create table if not exists chat_sessions (
   id uuid primary key default gen_random_uuid(),
   project_id uuid not null references projects(id) on delete cascade,
   title text,
+  -- Model-facing compacted prefix. Raw messages are never deleted; the cursor
+  -- says which raw id the snapshot covers so reconnects can load snapshot+tail
+  -- without paying to summarize the same history again.
+  compacted_history jsonb,
+  compacted_through_message_id bigint,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table chat_sessions add column if not exists compacted_history jsonb;
+alter table chat_sessions add column if not exists compacted_through_message_id bigint;
 
 create index if not exists chat_sessions_project_idx
   on chat_sessions (project_id, updated_at desc);
@@ -366,12 +374,17 @@ create index if not exists audit_project_idx
 
 alter table audit_events enable row level security;
 
--- Per-turn token usage (Plan §5 — dashboard usage widgets). One row per
--- completed agent turn. user_id is the acting user (the project owner), so the
--- dashboard can aggregate per account without a join. Purely analytics — no
--- plaintext, no secrets. project_id/user_id cascade-delete with their parents.
+-- Per-call token usage (Plan §5 — dashboard usage widgets). A top-level task
+-- can emit lead, planner, sub-agent, classifier, compaction, or media rows; the
+-- shared run_id groups those billed calls into one user-visible turn. user_id is
+-- the acting user, so account aggregation needs no join. Purely analytics — no
+-- plaintext or secrets. project_id/user_id cascade-delete with their parents.
 create table if not exists usage_events (
   id bigserial primary key,
+  -- Correlates every lead/planner/sub-agent/auxiliary billed call to one
+  -- top-level harness run, enabling exact snapshotted cost-per-task rollups.
+  -- Deliberately no FK: usage rows may land before the best-effort metrics row.
+  run_id uuid,
   project_id uuid references projects(id) on delete cascade,
   user_id uuid references users(id) on delete cascade,
   provider text not null,
@@ -397,19 +410,363 @@ alter table usage_events add column if not exists cache_read_tokens integer not 
 alter table usage_events add column if not exists cache_creation_tokens integer not null default 0;
 -- Idempotent migration for the per-turn cost snapshot (left NULL on old rows).
 alter table usage_events add column if not exists cost_usd numeric;
+alter table usage_events add column if not exists run_id uuid;
 
 create index if not exists usage_events_user_idx
   on usage_events (user_id, created_at desc);
+-- Supports project-scoped cost sweeps and the org month-to-date aggregate
+-- without scanning unrelated accounts' historical usage.
+create index if not exists usage_events_project_created_idx
+  on usage_events (project_id, created_at desc);
+create index if not exists usage_events_run_idx
+  on usage_events (run_id)
+  where run_id is not null;
 
 alter table usage_events enable row level security;
+
+-- Privacy-safe harness efficiency/quality telemetry. One row per top-level
+-- agent or plan run. This is intentionally a wide, explicit table: there is no
+-- generic metadata/payload column where prompts, source code, file paths,
+-- commands, tool arguments/results, connector names, secrets, or error text
+-- could accidentally be stored. Text dimensions are bounded by CHECKs so
+-- dashboards cannot accumulate user-controlled, high-cardinality labels.
+create table if not exists agent_run_metrics (
+  id bigserial primary key,
+  run_id uuid unique not null,
+  project_id uuid references projects(id) on delete cascade,
+  user_id uuid references users(id) on delete cascade,
+  metrics_version smallint not null default 1 check (metrics_version = 1),
+  started_at timestamptz not null,
+
+  run_mode text not null check (run_mode in ('agent', 'plan', 'plan_execution', 'unknown')),
+  provider text not null check (provider in ('anthropic', 'openai', 'google', 'zai', 'unknown')),
+  model_bucket text not null check (model_bucket in (
+    'claude_opus', 'claude_sonnet', 'gemini_pro', 'gemini_flash',
+    'gpt_codex', 'gpt_general', 'glm', 'internal', 'provider_other', 'unknown'
+  )),
+  planner_provider text not null check (planner_provider in ('anthropic', 'openai', 'google', 'zai', 'unknown')),
+  planner_model_bucket text not null check (planner_model_bucket in (
+    'claude_opus', 'claude_sonnet', 'gemini_pro', 'gemini_flash',
+    'gpt_codex', 'gpt_general', 'glm', 'internal', 'provider_other', 'unknown'
+  )),
+  executor_provider text not null check (executor_provider in ('anthropic', 'openai', 'google', 'zai', 'unknown')),
+  executor_model_bucket text not null check (executor_model_bucket in (
+    'claude_opus', 'claude_sonnet', 'gemini_pro', 'gemini_flash',
+    'gpt_codex', 'gpt_general', 'glm', 'internal', 'provider_other', 'unknown'
+  )),
+  route_tier text not null check (route_tier in ('quick', 'standard', 'hard', 'manual', 'unknown')),
+  route_source text not null check (route_source in (
+    'heuristic', 'classifier', 'manual', 'environment', 'static_fallback', 'unknown'
+  )),
+  harness_profile text not null check (harness_profile in ('legacy', 'progressive', 'unknown')),
+  profile_cohort text not null check (profile_cohort in ('treatment', 'control', 'ineligible', 'unknown')),
+
+  -- Phase timings are wall-clock unions. For example, three concurrent read
+  -- tools contribute the batch's elapsed wall time, not the sum of all three.
+  sandbox_ms integer not null default 0 check (sandbox_ms >= 0),
+  preflight_ms integer not null default 0 check (preflight_ms >= 0),
+  routing_ms integer not null default 0 check (routing_ms >= 0),
+  provider_ttft_ms integer check (provider_ttft_ms >= 0),
+  provider_ttft_total_ms integer not null default 0 check (provider_ttft_total_ms >= 0),
+  provider_ttft_samples integer not null default 0 check (provider_ttft_samples >= 0),
+  model_ms integer not null default 0 check (model_ms >= 0),
+  tool_ms integer not null default 0 check (tool_ms >= 0),
+  verification_ms integer not null default 0 check (verification_ms >= 0),
+  persistence_ms integer not null default 0 check (persistence_ms >= 0),
+  -- Time intentionally spent waiting for an answer to ask_user. Kept separate
+  -- from harness work so interactive pauses do not inflate efficiency latency.
+  user_wait_ms integer not null default 0 check (user_wait_ms >= 0),
+  total_ms integer not null default 0 check (total_ms >= 0),
+
+  iteration_count integer not null default 0 check (iteration_count >= 0),
+  model_call_count integer not null default 0 check (model_call_count >= 0),
+  provider_error_count integer not null default 0 check (provider_error_count >= 0),
+  provider_retry_count integer not null default 0 check (provider_retry_count >= 0),
+  routing_classifier_call_count integer not null default 0 check (routing_classifier_call_count >= 0),
+  routing_classifier_timeout_count integer not null default 0 check (routing_classifier_timeout_count >= 0),
+  tool_call_count integer not null default 0 check (tool_call_count >= 0),
+  tool_error_count integer not null default 0 check (tool_error_count >= 0),
+  tool_retry_count integer not null default 0 check (tool_retry_count >= 0),
+  tool_result_truncated_count integer not null default 0 check (tool_result_truncated_count >= 0),
+  web_search_unit_count integer not null default 0 check (web_search_unit_count >= 0),
+  estimated_web_search_unit_count integer not null default 0 check (estimated_web_search_unit_count >= 0),
+  verification_check_count integer not null default 0 check (verification_check_count >= 0),
+  verification_failure_count integer not null default 0 check (verification_failure_count >= 0),
+  compaction_count integer not null default 0 check (compaction_count >= 0),
+  compaction_error_count integer not null default 0 check (compaction_error_count >= 0),
+  compacted_message_count integer not null default 0 check (compacted_message_count >= 0),
+  subagent_count integer not null default 0 check (subagent_count >= 0),
+  subagent_error_count integer not null default 0 check (subagent_error_count >= 0),
+  subagent_progressive_count integer not null default 0 check (subagent_progressive_count >= 0),
+  subagent_legacy_count integer not null default 0 check (subagent_legacy_count >= 0),
+  files_changed_count integer not null default 0 check (files_changed_count >= 0),
+
+  cache_hit_call_count integer not null default 0 check (cache_hit_call_count >= 0),
+  cache_miss_call_count integer not null default 0 check (cache_miss_call_count >= 0),
+  fresh_input_tokens integer not null default 0 check (fresh_input_tokens >= 0),
+  output_tokens integer not null default 0 check (output_tokens >= 0),
+  cache_read_tokens integer not null default 0 check (cache_read_tokens >= 0),
+  cache_creation_tokens integer not null default 0 check (cache_creation_tokens >= 0),
+  -- Size gauges only: measured content is never stored.
+  peak_system_prompt_chars integer not null default 0 check (peak_system_prompt_chars >= 0),
+  peak_tool_schema_chars integer not null default 0 check (peak_tool_schema_chars >= 0),
+  peak_message_chars integer not null default 0 check (peak_message_chars >= 0),
+  peak_estimated_context_tokens integer not null default 0 check (peak_estimated_context_tokens >= 0),
+  initial_tool_count integer not null default 0 check (initial_tool_count >= 0),
+  peak_tool_count integer not null default 0 check (peak_tool_count >= 0),
+  initial_capability_count integer not null default 0 check (initial_capability_count >= 0),
+  peak_capability_count integer not null default 0 check (peak_capability_count >= 0),
+  capability_load_count integer not null default 0 check (capability_load_count >= 0),
+
+  run_status text not null check (run_status in ('success', 'error', 'aborted', 'unknown')),
+  completion_reason text not null check (completion_reason in (
+    'completed', 'empty_terminal', 'max_iterations', 'max_tokens', 'refusal', 'provider_error',
+    'tool_error', 'sandbox_error', 'verification_failed', 'persistence_failed', 'permission_denied',
+    'budget_exceeded', 'timeout', 'aborted', 'unknown'
+  )),
+  error_category text not null check (error_category in (
+    'none', 'provider', 'tool', 'sandbox', 'database', 'auth', 'permission',
+    'validation', 'timeout', 'rate_limit', 'budget', 'internal', 'unknown'
+  )),
+  final_answer_emitted boolean not null default false,
+  build_status text not null check (build_status in ('not_run', 'passed', 'failed', 'skipped')),
+  test_status text not null check (test_status in ('not_run', 'passed', 'failed', 'skipped')),
+  browser_status text not null check (browser_status in ('not_run', 'passed', 'failed', 'skipped')),
+  verification_status text not null check (verification_status in ('not_run', 'passed', 'failed', 'skipped')),
+  -- May be marked later when the next user turn is classified as a correction;
+  -- the follow-up text itself is never retained here.
+  correction_followup boolean not null default false,
+  correction_recorded_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+-- Idempotent additions for hosts that applied an earlier draft of the harness
+-- metrics table during rollout.
+alter table agent_run_metrics add column if not exists harness_profile text not null default 'unknown'
+  check (harness_profile in ('legacy', 'progressive', 'unknown'));
+alter table agent_run_metrics add column if not exists profile_cohort text not null default 'unknown'
+  check (profile_cohort in ('treatment', 'control', 'ineligible', 'unknown'));
+alter table agent_run_metrics add column if not exists planner_provider text not null default 'unknown'
+  check (planner_provider in ('anthropic', 'openai', 'google', 'zai', 'unknown'));
+alter table agent_run_metrics add column if not exists planner_model_bucket text not null default 'unknown'
+  check (planner_model_bucket in (
+    'claude_opus', 'claude_sonnet', 'gemini_pro', 'gemini_flash',
+    'gpt_codex', 'gpt_general', 'glm', 'internal', 'provider_other', 'unknown'
+  ));
+alter table agent_run_metrics add column if not exists executor_provider text not null default 'unknown'
+  check (executor_provider in ('anthropic', 'openai', 'google', 'zai', 'unknown'));
+alter table agent_run_metrics add column if not exists executor_model_bucket text not null default 'unknown'
+  check (executor_model_bucket in (
+    'claude_opus', 'claude_sonnet', 'gemini_pro', 'gemini_flash',
+    'gpt_codex', 'gpt_general', 'glm', 'internal', 'provider_other', 'unknown'
+  ));
+alter table agent_run_metrics add column if not exists initial_tool_count integer not null default 0
+  check (initial_tool_count >= 0);
+alter table agent_run_metrics add column if not exists peak_tool_count integer not null default 0
+  check (peak_tool_count >= 0);
+alter table agent_run_metrics add column if not exists initial_capability_count integer not null default 0
+  check (initial_capability_count >= 0);
+alter table agent_run_metrics add column if not exists peak_capability_count integer not null default 0
+  check (peak_capability_count >= 0);
+alter table agent_run_metrics add column if not exists capability_load_count integer not null default 0
+  check (capability_load_count >= 0);
+alter table agent_run_metrics add column if not exists subagent_progressive_count integer not null default 0
+  check (subagent_progressive_count >= 0);
+alter table agent_run_metrics add column if not exists subagent_legacy_count integer not null default 0
+  check (subagent_legacy_count >= 0);
+alter table agent_run_metrics add column if not exists user_wait_ms integer not null default 0
+  check (user_wait_ms >= 0);
+alter table agent_run_metrics add column if not exists web_search_unit_count integer not null default 0
+  check (web_search_unit_count >= 0);
+alter table agent_run_metrics add column if not exists estimated_web_search_unit_count integer not null default 0
+  check (estimated_web_search_unit_count >= 0);
+alter table agent_run_metrics add column if not exists correction_followup boolean not null default false;
+alter table agent_run_metrics add column if not exists correction_recorded_at timestamptz;
+
+-- `ADD COLUMN IF NOT EXISTS ... CHECK` only installs the CHECK when the column
+-- itself is new. Install named constraints when absent so a host that briefly ran
+-- an earlier draft with the column but without its bound gets the same privacy
+-- and non-negative guarantees as a fresh database.
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'agent_run_metrics'::regclass
+      and conname = 'agent_run_metrics_harness_profile_check'
+  ) then
+    alter table agent_run_metrics add constraint agent_run_metrics_harness_profile_check
+      check (harness_profile in ('legacy', 'progressive', 'unknown'));
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'agent_run_metrics'::regclass
+      and conname = 'agent_run_metrics_profile_cohort_check'
+  ) then
+    alter table agent_run_metrics add constraint agent_run_metrics_profile_cohort_check
+      check (profile_cohort in ('treatment', 'control', 'ineligible', 'unknown'));
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'agent_run_metrics'::regclass
+      and conname = 'agent_run_metrics_planner_provider_check'
+  ) then
+    alter table agent_run_metrics add constraint agent_run_metrics_planner_provider_check
+      check (planner_provider in ('anthropic', 'openai', 'google', 'zai', 'unknown'));
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'agent_run_metrics'::regclass
+      and conname = 'agent_run_metrics_planner_model_bucket_check'
+  ) then
+    alter table agent_run_metrics add constraint agent_run_metrics_planner_model_bucket_check
+      check (planner_model_bucket in (
+        'claude_opus', 'claude_sonnet', 'gemini_pro', 'gemini_flash',
+        'gpt_codex', 'gpt_general', 'glm', 'internal', 'provider_other', 'unknown'
+      ));
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'agent_run_metrics'::regclass
+      and conname = 'agent_run_metrics_executor_provider_check'
+  ) then
+    alter table agent_run_metrics add constraint agent_run_metrics_executor_provider_check
+      check (executor_provider in ('anthropic', 'openai', 'google', 'zai', 'unknown'));
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'agent_run_metrics'::regclass
+      and conname = 'agent_run_metrics_executor_model_bucket_check'
+  ) then
+    alter table agent_run_metrics add constraint agent_run_metrics_executor_model_bucket_check
+      check (executor_model_bucket in (
+        'claude_opus', 'claude_sonnet', 'gemini_pro', 'gemini_flash',
+        'gpt_codex', 'gpt_general', 'glm', 'internal', 'provider_other', 'unknown'
+      ));
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'agent_run_metrics'::regclass
+      and conname = 'agent_run_metrics_initial_tool_count_check'
+  ) then
+    alter table agent_run_metrics add constraint agent_run_metrics_initial_tool_count_check
+      check (initial_tool_count >= 0);
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'agent_run_metrics'::regclass
+      and conname = 'agent_run_metrics_peak_tool_count_check'
+  ) then
+    alter table agent_run_metrics add constraint agent_run_metrics_peak_tool_count_check
+      check (peak_tool_count >= 0);
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'agent_run_metrics'::regclass
+      and conname = 'agent_run_metrics_initial_capability_count_check'
+  ) then
+    alter table agent_run_metrics add constraint agent_run_metrics_initial_capability_count_check
+      check (initial_capability_count >= 0);
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'agent_run_metrics'::regclass
+      and conname = 'agent_run_metrics_peak_capability_count_check'
+  ) then
+    alter table agent_run_metrics add constraint agent_run_metrics_peak_capability_count_check
+      check (peak_capability_count >= 0);
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'agent_run_metrics'::regclass
+      and conname = 'agent_run_metrics_capability_load_count_check'
+  ) then
+    alter table agent_run_metrics add constraint agent_run_metrics_capability_load_count_check
+      check (capability_load_count >= 0);
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'agent_run_metrics'::regclass
+      and conname = 'agent_run_metrics_subagent_progressive_count_check'
+  ) then
+    alter table agent_run_metrics add constraint agent_run_metrics_subagent_progressive_count_check
+      check (subagent_progressive_count >= 0);
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'agent_run_metrics'::regclass
+      and conname = 'agent_run_metrics_subagent_legacy_count_check'
+  ) then
+    alter table agent_run_metrics add constraint agent_run_metrics_subagent_legacy_count_check
+      check (subagent_legacy_count >= 0);
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'agent_run_metrics'::regclass
+      and conname = 'agent_run_metrics_user_wait_ms_check'
+  ) then
+    alter table agent_run_metrics add constraint agent_run_metrics_user_wait_ms_check
+      check (user_wait_ms >= 0);
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'agent_run_metrics'::regclass
+      and conname = 'agent_run_metrics_web_search_unit_count_check'
+  ) then
+    alter table agent_run_metrics add constraint agent_run_metrics_web_search_unit_count_check
+      check (web_search_unit_count >= 0);
+  end if;
+  if not exists (
+    select 1 from pg_constraint
+    where conrelid = 'agent_run_metrics'::regclass
+      and conname = 'agent_run_metrics_estimated_web_search_unit_count_check'
+  ) then
+    alter table agent_run_metrics add constraint agent_run_metrics_estimated_web_search_unit_count_check
+      check (estimated_web_search_unit_count >= 0);
+  end if;
+end$$;
+
+-- Widen the completion enum only when an earlier definition is still present;
+-- a no-op reapply should not drop/revalidate a CHECK over the whole table.
+do $$
+declare completion_definition text;
+begin
+  select pg_get_constraintdef(oid) into completion_definition
+  from pg_constraint
+  where conrelid = 'agent_run_metrics'::regclass
+    and conname = 'agent_run_metrics_completion_reason_check';
+  if completion_definition is null
+     or position('empty_terminal' in completion_definition) = 0
+     or position('max_tokens' in completion_definition) = 0
+     or position('refusal' in completion_definition) = 0
+     or position('persistence_failed' in completion_definition) = 0 then
+    alter table agent_run_metrics
+      drop constraint if exists agent_run_metrics_completion_reason_check;
+    alter table agent_run_metrics
+      add constraint agent_run_metrics_completion_reason_check check (
+        completion_reason in (
+          'completed', 'empty_terminal', 'max_iterations', 'max_tokens', 'refusal',
+          'provider_error', 'tool_error', 'sandbox_error', 'verification_failed',
+          'persistence_failed', 'permission_denied', 'budget_exceeded', 'timeout',
+          'aborted', 'unknown'
+        )
+      );
+  end if;
+end$$;
+
+create index if not exists agent_run_metrics_user_idx
+  on agent_run_metrics (user_id, started_at desc);
+create index if not exists agent_run_metrics_project_idx
+  on agent_run_metrics (project_id, started_at desc);
+
+alter table agent_run_metrics enable row level security;
 
 -- Account-wide usage rollup for the dashboard. Aggregated in Postgres so the
 -- totals aren't capped by PostgREST's per-request row limit. Returns a single
 -- jsonb blob: grand totals plus a per-model breakdown ordered by total tokens.
 create or replace function account_usage_stats(uid uuid)
 returns jsonb language sql stable as $$
-  with rows as (
-    select provider, model, input_tokens, output_tokens,
+  with usage_rows as (
+    select run_id, provider, model, input_tokens, output_tokens,
            cache_read_tokens, cache_creation_tokens, cost_usd, elapsed_ms
     from usage_events where user_id = uid
   ),
@@ -420,8 +777,10 @@ returns jsonb language sql stable as $$
       coalesce(sum(cache_read_tokens), 0)::bigint      as total_cache_read_tokens,
       coalesce(sum(cache_creation_tokens), 0)::bigint  as total_cache_creation_tokens,
       coalesce(sum(elapsed_ms), 0)::bigint             as total_time_ms,
-      count(*)::bigint                                  as turns
-    from rows
+      -- Modern rows: one user task can emit lead/planner/sub-agent/aux calls,
+      -- so count its run UUID once. Legacy NULL rows retain one-row=one-turn.
+      (count(distinct run_id) + count(*) filter (where run_id is null))::bigint as turns
+    from usage_rows
   ),
   per_model as (
     select
@@ -438,8 +797,9 @@ returns jsonb language sql stable as $$
       coalesce(sum(output_tokens)         filter (where cost_usd is null), 0)::bigint as uncosted_output_tokens,
       coalesce(sum(cache_read_tokens)     filter (where cost_usd is null), 0)::bigint as uncosted_cache_read_tokens,
       coalesce(sum(cache_creation_tokens) filter (where cost_usd is null), 0)::bigint as uncosted_cache_creation_tokens,
-      count(*)::bigint                    as turns
-    from rows
+      (count(distinct run_id) + count(*) filter (where run_id is null))::bigint as turns,
+      count(*)::bigint                    as calls
+    from usage_rows
     group by provider, model
     order by (sum(input_tokens) + sum(output_tokens) + sum(cache_read_tokens)) desc
   )
@@ -461,7 +821,8 @@ returns jsonb language sql stable as $$
         'uncosted_output_tokens', uncosted_output_tokens,
         'uncosted_cache_read_tokens', uncosted_cache_read_tokens,
         'uncosted_cache_creation_tokens', uncosted_cache_creation_tokens,
-        'turns', turns
+        'turns', turns,
+        'calls', calls
       )) from per_model),
       '[]'::jsonb
     )
@@ -619,6 +980,18 @@ alter table project_members enable row level security;
 
 -- Projects can belong to an org (P3.1). owner_id stays the creator.
 alter table projects add column if not exists org_id uuid references organizations(id) on delete set null;
+create index if not exists projects_org_idx on projects (org_id);
+
+-- Constant-size budget gate: sum in Postgres instead of paging every usage row
+-- through the orchestrator on every agent turn. Defined only after projects has
+-- org_id so a fresh, top-to-bottom schema apply succeeds.
+create or replace function org_month_to_date_spend_usd(oid uuid, since_ts timestamptz)
+returns numeric language sql stable as $$
+  select coalesce(sum(u.cost_usd), 0)
+  from usage_events u
+  join projects p on p.id = u.project_id
+  where p.org_id = oid and u.created_at >= since_ts;
+$$;
 
 -- ── Comments (P3.4) ───────────────────────────────────────────────────────────
 -- A teammate can comment on a preview element (reusing selectedElement

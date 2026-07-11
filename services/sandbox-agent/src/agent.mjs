@@ -11,7 +11,9 @@
  *   GET  /health                     → { ok: true, kind: "node" }
  *   POST /net/configure              body: { ip, gw, mac?, mount_sandbox?, seed?, time_ms? } → { ok: true }
  *   GET  /fs/file?path=…             → { content } (+&encoding=base64 → { content, encoding: "base64" };
- *                                       +&offset=&limit= line range → { content, total_lines })
+ *                                       +&offset=&limit= line range; +&max_bytes= response cap;
+ *                                       +&head_tail=1 retains both ends of a full read;
+ *                                       text responses include total/returned bytes + truncated)
  *   PUT  /fs/file                    body: { path, content, encoding? }
  *   GET  /fs/manifest                → { files: [{ path, size, mtime_ms }] } (storage-sync exclusions applied)
  *   POST /fs/edit                    body: { path, old_string, new_string }
@@ -33,16 +35,25 @@
 
 import http from "node:http";
 import net from "node:net";
-import { promises as fs } from "node:fs";
+import { createReadStream, promises as fs } from "node:fs";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createInterface } from "node:readline";
 
 const SANDBOX_DIR = process.env.UNIQUS_SANDBOX_DIR ?? "/sandbox";
 const VSOCK_PORT = Number(process.env.UNIQUS_AGENT_PORT ?? 51000);
 const HALF_MAX = 8 * 1024;
 const MAX_LOG = 64 * 1024;
+// Absolute read ceiling. Model calls request a smaller 30 KiB window; internal
+// predeploy/diff callers retain the established 256 KiB behavior.
+const MAX_TEXT_READ_BYTES = 256 * 1024;
+const READ_GAP_RESERVE_BYTES = 256;
+const GREP_HEAD_BYTES = 20 * 1024;
+const GREP_TAIL_BYTES = 8 * 1024;
+const MAX_GREP_LINE_BYTES = 7 * 1024;
+let ripgrepAvailable = null;
 
 await fs.mkdir(SANDBOX_DIR, { recursive: true });
 process.chdir(SANDBOX_DIR);
@@ -244,21 +255,44 @@ async function handleRequest(req, res) {
         const buf = await fs.readFile(p);
         return json(res, 200, { content: buf.toString("base64"), encoding: "base64" });
       }
-      const content = await fs.readFile(p, "utf-8");
-      // Line-range read: slice in-guest so we don't ship a huge file across RPC
-      // just to window it. split("\n") (trailing newline → phantom empty last
-      // line) so total_lines matches the orchestrator/host line counting.
       const offsetRaw = url.searchParams.get("offset");
       const limitRaw = url.searchParams.get("limit");
+      const capRaw = url.searchParams.get("max_bytes");
+      const requestedCap = capRaw === null || capRaw.trim() === "" ? NaN : Number(capRaw);
+      const responseCap = Number.isSafeInteger(requestedCap)
+        ? Math.min(MAX_TEXT_READ_BYTES, Math.max(1, requestedCap))
+        : MAX_TEXT_READ_BYTES;
+      const headTail = ["1", "true"].includes((url.searchParams.get("head_tail") ?? "").toLowerCase());
       if (offsetRaw !== null || limitRaw !== null) {
-        const lines = content.split("\n");
-        const total = lines.length;
         const start = Math.max(1, parseInt(offsetRaw ?? "1", 10) || 1);
         const count = Math.max(1, parseInt(limitRaw ?? "2000", 10) || 2000);
-        const sliced = start > total ? "" : lines.slice(start - 1, start - 1 + count).join("\n");
-        return json(res, 200, { content: sliced, total_lines: total });
+        const range = await readBoundedLineRange(p, start, count, responseCap);
+        return json(res, 200, {
+          content: range.content,
+          total_lines: range.totalLines,
+          known_lines: range.knownLines,
+          has_more: range.hasMore,
+          total_bytes: range.totalBytes,
+          returned_bytes: range.returnedBytes,
+          selected_bytes: range.selectedBytes,
+          truncated: range.truncated,
+          range_start: start,
+          range_end: range.returnedEndLine,
+          requested_end: range.requestedEndLine,
+        });
       }
-      return json(res, 200, { content });
+      // Default reads are capped in-guest. Binary storage-sync reads use the
+      // base64 branch above and deliberately remain complete.
+      const read = await readTextWindow(p, responseCap, headTail);
+      return json(res, 200, {
+        content: read.content,
+        total_bytes: read.totalBytes,
+        returned_bytes: read.returnedBytes,
+        head_bytes: read.headBytes,
+        tail_bytes: read.tailBytes,
+        omitted_bytes: read.omittedBytes,
+        truncated: read.truncated,
+      });
     }
     if (method === "GET" && url.pathname === "/fs/manifest") {
       return json(res, 200, { files: await buildManifest() });
@@ -304,7 +338,16 @@ async function handleRequest(req, res) {
         caseInsensitive: body.case_insensitive === true,
         literal: body.literal === true,
       });
-      return json(res, 200, { matches });
+      return json(res, 200, {
+        matches: matches.matches,
+        total_matches: matches.totalMatches,
+        returned_matches: matches.returnedMatches,
+        omitted_matches: matches.omittedMatches,
+        head_matches: matches.headMatches,
+        tail_matches: matches.tailMatches,
+        truncated: matches.truncated,
+        line_truncations: matches.lineTruncations,
+      });
     }
     if (method === "POST" && url.pathname === "/exec/run") {
       const body = await readBody(req);
@@ -394,6 +437,168 @@ function truncate(s) {
   return `${s.slice(0, HALF_MAX)}\n\n[... truncated ${s.length - HALF_MAX * 2} bytes ...]\n\n${s.slice(-HALF_MAX)}`;
 }
 
+/** Return a UTF-8 prefix no larger than maxBytes without splitting a codepoint. */
+function utf8Head(text, maxBytes) {
+  const buf = Buffer.from(text);
+  if (buf.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) end--;
+  return buf.subarray(0, end).toString("utf-8");
+}
+
+/** Bounded full read: model calls keep head+tail; internal calls keep legacy head-only. */
+async function readTextWindow(filePath, cap, headTail) {
+  const stat = await fs.stat(filePath);
+  const useHeadTail = headTail && stat.size > cap && cap >= READ_GAP_RESERVE_BYTES * 2;
+  const dataBudget = useHeadTail ? cap - READ_GAP_RESERVE_BYTES : cap;
+  const headBudget = useHeadTail ? Math.floor((dataBudget * 2) / 3) : dataBudget;
+  const tailBudget = useHeadTail ? dataBudget - headBudget : 0;
+  const headBuffer = Buffer.alloc(Math.min(stat.size, headBudget + 3));
+  const handle = await fs.open(filePath, "r");
+  try {
+    const { bytesRead: headRead } = await handle.read(
+      headBuffer,
+      0,
+      headBuffer.length,
+      0,
+    );
+    let headEnd = Math.min(headRead, headBudget);
+    while (
+      headEnd > 0 &&
+      headEnd < headRead &&
+      (headBuffer[headEnd] & 0xc0) === 0x80
+    ) {
+      headEnd--;
+    }
+    const head = headBuffer.subarray(0, headEnd).toString("utf-8");
+    const headBytes = Buffer.byteLength(head);
+    if (!useHeadTail) {
+      return {
+        content: head,
+        totalBytes: stat.size,
+        returnedBytes: headBytes,
+        headBytes,
+        tailBytes: 0,
+        omittedBytes: Math.max(0, stat.size - headEnd),
+        truncated: stat.size > headEnd,
+      };
+    }
+
+    const tailBuffer = Buffer.alloc(tailBudget);
+    const tailOffset = Math.max(0, stat.size - tailBudget);
+    const { bytesRead: tailRead } = await handle.read(
+      tailBuffer,
+      0,
+      tailBuffer.length,
+      tailOffset,
+    );
+    let tailStart = 0;
+    while (tailStart < tailRead && (tailBuffer[tailStart] & 0xc0) === 0x80) tailStart++;
+    const tail = tailBuffer.subarray(tailStart, tailRead).toString("utf-8");
+    const tailBytes = Buffer.byteLength(tail);
+    const omittedBytes = Math.max(0, stat.size - headEnd - (tailRead - tailStart));
+    const marker = `\n\n[... ${omittedBytes} bytes omitted from the middle ...]\n\n`;
+    const content = `${head}${marker}${tail}`;
+    return {
+      content,
+      totalBytes: stat.size,
+      returnedBytes: Buffer.byteLength(content),
+      headBytes,
+      tailBytes,
+      omittedBytes,
+      truncated: omittedBytes > 0,
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Stream a 1-based line window, stopping once the window or byte cap is resolved. */
+async function readBoundedLineRange(filePath, start, count, cap) {
+  const desiredEndLine = Math.min(Number.MAX_SAFE_INTEGER, start + Math.max(0, count - 1));
+  const storeLimit = cap + 3;
+  const stored = Buffer.alloc(storeLimit);
+  const stat = await fs.stat(filePath);
+  let selectedBytes = 0;
+  let storedBytes = 0;
+  let lineNo = 1;
+  let stoppedEarly = false;
+
+  const appendSelected = (chunk, from, to) => {
+    if (to <= from) return;
+    const length = to - from;
+    selectedBytes += length;
+    if (storedBytes >= storeLimit) return;
+    const keep = Math.min(length, storeLimit - storedBytes);
+    chunk.copy(stored, storedBytes, from, from + keep);
+    storedBytes += keep;
+  };
+
+  scan: for await (const chunk of createReadStream(filePath)) {
+    let pos = 0;
+    while (pos < chunk.length) {
+      const newline = chunk.indexOf(0x0a, pos);
+      const end = newline === -1 ? chunk.length : newline;
+      if (lineNo >= start && lineNo <= desiredEndLine) {
+        appendSelected(chunk, pos, end);
+        if (storedBytes >= storeLimit) {
+          stoppedEarly = true;
+          break scan;
+        }
+      }
+      if (newline === -1) break;
+      if (lineNo >= start && lineNo < desiredEndLine) {
+        appendSelected(chunk, newline, newline + 1);
+        if (storedBytes >= storeLimit) {
+          stoppedEarly = true;
+          break scan;
+        }
+      }
+      const completedLine = lineNo;
+      lineNo++;
+      pos = newline + 1;
+      if (completedLine >= desiredEndLine) {
+        stoppedEarly = true;
+        break scan;
+      }
+    }
+  }
+
+  const totalLines = stoppedEarly ? null : lineNo;
+  const knownLines = lineNo;
+  const requestedEndLine = totalLines === null
+    ? desiredEndLine
+    : start > totalLines
+      ? null
+      : Math.min(totalLines, desiredEndLine);
+  let sourceEnd = Math.min(cap, storedBytes);
+  while (sourceEnd > 0 && sourceEnd < storedBytes && (stored[sourceEnd] & 0xc0) === 0x80) {
+    sourceEnd--;
+  }
+  const content = stored.subarray(0, sourceEnd).toString("utf-8");
+  let returnedEndLine = null;
+  if (requestedEndLine !== null) {
+    let returnedNewlines = 0;
+    for (let i = 0; i < sourceEnd; i++) {
+      if (stored[i] === 0x0a) returnedNewlines++;
+    }
+    returnedEndLine = Math.min(requestedEndLine, start + returnedNewlines);
+  }
+  const returnedBytes = Buffer.byteLength(content);
+  return {
+    content,
+    totalBytes: stat.size,
+    totalLines,
+    knownLines,
+    hasMore: stoppedEarly,
+    selectedBytes,
+    returnedBytes,
+    returnedEndLine,
+    requestedEndLine,
+    truncated: selectedBytes > sourceEnd,
+  };
+}
+
 /**
  * /fs/manifest walk (C-18 VM→host pull). The skip list mirrors the
  * orchestrator's storage-sync exclusions (storage/sync.ts SKIP_DIRS) so the
@@ -459,7 +664,192 @@ async function grep(pattern, sub, opts = {}) {
   const test = re
     ? (line) => re.test(line)
     : (line) => (ci ? line.toLowerCase() : line).includes(needle);
-  const out = [];
+
+  // Prefer rg when an image happens to provide it, but the rootfs does not
+  // depend on it. Any spawn/parse/regex incompatibility uses this same bounded
+  // streaming fallback instead.
+  let bounded = await grepWithRipgrep(pattern, target, root, ci, !re);
+  if (!bounded) {
+    bounded = createBoundedMatches();
+    await walkForGrep(target, root, test, bounded);
+  }
+  return finishBoundedMatches(bounded, fellBack);
+}
+
+function createBoundedMatches() {
+  return {
+    head: [],
+    tail: [],
+    headBytes: 0,
+    tailBytes: 0,
+    collectingHead: true,
+    totalMatches: 0,
+    lineTruncations: 0,
+  };
+}
+
+function capGrepLine(line) {
+  if (Buffer.byteLength(line) <= MAX_GREP_LINE_BYTES) return { line, shortened: false };
+  const marker = " ... [matching line truncated]";
+  return {
+    line: `${utf8Head(line, MAX_GREP_LINE_BYTES - Buffer.byteLength(marker))}${marker}`,
+    shortened: true,
+  };
+}
+
+function pushBoundedMatch(bounded, rawLine) {
+  bounded.totalMatches++;
+  const { line, shortened } = capGrepLine(rawLine);
+  if (shortened) bounded.lineTruncations++;
+  const storedBytes = Buffer.byteLength(line) + 1;
+  if (bounded.collectingHead && bounded.headBytes + storedBytes <= GREP_HEAD_BYTES) {
+    bounded.head.push(line);
+    bounded.headBytes += storedBytes;
+    return;
+  }
+
+  bounded.collectingHead = false;
+  while (bounded.tail.length && bounded.tailBytes + storedBytes > GREP_TAIL_BYTES) {
+    const dropped = bounded.tail.shift();
+    bounded.tailBytes -= Buffer.byteLength(dropped) + 1;
+  }
+  if (storedBytes <= GREP_TAIL_BYTES) {
+    bounded.tail.push(line);
+    bounded.tailBytes += storedBytes;
+  }
+}
+
+function finishBoundedMatches(bounded, fellBack) {
+  const headMatches = bounded.head.length;
+  const tailMatches = bounded.tail.length;
+  const returnedMatches = headMatches + tailMatches;
+  const omittedMatches = Math.max(0, bounded.totalMatches - returnedMatches);
+  const chunks = [];
+  if (bounded.totalMatches === 0) {
+    chunks.push("(no matches)");
+  } else {
+    if (bounded.head.length) chunks.push(bounded.head.join("\n"));
+    if (omittedMatches > 0) {
+      chunks.push(`[... ${omittedMatches} middle matches omitted from the bounded guest response ...]`);
+    }
+    if (bounded.tail.length) chunks.push(bounded.tail.join("\n"));
+  }
+  let body = chunks.join("\n");
+  if (omittedMatches > 0) {
+    body += `\n\n[search truncated: showing first ${headMatches} and last ${tailMatches} of ${bounded.totalMatches} matches (${omittedMatches} omitted). Narrow the pattern or path.]`;
+  }
+  if (bounded.lineTruncations > 0) {
+    body += `\n\n[${bounded.lineTruncations} matching line(s) shortened to ${MAX_GREP_LINE_BYTES} bytes each.]`;
+  }
+  const prefix = fellBack
+    ? "[pattern is not a valid regex — searched as a literal substring]\n"
+    : "";
+  return {
+    matches: `${prefix}${body}`,
+    totalMatches: bounded.totalMatches,
+    returnedMatches,
+    omittedMatches,
+    headMatches,
+    tailMatches,
+    truncated: omittedMatches > 0 || bounded.lineTruncations > 0,
+    lineTruncations: bounded.lineTruncations,
+  };
+}
+
+async function grepWithRipgrep(pattern, target, root, ci, literal) {
+  if (ripgrepAvailable === false) return null;
+  const targetArg = path.relative(root, target) || ".";
+  // The walker skips hidden/node_modules entries, but still searches an
+  // explicitly selected target beneath one. rg globs would hide that target,
+  // so preserve the legacy policy by using the fallback for this rare case.
+  if (
+    targetArg
+      .split(path.sep)
+      .some((part) => part !== "." && (part === "node_modules" || part.startsWith(".")))
+  ) {
+    return null;
+  }
+  const args = [
+    "--json",
+    "--no-config",
+    "--no-ignore",
+    "--hidden",
+    "--glob", "!**/node_modules",
+    "--glob", "!**/node_modules/**",
+    "--glob", "!**/.*",
+    "--glob", "!**/.*/**",
+    "--color=never",
+  ];
+  if (ci) args.push("--ignore-case");
+  if (literal) args.push("--fixed-strings");
+  args.push("--", pattern, targetArg);
+
+  let child;
+  try {
+    child = spawn("rg", args, { cwd: root, stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return null;
+  }
+  const completion = new Promise((resolve) => {
+    child.once("spawn", () => {
+      ripgrepAvailable = true;
+    });
+    child.once("error", (err) => {
+      if (err?.code === "ENOENT") ripgrepAvailable = false;
+      resolve(null);
+    });
+    child.once("close", (code) => resolve(code));
+  });
+  const bounded = createBoundedMatches();
+  let parseFailed = false;
+  try {
+    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    for await (const line of lines) {
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        parseFailed = true;
+        break;
+      }
+      if (event?.type !== "match") continue;
+      const rel = event?.data?.path?.text;
+      const lineNo = event?.data?.line_number;
+      const source = event?.data?.lines?.text;
+      if (typeof rel !== "string" || typeof lineNo !== "number" || typeof source !== "string") {
+        parseFailed = true;
+        break;
+      }
+      pushBoundedMatch(
+        bounded,
+        `${rel.startsWith("./") ? rel.slice(2) : rel}:${lineNo}: ${source.trim()}`,
+      );
+    }
+  } catch {
+    parseFailed = true;
+  }
+  if (parseFailed && child.exitCode === null) child.kill("SIGKILL");
+  const code = await completion;
+  if (parseFailed || (code !== 0 && code !== 1)) return null;
+  return bounded;
+}
+
+async function walkForGrep(target, root, test, bounded) {
+  async function scanFile(full) {
+    try {
+      const lines = createInterface({ input: createReadStream(full), crlfDelay: Infinity });
+      let lineNo = 0;
+      for await (const line of lines) {
+        lineNo++;
+        if (test(line)) {
+          pushBoundedMatch(bounded, `${path.relative(root, full)}:${lineNo}: ${line.trim()}`);
+        }
+      }
+    } catch {
+      // skip binary / unreadable
+    }
+  }
+
   async function walk(dir) {
     let entries;
     try {
@@ -474,24 +864,17 @@ async function grep(pattern, sub, opts = {}) {
         await walk(full);
         continue;
       }
-      try {
-        const text = await fs.readFile(full, "utf-8");
-        const lines = text.split("\n");
-        for (let i = 0; i < lines.length; i++) {
-          if (test(lines[i])) {
-            out.push(`${path.relative(root, full)}:${i + 1}: ${lines[i].trim()}`);
-          }
-        }
-      } catch {
-        // skip binary / unreadable
-      }
+      await scanFile(full);
     }
   }
-  await walk(target);
-  const note = fellBack
-    ? "[pattern is not a valid regex — searched as a literal substring]\n"
-    : "";
-  return out.length ? `${note}${out.join("\n")}` : `${note}(no matches)`;
+  let targetStat;
+  try {
+    targetStat = await fs.stat(target);
+  } catch {
+    return;
+  }
+  if (targetStat.isFile()) await scanFile(target);
+  else if (targetStat.isDirectory()) await walk(target);
 }
 
 // Per-stream byte cap for /exec/run (C-61). Keep consuming the stream past

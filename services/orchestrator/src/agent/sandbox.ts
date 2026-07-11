@@ -1,9 +1,10 @@
-import { promises as fs, existsSync } from "node:fs";
+import { createReadStream, promises as fs, existsSync } from "node:fs";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { createInterface } from "node:readline";
 import treeKill from "tree-kill";
 import { safeChildEnv } from "../safeEnv.js";
 import type { VmHandle } from "../firecracker/types.js";
@@ -49,14 +50,29 @@ function pickShell(): ShellChoice {
     ];
     for (const c of candidates) {
       if (existsSync(c)) {
-        cachedShell = { shell: c, prefix: ["-c"], name: "git-bash", isUnixLike: true };
+        cachedShell = {
+          shell: c,
+          prefix: ["-c"],
+          name: "git-bash",
+          isUnixLike: true,
+        };
         return cachedShell;
       }
     }
-    cachedShell = { shell: "cmd.exe", prefix: ["/c"], name: "cmd.exe", isUnixLike: false };
+    cachedShell = {
+      shell: "cmd.exe",
+      prefix: ["/c"],
+      name: "cmd.exe",
+      isUnixLike: false,
+    };
     return cachedShell;
   }
-  cachedShell = { shell: "/bin/sh", prefix: ["-c"], name: "sh", isUnixLike: true };
+  cachedShell = {
+    shell: "/bin/sh",
+    prefix: ["-c"],
+    name: "sh",
+    isUnixLike: true,
+  };
   return cachedShell;
 }
 
@@ -74,11 +90,104 @@ function resolvePath(sandbox: Sandbox, p: string): string {
   return resolved;
 }
 
-/** Cap a single read_file / grep result so one call can't flood the context. */
-const MAX_READ_BYTES = 256 * 1024;
+/** Preserve the existing cap for internal consumers such as predeploy scans. */
+const MAX_INTERNAL_READ_BYTES = 256 * 1024;
+/** Model-facing reads sit below the loop's 32 KiB replay ceiling. */
+const MODEL_READ_BYTES = 30 * 1024;
+const READ_GAP_RESERVE_BYTES = 256;
+const GREP_HEAD_BYTES = 20 * 1024;
+const GREP_TAIL_BYTES = 8 * 1024;
+const MAX_GREP_LINE_BYTES = 7 * 1024;
 
 /** Default line window when a range read is requested without an explicit limit. */
 const DEFAULT_READ_LINE_LIMIT = 2000;
+
+const SANDBOX_TEXT_META = Symbol("sandboxTextMeta");
+
+/** Private execution metadata. The symbol key is never serialized to the model. */
+export interface SandboxTextResult {
+  text: string;
+  [SANDBOX_TEXT_META]: { truncated: boolean };
+}
+
+function sandboxTextResult(text: string, truncated: boolean): SandboxTextResult {
+  return { text, [SANDBOX_TEXT_META]: { truncated } };
+}
+
+export function isSandboxTextResult(value: unknown): value is SandboxTextResult {
+  return typeof value === "object" && value !== null && SANDBOX_TEXT_META in value;
+}
+
+export function sandboxTextWasTruncated(result: SandboxTextResult): boolean {
+  return result[SANDBOX_TEXT_META].truncated;
+}
+
+class WeightedSemaphore {
+  private active = 0;
+  private readonly queue: Array<{
+    weight: number;
+    resolve: (release: () => void) => void;
+  }> = [];
+
+  constructor(private readonly capacity: number) {}
+
+  acquire(requestedWeight: number): Promise<() => void> {
+    const weight = Math.max(1, Math.min(this.capacity, Math.floor(requestedWeight)));
+    return new Promise((resolve) => {
+      this.queue.push({ weight, resolve });
+      this.drain();
+    });
+  }
+
+  isIdle(): boolean {
+    return this.active === 0 && this.queue.length === 0;
+  }
+
+  private drain(): void {
+    while (this.queue.length > 0) {
+      const next = this.queue[0];
+      if (this.active + next.weight > this.capacity) return;
+      this.queue.shift();
+      this.active += next.weight;
+      let released = false;
+      next.resolve(() => {
+        if (released) return;
+        released = true;
+        this.active -= next.weight;
+        this.drain();
+      });
+    }
+  }
+}
+
+const SANDBOX_IO_CAPACITY = 8;
+const sandboxIoSemaphores = new Map<string, WeightedSemaphore>();
+
+function sandboxIoKey(sandbox: Sandbox): string {
+  return sandbox.vm ? `vm:${sandbox.vm.id}` : `fs:${path.resolve(sandbox.rootDir)}`;
+}
+
+async function withSandboxIoPermit<T>(
+  sandbox: Sandbox,
+  weight: number,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const key = sandboxIoKey(sandbox);
+  let semaphore = sandboxIoSemaphores.get(key);
+  if (!semaphore) {
+    semaphore = new WeightedSemaphore(SANDBOX_IO_CAPACITY);
+    sandboxIoSemaphores.set(key, semaphore);
+  }
+  const release = await semaphore.acquire(weight);
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (semaphore.isIdle() && sandboxIoSemaphores.get(key) === semaphore) {
+      sandboxIoSemaphores.delete(key);
+    }
+  }
+}
 
 export interface ReadFileOptions {
   /** 1-based line to start reading from. */
@@ -92,7 +201,12 @@ export interface ReadFileOptions {
  * prefix a `[lines X–Y of N]` header so the model knows where it is. Shared by the
  * host path and the VM path (which slices in-guest and reports total_lines).
  */
-export function sliceLines(content: string, total: number, offset?: number, limit?: number): string {
+export function sliceLines(
+  content: string,
+  total: number,
+  offset?: number,
+  limit?: number,
+): string {
   const start = Math.max(1, offset ?? 1);
   const count = Math.max(1, limit ?? DEFAULT_READ_LINE_LIMIT);
   if (start > total) {
@@ -102,47 +216,286 @@ export function sliceLines(content: string, total: number, offset?: number, limi
   return `[lines ${start}–${end} of ${total}]\n${content}`;
 }
 
+function utf8Head(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text);
+  if (buf.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) end--;
+  return buf.subarray(0, end).toString("utf-8");
+}
+
+interface BoundedFullRead {
+  content: string;
+  returnedBytes: number;
+  headBytes: number;
+  tailBytes: number;
+  omittedBytes: number;
+}
+
+async function readTextWindow(
+  full: string,
+  totalBytes: number,
+  cap: number,
+  headTail: boolean,
+): Promise<BoundedFullRead> {
+  const useHeadTail = headTail && cap >= READ_GAP_RESERVE_BYTES * 2;
+  const dataBudget = useHeadTail ? cap - READ_GAP_RESERVE_BYTES : cap;
+  const headBudget = useHeadTail ? Math.floor((dataBudget * 2) / 3) : dataBudget;
+  const tailBudget = useHeadTail ? dataBudget - headBudget : 0;
+  const handle = await fs.open(full, "r");
+  try {
+    const headBuffer = Buffer.alloc(Math.min(totalBytes, headBudget + 3));
+    const { bytesRead: headRead } = await handle.read(
+      headBuffer,
+      0,
+      headBuffer.length,
+      0,
+    );
+    let headEnd = Math.min(headRead, headBudget);
+    while (headEnd > 0 && headEnd < headRead && (headBuffer[headEnd] & 0xc0) === 0x80) {
+      headEnd--;
+    }
+    const head = headBuffer.subarray(0, headEnd).toString("utf-8");
+    const headBytes = Buffer.byteLength(head);
+
+    if (!useHeadTail) {
+      return {
+        content: head,
+        returnedBytes: headBytes,
+        headBytes,
+        tailBytes: 0,
+        omittedBytes: Math.max(0, totalBytes - headEnd),
+      };
+    }
+
+    const tailBuffer = Buffer.alloc(tailBudget);
+    const tailOffset = Math.max(0, totalBytes - tailBudget);
+    const { bytesRead: tailRead } = await handle.read(
+      tailBuffer,
+      0,
+      tailBuffer.length,
+      tailOffset,
+    );
+    let tailStart = 0;
+    while (tailStart < tailRead && (tailBuffer[tailStart] & 0xc0) === 0x80) tailStart++;
+    const tail = tailBuffer.subarray(tailStart, tailRead).toString("utf-8");
+    const tailBytes = Buffer.byteLength(tail);
+    const omittedBytes = Math.max(0, totalBytes - headEnd - (tailRead - tailStart));
+    const marker = `\n\n[... ${omittedBytes} bytes omitted from the middle ...]\n\n`;
+    const content = `${head}${marker}${tail}`;
+    return {
+      content,
+      returnedBytes: Buffer.byteLength(content),
+      headBytes,
+      tailBytes,
+      omittedBytes,
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+interface BoundedRange {
+  content: string;
+  /** Exact only when the scan reached EOF. */
+  totalLines: number | null;
+  /** Lower bound that remains useful when the scan stopped early. */
+  knownLines: number;
+  hasMore: boolean;
+  selectedBytes: number;
+  returnedBytes: number;
+  returnedEndLine: number | null;
+  requestedEndLine: number | null;
+  truncated: boolean;
+}
+
+async function readBoundedLineRange(
+  full: string,
+  start: number,
+  count: number,
+  cap: number,
+): Promise<BoundedRange> {
+  const desiredEndLine = Math.min(
+    Number.MAX_SAFE_INTEGER,
+    start + Math.max(0, count - 1),
+  );
+  const storeLimit = cap + 3;
+  const stored = Buffer.alloc(storeLimit);
+  let selectedBytes = 0;
+  let storedBytes = 0;
+  let lineNo = 1;
+  let stoppedEarly = false;
+
+  const appendSelected = (chunk: Buffer, from: number, to: number): void => {
+    if (to <= from) return;
+    const length = to - from;
+    selectedBytes += length;
+    if (storedBytes >= storeLimit) return;
+    const keep = Math.min(length, storeLimit - storedBytes);
+    chunk.copy(stored, storedBytes, from, from + keep);
+    storedBytes += keep;
+  };
+
+  scan: for await (const value of createReadStream(full)) {
+    const chunk = value as Buffer;
+    let pos = 0;
+    while (pos < chunk.length) {
+      const newline = chunk.indexOf(0x0a, pos);
+      const end = newline === -1 ? chunk.length : newline;
+      if (lineNo >= start && lineNo <= desiredEndLine) {
+        appendSelected(chunk, pos, end);
+        if (storedBytes >= storeLimit) {
+          stoppedEarly = true;
+          break scan;
+        }
+      }
+      if (newline === -1) break;
+      if (lineNo >= start && lineNo < desiredEndLine) {
+        appendSelected(chunk, newline, newline + 1);
+        if (storedBytes >= storeLimit) {
+          stoppedEarly = true;
+          break scan;
+        }
+      }
+      const completedLine = lineNo;
+      lineNo++;
+      pos = newline + 1;
+      if (completedLine >= desiredEndLine) {
+        // A newline proves that at least one further (possibly empty) line
+        // exists. Do not scan the rest of a multi-gigabyte file just to turn
+        // that lower bound into an exact total.
+        stoppedEarly = true;
+        break scan;
+      }
+    }
+  }
+
+  const totalLines = stoppedEarly ? null : lineNo;
+  const knownLines = lineNo;
+  const requestedEndLine =
+    totalLines === null
+      ? desiredEndLine
+      : start > totalLines
+        ? null
+        : Math.min(totalLines, desiredEndLine);
+  let sourceEnd = Math.min(cap, storedBytes);
+  while (
+    sourceEnd > 0 &&
+    sourceEnd < storedBytes &&
+    (stored[sourceEnd] & 0xc0) === 0x80
+  ) {
+    sourceEnd--;
+  }
+  const content = stored.subarray(0, sourceEnd).toString("utf-8");
+  let returnedEndLine: number | null = null;
+  if (requestedEndLine !== null) {
+    let returnedNewlines = 0;
+    for (let i = 0; i < sourceEnd; i++) {
+      if (stored[i] === 0x0a) returnedNewlines++;
+    }
+    returnedEndLine = Math.min(requestedEndLine, start + returnedNewlines);
+  }
+  const returnedBytes = Buffer.byteLength(content);
+  return {
+    content,
+    totalLines,
+    knownLines,
+    hasMore: stoppedEarly,
+    selectedBytes,
+    returnedBytes,
+    returnedEndLine,
+    requestedEndLine,
+    truncated: selectedBytes > sourceEnd,
+  };
+}
+
+async function readFileResultUnlocked(
+  sandbox: Sandbox,
+  p: string,
+  opts?: ReadFileOptions,
+): Promise<SandboxTextResult> {
+  // The tool path always supplies an options object (even when both fields are
+  // undefined); internal predeploy/diff callers omit it. This preserves their
+  // established 256 KiB window while avoiding 8x over-transfer to a model turn
+  // that will retain at most 32 KiB.
+  const responseCap = opts ? MODEL_READ_BYTES : MAX_INTERNAL_READ_BYTES;
+  if (sandbox.vm) {
+    const result = await fcAgent.readFileResult(sandbox.vm, p, {
+      ...opts,
+      maxBytes: responseCap,
+      headTail: opts !== undefined,
+    });
+    return sandboxTextResult(result.text, result.truncated);
+  }
+  const full = resolvePath(sandbox, p);
+
+  // Range read: return just the requested line window (cheap for huge files).
+  if (opts && (opts.offset !== undefined || opts.limit !== undefined)) {
+    const start = Math.max(1, Math.floor(opts.offset ?? 1));
+    const count = Math.max(
+      1,
+      Math.floor(opts.limit ?? DEFAULT_READ_LINE_LIMIT),
+    );
+    const range = await readBoundedLineRange(full, start, count, responseCap);
+    if (range.totalLines !== null && start > range.totalLines) {
+      return sandboxTextResult(
+        `[file has ${range.totalLines} line(s); offset ${start} is past the end]`,
+        false,
+      );
+    }
+    const end = range.returnedEndLine ?? range.requestedEndLine ?? start;
+    const note = range.truncated
+      ? `\n\n[... selected range truncated in the sandbox: at least ${range.selectedBytes} bytes selected, showing the first ${range.returnedBytes} bytes through line ${end}. Reduce limit or request a narrower range. ...]`
+      : "";
+    const totalLabel =
+      range.totalLines === null
+        ? `at least ${range.knownLines}`
+        : String(range.totalLines);
+    return sandboxTextResult(
+      `[lines ${start}–${end} of ${totalLabel}]\n${range.content}${note}`,
+      range.truncated,
+    );
+  }
+
+  const stat = await fs.stat(full);
+  if (stat.size > responseCap) {
+    const read = await readTextWindow(full, stat.size, responseCap, opts !== undefined);
+    const detail =
+      read.tailBytes > 0
+        ? `showing the first ${read.headBytes} and last ${read.tailBytes} bytes (${read.omittedBytes} omitted)`
+        : `showing the first ${read.headBytes} bytes`;
+    return sandboxTextResult(
+      read.content +
+        `\n\n[... file truncated in the sandbox: ${stat.size} bytes total, ${detail}. Pass offset/limit to read a specific line range. ...]`,
+      true,
+    );
+  }
+  return sandboxTextResult(await fs.readFile(full, "utf-8"), false);
+}
+
+export async function readFileResult(
+  sandbox: Sandbox,
+  p: string,
+  opts?: ReadFileOptions,
+): Promise<SandboxTextResult> {
+  return await withSandboxIoPermit(sandbox, 1, () =>
+    readFileResultUnlocked(sandbox, p, opts),
+  );
+}
+
 export async function readFile(
   sandbox: Sandbox,
   p: string,
   opts?: ReadFileOptions,
 ): Promise<string> {
-  if (sandbox.vm) return await fcAgent.readFile(sandbox.vm, p, opts);
-  const full = resolvePath(sandbox, p);
-
-  // Range read: return just the requested line window (cheap for huge files).
-  if (opts && (opts.offset !== undefined || opts.limit !== undefined)) {
-    const content = await fs.readFile(full, "utf-8");
-    const lines = content.split("\n");
-    const total = lines.length;
-    const start = Math.max(1, Math.floor(opts.offset ?? 1));
-    const count = Math.max(1, Math.floor(opts.limit ?? DEFAULT_READ_LINE_LIMIT));
-    if (start > total) {
-      return `[file has ${total} line(s); offset ${start} is past the end]`;
-    }
-    const slice = lines.slice(start - 1, start - 1 + count).join("\n");
-    return sliceLines(slice, total, start, count);
-  }
-
-  const stat = await fs.stat(full);
-  if (stat.size > MAX_READ_BYTES) {
-    // Read only the head rather than pulling a multi-MB file into memory.
-    const fh = await fs.open(full, "r");
-    try {
-      const buf = Buffer.alloc(MAX_READ_BYTES);
-      const { bytesRead } = await fh.read(buf, 0, MAX_READ_BYTES, 0);
-      return (
-        buf.subarray(0, bytesRead).toString("utf-8") +
-        `\n\n[... file truncated: ${stat.size} bytes total, showing the first ${MAX_READ_BYTES}. Pass offset/limit to read a specific line range. ...]`
-      );
-    } finally {
-      await fh.close();
-    }
-  }
-  return await fs.readFile(full, "utf-8");
+  return (await readFileResult(sandbox, p, opts)).text;
 }
 
-export async function writeFile(sandbox: Sandbox, p: string, content: string): Promise<void> {
+export async function writeFile(
+  sandbox: Sandbox,
+  p: string,
+  content: string,
+): Promise<void> {
   if (sandbox.vm) {
     await fcAgent.writeFile(sandbox.vm, p, content);
     // Mirror host-side so the existing storage sync / file tree walker still
@@ -188,6 +541,21 @@ export async function writeFileBinary(
   await fs.writeFile(full, content);
 }
 
+/** Internal full-file pull for host mirroring. Model-facing readFile is capped. */
+async function readVmTextForMirror(
+  vm: VmHandle,
+  p: string,
+): Promise<string | null> {
+  // null is an explicit capability result from an old agent. Transport/HTTP
+  // failures must propagate so the outer best-effort mirror block leaves the
+  // existing host copy untouched instead of replacing it with capped text.
+  const binary = await fcAgent.readFileBinary(vm, p);
+  if (binary) return binary.toString("utf-8");
+  // Compatibility with agents that predate binary reads. Those agents also
+  // predate guest-side text caps, so this fallback still returns the full file.
+  return await fcAgent.readFile(vm, p);
+}
+
 export async function editFile(
   sandbox: Sandbox,
   p: string,
@@ -205,10 +573,14 @@ export async function editFile(
       if (content !== null) {
         const occurrences = content.split(oldString).length - 1;
         if (occurrences === 1) {
-          await fs.writeFile(full, content.replace(oldString, newString), "utf-8");
+          await fs.writeFile(
+            full,
+            content.replace(oldString, newString),
+            "utf-8",
+          );
         } else {
           // Host copy is out of sync — re-fetch from VM.
-          const vmContent = await fcAgent.readFile(sandbox.vm, p).catch(() => null);
+          const vmContent = await readVmTextForMirror(sandbox.vm, p);
           if (vmContent !== null) {
             await fs.mkdir(path.dirname(full), { recursive: true });
             await fs.writeFile(full, vmContent, "utf-8");
@@ -216,7 +588,7 @@ export async function editFile(
         }
       } else {
         // File doesn't exist on host yet — pull from VM.
-        const vmContent = await fcAgent.readFile(sandbox.vm, p).catch(() => null);
+        const vmContent = await readVmTextForMirror(sandbox.vm, p);
         if (vmContent !== null) {
           await fs.mkdir(path.dirname(full), { recursive: true });
           await fs.writeFile(full, vmContent, "utf-8");
@@ -231,15 +603,20 @@ export async function editFile(
   const content = await fs.readFile(full, "utf-8");
   const occurrences = content.split(oldString).length - 1;
   if (occurrences === 0) throw new Error(`old_string not found in ${p}`);
-  if (occurrences > 1) throw new Error(`old_string is not unique in ${p} (${occurrences} matches)`);
+  if (occurrences > 1)
+    throw new Error(
+      `old_string is not unique in ${p} (${occurrences} matches)`,
+    );
   await fs.writeFile(full, content.replace(oldString, newString), "utf-8");
 }
 
 export async function listDir(sandbox: Sandbox, p?: string): Promise<string[]> {
-  if (sandbox.vm) return await fcAgent.listDir(sandbox.vm, p);
-  const target = p ? resolvePath(sandbox, p) : path.resolve(sandbox.rootDir);
-  const entries = await fs.readdir(target, { withFileTypes: true });
-  return entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name));
+  return await withSandboxIoPermit(sandbox, 1, async () => {
+    if (sandbox.vm) return await fcAgent.listDir(sandbox.vm, p);
+    const target = p ? resolvePath(sandbox, p) : path.resolve(sandbox.rootDir);
+    const entries = await fs.readdir(target, { withFileTypes: true });
+    return entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name));
+  });
 }
 
 export interface GrepOptions {
@@ -248,13 +625,94 @@ export interface GrepOptions {
   literal?: boolean;
 }
 
-export async function grep(
+interface BoundedMatches {
+  head: string[];
+  tail: string[];
+  headBytes: number;
+  tailBytes: number;
+  collectingHead: boolean;
+  totalMatches: number;
+  lineTruncations: number;
+}
+
+function createBoundedMatches(): BoundedMatches {
+  return {
+    head: [],
+    tail: [],
+    headBytes: 0,
+    tailBytes: 0,
+    collectingHead: true,
+    totalMatches: 0,
+    lineTruncations: 0,
+  };
+}
+
+function pushBoundedMatch(bounded: BoundedMatches, rawLine: string): void {
+  bounded.totalMatches++;
+  const marker = " ... [matching line truncated]";
+  const shortened = Buffer.byteLength(rawLine) > MAX_GREP_LINE_BYTES;
+  const line = shortened
+    ? `${utf8Head(rawLine, MAX_GREP_LINE_BYTES - Buffer.byteLength(marker))}${marker}`
+    : rawLine;
+  if (shortened) bounded.lineTruncations++;
+  const storedBytes = Buffer.byteLength(line) + 1;
+  if (
+    bounded.collectingHead &&
+    bounded.headBytes + storedBytes <= GREP_HEAD_BYTES
+  ) {
+    bounded.head.push(line);
+    bounded.headBytes += storedBytes;
+    return;
+  }
+
+  bounded.collectingHead = false;
+  while (
+    bounded.tail.length &&
+    bounded.tailBytes + storedBytes > GREP_TAIL_BYTES
+  ) {
+    const dropped = bounded.tail.shift()!;
+    bounded.tailBytes -= Buffer.byteLength(dropped) + 1;
+  }
+  if (storedBytes <= GREP_TAIL_BYTES) {
+    bounded.tail.push(line);
+    bounded.tailBytes += storedBytes;
+  }
+}
+
+function finishBoundedMatches(bounded: BoundedMatches): string {
+  if (bounded.totalMatches === 0) return "(no matches)";
+  const omitted = Math.max(
+    0,
+    bounded.totalMatches - bounded.head.length - bounded.tail.length,
+  );
+  const chunks: string[] = [];
+  if (bounded.head.length) chunks.push(bounded.head.join("\n"));
+  if (omitted > 0) {
+    chunks.push(
+      `[... ${omitted} middle matches omitted from the bounded search response ...]`,
+    );
+  }
+  if (bounded.tail.length) chunks.push(bounded.tail.join("\n"));
+  let result = chunks.join("\n");
+  if (omitted > 0) {
+    result += `\n\n[search truncated: showing first ${bounded.head.length} and last ${bounded.tail.length} of ${bounded.totalMatches} matches (${omitted} omitted). Narrow the pattern or path.]`;
+  }
+  if (bounded.lineTruncations > 0) {
+    result += `\n\n[${bounded.lineTruncations} matching line(s) shortened to ${MAX_GREP_LINE_BYTES} bytes each.]`;
+  }
+  return result;
+}
+
+async function grepResultUnlocked(
   sandbox: Sandbox,
   pattern: string,
   p?: string,
   opts?: GrepOptions,
-): Promise<string> {
-  if (sandbox.vm) return await fcAgent.grep(sandbox.vm, pattern, p, opts);
+): Promise<SandboxTextResult> {
+  if (sandbox.vm) {
+    const result = await fcAgent.grepResult(sandbox.vm, pattern, p, opts);
+    return sandboxTextResult(result.text, result.truncated);
+  }
   const target = p ? resolvePath(sandbox, p) : path.resolve(sandbox.rootDir);
 
   // Build a matcher. A literal request — or a pattern that won't compile as a
@@ -276,60 +734,93 @@ export async function grep(
     ? (line: string) => regex!.test(line)
     : (line: string) => (ci ? line.toLowerCase() : line).includes(needle);
 
-  const results: string[] = [];
+  const bounded = createBoundedMatches();
   const root = path.resolve(sandbox.rootDir);
-  // Stop once we've gathered enough — a broad pattern over a big tree can match
-  // tens of thousands of lines, and the whole join would otherwise land in
-  // history and replay every iteration.
-  let bytes = 0;
-  let capped = false;
+  // Stream each file and retain a bounded head+tail window. Continuing the scan
+  // gives the model useful late matches without retaining the omitted middle.
+
+  async function scanFile(full: string): Promise<void> {
+    try {
+      const lines = createInterface({
+        input: createReadStream(full),
+        crlfDelay: Infinity,
+      });
+      let lineNo = 0;
+      for await (const line of lines) {
+        lineNo++;
+        if (test(line)) {
+          pushBoundedMatch(
+            bounded,
+            `${path.relative(root, full)}:${lineNo}: ${line.trim()}`,
+          );
+        }
+      }
+    } catch {
+      // skip binary or unreadable files
+    }
+  }
 
   async function walk(dir: string): Promise<void> {
-    if (capped) return;
     const entries = await fs.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
-      if (capped) return;
       if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         await walk(full);
       } else if (entry.isFile()) {
-        try {
-          const content = await fs.readFile(full, "utf-8");
-          const lines = content.split("\n");
-          for (let i = 0; i < lines.length; i++) {
-            if (test(lines[i])) {
-              const line = `${path.relative(root, full)}:${i + 1}: ${lines[i].trim()}`;
-              results.push(line);
-              bytes += line.length + 1;
-              if (bytes >= MAX_READ_BYTES) {
-                capped = true;
-                return;
-              }
-            }
-          }
-        } catch {
-          // skip binary or unreadable files
-        }
+        await scanFile(full);
       }
     }
   }
 
-  await walk(target);
+  const targetStat = await fs.stat(target);
+  if (targetStat.isFile()) await scanFile(target);
+  else if (targetStat.isDirectory()) await walk(target);
   const note = fellBackToLiteral
     ? "[pattern is not a valid regex — searched as a literal substring]\n"
     : "";
-  if (results.length === 0) return `${note}(no matches)`;
-  const out = results.join("\n");
-  return capped
-    ? `${note}${out}\n\n[... more matches omitted (hit ${MAX_READ_BYTES}-byte cap) — use a narrower pattern or path ...]`
-    : `${note}${out}`;
+  const truncated =
+    bounded.totalMatches > bounded.head.length + bounded.tail.length ||
+    bounded.lineTruncations > 0;
+  return sandboxTextResult(`${note}${finishBoundedMatches(bounded)}`, truncated);
+}
+
+export async function grepResult(
+  sandbox: Sandbox,
+  pattern: string,
+  p?: string,
+  opts?: GrepOptions,
+): Promise<SandboxTextResult> {
+  return await withSandboxIoPermit(sandbox, 2, () =>
+    grepResultUnlocked(sandbox, pattern, p, opts),
+  );
+}
+
+export async function grep(
+  sandbox: Sandbox,
+  pattern: string,
+  p?: string,
+  opts?: GrepOptions,
+): Promise<string> {
+  return (await grepResult(sandbox, pattern, p, opts)).text;
 }
 
 export interface CommandResult {
   stdout: string;
   stderr: string;
   exitCode: number | null;
+  /** True when either stream was shortened before it reached the model. */
+  truncated: boolean;
+}
+
+const COMMAND_TRUNCATION_MARKER = /\[\.\.\. truncated \d+ bytes \.\.\.\]/;
+
+/** Preserve command truncation as private metadata while keeping wire text stable. */
+export function commandResultText(result: CommandResult): SandboxTextResult {
+  return sandboxTextResult(
+    `exit_code: ${result.exitCode}\n--- stdout ---\n${result.stdout}\n--- stderr ---\n${result.stderr}`,
+    result.truncated,
+  );
 }
 
 export async function runCommand(
@@ -339,7 +830,15 @@ export async function runCommand(
   signal?: AbortSignal,
 ): Promise<CommandResult> {
   if (sandbox.vm) {
-    return await fcAgent.runCommand(sandbox.vm, command, timeoutMs, signal);
+    const result = await fcAgent.runCommand(sandbox.vm, command, timeoutMs, signal);
+    return {
+      ...result,
+      // The current VM wire shape predates explicit metadata but both Rust and
+      // Node agents insert this stable marker whenever either stream is capped.
+      truncated:
+        COMMAND_TRUNCATION_MARKER.test(result.stdout) ||
+        COMMAND_TRUNCATION_MARKER.test(result.stderr),
+    };
   }
   return new Promise((resolve) => {
     const choice = pickShell();
@@ -384,21 +883,36 @@ export async function runCommand(
       if (signal) signal.removeEventListener("abort", onAbort);
       if (abortedByUser) stderr += `\n[killed: aborted by user]`;
       else if (killed) stderr += `\n[killed: timeout after ${timeoutMs}ms]`;
-      resolve({ stdout: truncate(stdout), stderr: truncate(stderr), exitCode: code });
+      const boundedStdout = truncateCommandOutput(stdout);
+      const boundedStderr = truncateCommandOutput(stderr);
+      resolve({
+        stdout: boundedStdout.text,
+        stderr: boundedStderr.text,
+        exitCode: code,
+        truncated: boundedStdout.truncated || boundedStderr.truncated,
+      });
     });
     child.on("error", (err) => {
       clearTimeout(timer);
       if (signal) signal.removeEventListener("abort", onAbort);
-      resolve({ stdout: "", stderr: `[spawn error] ${err.message}`, exitCode: 1 });
+      resolve({
+        stdout: "",
+        stderr: `[spawn error] ${err.message}`,
+        exitCode: 1,
+        truncated: false,
+      });
     });
   });
 }
 
-function truncate(s: string): string {
-  if (s.length <= HALF_MAX * 2) return s;
+function truncateCommandOutput(s: string): { text: string; truncated: boolean } {
+  if (s.length <= HALF_MAX * 2) return { text: s, truncated: false };
   const head = s.slice(0, HALF_MAX);
   const tail = s.slice(-HALF_MAX);
-  return `${head}\n\n[... truncated ${s.length - HALF_MAX * 2} bytes ...]\n\n${tail}`;
+  return {
+    text: `${head}\n\n[... truncated ${s.length - HALF_MAX * 2} bytes ...]\n\n${tail}`,
+    truncated: true,
+  };
 }
 
 export async function waitForPort(
@@ -460,7 +974,10 @@ async function isPortOpen(port: number): Promise<boolean> {
  * Used after we kill a previous dev server to make sure the OS has released
  * the socket before we spawn the next one — without this we hit EADDRINUSE.
  */
-export async function waitForPortClosed(port: number, timeoutMs = 5_000): Promise<boolean> {
+export async function waitForPortClosed(
+  port: number,
+  timeoutMs = 5_000,
+): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const open = await new Promise<boolean>((resolve) => {
@@ -554,7 +1071,13 @@ export async function startServer(
     // preview proxy must learn how to reach the VM (per-VM TAP IP) — see
     // proxy.ts; until that's wired the preview won't render but the
     // server starts cleanly.
-    const r = await fcAgent.startServer(sandbox.vm, command, port, readyTimeoutMs, signal);
+    const r = await fcAgent.startServer(
+      sandbox.vm,
+      command,
+      port,
+      readyTimeoutMs,
+      signal,
+    );
     // Expose an unguessable 128-bit host id (the preview capability — M-6),
     // independent of the in-VM agent's shorter id, which we keep as vmServerId
     // for addressing the agent on stop/log RPCs.
@@ -573,7 +1096,13 @@ export async function startServer(
       vmServerId: r.id,
     };
     servers.set(id, server);
-    return { id, command, port: r.port, pid: r.pid, started_at: server.started_at };
+    return {
+      id,
+      command,
+      port: r.port,
+      pid: r.pid,
+      started_at: server.started_at,
+    };
   }
   // Pre-clear the port. Fast path: if it's already free, this is two
   // ~10ms TCP probes. Slow path: a zombie (often `npm run dev` ran via
@@ -707,7 +1236,9 @@ export function removeServersForProject(projectId: string): void {
 export function listServers(projectId?: string | null): ServerInfo[] {
   const all = Array.from(servers.values());
   const filtered =
-    projectId === undefined ? all : all.filter((s) => s.project_id === projectId);
+    projectId === undefined
+      ? all
+      : all.filter((s) => s.project_id === projectId);
   return filtered.map((s) => ({
     id: s.id,
     command: s.command,
@@ -717,9 +1248,7 @@ export function listServers(projectId?: string | null): ServerInfo[] {
   }));
 }
 
-export function getServer(
-  id: string,
-): {
+export function getServer(id: string): {
   id: string;
   command: string;
   port: number;
@@ -730,7 +1259,13 @@ export function getServer(
   const s = servers.get(id);
   if (!s) return null;
   const host = s.vm?.ip ?? "127.0.0.1";
-  return { id: s.id, command: s.command, port: s.port, project_id: s.project_id, host };
+  return {
+    id: s.id,
+    command: s.command,
+    port: s.port,
+    project_id: s.project_id,
+    host,
+  };
 }
 
 export function readServerLog(id: string, maxBytes = 8000): string {
@@ -746,12 +1281,19 @@ export function readServerLog(id: string, maxBytes = 8000): string {
  * Async variant that fetches the log from the in-VM agent for VM-backed
  * servers. Process-backed servers fall through to the in-memory buffer.
  */
-export async function readServerLogAsync(id: string, maxBytes = 8000): Promise<string> {
+export async function readServerLogAsync(
+  id: string,
+  maxBytes = 8000,
+): Promise<string> {
   const server = servers.get(id);
   if (!server) throw new Error(`No server with id ${id}`);
   if (server.vm) {
     try {
-      return await fcAgent.readServerLog(server.vm, server.vmServerId ?? id, maxBytes);
+      return await fcAgent.readServerLog(
+        server.vm,
+        server.vmServerId ?? id,
+        maxBytes,
+      );
     } catch (err) {
       // The in-VM agent prunes a server the instant its process exits, but never
       // tells the host — so our entry lingers and the agent's id resolves to a

@@ -23,7 +23,7 @@
     "dotenv": "^16.4.7",
     "iron-session": "^8.0.4",
     "mammoth": "^1.8.0",
-    "openai": "^6.39.1",
+    "openai": "^6.46.0",
     "pdf-parse": "^1.1.1",
     "pg": "^8.13.1",
     "playwright": "^1.59.1",

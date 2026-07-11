@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { createHash } from "node:crypto";
 import { ensureAnthropic } from "./router.js";
 
 /**
@@ -58,6 +59,28 @@ export interface CompactionResult {
   removedMessages: number;
   beforeTokens: number;
   afterTokens: number;
+  snapshotStrategy: string;
+  snapshotModel: string;
+}
+
+export interface CompactionBudget {
+  /** System prompt + serialized tool schemas and other fixed request prefix. */
+  fixedTokens?: number;
+  /** Selected model's context window when known. */
+  contextWindowTokens?: number;
+  /** Output/reasoning headroom kept outside the input budget. */
+  reserveTokens?: number;
+  /** Privacy-safe failure observer; compaction itself remains fail-open. */
+  onFailure?: () => void;
+  /** Billed internal summarizer usage for run-level cost correlation. */
+  onUsage?: (usage: {
+    provider: "anthropic";
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  }) => void;
 }
 
 function isToolResultBlock(block: unknown): boolean {
@@ -107,10 +130,54 @@ function messageChars(msg: Anthropic.MessageParam): number {
   return msg.content.reduce((acc, b) => acc + blockChars(b), 0);
 }
 
-function estimateTokens(messages: Anthropic.MessageParam[]): number {
+export function estimateMessageTokens(messages: Anthropic.MessageParam[]): number {
+  return Math.ceil(estimateMessageChars(messages) / CHARS_PER_TOKEN);
+}
+
+/** Block-walking size estimate that avoids serializing large image/tool payloads. */
+export function estimateMessageChars(messages: Anthropic.MessageParam[]): number {
   let total = 0;
-  for (const m of messages) total += messageChars(m);
-  return Math.ceil(total / CHARS_PER_TOKEN);
+  for (const message of messages) total += messageChars(message);
+  return total;
+}
+
+/** Conservative char-based estimate for system text and serialized schemas. */
+export function estimateFixedPromptTokens(system: string, tools: unknown[]): number {
+  const toolChars = JSON.stringify(tools).length;
+  return Math.ceil((system.length + toolChars) / CHARS_PER_TOKEN);
+}
+
+export function compactionTriggerTokens(budget: CompactionBudget = {}): number {
+  const contextWindow = budget.contextWindowTokens;
+  const reserve = Math.max(0, budget.reserveTokens ?? 0);
+  if (!contextWindow || !Number.isFinite(contextWindow)) {
+    return COMPACT_THRESHOLD_TOKENS;
+  }
+  return Math.max(1, Math.min(COMPACT_THRESHOLD_TOKENS, contextWindow - reserve));
+}
+
+export function compactionKeepTokens(budget: CompactionBudget = {}): number {
+  const trigger = compactionTriggerTokens(budget);
+  const fixed = Math.max(0, budget.fixedTokens ?? 0);
+  // Leave space for the compacted summary itself and estimation error rather
+  // than retaining 80k blindly on a smaller-window/fixed-heavy request.
+  return Math.max(1, Math.min(COMPACT_KEEP_TOKENS, trigger - fixed - 8_000));
+}
+
+/** Conservative usable windows for the curated families; unknowns use 200k. */
+export function contextWindowTokensForModel(model: string): number {
+  const id = model.toLowerCase();
+  if (id.includes("opus")) return 200_000;
+  if (id.includes("sonnet") || id.includes("glm") || id.includes("gemini")) return 1_000_000;
+  if (id.startsWith("gpt-")) return 400_000;
+  return 200_000;
+}
+
+export function estimatedRequestTokens(
+  messages: Anthropic.MessageParam[],
+  budget: CompactionBudget = {},
+): number {
+  return estimateMessageTokens(messages) + Math.max(0, budget.fixedTokens ?? 0);
 }
 
 function isRealUserMessage(msg: Anthropic.MessageParam): boolean {
@@ -130,12 +197,12 @@ function isRealUserMessage(msg: Anthropic.MessageParam): boolean {
  * no such split exists (e.g. the current single user turn is already
  * >150k tokens — there's nothing older to compact).
  */
-function findSplitIndex(messages: Anthropic.MessageParam[]): number {
+function findSplitIndex(messages: Anthropic.MessageParam[], keepTokens: number): number {
   let kept = 0;
   let candidate = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
     kept += Math.ceil(messageChars(messages[i]) / CHARS_PER_TOKEN);
-    if (isRealUserMessage(messages[i]) && kept >= COMPACT_KEEP_TOKENS) {
+    if (isRealUserMessage(messages[i]) && kept >= keepTokens) {
       candidate = i;
       break;
     }
@@ -240,16 +307,43 @@ Be terse. Keep the whole summary under ~800 words — shape it to fit rather tha
 
 const SUMMARY_USER_PROMPT_SUFFIX = "\n</conversation>";
 
+export interface CompactionSnapshotIdentity {
+  strategy: string;
+  model: string;
+}
+
+/**
+ * A persisted summary is valid only for the exact compaction recipe/model that
+ * produced it. Prompt edits automatically change the hash; internal model
+ * overrides change the model id. Either causes the next load to rebuild from
+ * the untouched raw transcript instead of recursively trusting stale loss.
+ */
+export function compactionSnapshotIdentity(): CompactionSnapshotIdentity {
+  const recipe = [
+    SUMMARY_SYSTEM_PROMPT,
+    SUMMARY_USER_PROMPT_PREFIX,
+    SUMMARY_USER_PROMPT_SUFFIX,
+    String(COMPACT_KEEP_TOKENS),
+    String(MAX_SUMMARY_TOKENS),
+  ].join("\n--recipe-boundary--\n");
+  return {
+    strategy: `structured-${createHash("sha256").update(recipe).digest("hex").slice(0, 16)}`,
+    model: ensureAnthropic("compact"),
+  };
+}
+
 async function summarizeOlderPortion(
   older: Anthropic.MessageParam[],
   apiKey: string,
   signal?: AbortSignal,
-): Promise<string> {
+  onUsage?: CompactionBudget["onUsage"],
+): Promise<{ text: string; identity: CompactionSnapshotIdentity }> {
   const transcript = older.map((m, i) => renderMessageForSummary(m, i)).join("\n\n");
   const client = new Anthropic({ apiKey });
+  const identity = compactionSnapshotIdentity();
   const response = await client.messages.create(
     {
-      model: ensureAnthropic("compact"),
+      model: identity.model,
       max_tokens: MAX_SUMMARY_TOKENS,
       system: SUMMARY_SYSTEM_PROMPT,
       messages: [
@@ -261,6 +355,14 @@ async function summarizeOlderPortion(
     },
     signal ? { signal } : undefined,
   );
+  onUsage?.({
+    provider: "anthropic",
+    model: identity.model,
+    inputTokens: response.usage.input_tokens ?? 0,
+    outputTokens: response.usage.output_tokens ?? 0,
+    cacheReadTokens: response.usage.cache_read_input_tokens ?? 0,
+    cacheCreationTokens: response.usage.cache_creation_input_tokens ?? 0,
+  });
   const text = response.content
     .map((b) => (b.type === "text" ? b.text : ""))
     .join("")
@@ -268,7 +370,7 @@ async function summarizeOlderPortion(
   if (!text) {
     throw new Error("compaction summarizer returned empty content");
   }
-  return text;
+  return { text, identity };
 }
 
 /**
@@ -278,27 +380,37 @@ async function summarizeOlderPortion(
  *
  * The caller (the agent loop) should run this AFTER history normalization
  * but BEFORE the next Anthropic call, so the messages array sent to the
- * API is already shrunken and the same compact form is what gets persisted
- * for future iterations of THIS session. The DB still holds the full
- * unsummarized history, which is fine — next session loads + re-compacts.
+ * API is already shrunken. The caller persists that model-facing snapshot and
+ * its raw-message cursor for later turns while retaining the complete raw
+ * transcript separately for UI replay.
  */
 export async function maybeCompact(
   messages: Anthropic.MessageParam[],
   apiKey: string,
   signal?: AbortSignal,
+  budget: CompactionBudget = {},
 ): Promise<CompactionResult | null> {
-  const beforeTokens = estimateTokens(messages);
-  if (beforeTokens < COMPACT_THRESHOLD_TOKENS) return null;
+  const beforeTokens = estimatedRequestTokens(messages, budget);
+  if (beforeTokens < compactionTriggerTokens(budget)) return null;
 
-  const splitIdx = findSplitIndex(messages);
+  const splitIdx = findSplitIndex(messages, compactionKeepTokens(budget));
   if (splitIdx <= 0) return null;
 
   const older = messages.slice(0, splitIdx);
   let summary: string;
+  let snapshotIdentity: CompactionSnapshotIdentity;
   try {
-    summary = await summarizeOlderPortion(older, apiKey, signal);
+    const summarized = await summarizeOlderPortion(older, apiKey, signal, budget.onUsage);
+    summary = summarized.text;
+    snapshotIdentity = summarized.identity;
   } catch (err) {
     if (signal?.aborted) return null;
+    try {
+      budget.onFailure?.();
+    } catch {
+      // A telemetry observer must not turn a recoverable compaction failure
+      // into a failed builder turn.
+    }
     // Don't crash the turn over a summarizer hiccup — the agent will hit
     // the API limit on its own next iteration if we genuinely can't
     // recover. Log and continue without compacting.
@@ -320,6 +432,12 @@ export async function maybeCompact(
     },
   ];
   messages.splice(0, splitIdx, ...synthetic);
-  const afterTokens = estimateTokens(messages);
-  return { removedMessages: splitIdx, beforeTokens, afterTokens };
+  const afterTokens = estimatedRequestTokens(messages, budget);
+  return {
+    removedMessages: splitIdx,
+    beforeTokens,
+    afterTokens,
+    snapshotStrategy: snapshotIdentity.strategy,
+    snapshotModel: snapshotIdentity.model,
+  };
 }

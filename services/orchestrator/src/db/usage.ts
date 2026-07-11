@@ -2,10 +2,10 @@ import { estimateTurnCostUsd } from "@uniqus/api-types";
 import { db } from "./client.js";
 
 /**
- * Per-turn token-usage analytics (Plan §5 — dashboard usage widgets). One row
- * is written at the end of each completed agent turn; the dashboard aggregates
- * them through the `account_usage_stats` SQL function (see schema.sql) to power
- * the total-tokens / cost / time-spent / top-models cards.
+ * Per-call token-usage analytics (Plan §5 — dashboard usage widgets). Lead,
+ * planning, routing, compaction, sub-agent, and auxiliary calls share a run_id;
+ * the dashboard aggregates them through the `account_usage_stats` SQL function
+ * (see schema.sql) to power total-token / cost / time / top-model cards.
  *
  * `inputTokens` is FRESH (uncached) input only. Cached prompt tokens are split
  * into their own buckets (read / creation) so the dashboard can price them at
@@ -16,7 +16,10 @@ import { db } from "./client.js";
 
 export interface RecordUsageInput {
   projectId: string;
-  userId: string;
+  /** Acting account when one exists. System-created tasks intentionally use NULL. */
+  userId: string | null;
+  /** Top-level harness run for exact cost-per-task aggregation. */
+  runId?: string | null;
   provider: string;
   model: string;
   inputTokens: number;
@@ -47,7 +50,8 @@ function isMissingColumnError(error: { code?: string; message?: string }): boole
   if (
     msg.includes("cache_read_tokens") ||
     msg.includes("cache_creation_tokens") ||
-    msg.includes("cost_usd")
+    msg.includes("cost_usd") ||
+    msg.includes("run_id")
   ) {
     return true;
   }
@@ -69,16 +73,22 @@ export async function recordUsageEvent(input: RecordUsageInput): Promise<void> {
     cache_read_tokens: Math.max(0, Math.round(input.cacheReadTokens ?? 0)),
     cache_creation_tokens: Math.max(0, Math.round(input.cacheCreationTokens ?? 0)),
   };
-  const full =
+  const fullWithoutRun =
     input.costUsd === undefined
       ? withCache
       : { ...withCache, cost_usd: Math.max(0, input.costUsd) };
+  const full = input.runId ? { ...fullWithoutRun, run_id: input.runId } : fullWithoutRun;
 
   // Degrade column-by-column on an un-migrated DB: full (cache + cost) →
   // cache-only → base. Each fallback only runs on a missing-column error, so a
   // fully-migrated DB inserts once and a partial one keeps the columns it has.
   let { error } = await db().from("usage_events").insert(full);
-  if (error && isMissingColumnError(error) && full !== withCache) {
+  // A run_id rollout must not throw away the already-supported cache/cost
+  // columns on an older database. Retry the same rich row without only run_id.
+  if (error && input.runId && isMissingColumnError(error)) {
+    ({ error } = await db().from("usage_events").insert(fullWithoutRun));
+  }
+  if (error && isMissingColumnError(error) && input.costUsd !== undefined) {
     ({ error } = await db().from("usage_events").insert(withCache));
   }
   if (error && isMissingColumnError(error)) {
@@ -115,6 +125,23 @@ export function startOfMonthIso(): string {
  * permissive posture.
  */
 export async function orgMonthToDateSpendUsd(orgId: string): Promise<number> {
+  const since = startOfMonthIso();
+  const rolledUp = await db().rpc("org_month_to_date_spend_usd", {
+    oid: orgId,
+    since_ts: since,
+  });
+  if (!rolledUp.error) return Math.max(0, Number(rolledUp.data ?? 0));
+  // Rollout compatibility: fall back to the paged implementation only when the
+  // aggregate function is not present yet. Other failures retain the existing
+  // fail-open behavior rather than turning every run into an O(history) sweep.
+  const missingRpc =
+    rolledUp.error.code === "PGRST202" ||
+    (rolledUp.error.message ?? "").toLowerCase().includes("org_month_to_date_spend_usd");
+  if (!missingRpc) {
+    console.error("orgMonthToDateSpendUsd: aggregate failed (returning 0):", rolledUp.error.message);
+    return 0;
+  }
+
   // 1. Project ids belonging to the org.
   const proj = await db().from("projects").select("id").eq("org_id", orgId);
   if (proj.error) {
@@ -125,7 +152,6 @@ export async function orgMonthToDateSpendUsd(orgId: string): Promise<number> {
   if (projectIds.length === 0) return 0;
 
   // 2. Sum cost_usd for those projects this calendar month, paging the sweep.
-  const since = startOfMonthIso();
   let total = 0;
   for (let from = 0; ; from += USAGE_PAGE_SIZE) {
     const { data, error } = await db()
@@ -253,9 +279,8 @@ interface ModelTokenTotals {
   cache_read_tokens: number;
   cache_creation_tokens: number;
   /**
-   * Σ of the per-turn cost (estimateTurnCostUsd) of every row in this bucket.
-   * Priced PER ROW so the long-context band keys off each turn's own prompt
-   * size — summing the bucket's tokens first would wrongly cross the band.
+   * Σ of the stored per-call cost snapshots in this bucket, with token-based
+   * estimation only for legacy rows that predate the snapshot column.
    */
   cost_usd: number;
 }
@@ -290,8 +315,12 @@ export interface ProjectUsageByModelRow extends ModelTokenTotals {
   model: string;
   /** Provider for this model (from usage_events.provider). */
   provider: string;
-  /** Number of usage_events (turns) in this (project, model) bucket. */
+  /** Distinct modern harness runs plus legacy unlinked usage rows. */
   turns: number;
+  /** Modern run ids retained so a project total can deduplicate across models. */
+  run_ids: string[];
+  /** Pre-correlation rows; each row historically represented one billed call. */
+  legacy_turns: number;
 }
 
 /** Page size when sweeping usage_events; PostgREST caps a request at 1000. */
@@ -306,10 +335,10 @@ const ZERO_TOTALS = (): ModelTokenTotals => ({
 });
 
 /**
- * Add one event's token columns into an accumulator bucket, plus its per-turn
- * estimated cost (long-context band applied to this row's own prompt size).
- * Recomputed from the token split rather than read from the stored cost_usd
- * snapshot, so the breakdown works even on a DB where cost_usd isn't migrated.
+ * Add one event's token columns into an accumulator bucket. Prefer the cost
+ * captured when the call was made: that preserves historical pricing and
+ * non-token charges such as image generation. Legacy rows without a snapshot
+ * are estimated from their token split as a migration-safe fallback.
  */
 function addTokens(into: ModelTokenTotals, row: Partial<UsageEventRow>): void {
   const input_tokens = Number(row.input_tokens ?? 0);
@@ -320,16 +349,24 @@ function addTokens(into: ModelTokenTotals, row: Partial<UsageEventRow>): void {
   into.output_tokens += output_tokens;
   into.cache_read_tokens += cache_read_tokens;
   into.cache_creation_tokens += cache_creation_tokens;
-  into.cost_usd += estimateTurnCostUsd(String(row.model ?? ""), {
-    inputTokens: input_tokens,
-    outputTokens: output_tokens,
-    cacheReadTokens: cache_read_tokens,
-    cacheCreationTokens: cache_creation_tokens,
-  });
+  const storedCost = Number(row.cost_usd);
+  into.cost_usd +=
+    row.cost_usd !== null &&
+    row.cost_usd !== undefined &&
+    Number.isFinite(storedCost)
+      ? Math.max(0, storedCost)
+      : estimateTurnCostUsd(String(row.model ?? ""), {
+          inputTokens: input_tokens,
+          outputTokens: output_tokens,
+          cacheReadTokens: cache_read_tokens,
+          cacheCreationTokens: cache_creation_tokens,
+        });
 }
 
 /** Raw usage_events columns the breakdown sweeps read. */
 interface UsageEventRow {
+  run_id?: string | null;
+  cost_usd?: number | null;
   project_id: string | null;
   /** Selected only by the by-project sweep; absent in the daily sweep. */
   provider?: string;
@@ -390,7 +427,7 @@ export async function getDailyUsageByModel(
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   const rows = await sweepUsageEvents(
     userId,
-    "model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at",
+    "model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at",
     since,
   );
   // Bucket per (date, model). Map insertion order follows created_at because
@@ -429,9 +466,10 @@ export async function getUsageByProjectByModel(
 ): Promise<ProjectUsageByModelRow[]> {
   const rows = await sweepUsageEvents(
     userId,
-    "project_id, provider, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at, projects(name)",
+    "run_id, project_id, provider, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd, created_at, projects(name)",
   );
   const buckets = new Map<string, ProjectUsageByModelRow>();
+  const seenRuns = new Map<string, Set<string>>();
   for (const row of rows) {
     const projectId = row.project_id ?? "";
     const model = String(row.model);
@@ -444,12 +482,25 @@ export async function getUsageByProjectByModel(
         model,
         provider: String(row.provider ?? ""),
         turns: 0,
+        run_ids: [],
+        legacy_turns: 0,
         ...ZERO_TOTALS(),
       };
       buckets.set(key, bucket);
+      seenRuns.set(key, new Set());
     }
     addTokens(bucket, row);
-    bucket.turns += 1;
+    if (row.run_id) {
+      const seen = seenRuns.get(key)!;
+      if (!seen.has(row.run_id)) {
+        seen.add(row.run_id);
+        bucket.run_ids.push(row.run_id);
+        bucket.turns += 1;
+      }
+    } else {
+      bucket.legacy_turns += 1;
+      bucket.turns += 1;
+    }
   }
   return [...buckets.values()];
 }

@@ -21,9 +21,9 @@ import type { VmHandle } from "./types.js";
  *
  * Change detection never compares guest mtimes to host mtimes (different
  * clocks, and hydration rewrites guest mtimes wholesale). Instead we keep the
- * last-seen manifest per VM id and diff VM-now against VM-before. With no
- * baseline (first pull after a boot or an orchestrator restart) we fall back
- * to host comparison: pull anything missing on the host or differing in size.
+ * last-confirmed manifest per VM id and diff VM-now against VM-before. A first
+ * pull fetches every sync-eligible VM file: size equality is not content
+ * equality, and assuming it was permanently losing same-length command edits.
  *
  * Old agents (VMs resumed from snapshots taken before /fs/manifest shipped)
  * are served by an exec-based fallback: `find | stat` for the inventory and a
@@ -60,6 +60,9 @@ const MAX_FILE_SIZE = 5 * 1024 * 1024; // matches storage sync's per-file cap
 // the next pull (baseline diff picks up where we left off).
 const MAX_FILES_PER_PULL = 800;
 const MAX_BYTES_PER_PULL = 64 * 1024 * 1024;
+const MAX_DELETIONS_PER_PULL = 800;
+const MAX_HOST_BASELINE_FILES = 20_000;
+const MAX_STRICT_PULL_PASSES = 4;
 const FETCH_BATCH = 8; // matches hydrate/storage batch sizing
 
 // Exec-fallback chunking: the agent truncates exec stdout above 16 KB
@@ -86,7 +89,14 @@ function shouldPull(relPath: string): boolean {
 }
 
 /** Last-seen VM manifest, keyed by VM id (a new VM ⇒ a fresh baseline). */
-const baselines = new Map<string, Map<string, { size: number; mtime_ms: number }>>();
+interface BaselineEntry {
+  size: number;
+  mtime_ms: number;
+  /** Dirty entries must be retried even when their metadata happens to match. */
+  dirty: boolean;
+}
+
+const baselines = new Map<string, Map<string, BaselineEntry>>();
 
 function pruneBaselines(keep: string): void {
   // VM ids churn (reclaim/reboot); don't let dead baselines accumulate.
@@ -99,36 +109,188 @@ function pruneBaselines(keep: string): void {
 export interface PullResult {
   /** Rel paths written to the host mirror this pull. */
   pulled: string[];
+  /** Rel paths removed from the host mirror because the VM deleted them. */
+  deleted: string[];
   /** Files we wanted but could not fetch intact (retried next pull). */
   skipped: number;
+  /** Eligible changes left dirty because this pull reached its safety caps. */
+  deferred: number;
 }
 
-/** Coalesce concurrent pulls per project — one walk at a time, like syncChanges. */
-const inFlight = new Map<string, Promise<PullResult | null>>();
+/** Coalesce concurrent pulls per project, including one fresh follow-up pass. */
+interface PullFlight {
+  hostDir: string;
+  again: boolean;
+  drain: boolean;
+  promise: Promise<PullResult | null>;
+}
 
-/**
- * Pull new/changed files from the project's running VM into the host mirror.
- * Returns null when there is nothing to do (no VM backend, VM not running, or
- * the inventory was unavailable). Never throws — this rides hot paths.
- */
-export function pullVmChanges(projectId: string, hostDir: string): Promise<PullResult | null> {
+const inFlight = new Map<string, PullFlight>();
+
+/** Schedule a raw pull sequence. Callers arriving mid-pass request a fresh pass. */
+function scheduledPull(
+  projectId: string,
+  hostDir: string,
+  drainDeferred = false,
+): Promise<PullResult | null> {
+  const resolvedHost = path.resolve(hostDir);
   const existing = inFlight.get(projectId);
-  if (existing) return existing;
-  const run = doPull(projectId, hostDir)
-    .catch((err) => {
-      console.error(`[pull ${projectId}] failed:`, err);
-      return null;
-    })
-    .finally(() => {
-      inFlight.delete(projectId);
-    });
-  inFlight.set(projectId, run);
+  if (existing) {
+    if (existing.hostDir !== resolvedHost) {
+      return Promise.reject(
+        new Error(`concurrent VM pulls disagreed on the host mirror for project ${projectId}`),
+      );
+    }
+    if (drainDeferred) existing.drain = true;
+    existing.again = true;
+    return existing.promise;
+  }
+
+  const flight: PullFlight = {
+    hostDir: resolvedHost,
+    again: false,
+    drain: drainDeferred,
+    promise: Promise.resolve(null),
+  };
+  const run = runPullPasses(projectId, flight).finally(() => {
+    if (inFlight.get(projectId) === flight) inFlight.delete(projectId);
+  });
+  flight.promise = run;
+  inFlight.set(projectId, flight);
   return run;
+}
+
+async function runPullPasses(
+  projectId: string,
+  flight: PullFlight,
+): Promise<PullResult | null> {
+  const pulled = new Set<string>();
+  const deleted = new Set<string>();
+  let last: PullResult | null = null;
+  let lastError: unknown = null;
+  let passCount = 0;
+
+  do {
+    flight.again = false;
+    passCount++;
+    try {
+      const pass = await doPull(projectId, flight.hostDir);
+      lastError = null;
+      if (pass) {
+        last = pass;
+        for (const rel of pass.pulled) pulled.add(rel);
+        for (const rel of pass.deleted) deleted.add(rel);
+        if (
+          flight.drain &&
+          pass.deferred > 0 &&
+          passCount < MAX_STRICT_PULL_PASSES
+        ) {
+          flight.again = true;
+        }
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  } while (flight.again);
+
+  if (lastError) throw lastError;
+  if (!last) return null;
+  return {
+    pulled: [...pulled],
+    deleted: [...deleted],
+    skipped: last.skipped,
+    deferred: last.deferred,
+  };
+}
+
+export function pullVmChanges(projectId: string, hostDir: string): Promise<PullResult | null> {
+  return scheduledPull(projectId, hostDir).catch((err) => {
+    console.error(`[pull ${projectId}] failed:`, err);
+    return null;
+  });
+}
+
+/** Await a complete VM-to-host reconciliation or reject instead of claiming durability. */
+export async function pullVmChangesStrict(
+  projectId: string,
+  hostDir: string,
+): Promise<PullResult | null> {
+  const result = await scheduledPull(projectId, hostDir, true);
+  if (result && (result.skipped > 0 || result.deferred > 0)) {
+    throw new Error(
+      `VM pull incomplete: ${result.skipped} failed, ${result.deferred} deferred`,
+    );
+  }
+  return result;
+}
+
+async function snapshotHostBaseline(hostDir: string): Promise<Map<string, BaselineEntry>> {
+  const root = path.resolve(hostDir);
+  const snapshot = new Map<string, BaselineEntry>();
+
+  const walk = async (dir: string): Promise<void> => {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      const rel = path.relative(root, full).replaceAll(path.sep, "/");
+      if (!shouldPull(rel)) continue;
+      if (entry.isDirectory()) {
+        await walk(full);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const stat = await fs.stat(full);
+      if (stat.size > MAX_FILE_SIZE) continue;
+      snapshot.set(rel, {
+        size: stat.size,
+        mtime_ms: stat.mtimeMs,
+        dirty: true,
+      });
+      if (snapshot.size > MAX_HOST_BASELINE_FILES) {
+        throw new Error(
+          `host mirror exceeds the ${MAX_HOST_BASELINE_FILES}-file safe baseline cap`,
+        );
+      }
+    }
+  };
+
+  try {
+    await walk(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return snapshot;
+    throw error;
+  }
+  return snapshot;
+}
+
+interface HostFileState {
+  size: number;
+  mtime_ms: number;
+}
+
+async function hostFileState(fullPath: string): Promise<HostFileState | null> {
+  try {
+    const stat = await fs.stat(fullPath);
+    return { size: stat.size, mtime_ms: stat.mtimeMs };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function sameHostState(a: HostFileState | null, b: HostFileState | null): boolean {
+  return a?.size === b?.size && a?.mtime_ms === b?.mtime_ms;
 }
 
 async function doPull(projectId: string, hostDir: string): Promise<PullResult | null> {
   const vm = getRunningVm(projectId);
   if (!vm) return null;
+
+  // Snapshot the host before the first VM inventory. This gives us a safe set
+  // of paths that existed before the command result, including deletions. Files
+  // created after this snapshot cannot be mistaken for a VM-side deletion.
+  let baseline = baselines.get(vm.id);
+  if (!baseline) baseline = await snapshotHostBaseline(hostDir);
 
   // 1. Inventory. Primary: the manifest endpoint. Fallback (pre-manifest
   //    agents): find|stat over exec.
@@ -138,38 +300,36 @@ async function doPull(projectId: string, hostDir: string): Promise<PullResult | 
     entries = await agentRpc.manifest(vm);
   } catch {
     const fallback = await manifestViaExec(vm);
-    if (fallback === null) return null;
+    if (fallback === null) throw new Error(`VM inventory unavailable for ${vm.id}`);
     entries = fallback;
     oldAgent = true;
   }
-  entries = entries.filter(
-    (e) =>
-      typeof e.path === "string" &&
-      shouldPull(e.path) &&
-      Number.isFinite(e.size) &&
-      e.size >= 0 &&
-      e.size <= MAX_FILE_SIZE,
-  );
-
-  // 2. Diff. Baseline (VM-now vs VM-before) when we have one; host comparison
-  //    (missing or size-mismatch) otherwise.
-  const baseline = baselines.get(vm.id);
-  const candidates: agentRpc.VmFileEntry[] = [];
-  for (const e of entries) {
-    if (baseline) {
-      const prev = baseline.get(e.path);
-      if (prev && prev.size === e.size && prev.mtime_ms === e.mtime_ms) continue;
-      candidates.push(e);
-    } else {
-      try {
-        const st = await fs.stat(path.resolve(hostDir, e.path));
-        if (st.size === e.size) continue; // same size ⇒ assume unchanged (heals on next baseline diff)
-      } catch {
-        // missing on host → pull
-      }
-      candidates.push(e);
+  const current = new Map<string, agentRpc.VmFileEntry>();
+  let oversized = 0;
+  for (const entry of entries) {
+    if (
+      typeof entry.path !== "string" ||
+      !shouldPull(entry.path) ||
+      !Number.isFinite(entry.size) ||
+      entry.size < 0 ||
+      !Number.isFinite(entry.mtime_ms)
+    ) {
+      continue;
     }
+    current.set(entry.path, entry);
+    if (entry.size > MAX_FILE_SIZE) oversized++;
   }
+  const eligible = [...current.values()].filter((entry) => entry.size <= MAX_FILE_SIZE);
+
+  // 2. Diff against only confirmed baseline rows. Dirty rows represent a prior
+  // failed/deferred fetch and retry even when their metadata happens to match.
+  const candidates: agentRpc.VmFileEntry[] = [];
+  for (const e of eligible) {
+    const prev = baseline.get(e.path);
+    if (prev && !prev.dirty && prev.size === e.size && prev.mtime_ms === e.mtime_ms) continue;
+    candidates.push(e);
+  }
+  const deletionCandidates = [...baseline.keys()].filter((rel) => !current.has(rel));
 
   // 3. Bound the batch.
   let budget = MAX_BYTES_PER_PULL;
@@ -184,51 +344,137 @@ async function doPull(projectId: string, hostDir: string): Promise<PullResult | 
       `[pull ${projectId}] deferring ${candidates.length - toFetch.length} files past the per-pull cap`,
     );
   }
+  const toDelete = deletionCandidates.slice(0, MAX_DELETIONS_PER_PULL);
+  if (deletionCandidates.length > toDelete.length) {
+    console.warn(
+      `[pull ${projectId}] deferring ${deletionCandidates.length - toDelete.length} deletions past the per-pull cap`,
+    );
+  }
 
   // 4. Fetch + write, integrity-checked against the manifest size so a
   //    truncated/raced read never lands as silent corruption.
   const hostRoot = path.resolve(hostDir);
   const pulled: string[] = [];
-  const failed = new Set<string>();
+  const deleted: string[] = [];
+  const failedFetches = new Set<string>();
+  const deletionHostStart = new Map<string, HostFileState | null>();
+  for (const rel of toDelete) {
+    const full = path.resolve(hostRoot, rel);
+    if (full !== hostRoot && full.startsWith(hostRoot + path.sep)) {
+      deletionHostStart.set(rel, await hostFileState(full));
+    }
+  }
   for (let i = 0; i < toFetch.length; i += FETCH_BATCH) {
     const batch = toFetch.slice(i, i + FETCH_BATCH);
     await Promise.all(
       batch.map(async (e) => {
         try {
+          const full = path.resolve(hostRoot, e.path);
+          if (full !== hostRoot && !full.startsWith(hostRoot + path.sep)) {
+            failedFetches.add(e.path);
+            return;
+          }
+          const hostBefore = await hostFileState(full);
           let buf = oldAgent ? null : await agentRpc.readFileBinary(vm, e.path).catch(() => null);
           if (buf === null) buf = await readViaExec(vm, e.path, e.size);
           if (buf === null || buf.length !== e.size) {
-            failed.add(e.path);
+            failedFetches.add(e.path);
             return;
           }
-          const full = path.resolve(hostRoot, e.path);
-          if (full !== hostRoot && !full.startsWith(hostRoot + path.sep)) {
-            failed.add(e.path);
+          const hostAfter = await hostFileState(full);
+          if (!sameHostState(hostBefore, hostAfter)) {
+            // A newer editor/upload write landed while the VM bytes were in
+            // flight. Never overwrite it with the older inventory snapshot.
+            failedFetches.add(e.path);
             return;
           }
           await fs.mkdir(path.dirname(full), { recursive: true });
           await fs.writeFile(full, buf);
           pulled.push(e.path);
         } catch (err) {
-          failed.add(e.path);
+          failedFetches.add(e.path);
           console.error(`[pull ${projectId}] ${e.path} failed:`, err);
         }
       }),
     );
   }
 
-  // 5. New baseline = everything we saw, minus failures (so they retry).
-  const next = new Map<string, { size: number; mtime_ms: number }>();
-  for (const e of entries) {
-    if (!failed.has(e.path)) next.set(e.path, { size: e.size, mtime_ms: e.mtime_ms });
+  const failedDeletes = new Set<string>();
+  for (const rel of toDelete) {
+    try {
+      const full = path.resolve(hostRoot, rel);
+      if (full === hostRoot || !full.startsWith(hostRoot + path.sep)) {
+        failedDeletes.add(rel);
+        continue;
+      }
+      const currentHost = await hostFileState(full);
+      if (!sameHostState(deletionHostStart.get(rel) ?? null, currentHost)) {
+        // A concurrent host/VM write changed this path after the inventory
+        // snapshot. Leave it intact and force the follow-up pull to reconcile.
+        failedDeletes.add(rel);
+        continue;
+      }
+      await fs.rm(full, { force: true });
+      deleted.push(rel);
+    } catch (error) {
+      failedDeletes.add(rel);
+      console.error(`[pull ${projectId}] delete ${rel} failed:`, error);
+    }
+  }
+
+  // Advance only confirmed paths. Deferred/failed rows stay dirty so the next
+  // pull retries them; successful deletions disappear from the baseline.
+  const selected = new Set(toFetch.map((entry) => entry.path));
+  const candidatePaths = new Set(candidates.map((entry) => entry.path));
+  const next = new Map(baseline);
+  for (const entry of eligible) {
+    if (selected.has(entry.path) && !failedFetches.has(entry.path)) {
+      next.set(entry.path, {
+        size: entry.size,
+        mtime_ms: entry.mtime_ms,
+        dirty: false,
+      });
+    } else if (candidatePaths.has(entry.path)) {
+      const prev = next.get(entry.path);
+      next.set(entry.path, {
+        ...prev,
+        size: entry.size,
+        mtime_ms: entry.mtime_ms,
+        dirty: true,
+      });
+    }
+  }
+  for (const entry of current.values()) {
+    if (entry.size > MAX_FILE_SIZE) {
+      const prev = next.get(entry.path);
+      next.set(entry.path, {
+        ...prev,
+        size: entry.size,
+        mtime_ms: entry.mtime_ms,
+        dirty: true,
+      });
+    }
+  }
+  for (const rel of toDelete) {
+    if (failedDeletes.has(rel)) {
+      const prev = next.get(rel);
+      if (prev) next.set(rel, { ...prev, dirty: true });
+    } else {
+      next.delete(rel);
+    }
   }
   baselines.set(vm.id, next);
   pruneBaselines(vm.id);
 
-  if (pulled.length > 0 || failed.size > 0) {
-    console.log(`[pull ${projectId}] ${pulled.length} pulled, ${failed.size} skipped`);
+  const deferred =
+    candidates.length - toFetch.length + deletionCandidates.length - toDelete.length;
+  const skipped = failedFetches.size + failedDeletes.size + oversized;
+  if (pulled.length > 0 || deleted.length > 0 || skipped > 0 || deferred > 0) {
+    console.log(
+      `[pull ${projectId}] ${pulled.length} pulled, ${deleted.length} deleted, ${skipped} skipped, ${deferred} deferred`,
+    );
   }
-  return { pulled, skipped: failed.size };
+  return { pulled, deleted, skipped, deferred };
 }
 
 // ── exec fallback (agents that predate /fs/manifest) ─────────────────────────

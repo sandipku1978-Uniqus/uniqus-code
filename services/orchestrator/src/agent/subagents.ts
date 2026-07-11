@@ -10,8 +10,9 @@
  *     the lead agent picks the right model for the job,
  *   - optional extra INSTRUCTIONS the lead agent writes to customize that
  *     sub-agent's prompt for the task at hand,
- *   - the full tool set EXCEPT spawning further sub-agents (depth is capped at 1
- *     so a sub-agent can never fork-bomb the orchestrator).
+ *   - a lean role-specific prompt/tool profile with monotonic capability
+ *     expansion; `general` retains the complete legacy surface,
+ *   - no further spawning (depth is capped at 1).
  *
  * Passing MULTIPLE entries runs them IN PARALLEL — that's how the lead agent
  * parallelizes independent work (e.g. audit the API while the design agent
@@ -24,6 +25,20 @@
  */
 
 import type Anthropic from "@anthropic-ai/sdk";
+import type {
+  CapabilityId,
+  GuidancePackId,
+  ProgressiveProfileCohort,
+} from "./profiles.js";
+
+export interface SubAgentExecutionBudget {
+  /** Provider/tool iterations, including final synthesis turns. */
+  maxIterations: number;
+  /** Cumulative generated tokens across the nested loop. */
+  maxOutputTokens: number;
+  /** End-to-end wall clock for the nested loop. */
+  maxWallTimeMs: number;
+}
 
 /** A specialized sub-agent role. `general` is the blank-slate catch-all. */
 export interface SubAgentDef {
@@ -35,7 +50,25 @@ export interface SubAgentDef {
   blurb: string;
   /** The role-specific preamble injected into the sub-agent's system prompt. */
   persona: string;
+  /** Lean, role-specific capability groups. `"all"` preserves legacy/general. */
+  capabilities: readonly CapabilityId[] | "all";
+  /** Detailed prompt packs relevant to the role. */
+  guidance: readonly GuidancePackId[] | "all";
+  /** Treatment-only hard bounds; control/ineligible workers retain the baseline. */
+  executionBudget: SubAgentExecutionBudget | null;
 }
+
+const RESEARCH_BUDGET: SubAgentExecutionBudget = {
+  maxIterations: 48,
+  maxOutputTokens: 96_000,
+  maxWallTimeMs: 10 * 60_000,
+};
+
+const BUILD_BUDGET: SubAgentExecutionBudget = {
+  maxIterations: 72,
+  maxOutputTokens: 192_000,
+  maxWallTimeMs: 15 * 60_000,
+};
 
 /**
  * The built-in specializations. `general` MUST stay last so the catch-all
@@ -50,6 +83,9 @@ export const AGENT_TYPES: Record<string, SubAgentDef> = {
     blurb: "review code/config for correctness bugs, security issues, and risky patterns",
     persona:
       "Your role is to REVIEW and AUDIT, not to build. Read the relevant code, config, and dependencies and report correctness bugs, security vulnerabilities, race conditions, missing error handling, and risky or non-idiomatic patterns — each with the file:line, why it's a problem, and a concrete fix. Be precise and skeptical; prefer reading and analysis over editing, and change files only if the task explicitly asks you to apply fixes.",
+    capabilities: ["knowledge"],
+    guidance: [],
+    executionBudget: RESEARCH_BUDGET,
   },
   design: {
     key: "design",
@@ -57,6 +93,9 @@ export const AGENT_TYPES: Record<string, SubAgentDef> = {
     blurb: "craft polished UI — layout, design tokens, component styling, accessibility",
     persona:
       "Your role is VISUAL and UX DESIGN. Produce polished, on-brand UI: deliberate layout and visual hierarchy, a coherent type scale, spacing, radii and color usage, and accessible semantics (labels, focus states, contrast, reduced-motion). Reuse the project's existing design tokens and components before inventing new ones. You cannot run the preview yourself — report exactly what you changed and what to look at so the lead agent can verify it visually.",
+    capabilities: ["design", "assets", "deployment"],
+    guidance: ["design", "assets", "deployment"],
+    executionBudget: BUILD_BUDGET,
   },
   frontend: {
     key: "frontend",
@@ -64,6 +103,9 @@ export const AGENT_TYPES: Record<string, SubAgentDef> = {
     blurb: "implement client UI — components, state, routing, client behavior",
     persona:
       "Your role is FRONTEND implementation: components, state management, routing, forms, and client-side behavior. Wire real loading/empty/error states. You cannot run the preview or drive the browser yourself — instead describe the exact flow to exercise (routes, inputs, expected outcomes) so the lead agent can verify it in the preview. Keep changes consistent with the project's existing framework and patterns.",
+    capabilities: ["design", "assets", "deployment"],
+    guidance: ["design", "assets", "deployment"],
+    executionBudget: BUILD_BUDGET,
   },
   backend: {
     key: "backend",
@@ -71,6 +113,9 @@ export const AGENT_TYPES: Record<string, SubAgentDef> = {
     blurb: "implement server logic — APIs, route handlers, integrations, persistence",
     persona:
       "Your role is BACKEND implementation: API routes/handlers, server logic, integrations, and serverless-safe persistence. NEVER fake persistence with the filesystem or module-level in-memory state (it breaks on Vercel) — use the project's connected database. Validate inputs, handle errors, and keep secrets server-side. Verify with predeploy_check where relevant.",
+    capabilities: ["background", "integrations", "secrets", "deployment"],
+    guidance: ["backend", "secrets", "deployment"],
+    executionBudget: BUILD_BUDGET,
   },
   database: {
     key: "database",
@@ -78,6 +123,9 @@ export const AGENT_TYPES: Record<string, SubAgentDef> = {
     blurb: "schema design, migrations, queries, and data integrity",
     persona:
       "Your role is DATA: schema design, migrations, queries, indexes, and data integrity. Use the project's connected database (inspect the existing schema before changing it); never invent a file/in-memory store. Prefer reversible, additive migrations, scope every DELETE/UPDATE with a WHERE clause, and call out any destructive change before making it.",
+    capabilities: ["integrations", "secrets"],
+    guidance: ["backend", "secrets"],
+    executionBudget: BUILD_BUDGET,
   },
   research: {
     key: "research",
@@ -85,6 +133,9 @@ export const AGENT_TYPES: Record<string, SubAgentDef> = {
     blurb: "investigate the codebase (and web, if available) and report findings",
     persona:
       "Your role is INVESTIGATION. Explore the codebase — and the web if you have a search tool — to answer the question you were given, then report findings precisely with file:line references and citations. You are READ-ONLY by default: do not modify files unless the task explicitly asks you to.",
+    capabilities: ["knowledge"],
+    guidance: [],
+    executionBudget: RESEARCH_BUDGET,
   },
   general: {
     key: "general",
@@ -92,8 +143,24 @@ export const AGENT_TYPES: Record<string, SubAgentDef> = {
     blurb: "blank-slate agent for any task that doesn't fit a specialization",
     persona:
       "You are a general-purpose, blank-slate sub-agent. Do exactly the task you were given, using sound engineering judgment and the project's existing conventions.",
+    capabilities: "all",
+    guidance: "all",
+    executionBudget: null,
   },
 };
+
+/**
+ * Specialized execution limits are part of the progressive harness treatment,
+ * not the historical control. Keeping control/ineligible workers unrestricted
+ * makes the experiment compare one coherent harness against the real baseline
+ * instead of silently changing both arms' stopping behavior.
+ */
+export function subAgentExecutionBudgetForCohort(
+  def: SubAgentDef,
+  cohort: ProgressiveProfileCohort,
+): SubAgentExecutionBudget | null {
+  return cohort === "treatment" ? def.executionBudget : null;
+}
 
 export type AgentTypeKey = keyof typeof AGENT_TYPES;
 
@@ -122,9 +189,13 @@ export function buildSubAgentPreamble(def: SubAgentDef, instructions?: string): 
     instructions && instructions.trim()
       ? `\n\nAdditional instructions from the lead agent (follow these for this task):\n${instructions.trim()}`
       : "";
+  const capabilityNote =
+    def.capabilities === "all"
+      ? "You have the complete general-purpose tool and guidance surface."
+      : "Your initial tool/guidance profile is specialized for this role; if the task genuinely expands, use load_capabilities to request the missing typed tools and operating guidance safely.";
   return (
     `You are a specialized "${def.label}" sub-agent, spawned by the lead engineer to handle one focused task autonomously and then report back. ${def.persona}\n\n` +
-    `You operate in the SAME project sandbox as the lead agent and share its files and connectors. Two hard limits apply to you: (1) you CANNOT spawn further sub-agents; (2) you do NOT own the preview — the dev-server and browser tools (start_server, stop_server, screenshot_preview, interact_preview, run_flow, save_flow) are DISABLED for you. NEVER try to start a dev server or drive the browser; the lead agent owns the single preview and runs + visually verifies the app after you report back. Concentrate on reading and editing files; verify your changes by re-reading the code you wrote, not by previewing. You may be running CONCURRENTLY with the lead agent and other sub-agents in this same sandbox, so stay strictly within the files your task names and do not touch unrelated files. Work the task end-to-end and finish with a CONCISE report: what you did, what you found, every file you changed, and anything the lead agent must know (follow-ups, blockers, decisions you made). You report to the lead agent, NOT to the end user — do not address the user or ask them questions; make a reasonable decision and note it instead.${extra}`
+    `You operate in the SAME project sandbox as the lead agent and share its files and connectors. Two hard limits apply to you: (1) you CANNOT spawn further sub-agents; (2) you do NOT own the preview — the dev-server and browser tools (start_server, stop_server, screenshot_preview, interact_preview, run_flow, save_flow) are DISABLED for you. NEVER try to start a dev server or drive the browser; the lead agent owns the single preview and runs + visually verifies the app after you report back. Concentrate on reading and editing files; verify your changes by re-reading the code you wrote, not by previewing. ${capabilityNote} You may be running CONCURRENTLY with the lead agent and other sub-agents in this same sandbox, so stay strictly within the files your task names and do not touch unrelated files. Work the task end-to-end and finish with a CONCISE report: what you did, what you found, every file you changed, and anything the lead agent must know (follow-ups, blockers, decisions you made). You report to the lead agent, NOT to the end user — do not address the user or ask them questions; make a reasonable decision and note it instead.${extra}`
   );
 }
 
@@ -138,7 +209,7 @@ export const SPAWN_AGENTS_TOOL: Anthropic.Tool = {
   description:
     "Delegate focused work to one or more specialized sub-agents that run autonomously in THIS sandbox and report back. Pass MULTIPLE entries to run them IN PARALLEL — use this to parallelize INDEPENDENT work (e.g. audit the API while a design agent restyles the landing page). FAN OUT by default for any multi-part build: when the user asks for several new pages, a batch of components, or independent sections, scaffold the shared parts FIRST (routing, nav, layout, design tokens) then spawn one sub-agent per page/section in parallel instead of building them all yourself serially — under-using this for big independent builds is the most common mistake. " +
     "ASYNCHRONOUS: this call returns IMMEDIATELY (it does NOT wait for the sub-agents) — they run in the background while you keep working. After spawning you can: (a) do other INDEPENDENT work yourself (but do NOT edit files a sub-agent is touching — you'd clobber each other), then call await_subagents to collect their reports before you integrate/verify; or (b) just end your turn — you'll be automatically resumed with each sub-agent's report as it finishes. " +
-    "Each sub-agent has the same tools you do (read/write files, run commands, connectors) EXCEPT it cannot spawn further sub-agents AND it cannot start dev servers or drive the browser (you, the lead, own the single preview). So once your sub-agents finish, it's YOUR job to run the app and visually verify the combined result. Do NOT use sub-agents for trivial steps you can just do yourself, and do NOT spawn agents whose tasks edit the SAME files at the same time. Types: " +
+    "Each specialization starts with the tools/guidance relevant to its role and can safely load another capability if its task genuinely expands. It cannot spawn further sub-agents or start dev servers/drive the browser (you, the lead, own the single preview). So once your sub-agents finish, it's YOUR job to run the app and visually verify the combined result. Do NOT use sub-agents for trivial steps you can just do yourself, and do NOT spawn agents whose tasks edit the SAME files at the same time. Types: " +
     AGENT_TYPE_KEYS.map((k) => `${k} (${AGENT_TYPES[k].blurb})`).join("; ") +
     ".",
   input_schema: {
@@ -208,6 +279,9 @@ export const AWAIT_SUBAGENTS_TOOL: Anthropic.Tool = {
 
 /** Max sub-agents per spawn_agents call — bounds parallel fan-out + cost. */
 export const MAX_SUB_AGENTS_PER_CALL = 6;
+
+/** Turn-wide bound; unlike the per-call cap it cannot be bypassed with retries. */
+export const MAX_SUB_AGENTS_PER_TURN = 12;
 
 /**
  * Tools a SUB-AGENT may not use. The lead agent owns the single preview, so a

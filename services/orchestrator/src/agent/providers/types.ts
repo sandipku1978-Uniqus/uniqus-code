@@ -93,6 +93,16 @@ export interface StreamTurnParams {
    * "X in · Y out" counter in the composer.
    */
   onUsage?: (usage: TokenUsage) => void;
+  /**
+   * Fires once per provider response when a built-in, provider-executed tool
+   * incurred a separately billable fee. The payload is the cumulative total
+   * for THIS response (never a streaming delta), and zero-use responses do not
+   * fire it. `exact` means both units and cost are authoritative at current
+   * list pricing; `estimated` means the provider response proves the units but
+   * an allowance or opaque billing rule prevents knowing the eventual invoice
+   * amount from the response alone.
+   */
+  onBillableToolUsage?: (usage: BillableToolUsage) => void;
 }
 
 /** Token usage for one model call (cumulative for the call, not a delta). */
@@ -150,6 +160,29 @@ export interface ForcedToolParams {
   messages: Anthropic.MessageParam[];
   maxTokens: number;
   signal?: AbortSignal;
+  /**
+   * Fires as soon as the provider response's usage is available. This is
+   * deliberately separate from the resolved result: providers validate the
+   * forced tool call after receiving (and therefore billing) the response, so
+   * malformed output can reject while its usage still needs to be metered.
+   */
+  onUsage?: (usage: TokenUsage) => void;
+}
+
+/** Separately billed usage from a provider-side built-in tool. */
+export interface BillableToolUsage {
+  kind: "web_search";
+  /** Provider-defined billable uses for this single response. */
+  units: number;
+  /** USD at the provider's current public list price. */
+  costUsd: number;
+  /** Whether `costUsd` can be treated as the response's authoritative charge. */
+  accuracy: "exact" | "estimated";
+}
+
+export interface ForcedToolResult {
+  input: unknown;
+  usage?: TokenUsage;
 }
 
 /** A provider that can run the agent loop and forced-tool (plan) calls. */
@@ -158,7 +191,7 @@ export interface ModelProviderAdapter {
   /** Stream one assistant turn (text + tool calls). */
   streamAgentTurn(p: StreamTurnParams): Promise<StreamTurnResult>;
   /** Force a single structured tool call; resolves with the parsed tool input. */
-  callForcedTool(p: ForcedToolParams): Promise<unknown>;
+  callForcedTool(p: ForcedToolParams): Promise<ForcedToolResult>;
 }
 
 /**
