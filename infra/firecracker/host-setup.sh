@@ -6,11 +6,12 @@
 # What this does:
 #   1. Verifies KVM is available.
 #   2. Installs firecracker, mkfs.ext4, jq, iptables, bridge-utils.
-#   3. Creates the bridge `fcbr0` and a /16 in 172.16.0.0/12 for VM private IPs.
-#   4. Sets up iptables MASQUERADE so VM traffic egresses via the host NIC, plus
+#   3. Installs the pinned Rust + musl build toolchain for the in-VM agent.
+#   4. Creates the bridge `fcbr0` and a /16 in 172.16.0.0/12 for VM private IPs.
+#   5. Sets up iptables MASQUERADE so VM traffic egresses via the host NIC, plus
 #      per-VM isolation so VMs on the shared bridge can't reach each other (P0.3).
-#   5. Drops the kernel + base rootfs in /var/lib/uniqus/firecracker/.
-#   6. Allows `uniqus` (or whichever uid runs the orchestrator) into /dev/kvm.
+#   6. Drops the kernel + base rootfs in /var/lib/uniqus/firecracker/.
+#   7. Allows `uniqus` (or whichever uid runs the orchestrator) into /dev/kvm.
 #
 # Hetzner notes:
 #   - You'll be on a CX/AX dedicated box with KVM enabled in BIOS — most are by
@@ -24,6 +25,7 @@ set -euo pipefail
 EXT_IFACE="${EXT_IFACE:-$(ip -o -4 route show default | awk '{print $5; exit}')}"
 STATE_DIR="/var/lib/uniqus/firecracker"
 KERNEL_URL="${KERNEL_URL:-}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Golden base snapshots restore with `network_overrides` on PUT /snapshot/load,
 # which Firecracker only added in v1.12.0. On anything older (we shipped v1.10.1
 # originally) every golden restore 400s and silently falls back to cold boot —
@@ -41,14 +43,14 @@ if [[ ! -e /dev/kvm ]]; then
   exit 1
 fi
 
-echo "[1/6] Installing packages…"
+echo "[1/7] Installing packages…"
 apt-get update -y
 apt-get install -y --no-install-recommends \
   iproute2 iptables iptables-persistent bridge-utils \
   e2fsprogs xz-utils curl jq ca-certificates \
   socat netcat-openbsd
 
-echo "[2/6] Installing Firecracker ${FIRECRACKER_VERSION}…"
+echo "[2/7] Installing Firecracker ${FIRECRACKER_VERSION}…"
 # Re-install when missing OR when the installed version != the pinned one, so a
 # version bump (e.g. the v1.10.1 → v1.12.1 network_overrides fix) actually takes
 # on an already-provisioned host instead of being skipped.
@@ -69,7 +71,10 @@ else
 fi
 firecracker --version
 
-echo "[3/6] State dir + kernel…"
+echo "[3/7] Rust + musl build toolchain…"
+SKIP_APT_UPDATE=1 bash "${HERE}/install-rust-toolchain.sh"
+
+echo "[4/7] State dir + kernel…"
 mkdir -p "${STATE_DIR}"
 if [[ ! -f "${STATE_DIR}/vmlinux" ]]; then
   if [[ -z "${KERNEL_URL}" ]]; then
@@ -92,8 +97,7 @@ if [[ ! -f "${STATE_DIR}/vmlinux" ]]; then
 fi
 chmod 0644 "${STATE_DIR}/vmlinux"
 
-echo "[4/6] Firecracker host networking (bridge fcbr0 + masquerade, reboot-persistent)…"
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo "[5/7] Firecracker host networking (bridge fcbr0 + masquerade, reboot-persistent)…"
 # The bridge, masquerade, and per-VM isolation now live in the idempotent
 # host-net.sh so the exact same logic runs here (first provision) AND on every
 # boot via the systemd unit. The bridge device is runtime-only state that does
@@ -117,7 +121,7 @@ install -m 0644 "${HERE}/uniqus-firecracker-net.service" /etc/systemd/system/uni
 systemctl daemon-reload
 systemctl enable uniqus-firecracker-net.service
 
-echo "[5/6] /dev/kvm group access…"
+echo "[6/7] /dev/kvm group access…"
 if ! getent group kvm >/dev/null; then groupadd kvm; fi
 chown root:kvm /dev/kvm
 chmod 0660 /dev/kvm
@@ -128,6 +132,6 @@ if id uniqus >/dev/null 2>&1; then
   echo "Added 'uniqus' to kvm group. Re-login (or `newgrp kvm`) for it to take effect."
 fi
 
-echo "[6/6] Done. Next: build the rootfs with infra/firecracker/build-rootfs.sh"
+echo "[7/7] Done. Next: build the rootfs with infra/firecracker/build-rootfs.sh"
 echo "State dir: ${STATE_DIR}"
 echo "Kernel:    ${STATE_DIR}/vmlinux"

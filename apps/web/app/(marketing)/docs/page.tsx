@@ -234,7 +234,7 @@ const TROUBLESHOOTING = [
   },
   {
     title: "Dependencies look corrupted or modules disappear",
-    body: "This is a dependency-install race — two installs running in the same folder at once. Let the agent handle installs; it auto-installs at the sandbox root and won't run a second install on top. If you see missing-module errors after a manual install, ask Uniqus to reinstall cleanly and restart the server.",
+    body: "This is a dependency-install race — two installs running in the same folder at once. Let the agent handle installs; it reconciles package.json and the lockfile at the sandbox root or the subdirectory being started. If you see missing-module errors after a manual install, ask Uniqus to reinstall cleanly and restart the server.",
   },
   {
     title: "A long chat slows down or loses the thread",

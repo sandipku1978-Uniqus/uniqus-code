@@ -1,9 +1,26 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { safeChildEnv } from "./safeEnv.js";
 import * as sb from "./agent/sandbox.js";
 import type { Sandbox } from "./agent/sandbox.js";
+
+export type PackageManager = "npm" | "pnpm" | "yarn";
+
+const DEPS_STATE_FILE = ".cache/uniqus/deps.sha256";
+const DEPS_STATE_VERSION = "uniqus-deps-v2";
+const DEPENDENCY_INPUT_FILES = [
+  "package.json",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  "yarn.lock",
+  ".npmrc",
+  ".yarnrc",
+  ".yarnrc.yml",
+] as const;
 
 /**
  * Whether the project's dependencies need to be installed before its dev
@@ -15,23 +32,49 @@ import type { Sandbox } from "./agent/sandbox.js";
  */
 export async function needsInstall(
   sandboxDir: string,
-): Promise<"npm" | "pnpm" | "yarn" | null> {
+): Promise<PackageManager | null> {
   const hasPackageJson = await exists(path.join(sandboxDir, "package.json"));
   if (!hasPackageJson) return null;
 
-  // node_modules dir present + non-empty? Then we're set.
-  try {
-    const entries = await fs.readdir(path.join(sandboxDir, "node_modules"));
-    if (entries.length > 0) return null;
-  } catch {
-    // doesn't exist — fall through
-  }
-
   // Pick the manager based on which lockfile is present (mirrors npm's own
   // detection). Default to npm when nothing matches.
-  if (await exists(path.join(sandboxDir, "pnpm-lock.yaml"))) return "pnpm";
-  if (await exists(path.join(sandboxDir, "yarn.lock"))) return "yarn";
-  return "npm";
+  const manager: PackageManager = await exists(path.join(sandboxDir, "pnpm-lock.yaml"))
+    ? "pnpm"
+    : await exists(path.join(sandboxDir, "yarn.lock"))
+      ? "yarn"
+      : "npm";
+
+  // A populated node_modules directory is not proof that the CURRENT
+  // manifest is installed. It may be a partial tree left by an interrupted
+  // install, or package.json may have changed since the last successful run.
+  // Only skip when the tree is populated AND its success marker matches the
+  // current manifest/lockfiles/runtime fingerprint.
+  if (!(await hasEntries(path.join(sandboxDir, "node_modules")))) return manager;
+  const expected = await dependencyFingerprint(sandboxDir, manager);
+  const recorded = await readTrimmed(path.join(sandboxDir, DEPS_STATE_FILE));
+  return recorded === expected ? null : manager;
+}
+
+/** Fingerprint everything that can materially change an installed JS tree. */
+export async function dependencyFingerprint(
+  sandboxDir: string,
+  manager: PackageManager,
+): Promise<string> {
+  const hash = createHash("sha256");
+  hash.update(`${DEPS_STATE_VERSION}\n${manager}\n`);
+  hash.update(
+    `node=${process.version}|platform=${process.platform}|arch=${process.arch}|abi=${process.versions.modules}\n`,
+  );
+  for (const name of DEPENDENCY_INPUT_FILES) {
+    hash.update(`file=${name}\n`);
+    try {
+      hash.update(await fs.readFile(path.join(sandboxDir, name)));
+    } catch {
+      hash.update("<missing>");
+    }
+    hash.update("\n");
+  }
+  return hash.digest("hex");
 }
 
 export interface InstallResult {
@@ -48,7 +91,7 @@ export interface InstallResult {
  */
 export async function runInstall(
   sandboxDir: string,
-  manager: "npm" | "pnpm" | "yarn",
+  manager: PackageManager,
   onStderr?: (chunk: string) => void,
   signal?: AbortSignal,
 ): Promise<InstallResult> {
@@ -57,11 +100,16 @@ export async function runInstall(
       ? ["install", "--prefer-offline"]
       : manager === "yarn"
       ? ["install", "--frozen-lockfile"]
-      : ["install", "--no-audit", "--no-fund", "--prefer-offline"];
+      : ["install", "--no-audit", "--no-fund", "--prefer-offline", "--engine-strict"];
 
   const start = Date.now();
   return new Promise((resolve) => {
-    const child = spawn(manager, args, {
+    const executable = process.platform === "win32" ? process.env.ComSpec ?? "cmd.exe" : manager;
+    const executableArgs =
+      process.platform === "win32"
+        ? ["/d", "/s", "/c", `${manager} ${args.join(" ")}`]
+        : args;
+    const child = spawn(executable, executableArgs, {
       cwd: sandboxDir,
       env: safeChildEnv(),
       stdio: ["ignore", "ignore", "pipe"],
@@ -125,6 +173,31 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
+async function hasEntries(dir: string): Promise<boolean> {
+  try {
+    return (await fs.readdir(dir)).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function readTrimmed(file: string): Promise<string | null> {
+  try {
+    return (await fs.readFile(file, "utf8")).trim();
+  } catch {
+    return null;
+  }
+}
+
+async function recordDependencyState(
+  sandboxDir: string,
+  manager: PackageManager,
+): Promise<void> {
+  const statePath = path.join(sandboxDir, DEPS_STATE_FILE);
+  await fs.mkdir(path.dirname(statePath), { recursive: true });
+  await fs.writeFile(statePath, `${await dependencyFingerprint(sandboxDir, manager)}\n`, "utf8");
+}
+
 // ── Unified, VM-aware, serialized installer ──────────────────────────────────
 
 /**
@@ -160,7 +233,7 @@ export interface EnsureDepsResult {
   attempted: boolean;
   /** False only when an attempted install exited non-zero. */
   ok: boolean;
-  manager: "npm" | "pnpm" | "yarn" | null;
+  manager: PackageManager | null;
   durationMs: number;
   stderr: string;
 }
@@ -207,7 +280,7 @@ export function ensureProjectDeps(
     signal?: AbortSignal;
     onStderr?: (s: string) => void;
     /** Fired with the chosen manager right before the install command runs. */
-    onStart?: (manager: "npm" | "pnpm" | "yarn") => void;
+    onStart?: (manager: PackageManager) => void;
     /**
      * Sandbox-relative subdirectory to probe + install in, for projects that
      * live below the sandbox root (derive it from the run command with
@@ -224,7 +297,7 @@ async function ensureDepsOnce(
   opts: {
     signal?: AbortSignal;
     onStderr?: (s: string) => void;
-    onStart?: (manager: "npm" | "pnpm" | "yarn") => void;
+    onStart?: (manager: PackageManager) => void;
     dir?: string | null;
   },
 ): Promise<EnsureDepsResult> {
@@ -243,35 +316,34 @@ async function ensureDepsOnce(
   const cdPrefix = opts.dir ? `cd ${shq(opts.dir)} && ` : "";
 
   if (sandbox.vm) {
-    // Probe the VM filesystem: no package.json → nothing to do; a non-empty
-    // node_modules → already installed; otherwise pick the manager from the
-    // lockfile (mirrors needsInstall, but inside the guest).
+    // Probe the VM filesystem. A non-empty node_modules tree is only current
+    // when the marker from the last successful install matches today's inputs.
     const probe = await sb.runCommand(
       sandbox,
-      cdPrefix +
-        "if [ ! -f package.json ]; then echo none; " +
-        'elif [ -d node_modules ] && [ -n "$(ls -A node_modules 2>/dev/null)" ]; then echo present; ' +
-        "elif [ -f pnpm-lock.yaml ]; then echo pnpm; " +
-        "elif [ -f yarn.lock ]; then echo yarn; else echo npm; fi",
+      cdPrefix + vmDependencyProbeCommand(),
       30_000,
       opts.signal,
     );
-    const out = probe.stdout;
-    const manager: "npm" | "pnpm" | "yarn" | null = out.includes("pnpm")
-      ? "pnpm"
-      : out.includes("yarn")
-        ? "yarn"
-        : out.includes("npm")
-          ? "npm"
-          : null;
-    if (!manager) return none();
+    if (probe.exitCode !== 0) {
+      throw new Error(
+        `dependency probe failed${opts.dir ? ` in ${opts.dir}` : ""}: ${
+          probe.stderr || probe.stdout || `exit ${probe.exitCode}`
+        }`,
+      );
+    }
+    const installMatch = probe.stdout.match(/^install:(npm|pnpm|yarn)$/m);
+    const manager = (installMatch?.[1] as PackageManager | undefined) ?? null;
+    if (!manager) {
+      if (/^(?:none|present:(?:npm|pnpm|yarn))$/m.test(probe.stdout)) return none();
+      throw new Error(`dependency probe returned an unexpected response: ${probe.stdout.trim()}`);
+    }
     opts.onStart?.(manager);
     const args =
       manager === "pnpm"
         ? "install --prefer-offline"
         : manager === "yarn"
           ? "install --frozen-lockfile"
-          : "install --no-audit --no-fund --prefer-offline";
+          : "install --no-audit --no-fund --prefer-offline --engine-strict";
     // Inline cache override — belt-and-braces for VMs restored from snapshots
     // whose FROZEN agent predates the agent-env fix: on a golden clone the
     // rootfs is read-only, so the default cache at /root/.npm can't be created
@@ -290,12 +362,22 @@ async function ensureDepsOnce(
       5 * 60_000,
       opts.signal,
     );
+    let stateError = "";
+    if (r.exitCode === 0) {
+      const state = await sb.runCommand(
+        sandbox,
+        `${cdPrefix}${vmRecordDependencyStateCommand(manager)}`,
+        30_000,
+        opts.signal,
+      );
+      if (state.exitCode !== 0) stateError = state.stderr || state.stdout;
+    }
     return {
       attempted: true,
-      ok: r.exitCode === 0,
+      ok: r.exitCode === 0 && !stateError,
       manager,
       durationMs: Date.now() - start,
-      stderr: r.stderr || r.stdout,
+      stderr: stateError || r.stderr || r.stdout,
     };
   }
 
@@ -310,11 +392,57 @@ async function ensureDepsOnce(
   if (!manager) return none();
   opts.onStart?.(manager);
   const result = await runInstall(hostDir, manager, opts.onStderr, opts.signal);
+  let stateError = "";
+  if (result.ok) {
+    try {
+      // Compute this after the install because npm may have created or updated
+      // package-lock.json, which is itself part of the desired-state hash.
+      await recordDependencyState(hostDir, manager);
+    } catch (err) {
+      stateError = `installed dependencies but could not record dependency state: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+    }
+  }
   return {
     attempted: true,
-    ok: result.ok,
+    ok: result.ok && !stateError,
     manager,
     durationMs: result.durationMs,
-    stderr: result.stderr,
+    stderr: stateError || result.stderr,
   };
+}
+
+/** Shell fragment shared by the VM probe and post-install marker write. */
+function vmFingerprintCommand(): string {
+  const files = DEPENDENCY_INPUT_FILES.map(shq).join(" ");
+  return (
+    "fingerprint=$({ " +
+    `printf '%s\\n' ${shq(DEPS_STATE_VERSION)} \"$manager\"; ` +
+    "node -e 'process.stdout.write(`node=${process.version}|platform=${process.platform}|arch=${process.arch}|abi=${process.versions.modules}\\n`)'; " +
+    `for file in ${files}; do printf 'file=%s\\n' \"$file\"; ` +
+    "if [ -f \"$file\" ]; then cat \"$file\"; else printf '<missing>'; fi; printf '\\n'; done; " +
+    "} | sha256sum | awk '{print $1}')"
+  );
+}
+
+function vmDependencyProbeCommand(): string {
+  return (
+    "if [ ! -f package.json ]; then echo none; exit 0; fi; " +
+    "if [ -f pnpm-lock.yaml ]; then manager=pnpm; " +
+    "elif [ -f yarn.lock ]; then manager=yarn; else manager=npm; fi; " +
+    `${vmFingerprintCommand()}; ` +
+    `state=${shq(DEPS_STATE_FILE)}; ` +
+    'if [ -d node_modules ] && [ -n "$(ls -A node_modules 2>/dev/null)" ] && ' +
+    '[ -f "$state" ] && [ "$(cat "$state" 2>/dev/null)" = "$fingerprint" ]; ' +
+    'then echo "present:$manager"; else echo "install:$manager"; fi'
+  );
+}
+
+function vmRecordDependencyStateCommand(manager: PackageManager): string {
+  return (
+    `manager=${manager}; ${vmFingerprintCommand()}; ` +
+    `state=${shq(DEPS_STATE_FILE)}; mkdir -p \"$(dirname \"$state\")\" && ` +
+    'printf "%s\\n" "$fingerprint" > "$state"'
+  );
 }

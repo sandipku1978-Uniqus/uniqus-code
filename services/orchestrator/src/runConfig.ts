@@ -61,12 +61,11 @@ export async function detectRunConfig(sandboxDir: string): Promise<RunConfig | n
     // Prefer `dev` (Next/Vite), then `start` (Express, plain Node).
     const scriptName = scripts.dev ? "dev" : scripts.start ? "start" : null;
     if (scriptName) {
-      const command = framework0HostFlags(scripts[scriptName])
-        ? `npm run ${scriptName}`
-        : // Append a sensible host flag so the proxy can reach it. Most
-          // dev tools take `--` to forward extra args to the underlying CLI.
-          `npm run ${scriptName} -- -H 0.0.0.0`;
-      const port = guessPortFromScript(scripts[scriptName]) ?? 3000;
+      const script = scripts[scriptName];
+      const framework = detectNodeFramework(script);
+      const hostArgs = framework0HostFlags(script) ? "" : framework.hostArgs;
+      const command = `npm run ${scriptName}${hostArgs}`;
+      const port = guessPortFromScript(script) ?? framework.defaultPort;
       return { command, port, source: "detected" };
     }
   } catch {
@@ -103,12 +102,38 @@ async function exists(p: string): Promise<boolean> {
 }
 
 /**
- * If a dev script already includes a host/port flag, we don't want to clobber
- * the user's intent by appending `-- -H 0.0.0.0`. Cheap heuristic.
+ * If a dev script already includes a host/bind flag, preserve the user's
+ * intent instead of appending a framework default. Cheap heuristic.
  */
 function framework0HostFlags(script: string | undefined): boolean {
   if (!script) return false;
-  return /\b(--host|-H|--bind|-b)\b/.test(script);
+  return /(?:^|\s)(?:--host|-H|--bind|-b)(?:\s|=|$)/.test(script);
+}
+
+interface NodeFrameworkDefaults {
+  /** npm argument suffix, including the leading space. */
+  hostArgs: string;
+  defaultPort: number;
+}
+
+function detectNodeFramework(script: string | undefined): NodeFrameworkDefaults {
+  const command = script ?? "";
+  // Next uses -H; Vite and the other common dev CLIs use --host. A generic
+  // `node server.js`/Express script gets no invented CLI flag because Node
+  // would reject it and the application owns its bind address.
+  if (/\bnext(?:\.js)?\b/i.test(command)) {
+    return { hostArgs: " -- -H 0.0.0.0", defaultPort: 3000 };
+  }
+  if (/\bastro\b/i.test(command)) {
+    return { hostArgs: " -- --host 0.0.0.0", defaultPort: 4321 };
+  }
+  if (/\b(?:vite|svelte-kit)\b/i.test(command)) {
+    return { hostArgs: " -- --host 0.0.0.0", defaultPort: 5173 };
+  }
+  if (/\b(?:nuxt|nuxi)\b/i.test(command)) {
+    return { hostArgs: " -- --host 0.0.0.0", defaultPort: 3000 };
+  }
+  return { hostArgs: "", defaultPort: 3000 };
 }
 
 function guessPortFromScript(script: string | undefined): number | null {

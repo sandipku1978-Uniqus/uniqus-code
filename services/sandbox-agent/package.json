@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "In-VM sandbox agent (Plan §1). Default impl is the Rust binary in src/main.rs (Cargo.toml); this package.json + src/agent.mjs is the legacy Node fallback used when the build host has no Rust toolchain.",
+  "description": "In-VM sandbox agent (Plan §1). Production uses the Rust binary in src/main.rs (Cargo.toml); this package.json + src/agent.mjs is the explicit local/development Node fallback.",
   "scripts": {
     "start:legacy": "node src/agent.mjs"
   },

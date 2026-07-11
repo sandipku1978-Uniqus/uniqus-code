@@ -6,7 +6,7 @@
 # Contents (Alpine-based for boot speed + small footprint):
 #   - openrc (init)
 #   - bash, coreutils, util-linux
-#   - node 20 (user runtime — the in-VM agent itself is now Rust, not Node)
+#   - Node.js 22 LTS (user runtime — the in-VM agent itself is now Rust, not Node)
 #   - python3 + pip
 #   - go 1.22
 #   - git, curl, ca-certificates
@@ -21,7 +21,10 @@ set -euo pipefail
 STATE_DIR="${STATE_DIR:-/var/lib/uniqus/firecracker}"
 ROOTFS="${STATE_DIR}/rootfs.ext4"
 ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-2048}"
-ALPINE_VERSION="${ALPINE_VERSION:-3.20}"
+# Alpine 3.22 ships Node.js 22 LTS. Keep this at a branch whose nodejs package
+# satisfies current Vite (20.19+ or 22.12+); Alpine 3.20 pinned production to
+# Node 20.15, so npm accepted Vite 8 with EBADENGINE and it crashed at runtime.
+ALPINE_VERSION="${ALPINE_VERSION:-3.22}"
 ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
 
 if [[ "$(id -u)" != "0" ]]; then echo "must run as root" >&2; exit 1; fi
@@ -80,21 +83,26 @@ chroot "${MNT}" /sbin/apk add --no-cache \
   go git curl ca-certificates iproute2 \
   socat dropbear-ssh
 
+# Fail the image build instead of shipping a runtime that npm merely warns is
+# incompatible with current Vite/Rolldown. npm's default engine-strict=false
+# otherwise turns this into a much later, misleading native-binding crash.
+chroot "${MNT}" node -e '
+  const [major, minor] = process.versions.node.split(".").map(Number);
+  if (!((major === 20 && minor >= 19) || (major === 22 && minor >= 12) || major > 22)) {
+    console.error(`Node ${process.version} is too old; require Node 20.19+ (Node 22 LTS preferred)`);
+    process.exit(1);
+  }
+'
+
 echo "[4/5] Building + installing the in-VM agent (Rust, musl) + init service…"
 mkdir -p "${MNT}/opt/sandbox-agent" "${MNT}/sandbox"
 
 # The agent is a statically-linked musl binary so it runs on Alpine without a
 # libc match. We compile on the host (faster than inside the chroot) targeting
-# x86_64-unknown-linux-musl. Cargo + the musl target must be installed once on
-# this build host:
-#   curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
-#   . "$HOME/.cargo/env"
-#   rustup target add x86_64-unknown-linux-musl
-#   apt-get install -y musl-tools  # provides musl-gcc for the linker
-#
-# If cargo is missing we fall back to the legacy Node agent — slower to boot
-# and larger memory footprint, but the rootfs still works while the operator
-# installs Rust.
+# x86_64-unknown-linux-musl. host-setup.sh provisions the pinned compiler via
+# install-rust-toolchain.sh. Production builds fail closed if it is unavailable;
+# local/dev builds may explicitly opt into the legacy Node agent with
+# ALLOW_NODE_AGENT_FALLBACK=1.
 RUST_TARGET="x86_64-unknown-linux-musl"
 if command -v cargo >/dev/null 2>&1; then
   echo "  → cargo build --release --target ${RUST_TARGET}"
@@ -122,11 +130,13 @@ depend() {
 }
 EOF
 else
-  echo "  ⚠ cargo not found — falling back to legacy Node agent."
-  echo "    To switch to the Rust agent (Plan §1), install rustup + the musl target on this host:"
-  echo "      curl https://sh.rustup.rs -sSf | sh -s -- -y && . \$HOME/.cargo/env"
-  echo "      rustup target add ${RUST_TARGET}"
-  echo "      apt-get install -y musl-tools"
+  if [[ "${ALLOW_NODE_AGENT_FALLBACK:-0}" != "1" ]]; then
+    echo "cargo is required to build the production Rust sandbox agent." >&2
+    echo "Run infra/firecracker/install-rust-toolchain.sh, then rebuild." >&2
+    echo "For an explicit local/dev fallback only, set ALLOW_NODE_AGENT_FALLBACK=1." >&2
+    exit 1
+  fi
+  echo "  ⚠ ALLOW_NODE_AGENT_FALLBACK=1 — installing the legacy Node agent."
   mkdir -p "${MNT}/opt/sandbox-agent/src"
   install -m 0644 "${AGENT_SRC}/package.json"  "${MNT}/opt/sandbox-agent/package.json"
   install -m 0755 "${AGENT_SRC}/src/agent.mjs" "${MNT}/opt/sandbox-agent/src/agent.mjs"

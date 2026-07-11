@@ -7,8 +7,11 @@ can use as a sandbox fleet.
 
 ## Files
 
-- `host-setup.sh` — installs Firecracker + builds the bridge / NAT / KVM
-  permissions. **Run once on a fresh box.**
+- `host-setup.sh` — installs Firecracker, the pinned Rust/musl agent build
+  toolchain, and the bridge / NAT / KVM permissions. **Run once on a fresh box.**
+- `install-rust-toolchain.sh` — idempotently installs the exact host-side Rust
+  toolchain and musl target used to compile the static in-VM agent. It can also
+  repair or upgrade that toolchain independently of the rest of host setup.
 - `host-net.sh` + `uniqus-firecracker-net.service` — recreate the `fcbr0`
   bridge, IP forwarding, and NAT/isolation iptables rules. The bridge device
   itself doesn't survive a reboot, so the systemd unit re-runs this on every
@@ -16,7 +19,8 @@ can use as a sandbox fleet.
 - `build-rootfs.sh` — produces `/var/lib/uniqus/firecracker/rootfs.ext4`
   (Alpine + Node + Python + Go + the in-VM agent). Re-run any time you update
   [`services/sandbox-agent/`](../../services/sandbox-agent/) or this script
-  itself.
+  itself. Production builds require Cargo and fail closed when it is missing;
+  `ALLOW_NODE_AGENT_FALLBACK=1` is an explicit local/development escape hatch.
 - `SECURITY.md` — the trust-boundary/isolation story; this file is bring-up +
   operational latency only.
 
@@ -31,6 +35,8 @@ sudo REPO_ROOT=/path/to/uniqus-code ./build-rootfs.sh
 
 # 3. Verify Firecracker can boot a VM.
 firecracker --version
+cargo --version
+rustup target list --installed | grep x86_64-unknown-linux-musl
 ls -lh /var/lib/uniqus/firecracker/{vmlinux,rootfs.ext4}
 ```
 
@@ -182,6 +188,10 @@ rebuild without touching the rootfs.
 
 ## Troubleshooting
 
+- `cargo is required to build the production Rust sandbox agent`: run
+  `sudo ./install-rust-toolchain.sh`, confirm that
+  `x86_64-unknown-linux-musl` appears in `rustup target list --installed`, and
+  rebuild. Do not enable the Node fallback on a production host.
 - `KVM is not available` from `host-setup.sh`: open the Hetzner Robot
   console → request KVM enablement on the box. Most CX/AX models ship
   with it on; AX models occasionally have it disabled in BIOS.

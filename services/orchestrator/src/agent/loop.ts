@@ -456,11 +456,11 @@ ${hasPreviewTools ? `3. For long-running dev servers: ALWAYS use start_server, n
 
    Preview-server reliability checklist — go through this BEFORE the first start_server call, not after it fails:
    • DEV server only, NEVER a build: start_server must run the framework's dev/watch command (\`npm run dev\`, \`next dev\`, \`vite\`, \`flask run\`, \`uvicorn ... --reload\`) so it stays up with hot reload. NEVER pass a production build (\`npm run build\`, \`next build\`, \`vite build\`) — it compiles and exits without opening a port, so the preview never loads; and \`next start\` serves a no-hot-reload build. start_server rejects build commands.
-   • Dependencies: when package.json is at the SANDBOX ROOT, start_server auto-installs missing deps as part of starting — do NOT run your own \`npm install\` first. A manual install (especially via run_in_background) races the auto-install in the same directory and can corrupt node_modules (the "disappearing modules" failure). The ONE case where you must install yourself is a project in a SUBDIRECTORY (auto-install only sees the root): then run a single \`cd <subdir> && npm install\` once. Never have two installs running in the same directory at the same time.
+   • Dependencies: start_server reconciles dependencies against package.json + the lockfile before starting — do NOT run your own \`npm install\` first. This works at the sandbox root AND for a subdirectory when command starts with \`cd <subdir> &&\`; use that exact command shape so the installer targets the right package. A manual install (especially via run_in_background) can race another install and corrupt node_modules (the "disappearing modules" failure). Never have two installs running in the same directory at the same time.
    • Pass the SAME port the framework actually listens on. The default ports differ: Next.js → 3000, Vite → 5173, Astro → 4321, Nuxt → 3000, SvelteKit dev → 5173, Remix → 3000, Flask → 5000, Django → 8000, FastAPI/uvicorn → 8000, Streamlit → 8501, Express convention → 3000. If you're not sure, read the framework's config (vite.config.* / next.config.* / astro.config.* / package.json scripts) instead of guessing.
    • If the project uses a non-default port, either pass that exact port to start_server, or pin the port via a CLI flag (\`vite --port 3000\`, \`next dev -p 3000\`, \`uvicorn ... --port 3000\`).
-   • All paths in the sandbox are RELATIVE to the sandbox root. If your project lives in a subdirectory (e.g. "my-app/"), you must run \`npm install\` and \`start_server\` from INSIDE that directory. Use: command = "cd my-app && npm run dev", NOT just "npm run dev". Check where package.json actually is with list_dir before running.
-   • Use ready_timeout_ms = 120000 (or 180000 for Next.js + TypeScript on a cold cache). The default 60000 is tight for first-run compilation and you'll get a "did not open port" error on a server that just needed another 10s.
+   • All paths in the sandbox are RELATIVE to the sandbox root. If your project lives in a subdirectory (e.g. "my-app/"), start it from INSIDE that directory so start_server also installs there. Use: command = "cd my-app && npm run dev", NOT just "npm run dev". Check where package.json actually is with list_dir before running.
+   • start_server defaults ready_timeout_ms to 120000; use 180000 for Next.js + TypeScript on a cold cache when needed.
    • If start_server fails: call read_server_log on the returned id (or list_servers to find recent ids). 90% of the time the log shows the real reason (missing dep, port already in use, syntax error, EACCES on a privileged port). Fix the root cause; do NOT retry the same command twice.
    • Do NOT call start_server back-to-back on the same port — the second call will pre-kill the first. If you want to restart, call stop_server explicitly, then start_server with the new args.
    • When using next dev, always add --turbopack for faster startup unless the project explicitly configures webpack, and bind the host. Example: "cd my-app && npx next dev --turbopack -p 3000 -H 0.0.0.0".` : "3. Preview server and browser-driving actions are unavailable in this sub-agent. Leave exact routes, inputs, viewport sizes, and expected outcomes for the lead agent to verify."}
@@ -2815,7 +2815,7 @@ export async function executeTool(
         }
         if (dep.attempted && !dep.ok) {
           throw new Error(
-            `auto-install (${dep.manager}) failed in ${(dep.durationMs / 1000).toFixed(1)}s — fix package.json before calling start_server again:\n${dep.stderr.slice(-1500)}`,
+            `auto-install (${dep.manager}) failed in ${(dep.durationMs / 1000).toFixed(1)}s — resolve the package or runtime compatibility error before calling start_server again:\n${dep.stderr.slice(-1500)}`,
           );
         }
         if (dep.attempted) {
@@ -2826,17 +2826,26 @@ export async function executeTool(
         // not a confusing "port did not open" message later.
         throw err instanceof Error ? err : new Error(String(err));
       }
-      const info = await sb.startServer(
-        sandbox,
-        args.command,
-        args.port,
-        // Default to 120s instead of the sandbox-level 60s default — most
-        // first-run dev-server failures are slow cold compiles, not real
-        // failures. Agent can still override via ready_timeout_ms.
-        args.ready_timeout_ms ?? 120_000,
-        projectId,
-        signal,
-      );
+      let info: sb.ServerInfo;
+      try {
+        info = await sb.startServer(
+          sandbox,
+          args.command,
+          args.port,
+          // Default to 120s instead of the sandbox-level 60s default — most
+          // first-run dev-server failures are slow cold compiles, not real
+          // failures. Agent can still override via ready_timeout_ms.
+          args.ready_timeout_ms ?? 120_000,
+          projectId,
+          signal,
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const dependencyContext = installNote
+          ? `\nDependency setup completed before the server launch: ${installNote}. The install itself succeeded; diagnose the server/runtime error above before reinstalling manually.`
+          : "\nNo dependency install ran before launch (the manifest was already current or this is not a package-managed project).";
+        throw new Error(`${message}${dependencyContext}`);
+      }
       const publicUrl = previewBaseUrl
         ? `${previewBaseUrl.replace(/\/$/, "")}/preview/${info.id}/`
         : `http://localhost:${info.port}`;

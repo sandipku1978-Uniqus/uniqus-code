@@ -306,7 +306,7 @@ export const TOOLS: Anthropic.Tool[] = [
         },
         ready_timeout_ms: {
           type: "number",
-          description: "Optional, default 60000. How long to wait for the port before giving up.",
+          description: "Optional, default 120000. How long to wait for the port before giving up.",
         },
       },
       required: ["command", "port"],

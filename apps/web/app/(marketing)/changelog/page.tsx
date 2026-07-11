@@ -546,6 +546,26 @@ const ENTRIES: Entry[] = [
       },
     ],
   },
+  {
+    id: "v0-21",
+    date: "Jul 2026",
+    ver: "v0.21",
+    title: "Cleaner workspaces, more reliable previews",
+    changes: [
+      {
+        tag: "improved",
+        text: "The website and project dashboard now use cleaner, flatter surfaces, while organization members, usage, and settings have been rebuilt as proper workspace tools instead of generic admin cards.",
+      },
+      {
+        tag: "fixed",
+        text: "Preview dependencies now stay in sync with package.json and lockfile changes, including apps inside subdirectories, so stale or partially installed modules no longer masquerade as a ready project.",
+      },
+      {
+        tag: "fixed",
+        text: "New projects use a current Node.js runtime and reject incompatible packages during installation instead of accepting them and failing later when the preview starts.",
+      },
+    ],
+  },
 ];
 
 const DISPLAY_ENTRIES = [...ENTRIES].reverse();

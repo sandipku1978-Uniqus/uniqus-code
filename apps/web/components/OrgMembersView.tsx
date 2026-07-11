@@ -10,24 +10,15 @@ import {
   removeOrgMemberApi,
 } from "@/lib/api";
 import { toast } from "@/lib/toast";
-
-/**
- * Organization members (P3.1/P3.2). Org-scoped near-clone of MembersView:
- * invite a teammate by email + role, change a role, or remove someone. The
- * server enforces RBAC (admin+ to manage); the UI surfaces a clear error if
- * the caller lacks the role rather than hiding the controls. Same page chrome
- * as the other dashboard sub-pages (.dash-page + .coll-head + .metric-strip)
- * so this reads as part of the product, not a bolted-on admin screen.
- */
+import { OrgMetric, OrgMetricRail, OrgPageHeader, OrgStatePanel } from "./OrgPageChrome";
 
 const ROLES: Role[] = ["admin", "editor", "viewer"];
-const ALL_ROLES: Role[] = ["owner", ...ROLES];
 
 const roleNote: Record<Role, string> = {
-  owner: "full control, incl. delete",
-  admin: "manage members + settings",
-  editor: "build + run the agent",
-  viewer: "read-only",
+  owner: "full control, including deletion",
+  admin: "manage members and settings",
+  editor: "build and run the agent",
+  viewer: "read-only access",
 };
 
 function initials(name: string | null | undefined, email: string | null | undefined): string {
@@ -40,19 +31,23 @@ export default function OrgMembersView({ orgId }: { orgId: string }) {
   const [email, setEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<Role>("editor");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    setMembers(null);
+    setError(null);
     try {
       const { members } = await fetchOrgMembersApi(orgId);
       setMembers(members);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Couldn't load members");
+      const message = e instanceof Error ? e.message : "Couldn't load members";
+      setError(message);
       setMembers([]);
+      toast.error(message);
     }
   }, [orgId]);
 
   useEffect(() => {
-    setMembers(null);
     void load();
   }, [load]);
 
@@ -72,152 +67,197 @@ export default function OrgMembersView({ orgId }: { orgId: string }) {
     }
   }
 
-  async function changeRole(m: OrgMember, role: Role) {
+  async function changeRole(member: OrgMember, role: Role) {
     try {
-      await setOrgMemberRoleApi(orgId, m.user_id, role);
-      setMembers((prev) => prev?.map((x) => (x.user_id === m.user_id ? { ...x, role } : x)) ?? null);
+      await setOrgMemberRoleApi(orgId, member.user_id, role);
+      setMembers((prev) =>
+        prev?.map((item) => (item.user_id === member.user_id ? { ...item, role } : item)) ?? null,
+      );
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Couldn't change role");
     }
   }
 
-  async function remove(m: OrgMember) {
+  async function remove(member: OrgMember) {
     try {
-      await removeOrgMemberApi(orgId, m.user_id);
-      setMembers((prev) => prev?.filter((x) => x.user_id !== m.user_id) ?? null);
-      toast.success("Removed");
+      await removeOrgMemberApi(orgId, member.user_id);
+      setMembers((prev) => prev?.filter((item) => item.user_id !== member.user_id) ?? null);
+      toast.success("Member removed");
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Couldn't remove");
+      toast.error(e instanceof Error ? e.message : "Couldn't remove member");
     }
   }
 
   const total = members?.length ?? 0;
-  const adminPlus = members?.filter((m) => roleAtLeast(m.role, "admin")).length ?? 0;
-  const canBuild = members?.filter((m) => roleAtLeast(m.role, "editor")).length ?? 0;
-  const viewers = members?.filter((m) => m.role === "viewer").length ?? 0;
+  const adminPlus = members?.filter((member) => roleAtLeast(member.role, "admin")).length ?? 0;
+  const canBuild = members?.filter((member) => roleAtLeast(member.role, "editor")).length ?? 0;
+  const viewers = members?.filter((member) => member.role === "viewer").length ?? 0;
+  const directoryStatus = error
+    ? "Directory unavailable"
+    : members === null
+      ? "Syncing directory"
+      : `${total} ${total === 1 ? "member" : "members"}`;
 
   return (
     <div className="dash-page org-page">
-      <header className="coll-head">
-        <span className="page-eyebrow">Workspace</span>
-        <h1>
-          Manage <span className="grad">members</span>
-        </h1>
-        <p className="lede">
-          Invite teammates by email, assign a role, and manage who can access this
-          organization&apos;s projects.
-        </p>
-      </header>
+      <OrgPageHeader
+        index="01"
+        title="Manage"
+        accent="members"
+        context="Access directory"
+        status={directoryStatus}
+        statusTone={error ? "danger" : members === null ? "warn" : "live"}
+        lede={
+          <>
+            Invite teammates by email, assign a role, and manage who can access this
+            organization&apos;s projects.
+          </>
+        }
+      />
 
-      {members !== null && members.length > 0 && (
-        <div className="metric-strip">
-          <MemberMetric value={total} label={total === 1 ? "Member" : "Members"} />
-          <MemberMetric value={adminPlus} label="Admins+" />
-          <MemberMetric value={canBuild} label="Can build" />
-          <MemberMetric value={viewers} label="Viewers" />
-        </div>
+      {members !== null && !error && (
+        <OrgMetricRail>
+          <OrgMetric value={total} label={total === 1 ? "Member" : "Members"} />
+          <OrgMetric value={adminPlus} label="Admins+" />
+          <OrgMetric value={canBuild} label="Can build" />
+          <OrgMetric value={viewers} label="Viewers" />
+        </OrgMetricRail>
       )}
 
-      <div className="dash-card">
-        <h2>Invite a teammate</h2>
-        <p className="card-sub">
-          They must already have a Uniqus account — add them by the email they signed up
-          with.
-        </p>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <input
-            type="email"
-            placeholder="teammate@company.com"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void invite();
-            }}
-            aria-label="Teammate email"
-            style={{ flex: 1, minWidth: 200 }}
-          />
-          <select
-            className="ui-select"
-            value={inviteRole}
-            onChange={(e) => setInviteRole(e.target.value as Role)}
-            aria-label="Invite role"
-            style={{ width: "auto" }}
-          >
-            {ROLES.map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
-          </select>
-          <button type="button" className="btn-primary" onClick={() => void invite()} disabled={busy || !email.trim()}>
-            {busy ? "Adding…" : "Add"}
-          </button>
-        </div>
-      </div>
+      <div className="org-members-layout">
+        <section className="org-invite-panel">
+          <div className="org-section-head">
+            <span className="org-section-index">Invite</span>
+            <h2>Add a teammate</h2>
+            <p>Use the email attached to their existing Uniqus account.</p>
+          </div>
+          <div className="org-invite-form">
+            <label>
+              <span>Email address</span>
+              <input
+                type="email"
+                placeholder="teammate@company.com"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void invite();
+                }}
+              />
+            </label>
+            <label>
+              <span>Starting role</span>
+              <select
+                className="ui-select"
+                value={inviteRole}
+                onChange={(event) => setInviteRole(event.target.value as Role)}
+              >
+                {ROLES.map((role) => (
+                  <option key={role} value={role}>
+                    {role}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="org-role-note">{roleNote[inviteRole]}</p>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => void invite()}
+              disabled={busy || !email.trim()}
+            >
+              {busy ? "Adding…" : "Add to organization"}
+            </button>
+          </div>
+        </section>
 
-      {members === null ? (
-        <div className="dash-card">
-          <p className="card-sub" style={{ marginBottom: 0 }}>Loading members…</p>
-        </div>
-      ) : members.length === 0 ? (
-        <div className="empty-state">No members yet. Invite a teammate above.</div>
-      ) : (
-        <div className="member-list">
-          {members.map((m) => (
-            <div key={m.user_id} className="member-row">
-              <span className="member-avatar" aria-hidden="true">
-                {initials(m.display_name, m.email)}
-              </span>
-              <div className="member-identity">
-                <div className="member-name">{m.display_name || m.email || m.user_id}</div>
-                {m.display_name && m.email && <div className="member-email">{m.email}</div>}
-              </div>
-
-              {m.role === "owner" ? (
-                <span className="role-pill" title={roleNote.owner}>
-                  owner
-                </span>
-              ) : (
-                <>
-                  <select
-                    className="ui-select"
-                    value={m.role}
-                    title={roleNote[m.role]}
-                    onChange={(e) => void changeRole(m, e.target.value as Role)}
-                    aria-label={`Role for ${m.email ?? m.user_id}`}
-                    style={{ width: "auto" }}
-                  >
-                    {ALL_ROLES.filter((r) => r !== "owner").map((r) => (
-                      <option key={r} value={r}>
-                        {r}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    className="btn-ghost"
-                    aria-label={`Remove ${m.email ?? m.user_id}`}
-                    title="Remove"
-                    onClick={() => void remove(m)}
-                    style={{ color: "var(--text-dim)", padding: "4px 8px" }}
-                  >
-                    ✕
-                  </button>
-                </>
-              )}
+        <section className="org-directory-panel">
+          <div className="org-collection-head">
+            <div>
+              <span className="org-section-index">Directory</span>
+              <h2>People &amp; access</h2>
             </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
+            {members !== null && !error && <span>{total} total</span>}
+          </div>
 
-function MemberMetric({ value, label }: { value: number | string; label: string }) {
-  return (
-    <div className="metric-cell">
-      <span className="metric-value">{value}</span>
-      <span className="metric-label">{label}</span>
+          {error ? (
+            <OrgStatePanel
+              state="error"
+              title="Members could not be loaded"
+              body={error}
+              onRetry={() => void load()}
+            />
+          ) : members === null ? (
+            <OrgStatePanel
+              state="loading"
+              title="Syncing the directory"
+              body="Fetching members and access roles for this organization."
+            />
+          ) : members.length === 0 ? (
+            <OrgStatePanel
+              state="empty"
+              title="The directory is empty"
+              body="Add the first teammate with the invite panel."
+            />
+          ) : (
+            <div className="member-list">
+              <div className="member-list-head" aria-hidden="true">
+                <span>Member</span>
+                <span>Access</span>
+              </div>
+              {members.map((member) => (
+                <div key={member.user_id} className="member-row">
+                  <span className="member-avatar" aria-hidden="true">
+                    {initials(member.display_name, member.email)}
+                  </span>
+                  <div className="member-identity">
+                    <div className="member-name">
+                      {member.display_name || member.email || member.user_id}
+                    </div>
+                    {member.display_name && member.email && (
+                      <div className="member-email">{member.email}</div>
+                    )}
+                  </div>
+
+                  <div className="member-actions">
+                    {member.role === "owner" ? (
+                      <span className="role-pill" title={roleNote.owner}>
+                        owner
+                      </span>
+                    ) : (
+                      <>
+                        <select
+                          className="ui-select"
+                          value={member.role}
+                          title={roleNote[member.role]}
+                          onChange={(event) => void changeRole(member, event.target.value as Role)}
+                          aria-label={`Role for ${member.email ?? member.user_id}`}
+                        >
+                          {ROLES.map((role) => (
+                            <option key={role} value={role}>
+                              {role}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          className="member-remove"
+                          aria-label={`Remove ${member.email ?? member.user_id}`}
+                          title="Remove member"
+                          onClick={() => void remove(member)}
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M6 6l12 12M18 6L6 18" />
+                          </svg>
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      </div>
     </div>
   );
 }

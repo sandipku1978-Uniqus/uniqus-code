@@ -88,11 +88,13 @@ with `iptables -C` so re-runs are no-ops):
 
 ## Rootfs, golden snapshot, and read-only sharing
 
-- **Base rootfs** (`build-rootfs.sh`) is an Alpine ext4 image: OpenRC, Node 20,
-  Python 3, Go 1.22, git, plus the in-VM agent (statically-linked Rust musl
-  binary, or a Node fallback if cargo is absent at build time). SSH is
-  disabled; root has its password cleared **only** for passwordless serial
-  console boot-debugging — there is no network login path.
+- **Base rootfs** (`build-rootfs.sh`) is an Alpine ext4 image: OpenRC, Node.js 22 LTS,
+  Python 3, Go 1.22, git, plus the in-VM agent as a statically-linked Rust musl
+  binary. Production builds fail closed if that binary cannot be compiled; the
+  legacy Node agent requires the explicit local/development-only
+  `ALLOW_NODE_AGENT_FALLBACK=1` escape hatch. SSH is disabled; root has its
+  password cleared **only** for passwordless serial console boot-debugging —
+  there is no network login path.
 - **Mutable dirs are tmpfs** (`/tmp`, `/run`, `/var/log`, `/root`) so the base
   rootfs is never written after boot. `/root` is load-bearing, not incidental:
   commands run as root with `HOME=/root`, and on a golden clone the rootfs is

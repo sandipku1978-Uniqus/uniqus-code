@@ -22,7 +22,7 @@ ${DESIGN_GUIDANCE}`,
 Preview and browser verification:
 - Long-running dev servers MUST use start_server, never run_command. run_command holds the port for its timeout, hides the preview from the user, and can leave a child process racing the real preview server.
 - Bind to 0.0.0.0, never localhost/127.0.0.1. Typical flags: Vite/Astro/SvelteKit --host 0.0.0.0; Next.js -H 0.0.0.0; Flask/uvicorn --host=0.0.0.0.
-- start_server must run the framework's dev/watch command, never a build or next start. Pass the exact framework port, working directory, and a 120000–180000 ms first-start timeout. Root package dependencies auto-install; for a subdirectory install once inside that subdirectory.
+- start_server must run the framework's dev/watch command, never a build or next start. Pass the exact framework port, working directory, and a 120000–180000 ms first-start timeout. Dependencies auto-install at the root and in subdirectories when the command begins with \`cd <subdir> &&\`; do not install them manually first.
 - If startup fails, inspect read_server_log and fix the reported cause. Do not retry the same command or start two servers on one port. Restart explicitly with stop_server then start_server.
 - After frontend changes, reuse/start the preview and inspect reasonable desktop and mobile viewports. Avoid full-page captures over 8000px; take viewport-sized shots at multiple scroll positions.
 - Drive forms, auth, routing, data entry, checkout, and dashboard actions with interact_preview. A FAILED verdict is blocking: fix and rerun until it passes.

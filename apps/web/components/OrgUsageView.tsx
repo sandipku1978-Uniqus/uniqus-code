@@ -1,139 +1,181 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { OrgUsageSummary } from "@uniqus/api-types";
 import { fetchOrgUsageApi } from "@/lib/api";
+import { OrgMetric, OrgMetricRail, OrgPageHeader, OrgStatePanel } from "./OrgPageChrome";
 
-/**
- * Organization usage (P3.5) — month-to-date agent spend across the org's projects
- * vs. its monthly cap, plus a project count. Mirrors the account usage widgets but
- * scoped to the org so an admin can see how close the team is to the budget that
- * pauses runs. Same page chrome as the other dashboard sub-pages (.dash-page +
- * .coll-head + .metric-strip), with a magenta progress meter that ambers then
- * reds as the cap is approached.
- */
-
-function money(n: number): string {
-  return `$${n.toFixed(2)}`;
+function money(amount: number): string {
+  return `$${amount.toFixed(2)}`;
 }
 
 function monthLabel(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "this month";
-  return d.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "this month";
+  return date.toLocaleDateString(undefined, { month: "long", year: "numeric" });
 }
 
 export default function OrgUsageView({ orgId }: { orgId: string }) {
   const [usage, setUsage] = useState<OrgUsageSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let alive = true;
+  const load = useCallback(async () => {
     setUsage(null);
     setError(null);
-    fetchOrgUsageApi(orgId)
-      .then((r) => {
-        if (alive) setUsage(r.usage);
-      })
-      .catch((e) => {
-        if (alive) setError(e instanceof Error ? e.message : "Couldn't load usage");
-      });
-    return () => {
-      alive = false;
-    };
+    try {
+      const response = await fetchOrgUsageApi(orgId);
+      setUsage(response.usage);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't load usage");
+    }
   }, [orgId]);
 
-  if (error) {
-    return (
-      <div className="dash-page org-page">
-        <span className="page-eyebrow">Workspace</span>
-        <h1>Usage</h1>
-        <div className="dash-card">
-          <p className="card-sub" style={{ marginBottom: 0 }}>{error}</p>
-        </div>
-      </div>
-    );
-  }
-  if (!usage) {
-    return (
-      <div className="dash-page org-page">
-        <span className="page-eyebrow">Workspace</span>
-        <h1>Usage</h1>
-        <div className="dash-card">
-          <p className="card-sub" style={{ marginBottom: 0 }}>Loading…</p>
-        </div>
-      </div>
-    );
-  }
+  useEffect(() => {
+    void load();
+  }, [load]);
 
-  const { spend_usd, budget_usd, project_count, month_start } = usage;
   const pct =
-    budget_usd && budget_usd > 0 ? Math.min(100, (spend_usd / budget_usd) * 100) : null;
-  const over = pct != null && spend_usd >= (budget_usd ?? Infinity);
-  const meterColor = over
-    ? "var(--conf-low)"
-    : pct != null && pct >= 80
-    ? "var(--conf-medium)"
-    : "var(--brand-magenta)";
+    usage?.budget_usd && usage.budget_usd > 0
+      ? Math.min(100, (usage.spend_usd / usage.budget_usd) * 100)
+      : null;
+  const over = usage != null && pct != null && usage.spend_usd >= (usage.budget_usd ?? Infinity);
+  const nearCap = pct != null && pct >= 80 && !over;
+  const status = error
+    ? "Usage unavailable"
+    : !usage
+      ? "Calculating spend"
+      : usage.budget_usd == null
+        ? "No monthly cap"
+        : over
+          ? "Budget reached"
+          : nearCap
+            ? "Approaching cap"
+            : "Spend on track";
+  const statusTone = error ? "danger" : !usage ? "warn" : over ? "danger" : nearCap ? "warn" : "live";
+  const meterTone = over ? "danger" : nearCap ? "warn" : "live";
 
   return (
     <div className="dash-page org-page">
-      <header className="coll-head">
-        <span className="page-eyebrow">Workspace</span>
-        <h1>
-          Usage &amp; <span className="grad">budget</span>
-        </h1>
-        <p className="lede">
-          Agent spend across every project in this organization, tracked against its
-          monthly cap. {monthLabel(month_start)} to date.
-        </p>
-      </header>
+      <OrgPageHeader
+        index="02"
+        title="Usage &"
+        accent="budget"
+        context="Monthly controls"
+        status={status}
+        statusTone={statusTone}
+        lede={
+          <>
+            Track agent spend across every project in this organization and see how the
+            workspace is pacing against its monthly limit.
+          </>
+        }
+      />
 
-      <div className="metric-strip">
-        <MetricCell value={money(spend_usd)} label="Spent this month" />
-        <MetricCell value={budget_usd == null ? "No cap" : money(budget_usd)} label="Monthly cap" />
-        <MetricCell value={project_count} label="Projects" />
-        <MetricCell
-          value={budget_usd == null ? "—" : money(Math.max(0, budget_usd - spend_usd))}
-          label="Remaining"
+      {error ? (
+        <OrgStatePanel
+          state="error"
+          title="Usage could not be calculated"
+          body={error}
+          onRetry={() => void load()}
         />
-      </div>
+      ) : !usage ? (
+        <OrgStatePanel
+          state="loading"
+          title="Calculating organization usage"
+          body="Collecting this month's snapshotted agent cost across shared projects."
+        />
+      ) : (
+        <>
+          <OrgMetricRail>
+            <OrgMetric value={money(usage.spend_usd)} label="Spent this month" />
+            <OrgMetric
+              value={usage.budget_usd == null ? "No cap" : money(usage.budget_usd)}
+              label="Monthly cap"
+            />
+            <OrgMetric value={usage.project_count} label="Projects" />
+            <OrgMetric
+              value={
+                usage.budget_usd == null
+                  ? "—"
+                  : money(Math.max(0, usage.budget_usd - usage.spend_usd))
+              }
+              label="Remaining"
+            />
+          </OrgMetricRail>
 
-      {pct != null && (
-        <div className="dash-card">
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
-            <span className="page-eyebrow" style={{ margin: 0 }}>
-              {money(spend_usd)} of {money(budget_usd ?? 0)}
-            </span>
-            <span className="page-eyebrow" style={{ margin: 0, color: meterColor }}>
-              {Math.round(pct)}%
-            </span>
+          <div className="org-usage-layout">
+            <section className="org-budget-panel">
+              <div className="org-budget-head">
+                <div>
+                  <span className="org-section-index">Budget position</span>
+                  <h2>{usage.budget_usd == null ? "Uncapped workspace" : "Monthly pacing"}</h2>
+                </div>
+                <span className="org-status">
+                  <span className={`org-status-dot ${meterTone}`} aria-hidden="true" />
+                  {status}
+                </span>
+              </div>
+
+              <div className="org-budget-reading">
+                <strong>{pct == null ? "∞" : `${Math.round(pct)}%`}</strong>
+                <span>{pct == null ? "No enforced ceiling" : "of the monthly cap used"}</span>
+              </div>
+
+              {pct != null ? (
+                <>
+                  <div
+                    className="usage-meter org-usage-meter"
+                    role="progressbar"
+                    aria-label="Monthly organization budget used"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={Math.round(pct)}
+                  >
+                    <span className={meterTone} style={{ width: `${pct}%` }} />
+                  </div>
+                  <div className="org-budget-scale">
+                    <span>{money(usage.spend_usd)} spent</span>
+                    <span>{money(usage.budget_usd ?? 0)} cap</span>
+                  </div>
+                </>
+              ) : (
+                <p className="org-budget-copy">
+                  Agent runs remain available regardless of monthly spend. Add a cap in
+                  organization settings if the team needs a hard limit.
+                </p>
+              )}
+
+              {over && (
+                <p className="org-budget-alert">
+                  New agent runs are paused until the cap is raised or the month resets.
+                </p>
+              )}
+            </section>
+
+            <aside className="org-facts-panel">
+              <div className="org-section-head">
+                <span className="org-section-index">Accounting window</span>
+                <h2>{monthLabel(usage.month_start)}</h2>
+                <p>A live roll-up of cost snapshots recorded by every organization project.</p>
+              </div>
+              <dl className="org-fact-list">
+                <div>
+                  <dt>Scope</dt>
+                  <dd>{usage.project_count} shared projects</dd>
+                </div>
+                <div>
+                  <dt>Resets</dt>
+                  <dd>Start of each month</dd>
+                </div>
+                <div>
+                  <dt>Enforcement</dt>
+                  <dd>{usage.budget_usd == null ? "Monitoring only" : "Runs pause at cap"}</dd>
+                </div>
+              </dl>
+            </aside>
           </div>
-          <div className="usage-meter">
-            <span style={{ width: `${pct}%`, background: meterColor }} />
-          </div>
-          {over && (
-            <p style={{ color: "var(--conf-low)", fontSize: 12, margin: "10px 0 0" }}>
-              The monthly budget has been reached — new agent runs are paused until the cap
-              is raised or the month resets.
-            </p>
-          )}
-        </div>
+        </>
       )}
-
-      <p style={{ color: "var(--text-muted)", fontSize: 12.5, lineHeight: 1.6, marginTop: 4 }}>
-        Spend is the sum of snapshotted agent cost across every project in this organization
-        since the start of {monthLabel(month_start)}.
-      </p>
-    </div>
-  );
-}
-
-function MetricCell({ value, label }: { value: number | string; label: string }) {
-  return (
-    <div className="metric-cell">
-      <span className="metric-value">{value}</span>
-      <span className="metric-label">{label}</span>
     </div>
   );
 }

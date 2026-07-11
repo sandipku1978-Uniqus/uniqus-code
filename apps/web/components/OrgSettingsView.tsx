@@ -11,15 +11,7 @@ import {
   leaveOrgApi,
 } from "@/lib/api";
 import { toast } from "@/lib/toast";
-
-/**
- * Organization settings (P3.1/P3.5) — the workspace's own admin surface: rename,
- * a shared monthly spend cap, and a danger zone (leave / delete). RBAC is fetched
- * with the org so we can disable controls the caller can't use rather than letting
- * them fail server-side: admin+ may rename + set budget, only an owner may delete,
- * anyone may leave (the server blocks the sole owner). Same page chrome as the
- * other dashboard sub-pages (.dash-page + .coll-head + .dash-card).
- */
+import { OrgPageHeader, OrgStatePanel } from "./OrgPageChrome";
 
 export default function OrgSettingsView({
   orgId,
@@ -27,21 +19,16 @@ export default function OrgSettingsView({
   onRemoved,
 }: {
   orgId: string;
-  /** Notify the parent so the switcher's org list reflects the new name. */
   onRenamed: (name: string) => void;
-  /** Fired after a successful leave/delete so the parent drops back to Personal. */
   onRemoved: () => void;
 }) {
   const [org, setOrg] = useState<Organization | null>(null);
   const [role, setRole] = useState<Role | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-
   const [name, setName] = useState("");
   const [savingName, setSavingName] = useState(false);
-
   const [budget, setBudget] = useState("");
   const [savingBudget, setSavingBudget] = useState(false);
-
   const [confirm, setConfirm] = useState<null | "leave" | "delete">(null);
   const [busy, setBusy] = useState(false);
 
@@ -69,8 +56,7 @@ export default function OrgSettingsView({
 
   async function saveName() {
     const trimmed = name.trim();
-    if (!trimmed || savingName || !org) return;
-    if (trimmed === org.name) return;
+    if (!trimmed || savingName || !org || trimmed === org.name) return;
     setSavingName(true);
     try {
       await renameOrgApi(orgId, trimmed);
@@ -91,12 +77,12 @@ export default function OrgSettingsView({
     if (trimmed === "") {
       value = null;
     } else {
-      const n = Number(trimmed);
-      if (!Number.isFinite(n) || n < 0) {
+      const amount = Number(trimmed);
+      if (!Number.isFinite(amount) || amount < 0) {
         toast.error("Enter a non-negative amount, or leave blank for no cap");
         return;
       }
-      value = n;
+      value = amount;
     }
     setSavingBudget(true);
     try {
@@ -140,168 +126,202 @@ export default function OrgSettingsView({
     }
   }
 
-  if (loadError) {
-    return (
-      <div className="dash-page org-page">
-        <span className="page-eyebrow">Workspace</span>
-        <h1>Settings</h1>
-        <div className="dash-card">
-          <p className="card-sub" style={{ marginBottom: 0 }}>{loadError}</p>
-        </div>
-      </div>
-    );
-  }
-  if (!org) {
-    return (
-      <div className="dash-page org-page">
-        <span className="page-eyebrow">Workspace</span>
-        <h1>Settings</h1>
-        <div className="dash-card">
-          <p className="card-sub" style={{ marginBottom: 0 }}>Loading…</p>
-        </div>
-      </div>
-    );
-  }
+  const roleLabel = role ? `${role[0].toUpperCase()}${role.slice(1)} access` : "Checking access";
+  const headerStatus = loadError ? "Settings unavailable" : org ? roleLabel : "Loading settings";
+  const headerTone = loadError ? "danger" : org ? (canManage ? "live" : "dim") : "warn";
 
   return (
     <div className="dash-page org-page">
-      <header className="coll-head">
-        <span className="page-eyebrow">Workspace</span>
-        <h1>
-          Organization <span className="grad">settings</span>
-        </h1>
-        <p className="lede">
-          Rename <strong>{org.name}</strong>, cap its monthly agent spend, or leave/delete
-          it.
-        </p>
-      </header>
+      <OrgPageHeader
+        index="03"
+        title="Organization"
+        accent="settings"
+        context="Workspace controls"
+        status={headerStatus}
+        statusTone={headerTone}
+        lede={
+          <>
+            Control the workspace identity, monthly spend policy, and your relationship to
+            {org ? ` ${org.name}` : " this organization"}.
+          </>
+        }
+      />
 
-      {/* Name */}
-      <div className="dash-card">
-        <h2>Organization name</h2>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <input
-            value={name}
-            disabled={!canManage}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void saveName();
-            }}
-            aria-label="Organization name"
-            style={{ flex: 1, minWidth: 0 }}
-          />
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={() => void saveName()}
-            disabled={!canManage || savingName || !name.trim() || name.trim() === org.name}
-          >
-            {savingName ? "Saving…" : "Save"}
-          </button>
-        </div>
-        {!canManage && (
-          <p className="card-sub" style={{ marginBottom: 0, marginTop: 10 }}>
-            Only an admin or owner can change settings.
-          </p>
-        )}
-      </div>
+      {loadError ? (
+        <OrgStatePanel
+          state="error"
+          title="Settings could not be loaded"
+          body={loadError}
+          onRetry={() => void load()}
+        />
+      ) : !org ? (
+        <OrgStatePanel
+          state="loading"
+          title="Loading workspace controls"
+          body="Checking your role and the organization's current policy."
+        />
+      ) : (
+        <>
+          <div className="org-settings-layout">
+            <div className="org-settings-sheet">
+              <section className="org-settings-section">
+                <div className="org-section-head">
+                  <span className="org-section-index">Identity</span>
+                  <h2>Organization name</h2>
+                  <p>This name appears in the workspace switcher and on shared projects.</p>
+                </div>
+                <div className="org-setting-form">
+                  <label htmlFor="org-settings-name">Workspace name</label>
+                  <div className="org-field-action">
+                    <input
+                      id="org-settings-name"
+                      value={name}
+                      disabled={!canManage}
+                      onChange={(event) => setName(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") void saveName();
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      onClick={() => void saveName()}
+                      disabled={!canManage || savingName || !name.trim() || name.trim() === org.name}
+                    >
+                      {savingName ? "Saving…" : "Save name"}
+                    </button>
+                  </div>
+                </div>
+              </section>
 
-      {/* Budget */}
-      <div className="dash-card">
-        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
-          <h2 style={{ margin: 0 }}>Monthly budget</h2>
-          <span className="page-eyebrow" style={{ margin: 0 }}>
-            {org.monthly_budget_usd == null ? "No cap" : `$${org.monthly_budget_usd} / month`}
-          </span>
-        </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 12 }}>
-          <span aria-hidden style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono-stack)", fontSize: 13 }}>
-            $
-          </span>
-          <input
-            type="number"
-            min={0}
-            step="any"
-            inputMode="decimal"
-            placeholder="No cap"
-            value={budget}
-            disabled={!canManage}
-            onChange={(e) => setBudget(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void saveBudget();
-            }}
-            aria-label="Monthly budget in USD"
-            style={{ flex: 1, minWidth: 0 }}
-          />
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={() => void saveBudget()}
-            disabled={!canManage || savingBudget}
-          >
-            {savingBudget ? "Saving…" : "Save"}
-          </button>
-        </div>
-        <p className="card-sub" style={{ marginBottom: 0, marginTop: 10 }}>
-          Leave blank for no cap. Caps the org&apos;s combined agent spend per calendar month;
-          runs pause once it&apos;s reached.
-        </p>
-      </div>
-
-      {/* Danger zone */}
-      <div className="dash-card danger">
-        <h2>Danger zone</h2>
-
-        <div className="danger-row">
-          <div>
-            <div className="t">Leave organization</div>
-            <div className="d">
-              You&apos;ll lose access to its shared projects. Projects you own move back to
-              Personal.
+              <section className="org-settings-section">
+                <div className="org-section-head">
+                  <span className="org-section-index">Spend policy</span>
+                  <h2>Monthly agent budget</h2>
+                  <p>Runs pause when combined organization spend reaches this ceiling.</p>
+                </div>
+                <div className="org-setting-form">
+                  <div className="org-setting-label-row">
+                    <label htmlFor="org-settings-budget">Monthly cap in USD</label>
+                    <span>{org.monthly_budget_usd == null ? "No cap" : `$${org.monthly_budget_usd} / month`}</span>
+                  </div>
+                  <div className="org-field-action org-money-field">
+                    <span aria-hidden="true">$</span>
+                    <input
+                      id="org-settings-budget"
+                      type="number"
+                      min={0}
+                      step="any"
+                      inputMode="decimal"
+                      placeholder="No cap"
+                      value={budget}
+                      disabled={!canManage}
+                      onChange={(event) => setBudget(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") void saveBudget();
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      onClick={() => void saveBudget()}
+                      disabled={!canManage || savingBudget}
+                    >
+                      {savingBudget ? "Saving…" : "Save budget"}
+                    </button>
+                  </div>
+                  <p className="org-field-note">Leave blank to monitor spend without enforcing a cap.</p>
+                </div>
+              </section>
             </div>
+
+            <aside className="org-permission-panel">
+              <span className="org-section-index">Your access</span>
+              <strong className="org-permission-role">{role ?? "member"}</strong>
+              <p>
+                {canManage
+                  ? "You can update organization identity, budget, and member access."
+                  : "You can view organization policy, but an admin or owner must change it."}
+              </p>
+              <ul>
+                <li>
+                  <span className={`org-permission-mark ${canManage ? "yes" : "no"}`} aria-hidden="true" />
+                  <span>Edit workspace settings</span>
+                  <strong>{canManage ? "Allowed" : "Not allowed"}</strong>
+                </li>
+                <li>
+                  <span className={`org-permission-mark ${canManage ? "yes" : "no"}`} aria-hidden="true" />
+                  <span>Manage monthly budget</span>
+                  <strong>{canManage ? "Allowed" : "Not allowed"}</strong>
+                </li>
+                <li>
+                  <span className={`org-permission-mark ${isOwner ? "yes" : "no"}`} aria-hidden="true" />
+                  <span>Delete organization</span>
+                  <strong>{isOwner ? "Allowed" : "Not allowed"}</strong>
+                </li>
+              </ul>
+            </aside>
           </div>
-          {confirm === "leave" ? (
-            <div style={{ display: "flex", gap: 8 }}>
-              <button type="button" className="btn-ghost" onClick={() => setConfirm(null)} disabled={busy}>
-                Cancel
-              </button>
-              <button type="button" className="btn-danger" onClick={() => void doLeave()} disabled={busy}>
-                {busy ? "Leaving…" : "Confirm leave"}
-              </button>
-            </div>
-          ) : (
-            <button type="button" className="btn-secondary" onClick={() => setConfirm("leave")}>
-              Leave
-            </button>
-          )}
-        </div>
 
-        {isOwner && (
-          <div className="danger-row">
-            <div>
-              <div className="t">Delete organization</div>
-              <div className="d">
-                Removes the org and its membership. Its projects are kept and return to
-                their owners&apos; Personal space.
-              </div>
+          <section className="org-danger-panel">
+            <div className="org-danger-head">
+              <span className="org-section-index">Danger zone</span>
+              <h2>Destructive actions</h2>
+              <p>These changes affect workspace access, not the underlying project history.</p>
             </div>
-            {confirm === "delete" ? (
-              <div style={{ display: "flex", gap: 8 }}>
-                <button type="button" className="btn-ghost" onClick={() => setConfirm(null)} disabled={busy}>
-                  Cancel
-                </button>
-                <button type="button" className="btn-danger" onClick={() => void doDelete()} disabled={busy}>
-                  {busy ? "Deleting…" : "Delete forever"}
-                </button>
+
+            <div className="org-danger-actions">
+              <div className="danger-row">
+                <div>
+                  <div className="t">Leave organization</div>
+                  <div className="d">
+                    You&apos;ll lose access to shared projects. Projects you own return to Personal.
+                  </div>
+                </div>
+                {confirm === "leave" ? (
+                  <div className="org-confirm-actions">
+                    <button type="button" className="btn-ghost" onClick={() => setConfirm(null)} disabled={busy}>
+                      Cancel
+                    </button>
+                    <button type="button" className="btn-danger" onClick={() => void doLeave()} disabled={busy}>
+                      {busy ? "Leaving…" : "Confirm leave"}
+                    </button>
+                  </div>
+                ) : (
+                  <button type="button" className="btn-secondary" onClick={() => setConfirm("leave")}>
+                    Leave
+                  </button>
+                )}
               </div>
-            ) : (
-              <button type="button" className="btn-danger" onClick={() => setConfirm("delete")}>
-                Delete
-              </button>
-            )}
-          </div>
-        )}
-      </div>
+
+              {isOwner && (
+                <div className="danger-row">
+                  <div>
+                    <div className="t">Delete organization</div>
+                    <div className="d">
+                      Membership is removed; projects remain and return to their owners.
+                    </div>
+                  </div>
+                  {confirm === "delete" ? (
+                    <div className="org-confirm-actions">
+                      <button type="button" className="btn-ghost" onClick={() => setConfirm(null)} disabled={busy}>
+                        Cancel
+                      </button>
+                      <button type="button" className="btn-danger" onClick={() => void doDelete()} disabled={busy}>
+                        {busy ? "Deleting…" : "Delete forever"}
+                      </button>
+                    </div>
+                  ) : (
+                    <button type="button" className="btn-danger" onClick={() => setConfirm("delete")}>
+                      Delete
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </section>
+        </>
+      )}
     </div>
   );
 }
