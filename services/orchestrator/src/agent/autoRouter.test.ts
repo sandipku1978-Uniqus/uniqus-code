@@ -43,8 +43,18 @@ describe("classifyTaskHeuristic", () => {
     expect(classifyTaskHeuristic("quickly debug the race condition in the worker")).toBe("hard");
   });
 
-  it("treats a long, dense brief as hard", () => {
-    expect(classifyTaskHeuristic("Build ".concat("x".repeat(900)))).toBe("hard");
+  it("does not escalate on length alone — a long but signal-free brief is ambiguous", () => {
+    // Length is a weak proxy for difficulty; let the classify tiebreak decide
+    // rather than force-routing a long routine brief to Opus.
+    expect(classifyTaskHeuristic("Build ".concat("x".repeat(900)))).toBe("ambiguous");
+  });
+
+  it("still flags a long brief as hard when it carries a hard signal", () => {
+    expect(
+      classifyTaskHeuristic(
+        "refactor the auth flow across the whole codebase. ".concat("x".repeat(900)),
+      ),
+    ).toBe("hard");
   });
 
   it("returns ambiguous for medium-length, signal-free requests", () => {

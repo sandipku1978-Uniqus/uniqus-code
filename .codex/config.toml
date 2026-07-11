@@ -1,0 +1,56 @@
+# Project-level Codex setup mirroring the repo's Claude configuration.
+#
+# Codex loads this only after the project is trusted. Keep repo behavior here;
+# keep personal credentials and provider overrides in ~/.codex/config.toml.
+
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+web_search = "live"
+
+# AGENTS.md is the Codex-native mirror of CLAUDE.md. The fallback keeps Codex
+# useful if someone updates/removes AGENTS.md but leaves Claude guidance behind.
+project_doc_fallback_filenames = ["CLAUDE.md"]
+project_doc_max_bytes = 65536
+
+[sandbox_workspace_write]
+network_access = true
+
+# Claude's settings.local.json also listed additional Windows temp directories
+# under C:\Users\thech\..., which do not exist for this checkout's current user.
+# Codex workspace-write already grants the active temp directory for local work.
+
+[features.network_proxy]
+enabled = true
+allow_local_binding = true
+
+[features.network_proxy.domains]
+"127.0.0.1" = "allow"
+"localhost" = "allow"
+"github.com" = "allow"
+"api.github.com" = "allow"
+"raw.githubusercontent.com" = "allow"
+"platform.openai.com" = "allow"
+"developers.openai.com" = "allow"
+"cookbook.openai.com" = "allow"
+"community.openai.com" = "allow"
+"docs.claude.com" = "allow"
+"**.artificialanalysis.ai" = "allow"
+"www.latforge.com" = "allow"
+"venturebeat.com" = "allow"
+"blog.google" = "allow"
+"thenewstack.io" = "allow"
+"www.mindstudio.ai" = "allow"
+"developers.figma.com" = "allow"
+"supabase.com" = "allow"
+"www.hetzner.com" = "allow"
+"status.hetzner.com" = "allow"
+"www.techpowerup.com" = "allow"
+"docs.mesa3d.org" = "allow"
+"en.wikichip.org" = "allow"
+"www.phoronix.com" = "allow"
+"kasmweb.com" = "allow"
+"jimmy-claw.github.io" = "allow"
+"e2b.dev" = "allow"
+"guacamole.apache.org" = "allow"
+"ai.google.dev" = "allow"
+"same.new" = "allow"

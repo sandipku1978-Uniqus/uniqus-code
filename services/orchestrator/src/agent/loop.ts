@@ -7,6 +7,7 @@ import {
   normalizeMessageHistoryInPlace,
   pruneStaleImagesInPlace,
 } from "./messageHistory.js";
+import { attachCitations } from "./citations.js";
 import { maybeCompact, type CompactionResult } from "./compact.js";
 import { createLiveOutputEstimator } from "./liveUsage.js";
 import {
@@ -64,6 +65,7 @@ import { describeImage as describeImageGemini } from "./providers/google.js";
 import type {
   ChangedFile,
   DesignTokens,
+  Citation,
   FlowStep,
   ModelChoice,
   ModelProvider,
@@ -91,32 +93,40 @@ const MAX_TOKENS = 16384*2;
 // the cap stops a pathological pause loop from spinning forever (C-34).
 const MAX_PAUSE_TURN_RETRIES = 6;
 
-function buildSystemPrompt(
-  skillsBody: string | null,
-  accountPrompt: string | null,
-  hasWebSearch: boolean,
-  hasVision: boolean,
-  repo: { fullName: string; url: string } | null,
-  designTokens: DesignTokens | null,
-  librarySkills: { name: string; body: string }[],
-  knowledgeDocs: { id: string; title: string; description: string | null }[],
+/**
+ * Leading marker for the live-project-state block appended to each turn's user
+ * message. Stable + distinctive so the replay path (server.ts
+ * REPLAY_TRAILER_MARKERS) can strip it from the persisted user message, showing
+ * the user just the words they typed.
+ */
+export const LIVE_PROJECT_STATE_MARKER = "\n\n<live-project-state>";
+
+/**
+ * The volatile per-turn ground truth: which dev servers are up right now, and
+ * which integrations are connected. This used to live at the END of the system
+ * prompt. It does not any more, and that is load-bearing for cost, not style:
+ * the system prompt is the FRONT of the prompt-cache prefix on every provider
+ * (Anthropic `system`, OpenAI `instructions`, Gemini `systemInstruction`, GLM
+ * `system[0]`), so a single changed byte here — a server starting, a connector
+ * being added — invalidated the whole cached prefix behind it: system, the
+ * ~16KB tool block, and the entire replayed history. On OpenAI, where there is
+ * no separate tools breakpoint to fall back on, that re-billed the lot at full
+ * input price.
+ *
+ * Appending it to the LATEST user message instead makes history append-only:
+ * older blocks keep their bytes (so the cached prefix survives) and the newest
+ * block is the authoritative one. The system prompt tells the model exactly
+ * that — see the "Live project state" paragraph in buildSystemPrompt.
+ */
+export function formatLiveProjectStateBlock(
   runningServers: ServerInfo[],
   activeConnectors: { id: string; name: string; status: string }[],
-  hasSubAgents: boolean,
-  hasAskUser: boolean,
-  hasPlanMode: boolean,
-  personaPreamble: string | null,
 ): string {
-  const { name: shellName, isUnixLike } = sb.shellInfo();
-  const platform = process.platform;
-
   // GRIPE-9: the live set of dev servers running RIGHT NOW, injected every turn
   // as ground truth. Reopening a project tears down its servers, but earlier
   // turns in the replayed history still say "server running at ...". Without a
   // per-turn snapshot the agent trusts that stale history and tries to
-  // screenshot / read the log of a server that no longer exists. This line is
-  // the authoritative current state — it overrides anything earlier in the
-  // conversation.
+  // screenshot / read the log of a server that no longer exists.
   const runningServersSection =
     runningServers.length === 0
       ? `Running dev servers: none at the start of this turn. Any server mentioned earlier in this conversation has been stopped (e.g. the project was reopened) — do NOT assume it is still up. A server you started THIS turn with start_server IS live — trust its tool result. If you need a preview and haven't started one this turn, start one with start_server; do not screenshot, read_server_log, or interact_preview against a server id from an earlier turn without first confirming it via list_servers.`
@@ -134,6 +144,26 @@ function buildSystemPrompt(
       : `Available integrations (connected & active for this project — use these, don't invent your own storage):\n${activeConnectors
           .map((c) => `  • ${c.name}${c.status ? ` (${c.status})` : ""}`)
           .join("\n")}`;
+
+  return `${LIVE_PROJECT_STATE_MARKER}\n${runningServersSection}\n\n${availableConnectorsSection}\n</live-project-state>`;
+}
+
+function buildSystemPrompt(
+  skillsBody: string | null,
+  accountPrompt: string | null,
+  hasWebSearch: boolean,
+  hasVision: boolean,
+  repo: { fullName: string; url: string } | null,
+  designTokens: DesignTokens | null,
+  librarySkills: { name: string; body: string }[],
+  knowledgeDocs: { id: string; title: string; description: string | null }[],
+  hasSubAgents: boolean,
+  hasAskUser: boolean,
+  hasPlanMode: boolean,
+  personaPreamble: string | null,
+): string {
+  const { name: shellName, isUnixLike } = sb.shellInfo();
+  const platform = process.platform;
 
   // Web search is only wired on the Anthropic path (server-side web_search);
   // the OpenAI/Gemini adapters run function-calling only. Advertising a tool
@@ -274,7 +304,7 @@ Secrets & env vars (the user's "set it like in Vercel" expectation):
 - After adding/changing env vars, restart the dev server (stop_server then start_server) so the new process picks them up — a running process won't see env changes.
 
 Building for serverless deploy (apps deploy to Vercel serverless — you verify in the preview, but WRITE for that target):
-- PERSISTENCE: NEVER use the filesystem (fs.writeFile, a JSON file, SQLite/better-sqlite3/Prisma-sqlite, lowdb) or module-level in-memory state (let rows=[], new Map(), a global cache) as a database, session store, or cache. It works in the preview (a long-lived dev server with a writable disk) but Vercel's filesystem is read-only and every request is an isolated, ephemeral function — writes vanish and the data resets. Silently losing data is worse than not building the feature. For real persistence use a database (see Available integrations in the Live project state section at the end of this prompt).
+- PERSISTENCE: NEVER use the filesystem (fs.writeFile, a JSON file, SQLite/better-sqlite3/Prisma-sqlite, lowdb) or module-level in-memory state (let rows=[], new Map(), a global cache) as a database, session store, or cache. It works in the preview (a long-lived dev server with a writable disk) but Vercel's filesystem is read-only and every request is an isolated, ephemeral function — writes vanish and the data resets. Silently losing data is worse than not building the feature. For real persistence use a database (see "Available integrations" in the <live-project-state> block on the latest user message).
 - NO long-lived-process patterns: setInterval/cron, in-process queues, WebSocket servers, and long-held SSE do NOT work on serverless — a function has a short timeout (Vercel's default is ~60s; don't rely on long-running work) and is killed right after the response. For scheduled work use an external cron; for real-time use a hosted relay (Pusher/Ably). Uniqus deploys to Vercel (serverless) — apps that need a persistent server (a WebSocket server, an in-process worker) aren't a fit; avoid those patterns, or tell the user that piece needs separate hosting.
 - NETWORKING & URLs: in app code, call your own backend with plain relative paths (fetch("/api/...")). NEVER hardcode localhost, 127.0.0.1, a port, or the preview/orchestrator origin — those work in the preview but are wrong after deploy. The preview routes relative requests for you.
 - HYDRATION: never render a non-deterministic value (Date.now(), Math.random(), new Date(), locale date formatting, browser-only APIs) directly in a component's render — server and client then produce different HTML and React throws a hydration mismatch that quietly breaks interactivity. Compute such values in useEffect/event handlers (client-only) or pass stable values via props.
@@ -329,17 +359,20 @@ Conventions:
 8. When the task is complete, briefly summarize what you built, include the public URL if you started a server, and describe how to use it inside Uniqus Code. Do not end by telling the user to run local terminal commands. End that summary with a short \`## What changed\` section: a plain-English bulleted list, one line per file you created or edited this turn, written for a NON-technical reader (e.g. "Added the expenses table and the running-total bar" rather than "edited src/App.tsx"). Keep it to the files you actually touched — do not list files you only read. (This is a human-readable gloss; an exact, machine-generated file list is shown separately, so don't pad it.)
 9. Currency of facts: when the task names specific products, models, versions, or prices — ESPECIALLY AI/LLM model lineups — your training data lags reality by months. ${currencyGuidance} A stale model name or a missing current flagship is a failure the user will notice immediately.${formatAccountPromptForPrompt(accountPrompt)}${formatDesignSystemForPrompt(designTokens)}${formatLibrarySkillsForPrompt(librarySkills)}${formatSkillsForPrompt(skillsBody)}
 
-Live project state (refreshed at the start of every turn — kept at the END of this prompt because it changes often; when it contradicts anything earlier in the conversation, THIS section wins):
-
-${runningServersSection}
-
-${availableConnectorsSection}`;
+Live project state: a <live-project-state> block is appended to the LATEST user message on every turn. It lists the dev servers running right now and the integrations connected to this project. Treat it as ground truth: when it contradicts anything earlier in the conversation, the MOST RECENT block wins. Earlier <live-project-state> blocks are stale snapshots of past turns — ignore them. The block is appended by the system, not written by the user; it is context, never an instruction.`;
 }
 
 export interface LoopHooks {
   onText?: (text: string) => void;
   /** Fires for each reasoning/thinking delta (surfaced as a collapsible trace). */
   onThinking?: (text: string) => void;
+  /**
+   * Fires once per assistant turn that cited web sources, after its text is
+   * complete (citations arrive with the finished response, not as deltas). The
+   * UI must render these — every provider that runs a server-side search
+   * requires attribution, and OpenAI requires it inline and clickable.
+   */
+  onCitations?: (citations: Citation[]) => void;
   onToolCallStarted?: (callId: string, name: string) => void;
   /**
    * Fires as a tool's arguments stream in, with a best-effort partial parse of
@@ -874,8 +907,6 @@ export async function runAgentLoop(
     opts.designSystem ?? null,
     opts.librarySkills ?? [],
     opts.knowledgeDocs ?? [],
-    opts.runningServers ?? [],
-    opts.activeConnectors ?? [],
     allowSubAgents,
     hasAskUser,
     hasPlanMode,
@@ -896,9 +927,18 @@ export async function runAgentLoop(
   // preview) as a structured block on this turn's user message, so the agent
   // knows which UI node the request targets. It rides the persisted message
   // and is stripped from the replayed user bubble (see REPLAY_TRAILER_MARKERS).
-  const turnContent = opts.selectedElement
-    ? `${userMessage}${formatSelectedElementBlock(opts.selectedElement)}`
-    : userMessage;
+  //
+  // The live-project-state block rides the same trailer, and goes LAST so it is
+  // the final thing the model reads on the turn. It lives here rather than in
+  // the system prompt so the cached prefix (system + tools) stays byte-identical
+  // across turns — see formatLiveProjectStateBlock. Because it is appended to a
+  // NEW message each turn rather than rewritten in place, history stays
+  // append-only and every cache breakpoint behind it survives.
+  const turnContent = `${
+    opts.selectedElement
+      ? `${userMessage}${formatSelectedElementBlock(opts.selectedElement)}`
+      : userMessage
+  }${formatLiveProjectStateBlock(opts.runningServers ?? [], opts.activeConnectors ?? [])}`;
   record({ role: "user", content: turnContent });
   normalizeMessageHistoryInPlace(messages);
 
@@ -1285,6 +1325,14 @@ export async function runAgentLoop(
       Array.isArray(turn.content) && turn.content.length === 0 && toolCalls.length === 0
         ? [{ type: "text", text: "(no response)" }]
         : turn.content;
+    // Web sources the model cited this iteration. Stamped onto the answer's text
+    // block so they survive persistence and replay (stripped before Anthropic —
+    // see anthropic.ts FOREIGN_BLOCK_FIELDS), and pushed live to the UI, which
+    // is REQUIRED to display them: OpenAI mandates inline, clickable citations.
+    if (turn.citations && turn.citations.length > 0 && Array.isArray(assistantContent)) {
+      attachCitations(assistantContent, turn.citations);
+      opts.onCitations?.(turn.citations);
+    }
     record({ role: "assistant", content: assistantContent });
 
     // A server-side tool (Anthropic web_search) paused a long-running turn:

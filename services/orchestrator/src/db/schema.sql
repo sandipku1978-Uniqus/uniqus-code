@@ -110,6 +110,13 @@ create table if not exists projects (
 
 create index if not exists projects_owner_idx on projects (owner_id, updated_at desc);
 
+-- Trust state for the per-project `.uniqus/skills.md` prompt extension.
+-- Normal user-created/edited skills are trusted. If a GitHub/ZIP import contains
+-- `.uniqus/skills.md`, the orchestrator marks it `untrusted_import` and excludes
+-- it from the agent system prompt until the user explicitly saves it in Uniqus.
+alter table projects add column if not exists skills_trust text not null default 'trusted'
+  check (skills_trust in ('trusted', 'untrusted_import'));
+
 -- Touch updated_at on every row that owns an updated_at column.
 create or replace function touch_project_updated_at() returns trigger as $$
 begin

@@ -140,6 +140,20 @@ function isUserTurnMessage(msg: Anthropic.MessageParam): boolean {
   );
 }
 
+/**
+ * Index of the last REAL user turn, or -1 if there is none. This is the boundary
+ * between "the turn in progress" and everything before it — the same line that
+ * decides which images survive (pruneStaleImagesInPlace, below) and which OpenAI
+ * reasoning items are worth replaying (providers/openai.ts toResponsesInput).
+ * Anything at an index ABOVE this belongs to the current turn.
+ */
+export function lastRealUserTurnIndex(messages: Anthropic.MessageParam[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (isUserTurnMessage(messages[i])) return i;
+  }
+  return -1;
+}
+
 const IMAGE_STRIP_STUB =
   "[screenshot omitted from context to save tokens — re-run the tool if you need to see it again]";
 
@@ -155,13 +169,7 @@ const IMAGE_STRIP_STUB =
  * gets persisted.
  */
 export function pruneStaleImagesInPlace(messages: Anthropic.MessageParam[]): void {
-  let lastUserTurn = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (isUserTurnMessage(messages[i])) {
-      lastUserTurn = i;
-      break;
-    }
-  }
+  const lastUserTurn = lastRealUserTurnIndex(messages);
   if (lastUserTurn <= 0) return; // nothing before the current turn to prune
 
   for (let i = 0; i < lastUserTurn; i++) {

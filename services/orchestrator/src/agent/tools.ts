@@ -1,15 +1,53 @@
 import type Anthropic from "@anthropic-ai/sdk";
 
 /**
- * Anthropic's server-side web search tool. The model calls it; Anthropic
- * runs the search and injects results into the response — we don't execute
- * anything on our side. Billed per search by Anthropic.
+ * Anthropic's server-side web search tool. The model calls it; Anthropic runs
+ * the search and injects results into the response — we don't execute anything
+ * on our side. Billed per search ($10/1k) on top of the tokens it returns.
+ *
+ * Two variants, picked by resolved model via `webSearchToolForModel`:
+ *  - `web_search_20260209` adds DYNAMIC FILTERING: instead of every search
+ *    result being loaded verbatim into the context window, Claude writes and
+ *    runs code that filters them first, so only relevant content is billed as
+ *    input. Straight token saving on any searching turn. It runs the search
+ *    from inside code execution (`allowed_callers` defaults to
+ *    `["code_execution_20260120"]`) which the API provisions automatically —
+ *    we must NOT declare a code_execution tool ourselves, or the model sees two
+ *    execution environments. Requires programmatic tool calling, so it's gated
+ *    to the models that have it; anything else 400s unless we'd pass
+ *    `allowed_callers: ["direct"]`.
+ *  - `web_search_20250305` is the basic variant and the safe fallback.
+ *
+ * Kept a pure function of the MODEL, never of the turn: tools render first in
+ * the prompt-cache prefix, and a tool-definition change invalidates the whole
+ * cache (tools + system + messages).
+ * https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool
  */
 export const WEB_SEARCH_TOOL = {
   type: "web_search_20250305",
   name: "web_search",
   max_uses: 10,
 } as const;
+
+const WEB_SEARCH_TOOL_DYNAMIC = {
+  type: "web_search_20260209",
+  name: "web_search",
+  max_uses: 10,
+} as const;
+
+/**
+ * Models that support web search's dynamic filtering. Per the tool docs this is
+ * Opus 4.6/4.7/4.8, Sonnet 5, and Sonnet 4.6 (plus Fable/Mythos, which we don't
+ * route to). Matched by prefix so a dated snapshot id still resolves.
+ */
+const DYNAMIC_WEB_SEARCH_MODELS = /^claude-(opus-4-[678]|sonnet-5|sonnet-4-6)\b/;
+
+/** The right web_search variant for `model` — see WEB_SEARCH_TOOL. */
+export function webSearchToolForModel(
+  model: string,
+): typeof WEB_SEARCH_TOOL | typeof WEB_SEARCH_TOOL_DYNAMIC {
+  return DYNAMIC_WEB_SEARCH_MODELS.test(model) ? WEB_SEARCH_TOOL_DYNAMIC : WEB_SEARCH_TOOL;
+}
 
 /**
  * Vision bridge for text-only models (e.g. GLM-5.2). Only added to the tool list

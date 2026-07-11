@@ -231,6 +231,50 @@ function deployStatus(state: DeploymentState | null | undefined): {
   }
 }
 
+type StatusFilterKey = "all" | "live" | "building" | "failed" | "none";
+
+/** Deploy-status filter chips for the All-projects gallery — mirrors the
+ *  status dot vocabulary already used on tiles/timeline rows (deployStatus). */
+const STATUS_FILTERS: ReadonlyArray<{ key: StatusFilterKey; label: string }> = [
+  { key: "all", label: "All" },
+  { key: "live", label: "Live" },
+  { key: "building", label: "Building" },
+  { key: "failed", label: "Failed" },
+  { key: "none", label: "Not deployed" },
+];
+
+type SortKey = "name-asc" | "name-desc" | "updated-desc" | "created-desc";
+
+/** Sort options for the All-projects gallery. */
+const SORT_OPTIONS: ReadonlyArray<{ key: SortKey; label: string }> = [
+  { key: "name-asc", label: "Name (A–Z)" },
+  { key: "name-desc", label: "Name (Z–A)" },
+  { key: "updated-desc", label: "Recently updated" },
+  { key: "created-desc", label: "Recently created" },
+];
+
+function sortProjects(
+  projects: ProjectSummary[],
+  sortKey: SortKey,
+): ProjectSummary[] {
+  const list = [...projects];
+  switch (sortKey) {
+    case "name-desc":
+      return list.sort((a, b) => b.name.localeCompare(a.name));
+    case "updated-desc":
+      return list.sort(
+        (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+      );
+    case "created-desc":
+      return list.sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+      );
+    case "name-asc":
+    default:
+      return list.sort((a, b) => a.name.localeCompare(b.name));
+  }
+}
+
 type Mode = "describe" | "zip" | "github";
 type GithubAuthMode = "oauth" | "pat";
 
@@ -2678,18 +2722,29 @@ function AllProjectsView({
   onOpenMenu: (id: string, open: boolean) => void;
 }) {
   const [q, setQ] = useState("");
-  const sorted = projects
-    ? [...projects].sort((a, b) => a.name.localeCompare(b.name))
-    : null;
+  const [statusFilter, setStatusFilter] = useState<StatusFilterKey>("all");
+  const [sortKey, setSortKey] = useState<SortKey>("name-asc");
+  const sorted = projects ? sortProjects(projects, sortKey) : null;
   const query = q.trim().toLowerCase();
-  const shown =
-    sorted && query
-      ? sorted.filter(
-          (p) =>
-            p.name.toLowerCase().includes(query) ||
-            (p.description ?? "").toLowerCase().includes(query),
-        )
-      : sorted;
+  const shown = sorted
+    ? sorted.filter((p) => {
+        if (
+          statusFilter !== "all" &&
+          deployStatus(p.latest_deploy_state).dotClass !== statusFilter
+        ) {
+          return false;
+        }
+        if (
+          query &&
+          !p.name.toLowerCase().includes(query) &&
+          !(p.description ?? "").toLowerCase().includes(query)
+        ) {
+          return false;
+        }
+        return true;
+      })
+    : null;
+  const isFiltered = query.length > 0 || statusFilter !== "all";
 
   // Metrics span the full set, not the filtered view.
   const total = projects?.length ?? 0;
@@ -2706,7 +2761,7 @@ function AllProjectsView({
             All <span className="grad">projects</span>
           </>
         }
-        lede="Every project in this workspace, sorted by name. Open one to jump in, or use the ⋯ menu to rename, re-icon, move, or remove it."
+        lede="Every project in this workspace. Open one to jump in, or use the ⋯ menu to rename, re-icon, move, or remove it."
       />
 
       <div className="metric-strip">
@@ -2738,7 +2793,33 @@ function AllProjectsView({
               aria-label="Filter projects by name or description"
             />
           </label>
-          {query && shown && (
+          <div className="status-filters" role="group" aria-label="Filter by deploy status">
+            {STATUS_FILTERS.map((f) => (
+              <button
+                key={f.key}
+                type="button"
+                className="status-filter"
+                aria-pressed={statusFilter === f.key}
+                onClick={() => setStatusFilter(f.key)}
+              >
+                {f.key !== "all" && <span className={`d ${f.key}`} aria-hidden="true" />}
+                {f.label}
+              </button>
+            ))}
+          </div>
+          <select
+            value={sortKey}
+            onChange={(e) => setSortKey(e.target.value as SortKey)}
+            aria-label="Sort projects"
+            className="ui-select sort-select"
+          >
+            {SORT_OPTIONS.map((o) => (
+              <option key={o.key} value={o.key}>
+                Sort: {o.label}
+              </option>
+            ))}
+          </select>
+          {isFiltered && shown && (
             <span className="coll-count">
               {shown.length} of {sorted?.length ?? 0}
             </span>
@@ -2754,7 +2835,13 @@ function AllProjectsView({
         </div>
       ) : shown.length === 0 ? (
         <div className="empty-state">
-          No projects match <strong>“{q.trim()}”</strong> — try a different search.
+          {query ? (
+            <>
+              No projects match <strong>“{q.trim()}”</strong> — try a different search.
+            </>
+          ) : (
+            "No projects match this filter."
+          )}
         </div>
       ) : (
         <div className="proj-grid">

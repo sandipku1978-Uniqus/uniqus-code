@@ -1,4 +1,4 @@
-# Uniqus Code — working notes for Claude
+# Uniqus Code — working notes for Codex
 
 ## Working principles
 - **Fix the root cause; never paper over it.** Do not "resolve" an issue by
@@ -234,9 +234,3 @@
 ## Monorepo
 - Workspaces: `apps/*`, `services/*`, `packages/*`. Typecheck with
   `npm run typecheck` (turbo). Web dev server runs on port 4242.
-
-## UI verification (Playwright)
-- When driving the app with Playwright for UI verification, launch with
-  `channel: "msedge"` (the machine's installed Microsoft Edge) instead of
-  downloading Playwright's bundled Chromium. Don't run
-  `npx playwright install`.

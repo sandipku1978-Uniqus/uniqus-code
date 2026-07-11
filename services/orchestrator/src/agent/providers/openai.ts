@@ -1,6 +1,8 @@
 import OpenAI from "openai";
 import type Anthropic from "@anthropic-ai/sdk";
-import type { ThinkingEffort } from "@uniqus/api-types";
+import type { Citation, ThinkingEffort } from "@uniqus/api-types";
+import { normalizeCitations } from "../citations.js";
+import { lastRealUserTurnIndex } from "../messageHistory.js";
 import { parsePartialJson } from "./partialJson.js";
 import type {
   ForcedToolParams,
@@ -126,6 +128,8 @@ export class OpenAIAdapter implements ModelProviderAdapter {
     // The reasoning item that precedes the next function_call(s); echoed back
     // on the following turn (encrypted) so the chain survives the tool round-trip.
     let pendingReasoning: ReasoningRef | undefined;
+    // Web sources cited this turn, read off the terminal response.completed.
+    let citations: Citation[] = [];
 
     for await (const event of stream) {
       // Function-call argument deltas — the live path for showing a call's file
@@ -156,6 +160,7 @@ export class OpenAIAdapter implements ModelProviderAdapter {
             usage = toTokenUsage(event.response.usage);
             p.onUsage?.(usage);
           }
+          citations = citationsFromResponse(event.response);
           break;
         case "response.incomplete":
           truncated = true;
@@ -251,6 +256,7 @@ export class OpenAIAdapter implements ModelProviderAdapter {
       stopReason: toolCalls.length > 0 ? "tool_use" : truncated ? "max_tokens" : "end_turn",
       toolCalls,
       usage,
+      ...(citations.length > 0 ? { citations } : {}),
     };
   }
 
@@ -336,6 +342,34 @@ function toolUseBlock(
  * of billing every replayed prefix token at full price. OpenAI auto-caches with
  * no separate write line, so cacheCreationTokens is 0.
  */
+/**
+ * Pull the web sources out of a completed Responses turn. Each `output_text`
+ * part carries `url_citation` annotations whose `end_index` is a character
+ * offset into THAT part, so we walk the parts in order and rebase onto the
+ * concatenated answer text the loop actually renders.
+ *
+ * Read from the terminal `response.completed` payload rather than the streamed
+ * `response.output_text.annotation.added` events: the final output is
+ * authoritative and already ordered, so the offsets can't drift.
+ */
+export function citationsFromResponse(response: OpenAI.Responses.Response): Citation[] {
+  const raw: Partial<Citation>[] = [];
+  let base = 0;
+  for (const item of response.output ?? []) {
+    if (item.type !== "message") continue;
+    for (const part of item.content ?? []) {
+      if (part.type !== "output_text") continue;
+      for (const a of part.annotations ?? []) {
+        if (a.type === "url_citation") {
+          raw.push({ url: a.url, title: a.title, endIndex: base + a.end_index });
+        }
+      }
+      base += part.text.length;
+    }
+  }
+  return normalizeCitations(raw);
+}
+
 export function toTokenUsage(u: OpenAI.Responses.ResponseUsage): TokenUsage {
   const cached = u.input_tokens_details?.cached_tokens ?? 0;
   return {
@@ -370,13 +404,29 @@ export function toResponsesTools(
  * text becomes an output_text message; tool_use blocks become top-level
  * function_call items; tool_result blocks become function_call_output items,
  * with any images forwarded on a trailing user message.
+ *
+ * Reasoning items are replayed ONLY for the turn in progress. OpenAI's documented
+ * rule is to pass back reasoning / function-call items "since the last user
+ * message"; older ones its "systems will smartly ignore". But EVERY item in
+ * `input` bills as input tokens, so replaying the whole session's encrypted
+ * reasoning means paying to upload blobs the server then discards — and the pile
+ * grows with every tool call the session makes, unbounded until compaction. We
+ * cut at the same turn boundary pruneStaleImagesInPlace uses.
  */
 export function toResponsesInput(
   messages: Anthropic.MessageParam[],
 ): OpenAI.Responses.ResponseInputItem[] {
   const out: OpenAI.Responses.ResponseInputItem[] = [];
+  // Anything at an index ABOVE this belongs to the current turn. -1 (the slice
+  // holds no real user turn) means replay everything — we're mid-turn already.
+  const lastUserTurn = lastRealUserTurnIndex(messages);
 
-  for (const msg of messages) {
+  for (const [index, msg] of messages.entries()) {
+    // OpenAI requires every item between the last user message and the pending
+    // function_call_output to survive untouched; below that line, drop the
+    // reasoning ciphertext (the function_call itself must always stay, or the
+    // matching function_call_output would dangle).
+    const replayReasoning = index > lastUserTurn;
     if (msg.role === "assistant") {
       if (typeof msg.content === "string") {
         if (msg.content) out.push({ role: "assistant", content: msg.content });
@@ -389,8 +439,11 @@ export function toResponsesInput(
         else if (block.type === "tool_use") {
           // Replay the encrypted reasoning item immediately before its call so
           // the model keeps its chain-of-thought across the tool round-trip
-          // (stateless store:false). Only when both id + ciphertext survived.
-          const reasoning = (block as { openai_reasoning?: ReasoningRef }).openai_reasoning;
+          // (stateless store:false). Only when both id + ciphertext survived,
+          // and only for the current turn (see the boundary note above).
+          const reasoning = replayReasoning
+            ? (block as { openai_reasoning?: ReasoningRef }).openai_reasoning
+            : undefined;
           if (reasoning?.id && reasoning.encrypted) {
             fnCalls.push({
               type: "reasoning",

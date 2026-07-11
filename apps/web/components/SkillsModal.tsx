@@ -34,6 +34,7 @@ export default function SkillsModal({
   const [error, setError] = useState<string | null>(null);
   const [packs, setPacks] = useState<SkillPackSummary[]>([]);
   const [packBusy, setPackBusy] = useState<string | null>(null);
+  const [trusted, setTrusted] = useState(true);
   // The content as loaded/last-saved, to detect unsaved edits (§D).
   const pristineRef = useRef<string>("");
   const [confirmDiscard, setConfirmDiscard] = useState(false);
@@ -63,6 +64,7 @@ export default function SkillsModal({
         if (abort) return;
         setContent(s.content);
         pristineRef.current = s.content;
+        setTrusted(s.trusted !== false);
         setPacks(p.packs);
         setLibrary(lib.skills);
       } catch (err) {
@@ -103,6 +105,7 @@ export default function SkillsModal({
     try {
       await writeSkillsApi(projectId, content);
       pristineRef.current = content;
+      setTrusted(true);
       toast.success("Skills saved");
       onClose();
     } catch (err) {
@@ -177,7 +180,10 @@ export default function SkillsModal({
       title="Project Skills"
       subtitle={
         <>
-          Stored at <code>.uniqus/skills.md</code> · prepended to the agent system prompt every turn
+          Stored at <code>.uniqus/skills.md</code>
+          {trusted
+            ? " · prepended to the agent system prompt every turn"
+            : " · imported Skills are inactive until you save them"}
         </>
       }
       onClose={requestClose}
@@ -211,6 +217,8 @@ export default function SkillsModal({
                   Undo
                 </button>
               </>
+            ) : !trusted ? (
+              "Imported Skills are inactive until you save them"
             ) : (
               `${content.length.toLocaleString()} chars · max 64 KB${dirty ? " · unsaved" : ""}`
             )}

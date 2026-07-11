@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { ThinkingEffort } from "@uniqus/api-types";
-import { WEB_SEARCH_TOOL } from "../tools.js";
+import type { Citation, ThinkingEffort } from "@uniqus/api-types";
+import { CITATIONS_BLOCK_FIELD, normalizeCitations } from "../citations.js";
+import { webSearchToolForModel } from "../tools.js";
 import { parsePartialJson } from "./partialJson.js";
 import type {
   ForcedToolParams,
@@ -56,7 +57,34 @@ const FOREIGN_BLOCK_FIELDS = [
   "thought_signature",
   "thought_signature_model",
   "openai_reasoning",
+  // Our normalized web-search citations (agent/citations.ts). Anthropic HAS a
+  // `citations` field on text blocks, but it expects its own union shape with
+  // `encrypted_index` — ours would 400. Strip it; the model never needs it.
+  CITATIONS_BLOCK_FIELD,
 ] as const;
+
+/**
+ * Pull the web sources out of a finished Anthropic turn. Every text block the
+ * model grounded in search carries a `citations` array, and the block itself IS
+ * the cited span — so the running length of the answer text at the end of that
+ * block is exactly where an inline marker belongs. (Anthropic reports
+ * `cited_text` from the SOURCE page, not offsets into the answer, which is why
+ * we anchor on block boundaries rather than a substring search.)
+ */
+export function citationsFromContent(content: Anthropic.ContentBlock[]): Citation[] {
+  const raw: Partial<Citation>[] = [];
+  let endIndex = 0;
+  for (const block of content) {
+    if (block.type !== "text") continue;
+    endIndex += block.text.length;
+    for (const c of block.citations ?? []) {
+      if (c.type === "web_search_result_location") {
+        raw.push({ url: c.url, title: c.title ?? undefined, endIndex });
+      }
+    }
+  }
+  return normalizeCitations(raw);
+}
 
 /**
  * Strip provider-specific extras the canonical history may carry that the
@@ -158,7 +186,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
       system: [{ type: "text", text: p.system, cache_control: { type: "ephemeral" } }],
       tools: withToolCache([
         ...p.tools,
-        WEB_SEARCH_TOOL,
+        webSearchToolForModel(p.model),
       ] as Anthropic.Tool[]) as Anthropic.MessageCreateParams["tools"],
       messages: withPrefixCache(stripForeignFields(p.messages)),
     } as Anthropic.MessageCreateParamsStreaming;
@@ -276,11 +304,13 @@ export class AnthropicAdapter implements ModelProviderAdapter {
       }
     }
 
+    const citations = citationsFromContent(finalMessage.content);
     return {
       content: finalMessage.content,
       stopReason: mapStopReason(finalMessage.stop_reason),
       toolCalls,
       usage: finalUsage,
+      ...(citations.length > 0 ? { citations } : {}),
     };
   }
 

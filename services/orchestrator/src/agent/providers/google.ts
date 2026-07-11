@@ -1,8 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { FunctionCallingConfigMode, GoogleGenAI, ThinkingLevel } from "@google/genai";
+import type { GroundingMetadata } from "@google/genai";
 import { DEFAULT_VISION_BRIDGE_SYSTEM } from "./types.js";
+import { endIndexOfSpan, normalizeCitations } from "../citations.js";
 import type Anthropic from "@anthropic-ai/sdk";
-import type { ThinkingEffort } from "@uniqus/api-types";
+import type { Citation, ThinkingEffort } from "@uniqus/api-types";
 import type {
   ForcedToolParams,
   ModelProviderAdapter,
@@ -203,6 +205,43 @@ export async function describeImage(opts: {
 // prefix makes every id globally unique across turns AND adapter instances.
 let geminiIdCounter = 0;
 
+/**
+ * Pull the web sources out of Gemini's grounding metadata.
+ *
+ * `groundingChunks[i].web` holds the source; `groundingSupports[]` maps a span
+ * of the answer to the chunks that support it. The span's `startIndex`/
+ * `endIndex` are BYTE offsets into a Part, which don't map to JS string indices
+ * — but the support also echoes the span's `text`, so we locate that directly
+ * (endIndexOfSpan) and skip the UTF-8 → UTF-16 conversion entirely.
+ *
+ * When a model grounds without emitting supports (only chunks), we still list
+ * every source — un-anchored, so the UI shows them in the footer with no inline
+ * marker. That is the honest rendering: we know it searched, not where it used
+ * each result.
+ */
+export function citationsFromGrounding(
+  grounding: GroundingMetadata | undefined,
+  answerText: string,
+): Citation[] {
+  const chunks = grounding?.groundingChunks ?? [];
+  const supports = grounding?.groundingSupports ?? [];
+  const raw: Partial<Citation>[] = [];
+
+  for (const support of supports) {
+    const endIndex = endIndexOfSpan(answerText, support.segment?.text);
+    for (const idx of support.groundingChunkIndices ?? []) {
+      const web = chunks[idx]?.web;
+      if (web?.uri) raw.push({ url: web.uri, title: web.title, endIndex });
+    }
+  }
+  if (raw.length === 0) {
+    for (const chunk of chunks) {
+      if (chunk.web?.uri) raw.push({ url: chunk.web.uri, title: chunk.web.title });
+    }
+  }
+  return normalizeCitations(raw);
+}
+
 export class GoogleAdapter implements ModelProviderAdapter {
   readonly provider = "google" as const;
   private ai: GoogleGenAI;
@@ -259,6 +298,8 @@ export class GoogleAdapter implements ModelProviderAdapter {
     // tool like googleSearch — surfaced as web_search, never executed).
     const ourTools = new Set(p.tools.map((t) => t.name));
     let searchSurfaced = false;
+    // Grounding metadata (the cited sources), kept from whichever chunk carries it.
+    let grounding: GroundingMetadata | undefined;
 
     // Iterate raw parts (not the chunk.text / chunk.functionCalls accessors) so
     // we can (a) split thought-summary parts from the answer text and (b) read
@@ -276,7 +317,13 @@ export class GoogleAdapter implements ModelProviderAdapter {
       // groundingMetadata fallback — some models only report searches here (and
       // typically only on the final chunk). Skipped when toolCall parts already
       // surfaced the same searches with richer per-call queries (3.5 Flash).
-      const queries = chunk.candidates?.[0]?.groundingMetadata?.webSearchQueries;
+      // Keep the richest groundingMetadata we see. It typically lands only on
+      // the final chunk, and it is the ONLY place the cited source URLs appear
+      // — the toolCall parts carry queries, not results.
+      const gm = chunk.candidates?.[0]?.groundingMetadata;
+      if (gm?.groundingChunks?.length || gm?.groundingSupports?.length) grounding = gm;
+
+      const queries = gm?.webSearchQueries;
       if (queries && queries.length > 0 && !searchSurfaced)
         surfaceSearch({ queries }, queries.join("\n"));
 
@@ -399,11 +446,13 @@ export class GoogleAdapter implements ModelProviderAdapter {
       toolCalls.push({ id: c.id, name: c.name, input: c.args });
     }
 
+    const citations = citationsFromGrounding(grounding, text);
     return {
       content,
       stopReason: mapStopReason(finishReason, toolCalls.length > 0),
       toolCalls,
       usage,
+      ...(citations.length > 0 ? { citations } : {}),
     };
   }
 

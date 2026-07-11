@@ -12,6 +12,7 @@ import {
   uploadProjectFilesApi,
   type SlashCommandSummary,
 } from "@/lib/api";
+import { renderAnswer, sourceHost, type Source } from "@/lib/citations";
 import { useStore, AGENT_PREVIEW_TAB, type ChatItem, type SelectedElement } from "@/lib/store";
 import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
 import { useIsMobile } from "@/lib/use-is-mobile";
@@ -1668,6 +1669,33 @@ function CopyButton({
   );
 }
 
+/**
+ * Attribution for an answer grounded in web search. Rendered under the prose,
+ * alongside the inline `[n]` markers renderAnswer splices in. This is required
+ * by every provider that runs a server-side search — Anthropic ("citations must
+ * be included to the original source") and OpenAI, which additionally requires
+ * the inline markers be "clearly visible and clickable".
+ */
+function SourcesFooter({ sources }: { sources: Source[] }) {
+  if (sources.length === 0) return null;
+  return (
+    <div className="msg-sources">
+      <span className="msg-sources-label">Sources</span>
+      <ol className="msg-sources-list">
+        {sources.map((s) => (
+          <li key={s.url}>
+            <a href={s.url} target="_blank" rel="noopener noreferrer nofollow" title={s.url}>
+              <span className="msg-sources-n">{s.n}</span>
+              <span className="msg-sources-title">{s.title || sourceHost(s.url)}</span>
+              <span className="msg-sources-host">{sourceHost(s.url)}</span>
+            </a>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 /** Markdown `pre` renderer that wraps a code block with a hover Copy button. */
 function CodeBlock({ children }: { children?: ReactNode }) {
   const ref = useRef<HTMLPreElement>(null);
@@ -1836,6 +1864,9 @@ const ChatItemView = memo(function ChatItemView({
     );
   }
   if (item.kind === "assistant_text") {
+    // Splice clickable [n] markers into the prose and collect the source list.
+    // Copy still yields the model's own words, not our injected links.
+    const { markdown, sources } = renderAnswer(item.content, item.citations);
     return (
       <div className="msg">
         <div className="head">
@@ -1847,7 +1878,8 @@ const ChatItemView = memo(function ChatItemView({
           </span>
         </div>
         <div className="msg-body" style={{ paddingLeft: 30 }}>
-          <Markdown content={item.content} />
+          <Markdown content={markdown} />
+          <SourcesFooter sources={sources} />
         </div>
       </div>
     );

@@ -1,7 +1,8 @@
 import OpenAI from "openai";
 import { fetch as undiciFetch } from "undici";
 import type Anthropic from "@anthropic-ai/sdk";
-import type { ThinkingEffort } from "@uniqus/api-types";
+import type { Citation, ThinkingEffort } from "@uniqus/api-types";
+import { normalizeCitations } from "../citations.js";
 import { safeParseJson } from "./openai.js";
 import { parsePartialJson } from "./partialJson.js";
 import { DEFAULT_VISION_BRIDGE_SYSTEM } from "./types.js";
@@ -169,6 +170,38 @@ function toTokenUsage(u: OpenAIUsage | undefined | null): TokenUsage | undefined
  * NOT trigger a search in testing, so stick with `search-prime`.
  * `search_result:"True"` asks for the result list alongside the answer.
  */
+/**
+ * One entry of GLM's top-level `web_search` array — returned because the tool
+ * sets `search_result:"True"` below. `refer` ("ref_1") is what the model's own
+ * inline `[1]` markers point at, so array order IS citation order.
+ */
+interface GlmWebSearchResult {
+  title?: string;
+  link?: string;
+  refer?: string;
+}
+
+/**
+ * Map GLM's search results to canonical citations. GLM gives no offsets into
+ * the answer — it writes its own `[n]` markers inline instead — so these are
+ * un-anchored and ordered by `refer`, which is exactly the numbering the model
+ * used. The UI links the existing markers rather than inserting new ones.
+ *
+ * Without this the model's `[1]`/`[2]` render as dead text pointing at nothing.
+ */
+export function citationsFromGlmSearch(results: GlmWebSearchResult[]): Citation[] {
+  const referNumber = (r: GlmWebSearchResult, i: number): number => {
+    const n = Number.parseInt(String(r.refer ?? "").replace(/\D+/g, ""), 10);
+    return Number.isFinite(n) && n > 0 ? n : i + 1;
+  };
+  return normalizeCitations(
+    [...results]
+      .map((r, i) => ({ r, n: referNumber(r, i) }))
+      .sort((a, b) => a.n - b.n)
+      .map(({ r }) => ({ url: r.link, title: r.title })),
+  );
+}
+
 const GLM_WEB_SEARCH_TOOL = {
   type: "web_search",
   web_search: {
@@ -247,6 +280,9 @@ export class ZaiAdapter implements ModelProviderAdapter {
     const announced = new Set<number>();
     let usage: TokenUsage | undefined;
     let finish: string | null = null;
+    // GLM returns its search results as a top-level `web_search` array on the
+    // chunk that carries them (we asked for it via search_result:"True").
+    let webSearch: GlmWebSearchResult[] = [];
 
     for await (const chunk of stream) {
       // With include_usage, the final chunk carries usage and has no choices.
@@ -254,6 +290,9 @@ export class ZaiAdapter implements ModelProviderAdapter {
         usage = zaiTokenUsage(chunk.usage);
         p.onUsage?.(usage);
       }
+      // Not in the OpenAI SDK's chunk typings — GLM adds it when search ran.
+      const results = (chunk as unknown as { web_search?: GlmWebSearchResult[] }).web_search;
+      if (Array.isArray(results) && results.length > 0) webSearch = results;
       const choice = chunk.choices?.[0];
       if (!choice) continue;
       const delta = choice.delta as OpenAI.Chat.Completions.ChatCompletionChunk.Choice.Delta & {
@@ -307,11 +346,13 @@ export class ZaiAdapter implements ModelProviderAdapter {
       toolCalls.push({ id: c.id, name: c.name, input });
     }
 
+    const citations = citationsFromGlmSearch(webSearch);
     return {
       content,
       stopReason: mapZaiFinish(finish, toolCalls.length > 0),
       toolCalls,
       usage,
+      ...(citations.length > 0 ? { citations } : {}),
     };
   }
 
@@ -351,22 +392,23 @@ function applyThinking(
   }
   if (!effort) return;
   // GLM-5.2's `reasoning_effort` accepts max/xhigh/high/medium/low/minimal/none,
-  // but with thinking ON the server COLLAPSES them to two working tiers:
-  // low/medium → "high" (enhanced reasoning) and high/xhigh/max → "max" (deepest,
-  // GLM's recommended coding default). The composer only ever surfaces high/max
-  // for a GLM model (thinkingEffortsForModel), so those two are the live path;
-  // lower rungs (only reachable on an Auto turn that resolved to GLM) fold in:
-  //   high/xhigh/max ⇒ "max"   — GLM's deepest reasoning, for the hardest turns
-  //   low/medium     ⇒ "high"  — enhanced but BOUNDED reasoning
+  // which the server collapses into THREE real tiers:
+  //   none/minimal    ⇒ no thinking
+  //   low/medium/high ⇒ "high"  — enhanced but BOUNDED reasoning
+  //   xhigh/max       ⇒ "max"   — GLM's deepest reasoning (and its own default)
+  // So "high" is its OWN tier, not an alias for the deepest one. The composer
+  // surfaces exactly high/max for a GLM model (thinkingEffortsForModel), so those
+  // two are the live path and they MUST send different payloads — folding `high`
+  // into "max" made the picker a no-op and ran every GLM turn at the deepest tier.
   // CRITICAL: medium must NOT map to "max". It used to (`effort === "low" ? high
   // : max`), which silently promoted a *medium* request to GLM's deepest tier and
   // let GLM-5.2 spiral in thinking for minutes — repeatedly "deciding" to start
-  // implementing, then re-deliberating — with no tool call ever emitted. Only
-  // high/xhigh/max should opt into "max". We send the already-resolved tier
-  // ("high"/"max") rather than leaning on the server-side collapse, so the request
-  // is explicit and robust if that mapping ever changes.
-  // https://docs.z.ai/api-reference/llm/chat-completion (reasoning_effort)
-  const deep = effort === "high" || effort === "xhigh" || effort === "max";
+  // implementing, then re-deliberating — with no tool call ever emitted. Nor must
+  // `high`: that reintroduced the same spiral one rung up. Only xhigh/max opt in.
+  // We send the already-resolved tier rather than leaning on the server-side
+  // collapse, so the request is explicit and robust if that mapping ever changes.
+  // https://docs.z.ai/guides/capabilities/thinking (reasoning_effort)
+  const deep = effort === "xhigh" || effort === "max";
   body.thinking = { type: "enabled" };
   body.reasoning_effort = deep ? "max" : "high";
 }

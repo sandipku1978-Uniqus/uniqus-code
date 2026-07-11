@@ -120,6 +120,30 @@ export type ModelChoice = "auto" | string;
  */
 export type ThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
+/**
+ * One web source a model cited, normalized across providers. Every provider
+ * that runs a server-side web search returns attribution in its own shape —
+ * Anthropic `citations` on each text block, OpenAI `url_citation` annotations,
+ * Gemini `groundingMetadata`, GLM a top-level `web_search` array — and every
+ * one of them requires it to be shown. OpenAI's is the strictest: "inline
+ * citations must be made clearly visible and clickable in your user interface."
+ * So this shape carries both what the footer needs (url, title) and what an
+ * inline marker needs (where the cited span ends).
+ */
+export interface Citation {
+  /** Absolute http(s) URL of the source. */
+  url: string;
+  /** Page title, when the provider supplies one. */
+  title?: string;
+  /**
+   * 0-based character offset into the assistant's answer text at which the
+   * cited span ENDS — where an inline marker is anchored. Absent when the
+   * provider gives no span (GLM, which writes its own `[n]` markers inline);
+   * such a source still appears in the footer.
+   */
+  endIndex?: number;
+}
+
 /** Every rung, low→max, in order. The composer slider renders a subset of these. */
 export const THINKING_EFFORTS: ThinkingEffort[] = ["low", "medium", "high", "xhigh", "max"];
 
@@ -129,9 +153,11 @@ export const THINKING_EFFORTS: ThinkingEffort[] = ["low", "medium", "high", "xhi
  * two never drift (mirrors how MODEL_CATALOG is the single source of truth).
  *
  * - **Anthropic** (`output_config.effort`) accepts the full low→max scale.
- * - **Z.ai / GLM-5.2** collapses reasoning to two real tiers, so we expose only
- *   `high`→`max` (our `high`⇒GLM "max"-adjacent deepest; anything lower is a
- *   bounded tier). Showing five rungs would be a lie — three of them no-op.
+ * - **Z.ai / GLM-5.2** collapses its seven rungs into three real tiers
+ *   (`none`/`minimal` ⇒ no thinking, `low`/`medium`/`high` ⇒ "high",
+ *   `xhigh`/`max` ⇒ "max"), so we expose only `high`→`max`: the two reasoning
+ *   tiers that actually differ. Showing five rungs would be a lie — `low` and
+ *   `medium` are indistinguishable from `high` on the wire.
  * - **OpenAI** (`reasoning.effort`) tops out at `xhigh` on the current GPT-5.x
  *   models (there is no `max`), so we expose `low`→`xhigh` and hide only `max`.
  * - **Google** caps out at `high` (`thinkingLevel` has no xhigh/max), so we hide
@@ -330,6 +356,14 @@ export const MODEL_PRICING: Record<string, ModelPrice> = {
   // the 4.6 generation (verified 2026-07-07 vs the Anthropic models overview;
   // Opus 4.8 is likewise flat). The old band over-priced every >200K Sonnet turn.
   "claude-sonnet-4-6": { input: 3, output: 15 },
+  // Haiku 4.5 — NOT user-selectable (absent from MODEL_CATALOG, like the vision
+  // bridge models below), but it IS the internal compact/classify model (router.ts
+  // AUTO), so a metered aux call must not fall through to DEFAULT_PRICE's $3/$15 —
+  // a 3× overprice on every summarize/classify row. Both the dated id the router
+  // pins and the bare alias are listed so either persists correctly. Flat, no band.
+  // Source: platform.claude.com/docs/en/about-claude/pricing (verified 2026-07-09).
+  "claude-haiku-4-5-20251001": { input: 1, output: 5 },
+  "claude-haiku-4-5": { input: 1, output: 5 },
   // Z.ai (GLM) — source: z.ai published API rates as of 2026-06-18. Cached input
   // is ~0.26 (not the 0.1× default), so set it explicitly; GLM has no separate
   // cache-write line. Flat-priced (no long-context band) despite the 1M window.
@@ -603,9 +637,13 @@ export interface ProjectSummary {
   design_system_id?: string | null;
   /** Attached reusable library skills (ids; empty/undefined = none). */
   skill_library_ids?: string[] | null;
+  /** Whether `.uniqus/skills.md` is trusted enough to inject into the agent prompt. */
+  skills_trust?: ProjectSkillsTrust | null;
   /** Organization (workspace) the project belongs to. Null = the owner's personal workspace. */
   org_id?: string | null;
 }
+
+export type ProjectSkillsTrust = "trusted" | "untrusted_import";
 
 // ── Design systems ──────────────────────────────────────────────────────────
 // Global, per-user reusable token sets attached to a project (or none) and
@@ -916,6 +954,16 @@ export type ServerEvent =
        */
       type: "thinking";
       content: string;
+    }
+  | {
+      /**
+       * Web sources the model cited, emitted once per assistant turn that ran a
+       * search, immediately after that turn's text. Providers hand back
+       * attribution only with the finished response, so this cannot stream as a
+       * delta. Rendering it is REQUIRED — see the {@link Citation} docs.
+       */
+      type: "citations";
+      citations: Citation[];
     }
   | {
       /**

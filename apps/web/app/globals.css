@@ -1042,7 +1042,7 @@ section.band .sub {
 @media (max-width: 760px) { .metric-strip { grid-template-columns: repeat(2, 1fr); } }
 
 /* All-projects filter toolbar. */
-.coll-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+.coll-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
 .coll-search { position: relative; flex: 1; max-width: 380px; display: flex; align-items: center; }
 .coll-search svg { position: absolute; left: 12px; color: var(--text-dim); pointer-events: none; }
 .coll-search input {
@@ -1067,7 +1067,35 @@ section.band .sub {
   font-size: 11px;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
+  margin-left: auto;
 }
+select.sort-select { width: auto; flex: none; }
+.status-filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.status-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+  background: var(--bg-elev);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color var(--dur-fast) ease, border-color var(--dur-fast) ease, background var(--dur-fast) ease;
+}
+.status-filter:hover { color: var(--text-primary); border-color: var(--text-dim); }
+.status-filter[aria-pressed="true"] {
+  color: var(--text-primary);
+  border-color: var(--brand-magenta);
+  background: rgba(178, 30, 125, 0.14);
+}
+.status-filter .d { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.status-filter .d.live { background: var(--conf-high); }
+.status-filter .d.building { background: var(--conf-medium); }
+.status-filter .d.failed { background: var(--conf-low); }
+.status-filter .d.none { background: var(--text-dim); }
 
 /* Recent timeline — grouped, hairline-divided rows on a status-colored rail. */
 .timeline { animation: fadeInUp var(--dur-base) var(--ease-out) backwards; }
@@ -5083,6 +5111,100 @@ section.band .sub {
 .dash-listrow.active { background: var(--bg-dark); border-color: var(--brand-magenta); }
 
 /* ==========================================================================
+   Organization sub-pages (Members · Usage · Settings) — same page chrome as
+   Databases/Design Systems/Skills: .dash-page + .coll-head + .metric-strip.
+   Adds a hairline member list and a danger-zone card modifier.
+   ========================================================================== */
+.org-page { max-width: 880px; }
+
+.member-list {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  overflow: hidden;
+  animation: fadeInUp var(--dur-base) var(--ease-out) backwards;
+}
+.member-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-light);
+  transition: background var(--dur-fast) ease;
+}
+.member-row:first-child { border-top: none; }
+.member-row:hover { background: var(--bg-surface-hover); }
+.member-avatar {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: var(--radius-full);
+  display: grid;
+  place-items: center;
+  background: var(--bg-surface-active);
+  color: var(--text-muted);
+  font-family: var(--font-mono-stack);
+  font-size: 12px;
+  font-weight: 600;
+}
+.member-identity { flex: 1; min-width: 0; }
+.member-name {
+  color: var(--text-primary);
+  font-size: 13.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.member-email {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.role-pill {
+  flex: none;
+  font-family: var(--font-mono-stack);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--brand-magenta);
+  background: color-mix(in srgb, var(--brand-magenta) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--brand-magenta) 30%, transparent);
+  border-radius: var(--radius-full);
+  padding: 3px 10px;
+}
+
+.dash-card.danger { border-color: color-mix(in srgb, var(--conf-low) 35%, var(--border-default)); }
+.danger-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.danger-row + .danger-row {
+  border-top: 1px solid var(--border-light);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+.danger-row .t { color: var(--text-primary); font-size: 13.5px; }
+.danger-row .d { color: var(--text-dim); font-size: 11.5px; margin-top: 2px; max-width: 48ch; }
+
+.usage-meter {
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+.usage-meter > span {
+  display: block;
+  height: 100%;
+  transition: width 200ms ease-out;
+}
+
+/* ==========================================================================
    Design Systems workflow — empty-state hero, gradient create/import composer,
    list + editor layout, and the sticky live preview.
    ========================================================================== */
@@ -8844,9 +8966,9 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   letter-spacing: 0.03em;
   text-transform: uppercase;
 }
-.change-tag.new { background: color-mix(in srgb, var(--mk-green) 22%, transparent); color: var(--mk-green); }
-.change-tag.improved { background: color-mix(in srgb, var(--mk-cyan) 22%, transparent); color: var(--mk-cyan); }
-.change-tag.fixed { background: color-mix(in srgb, var(--mk-amber) 22%, transparent); color: var(--mk-amber); }
+.change-tag.tag-new { background: color-mix(in srgb, var(--mk-green) 22%, transparent); color: var(--mk-green); }
+.change-tag.tag-improved { background: color-mix(in srgb, var(--mk-cyan) 22%, transparent); color: var(--mk-cyan); }
+.change-tag.tag-fixed { background: color-mix(in srgb, var(--mk-amber) 22%, transparent); color: var(--mk-amber); }
 
 @media (max-width: 980px) {
   .mk-changelog-layout { grid-template-columns: 1fr; gap: 24px; }
@@ -9529,4 +9651,67 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 @keyframes amDotPulse {
   0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, #b21e7d) 45%, transparent); }
   50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent, #b21e7d) 0%, transparent); }
+}
+
+/* ── Web-search attribution ────────────────────────────────────────────────
+   Sources footer under an answer the model grounded in web search. The inline
+   [n] markers are ordinary markdown links (see lib/citations.ts) and inherit
+   link styling; these rules cover the footer only. Required by the providers:
+   Anthropic mandates citing the source, OpenAI mandates the inline markers be
+   clearly visible and clickable. */
+.msg-sources {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+.msg-sources-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.55;
+  margin-bottom: 6px;
+}
+.msg-sources-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.msg-sources-list a {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 6px;
+  margin-left: -6px;
+  border-radius: 6px;
+  font-size: 13px;
+  text-decoration: none;
+  color: inherit;
+}
+.msg-sources-list a:hover {
+  background: color-mix(in srgb, currentColor 7%, transparent);
+}
+.msg-sources-n {
+  flex: none;
+  min-width: 16px;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  opacity: 0.5;
+}
+.msg-sources-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.msg-sources-list a:hover .msg-sources-title {
+  text-decoration: underline;
+}
+.msg-sources-host {
+  flex: none;
+  font-size: 11px;
+  opacity: 0.45;
 }

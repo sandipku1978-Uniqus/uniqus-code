@@ -32,6 +32,7 @@ import type {
   DesignFindings,
   DesignSystemDraft,
   ChangedFile,
+  Citation,
   PermissionMode,
   ToolRiskCategory,
 } from "@uniqus/api-types";
@@ -44,7 +45,8 @@ import {
   runModeForPermission,
 } from "@uniqus/api-types";
 import { decidePermission } from "./agent/permissions.js";
-import { runAgentLoop } from "./agent/loop.js";
+import { readCitations } from "./agent/citations.js";
+import { LIVE_PROJECT_STATE_MARKER, runAgentLoop } from "./agent/loop.js";
 import { detectActiveConnectors } from "./connectors/detector.js";
 import { runInteractPreview, type InteractAction } from "./agent/interact.js";
 import { getFlow, setFlowRunResult } from "./db/flows.js";
@@ -59,6 +61,9 @@ import { proposePlan, formatPlanForExecution } from "./agent/plan.js";
 import { getTodos, clearTodos } from "./agent/todos.js";
 import { assertPublicHost, safeFetch } from "./connectors/ssrfGuard.js";
 import {
+  hasSkillsFile,
+  isSkillsRelPath,
+  projectSkillsAreTrusted,
   readSkills,
   writeSkills,
   skillsRelPath,
@@ -128,6 +133,7 @@ import {
   setProjectOrg,
   createProject,
   getProject,
+  getProjectById,
   getProjectForUser,
   touchProject,
   deleteProject,
@@ -138,6 +144,7 @@ import {
   updateProjectLinkedBranch,
   setProjectDesignSystem,
   setProjectSkillLibraries,
+  setProjectSkillsTrust,
 } from "./db/projects.js";
 import {
   listDesignSystems,
@@ -310,6 +317,23 @@ async function resolveNewProjectSkillIds(
     console.error("resolveNewProjectSkillIds defaults lookup failed (non-fatal):", err);
     return [];
   }
+}
+
+async function markImportedSkillsUntrustedIfPresent(
+  projectId: string,
+  sandboxDir: string,
+  source: "github" | "zip",
+): Promise<void> {
+  if (!(await hasSkillsFile(sandboxDir))) return;
+  await setProjectSkillsTrust(projectId, "untrusted_import").catch((err) =>
+    console.error(`[${source}-import] mark imported skills untrusted failed for ${projectId}:`, err),
+  );
+}
+
+async function markProjectSkillsTrusted(projectId: string, source: string): Promise<void> {
+  await setProjectSkillsTrust(projectId, "trusted").catch((err) =>
+    console.error(`[skills] mark trusted failed for ${projectId} (${source}):`, err),
+  );
 }
 
 type Sender = (event: ServerEvent) => void;
@@ -1371,6 +1395,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         { repo_url: repoUrl, branch: body.branch, pat: authToken, preserveGit: body.preserve_git === true },
         dest,
       );
+      await markImportedSkillsUntrustedIfPresent(project.id, dest, "github");
       await getTracker(project.id, dest).syncChanges();
 
       // P1.1: persist the captured branch + remote so the workspace shows them.
@@ -1522,7 +1547,13 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (!project) return json(res, 404, { error: "project not found" });
     const dest = sandboxDirFor(projectId);
     const content = await readSkills(dest);
-    return json(res, 200, { content: content ?? "", path: skillsRelPath() });
+    const trusted = projectSkillsAreTrusted(project.skills_trust);
+    return json(res, 200, {
+      content: content ?? "",
+      path: skillsRelPath(),
+      trusted,
+      trust: trusted ? "trusted" : "untrusted_import",
+    });
   }
   if (skillsMatch && req.method === "PUT") {
     const projectId = skillsMatch[1];
@@ -1534,6 +1565,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     }
     const dest = sandboxDirFor(projectId);
     await writeSkills(dest, body.content);
+    await markProjectSkillsTrusted(projectId, "skills-api");
     const rel = skillsRelPath();
     getTracker(projectId, dest)
       .syncFile(rel)
@@ -1954,6 +1986,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       content = existing && existing.trim() ? `${existing.trimEnd()}\n\n${pack.body}` : pack.body;
     }
     await writeSkills(dest, content);
+    await markProjectSkillsTrusted(projectId, "skill-pack");
     const rel = skillsRelPath();
     getTracker(projectId, dest)
       .syncFile(rel)
@@ -2844,6 +2877,7 @@ async function handleZipImport(
 
   try {
     const result = await importZip(zipBuffer, dest);
+    await markImportedSkillsUntrustedIfPresent(project.id, dest, "zip");
     await getTracker(project.id, dest).syncChanges();
     return json(res, 201, { project: toProjectSummary(project), import: result });
   } catch (err) {
@@ -3339,6 +3373,9 @@ async function handleFileOp(
         return json(res, 409, { error: `destination already exists: ${toRel}` });
       }
       await fs.rename(fromFull, toFull);
+      if (isSkillsRelPath(toRel)) {
+        await markProjectSkillsTrusted(projectId, "file-rename");
+      }
 
       // Storage doesn't have a true rename. Walk the moved subtree and
       // re-sync each file under its new path; the old paths become orphans
@@ -3773,6 +3810,7 @@ function toProjectSummary(p: {
   latest_deploy_at?: string | null;
   design_system_id?: string | null;
   skill_library_ids?: string[] | null;
+  skills_trust?: ProjectSummary["skills_trust"];
   org_id?: string | null;
 }): ProjectSummary {
   return {
@@ -3790,6 +3828,7 @@ function toProjectSummary(p: {
     latest_deploy_at: p.latest_deploy_at ?? null,
     design_system_id: p.design_system_id ?? null,
     skill_library_ids: p.skill_library_ids ?? [],
+    skills_trust: p.skills_trust ?? "trusted",
     org_id: p.org_id ?? null,
   };
 }
@@ -4137,6 +4176,9 @@ async function handleConnection(
             }
           }
           await sandboxWriteFile({ rootDir: sandboxDir, vm: vmHandle ?? undefined }, event.path, event.content);
+          if (isSkillsRelPath(event.path)) {
+            await markProjectSkillsTrusted(project.id, "client-write-file");
+          }
           send({ type: "client_write_ack", path: event.path, ok: true });
           // Tell other sessions on this project that the file changed (their
           // editor will refresh if they have it open). Skip our own session
@@ -4610,6 +4652,10 @@ const REPLAY_TRAILER_MARKERS = [
   "\n\nApproved plan:",
   // The selected-element block the loop appends (see selectedElement.ts).
   SELECTED_ELEMENT_MARKER,
+  // The per-turn live-project-state block the loop appends (see loop.ts). It
+  // moved out of the system prompt so the cached prefix stays byte-stable, and
+  // it must not surface in the user's replayed bubble.
+  LIVE_PROJECT_STATE_MARKER,
 ];
 
 /**
@@ -4739,6 +4785,11 @@ function replayHistory(send: Sender, history: Anthropic.MessageParam[]): void {
         for (const block of msg.content) {
           if (block.type === "text") {
             send({ type: "text", content: block.text });
+            // Web sources the model cited, stamped on the block by the loop.
+            // Replayed after their text so the client attaches them to the
+            // bubble they belong to (same order as the live stream).
+            const citations = readCitations(block);
+            if (citations) send({ type: "citations", citations });
           } else if (block.type === "tool_use") {
             toolCalls++;
             send({ type: "tool_call", call_id: block.id, name: block.name, input: block.input });
@@ -4961,9 +5012,6 @@ async function runSession(
   const messageWithRefs = projectNote
     ? `<system-reminder>${projectNote}</system-reminder>\n\n${messageWithRefsBase}`
     : messageWithRefsBase;
-  // Re-read skills every turn so edits during a long session take effect
-  // on the next iteration (rather than only after a session reset).
-  const skillsBody = await readSkills(sandboxDir);
   // Account-wide custom prompt (Settings → Custom prompts). Fetched per turn
   // so edits take effect immediately; non-fatal if the lookup fails.
   const accountPrompt = userId
@@ -4980,6 +5028,11 @@ async function runSession(
         fullName: projectRow.github_repo_full_name ?? projectRow.github_repo_url,
         url: projectRow.github_repo_url,
       }
+    : null;
+  // Imported `.uniqus/skills.md` is not prompt-trusted until the user explicitly
+  // saves it through Uniqus (Skills modal or file editor).
+  const skillsBody = projectSkillsAreTrusted(projectRow?.skills_trust)
+    ? await readSkills(sandboxDir)
     : null;
   // The project's attached design system (per-turn read so attach/detach in the
   // Design Systems tab takes effect on the next turn). Non-fatal on lookup error.
@@ -5013,6 +5066,7 @@ async function runSession(
   const planHooks = {
     onText: (content: string) => send({ type: "text", content }),
     onThinking: (content: string) => send({ type: "thinking", content }),
+    onCitations: (citations: Citation[]) => send({ type: "citations", citations }),
     onToolCallStarted: (callId: string, name: string) =>
       send({ type: "tool_call", call_id: callId, name, input: {} }),
     // Live partial args (adapter-throttled ~60ms) so the file name / pattern
@@ -5143,6 +5197,13 @@ async function runSession(
       history,
       skills: skillsBody,
       accountPrompt,
+      librarySkills,
+      designSystem,
+      knowledgeDocs,
+      repo,
+      runningServers: listServers(projectId),
+      activeConnectors: await detectActiveConnectors(projectId),
+      userId,
       modelChoice,
       projectId,
       signal,
@@ -5178,7 +5239,7 @@ async function runSession(
     mode === "plan-then-execute"
       ? undefined
       : async (reason: string): Promise<string> => {
-          const planPrompt = `${messageWithRefs}\n\nThe engineer chose to plan before making changes. Their stated intent and approach:\n${reason}\n\nProduce a structured implementation plan for this work.`;
+          const planPrompt = `${messageWithRefs}${selectedBlock}\n\nThe engineer chose to plan before making changes. Their stated intent and approach:\n${reason}\n\nProduce a structured implementation plan for this work.`;
           // Empty history for the plan call: the live history ends with the
           // assistant's enter_plan_mode tool_use, which would need a paired
           // tool_result; the reason + original message carry the context.
@@ -5189,6 +5250,13 @@ async function runSession(
             history: [],
             skills: skillsBody,
             accountPrompt,
+            librarySkills,
+            designSystem,
+            knowledgeDocs,
+            repo,
+            runningServers: listServers(projectId),
+            activeConnectors: await detectActiveConnectors(projectId),
+            userId,
             modelChoice,
             projectId,
             signal,
@@ -5376,6 +5444,7 @@ async function runSession(
       }),
     onText: (content) => send({ type: "text", content }),
     onThinking: (content) => send({ type: "thinking", content }),
+    onCitations: (citations) => send({ type: "citations", citations }),
     onIteration: (iter) => send({ type: "iteration", iter }),
     // Auto routing resolved the model for this turn — surface it in the chat so
     // the user sees which model Auto picked (and the tier) before output streams.
@@ -5843,7 +5912,14 @@ async function executeAgentTask(task: {
   // the platform env keys, so it's safe with an empty/unknown userId.
   const resolvedKeys = await resolveProviderKeysForUser(userId);
   const anthropicKey = resolvedKeys.anthropic ?? apiKey;
-  const skillsBody = await readSkills(sandboxDir).catch(() => null);
+  const taskProject = await getProjectById(projectId).catch((err) => {
+    console.error(`[task ${task.id}] project lookup failed:`, err);
+    return null;
+  });
+  const skillsBody =
+    taskProject && projectSkillsAreTrusted(taskProject.skills_trust)
+      ? await readSkills(sandboxDir).catch(() => null)
+      : null;
 
   // 4. Pre-run checkpoint (background, best-effort — never blocks the task).
   commitCheckpoint(sandboxDir, projectId, `pre-task: ${task.title.slice(0, 80)}`).catch((err) =>

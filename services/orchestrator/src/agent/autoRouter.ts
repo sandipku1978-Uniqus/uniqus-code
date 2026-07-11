@@ -158,8 +158,13 @@ export function classifyTaskHeuristic(userMessage: string): TaskTier {
   // Hard wins over quick: "quickly debug the race condition" is HARD work.
   if (HARD_PATTERNS.some((re) => re.test(msg))) return "hard";
   if (QUICK_PATTERNS.some((re) => re.test(msg))) return "quick";
-  // A long, dense brief is almost always substantial multi-step work.
-  if (msg.length > 800) return "hard";
+  // Length is deliberately NOT a hard signal. A `msg.length > 800 ⇒ "hard"` rule
+  // used to sit here, and it force-escalated every long-but-routine brief (pasted
+  // requirements, a detailed-but-straightforward spec) to Opus 4.8 on size alone,
+  // skipping the classify tiebreak entirely — Opus at $5/$25 where Sonnet at $3/$15
+  // would do. Long ≠ hard. A brief carrying no HARD_PATTERNS signal now falls
+  // through to `ambiguous`, where the Haiku tiebreak decides and biases toward
+  // `standard` when it can't tell.
   return "ambiguous";
 }
 

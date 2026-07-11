@@ -10,7 +10,7 @@
  */
 
 import type Anthropic from "@anthropic-ai/sdk";
-import type { ThinkingEffort } from "@uniqus/api-types";
+import type { Citation, ThinkingEffort } from "@uniqus/api-types";
 
 /** API keys for whichever providers are configured. */
 export interface ProviderKeys {
@@ -133,6 +133,13 @@ export interface StreamTurnResult {
   toolCalls: AgentToolCall[];
   /** Final token usage for this call, if the provider reported it. */
   usage?: TokenUsage;
+  /**
+   * Web sources the model cited this turn, normalized across providers and
+   * ordered by where the cited span ends. Every provider that runs a
+   * server-side search requires these be shown to the user — see
+   * agent/citations.ts. Absent when the turn did no searching.
+   */
+  citations?: Citation[];
 }
 
 export interface ForcedToolParams {

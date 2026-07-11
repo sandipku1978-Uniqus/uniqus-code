@@ -3,6 +3,7 @@
 import { create } from "zustand";
 import type {
   ChangedFile,
+  Citation,
   CurrentUser,
   DeploymentState,
   ModelChoice,
@@ -243,7 +244,18 @@ export type ChatItem =
       /** Epoch ms the message was sent (live turns only; absent on replay). */
       at?: number;
     }
-  | { kind: "assistant_text"; id: string; content: string }
+  | {
+      kind: "assistant_text";
+      id: string;
+      content: string;
+      /**
+       * Web sources this answer cited, from the `citations` event that follows
+       * its text. Rendered as inline clickable markers plus a Sources footer —
+       * every provider that runs a server-side search requires attribution, and
+       * OpenAI requires it be "clearly visible and clickable".
+       */
+      citations?: Citation[];
+    }
   | {
       /**
        * The model's reasoning trace (Anthropic adaptive thinking / Gemini
@@ -770,6 +782,8 @@ interface State {
    */
   removeLastUserMessage(): void;
   appendText(content: string): void;
+  /** Attach cited web sources to the answer bubble they belong to. */
+  attachCitations(citations: Citation[]): void;
   /** Append a reasoning/thinking delta to the current reasoning block. */
   appendThinking(content: string): void;
   addToolCall(callId: string, name: string, input: unknown): void;
@@ -1135,6 +1149,24 @@ export const useStore = create<State>((set, get) => ({
         return { chat: [...s.chat.slice(0, i), merged, ...s.chat.slice(i + 1)] };
       }
       return { chat: [...s.chat, { kind: "assistant_text", id: id(), content }] };
+    }),
+
+  /**
+   * Attach cited sources to the answer bubble they belong to. Citations arrive
+   * once, after that turn's text is complete (providers only report them on the
+   * finished response), so we stamp the most recent assistant_text — skipping
+   * back over any trailing reasoning blocks, exactly as appendText does when a
+   * model re-enters thinking mid-answer.
+   */
+  attachCitations: (citations) =>
+    set((s) => {
+      if (citations.length === 0) return {};
+      let i = s.chat.length - 1;
+      while (i >= 0 && s.chat[i].kind === "reasoning") i--;
+      const target = i >= 0 ? s.chat[i] : undefined;
+      if (!target || target.kind !== "assistant_text") return {};
+      const merged = { ...target, citations };
+      return { chat: [...s.chat.slice(0, i), merged, ...s.chat.slice(i + 1)] };
     }),
 
   appendThinking: (content) =>

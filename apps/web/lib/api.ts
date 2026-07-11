@@ -948,7 +948,7 @@ export const fetchSlashCommandsApi = (
 
 export const fetchSkillsApi = (
   projectId: string,
-): Promise<{ content: string; path: string }> =>
+): Promise<{ content: string; path: string; trusted?: boolean; trust?: "trusted" | "untrusted_import" }> =>
   api(`/api/projects/${projectId}/skills`);
 
 export const writeSkillsApi = (

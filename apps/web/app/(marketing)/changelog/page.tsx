@@ -490,6 +490,34 @@ const ENTRIES: Entry[] = [
       },
     ],
   },
+  {
+    id: "v0-19",
+    date: "Jul 2026",
+    ver: "v0.19",
+    title: "Sources you can follow",
+    changes: [
+      {
+        tag: "new",
+        text: "Answers grounded in web search now show clickable citations in the text and a clean source list underneath, including after you reopen a conversation.",
+      },
+      {
+        tag: "new",
+        text: "The all-projects view can now filter by deploy status and sort by name, recent activity, or creation date.",
+      },
+      {
+        tag: "improved",
+        text: "Workspace members, usage, and settings pages have been refreshed with clearer summaries, controls, and budget status.",
+      },
+      {
+        tag: "improved",
+        text: "Plan mode now sees the same up-to-date project context as the building agent, including attached design systems, knowledge, connectors, and running apps.",
+      },
+      {
+        tag: "fixed",
+        text: "Skill instructions arriving inside an imported ZIP or GitHub project are held for review until you explicitly save them in Uniqus.",
+      },
+    ],
+  },
 ];
 
 const DISPLAY_ENTRIES = [...ENTRIES].reverse();
@@ -534,7 +562,7 @@ export default function ChangelogPage() {
                   <ul>
                     {entry.changes.map((change) => (
                       <li key={change.text}>
-                        <span className={`change-tag ${change.tag}`}>
+                        <span className={`change-tag tag-${change.tag}`}>
                           {change.tag}
                         </span>
                         <span>{change.text}</span>

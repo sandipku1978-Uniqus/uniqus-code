@@ -150,6 +150,55 @@ describe("openai · toResponsesInput", () => {
     ]);
   });
 
+  it("drops reasoning items from turns before the last user message, keeping this turn's", () => {
+    const withReasoning = (id: string, rs: string, enc: string): Anthropic.ContentBlockParam =>
+      ({
+        type: "tool_use",
+        id,
+        name: "read_file",
+        input: { path: `${id}.txt` },
+        openai_reasoning: { id: rs, encrypted: enc },
+      }) as unknown as Anthropic.ContentBlockParam;
+
+    const messages: Anthropic.MessageParam[] = [
+      { role: "user", content: "first ask" },
+      { role: "assistant", content: [withReasoning("call_1", "rs_old", "ENC_OLD")] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "a" }] },
+      { role: "user", content: "second ask" },
+      { role: "assistant", content: [withReasoning("call_2", "rs_new", "ENC_NEW")] },
+    ];
+
+    const input = toResponsesInput(messages);
+    const isReasoning = (it: unknown): boolean =>
+      (it as { type?: string }).type === "reasoning";
+
+    // The stale ciphertext is gone: OpenAI discards reasoning items from before
+    // the last user message, but every item in `input` is billed as input.
+    expect(JSON.stringify(input)).not.toContain("ENC_OLD");
+    // Its function_call must survive, or the matching function_call_output dangles.
+    expect(input).toContainEqual({
+      type: "function_call",
+      call_id: "call_1",
+      name: "read_file",
+      arguments: JSON.stringify({ path: "call_1.txt" }),
+    });
+    // Exactly one reasoning item survives — this turn's, immediately before its call.
+    expect(input.filter(isReasoning)).toHaveLength(1);
+    const i = input.findIndex(isReasoning);
+    expect(input[i]).toEqual({
+      type: "reasoning",
+      id: "rs_new",
+      summary: [],
+      encrypted_content: "ENC_NEW",
+    });
+    expect(input[i + 1]).toEqual({
+      type: "function_call",
+      call_id: "call_2",
+      name: "read_file",
+      arguments: JSON.stringify({ path: "call_2.txt" }),
+    });
+  });
+
   it("forwards tool_result images on a trailing user message", () => {
     const messages: Anthropic.MessageParam[] = [
       {

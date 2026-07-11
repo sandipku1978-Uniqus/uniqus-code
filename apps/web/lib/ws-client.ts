@@ -335,6 +335,12 @@ function handleEvent(event: ServerEvent): void {
       pendingThinking += event.content;
       scheduleStreamFlush();
       break;
+    case "citations":
+      // Sources for the answer that just finished. Never a delta — providers
+      // only report attribution on the completed response. handleEvent's top
+      // guard already flushed pendingText, so the bubble exists and is whole.
+      s.attachCitations(event.citations);
+      break;
     case "system":
       // Non-agent infra messages — VM lifecycle, storage notices, etc. Render
       // muted so the user doesn't read them as agent output.

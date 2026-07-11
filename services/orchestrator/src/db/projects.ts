@@ -1,6 +1,6 @@
 import { db } from "./client.js";
 import type { DeploymentState } from "./deployments.js";
-import { roleAtLeast, type Role } from "@uniqus/api-types";
+import { roleAtLeast, type ProjectSkillsTrust, type Role } from "@uniqus/api-types";
 import { getProjectRole, listSharedProjectIds } from "./members.js";
 
 export interface ProjectRecord {
@@ -27,6 +27,8 @@ export interface ProjectRecord {
   design_system_id?: string | null;
   /** Attached reusable library skills (uuid[]; empty = none). */
   skill_library_ids?: string[] | null;
+  /** Trust state for `.uniqus/skills.md` prompt injection. */
+  skills_trust?: ProjectSkillsTrust | null;
   /** Supabase project ref linked to this project, if provisioned. */
   supabase_project_ref?: string | null;
   /** Organization (workspace) the project lives in. Null = the owner's personal workspace. */
@@ -207,6 +209,18 @@ export async function setProjectSkillLibraries(
   if (error) throw new Error(`setProjectSkillLibraries failed: ${error.message}`);
 }
 
+/** Mark whether this project's `.uniqus/skills.md` can be injected as prompt guidance. */
+export async function setProjectSkillsTrust(
+  id: string,
+  trust: ProjectSkillsTrust,
+): Promise<void> {
+  const { error } = await db().from("projects").update({ skills_trust: trust }).eq("id", id);
+  if (!error) return;
+  // Keep old, not-yet-migrated control planes usable; schema.sql adds the column.
+  if (/skills_trust|schema cache|column/i.test(error.message ?? "")) return;
+  throw new Error(`setProjectSkillsTrust failed: ${error.message}`);
+}
+
 export async function getProject(
   id: string,
   ownerId: string,
@@ -218,6 +232,20 @@ export async function getProject(
     .eq("owner_id", ownerId)
     .maybeSingle();
   if (error) throw new Error(`getProject failed: ${error.message}`);
+  if (!data) return null;
+  return withLatestDeploy(
+    data as Record<string, unknown> & { deployments?: EmbeddedDeploymentRow[] | null },
+  );
+}
+
+/** Internal project read for background workers that do not have an HTTP actor. */
+export async function getProjectById(id: string): Promise<ProjectRecord | null> {
+  const { data, error } = await db()
+    .from("projects")
+    .select("*, deployments(state, created_at)")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw new Error(`getProjectById failed: ${error.message}`);
   if (!data) return null;
   return withLatestDeploy(
     data as Record<string, unknown> & { deployments?: EmbeddedDeploymentRow[] | null },
@@ -250,16 +278,7 @@ export async function getProjectForUser(
   const role = await getProjectRole(id, userId);
   if (!roleAtLeast(role, minRole)) return null;
   // Authorized as a shared member: fetch the row by id (not owner-scoped).
-  const { data, error } = await db()
-    .from("projects")
-    .select("*, deployments(state, created_at)")
-    .eq("id", id)
-    .maybeSingle();
-  if (error) throw new Error(`getProjectForUser failed: ${error.message}`);
-  if (!data) return null;
-  return withLatestDeploy(
-    data as Record<string, unknown> & { deployments?: EmbeddedDeploymentRow[] | null },
-  );
+  return getProjectById(id);
 }
 
 export async function touchProject(id: string): Promise<void> {

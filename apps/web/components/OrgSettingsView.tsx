@@ -17,39 +17,9 @@ import { toast } from "@/lib/toast";
  * a shared monthly spend cap, and a danger zone (leave / delete). RBAC is fetched
  * with the org so we can disable controls the caller can't use rather than letting
  * them fail server-side: admin+ may rename + set budget, only an owner may delete,
- * anyone may leave (the server blocks the sole owner). House design language:
- * hairline cards, mono micro-labels, magenta the only accent.
+ * anyone may leave (the server blocks the sole owner). Same page chrome as the
+ * other dashboard sub-pages (.dash-page + .coll-head + .dash-card).
  */
-
-const eyebrow: React.CSSProperties = {
-  fontFamily: "var(--font-mono)",
-  fontSize: "var(--fs-2xs)",
-  textTransform: "uppercase",
-  letterSpacing: "0.08em",
-  color: "var(--text-dim)",
-};
-
-const cardStyle: React.CSSProperties = {
-  border: "1px solid var(--border-default)",
-  borderRadius: "var(--radius-lg)",
-  background: "var(--bg-surface)",
-  padding: 16,
-  display: "flex",
-  flexDirection: "column",
-  gap: 12,
-  maxWidth: 640,
-};
-
-const inputStyle: React.CSSProperties = {
-  flex: 1,
-  minWidth: 0,
-  background: "var(--bg-elev)",
-  border: "1px solid var(--border-default)",
-  borderRadius: "var(--radius-md)",
-  color: "var(--text-primary)",
-  padding: "8px 10px",
-  fontSize: "var(--fs-md)",
-};
 
 export default function OrgSettingsView({
   orgId,
@@ -172,27 +142,45 @@ export default function OrgSettingsView({
 
   if (loadError) {
     return (
-      <div style={{ ...eyebrow, color: "var(--text-muted)" }}>
-        {loadError}
+      <div className="dash-page org-page">
+        <span className="page-eyebrow">Workspace</span>
+        <h1>Settings</h1>
+        <div className="dash-card">
+          <p className="card-sub" style={{ marginBottom: 0 }}>{loadError}</p>
+        </div>
       </div>
     );
   }
-  if (!org) return <div style={eyebrow}>Loading…</div>;
+  if (!org) {
+    return (
+      <div className="dash-page org-page">
+        <span className="page-eyebrow">Workspace</span>
+        <h1>Settings</h1>
+        <div className="dash-card">
+          <p className="card-sub" style={{ marginBottom: 0 }}>Loading…</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-        <span style={eyebrow}>● Settings</span>
-        <span style={eyebrow}>{org.name}</span>
-      </div>
+    <div className="dash-page org-page">
+      <header className="coll-head">
+        <span className="page-eyebrow">Workspace</span>
+        <h1>
+          Organization <span className="grad">settings</span>
+        </h1>
+        <p className="lede">
+          Rename <strong>{org.name}</strong>, cap its monthly agent spend, or leave/delete
+          it.
+        </p>
+      </header>
 
       {/* Name */}
-      <div style={cardStyle}>
-        <span style={eyebrow}>Organization name</span>
+      <div className="dash-card">
+        <h2>Organization name</h2>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <input
-            className="ui-input"
-            style={inputStyle}
             value={name}
             disabled={!canManage}
             onChange={(e) => setName(e.target.value)}
@@ -200,6 +188,7 @@ export default function OrgSettingsView({
               if (e.key === "Enter") void saveName();
             }}
             aria-label="Organization name"
+            style={{ flex: 1, minWidth: 0 }}
           />
           <button
             type="button"
@@ -211,22 +200,22 @@ export default function OrgSettingsView({
           </button>
         </div>
         {!canManage && (
-          <div style={{ color: "var(--text-dim)", fontSize: "var(--fs-xs)" }}>
+          <p className="card-sub" style={{ marginBottom: 0, marginTop: 10 }}>
             Only an admin or owner can change settings.
-          </div>
+          </p>
         )}
       </div>
 
       {/* Budget */}
-      <div style={cardStyle}>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-          <span style={eyebrow}>● Monthly budget</span>
-          <span style={eyebrow}>
+      <div className="dash-card">
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
+          <h2 style={{ margin: 0 }}>Monthly budget</h2>
+          <span className="page-eyebrow" style={{ margin: 0 }}>
             {org.monthly_budget_usd == null ? "No cap" : `$${org.monthly_budget_usd} / month`}
           </span>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span aria-hidden style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: "var(--fs-md)" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 12 }}>
+          <span aria-hidden style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono-stack)", fontSize: 13 }}>
             $
           </span>
           <input
@@ -234,8 +223,6 @@ export default function OrgSettingsView({
             min={0}
             step="any"
             inputMode="decimal"
-            className="ui-input"
-            style={inputStyle}
             placeholder="No cap"
             value={budget}
             disabled={!canManage}
@@ -244,6 +231,7 @@ export default function OrgSettingsView({
               if (e.key === "Enter") void saveBudget();
             }}
             aria-label="Monthly budget in USD"
+            style={{ flex: 1, minWidth: 0 }}
           />
           <button
             type="button"
@@ -254,21 +242,22 @@ export default function OrgSettingsView({
             {savingBudget ? "Saving…" : "Save"}
           </button>
         </div>
-        <div style={{ color: "var(--text-dim)", fontSize: "var(--fs-xs)" }}>
+        <p className="card-sub" style={{ marginBottom: 0, marginTop: 10 }}>
           Leave blank for no cap. Caps the org&apos;s combined agent spend per calendar month;
           runs pause once it&apos;s reached.
-        </div>
+        </p>
       </div>
 
       {/* Danger zone */}
-      <div style={{ ...cardStyle, borderColor: "color-mix(in srgb, #ef4444 35%, var(--border-default))" }}>
-        <span style={{ ...eyebrow, color: "#ef4444" }}>● Danger zone</span>
+      <div className="dash-card danger">
+        <h2>Danger zone</h2>
 
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ color: "var(--text-primary)", fontSize: "var(--fs-md)" }}>Leave organization</div>
-            <div style={{ color: "var(--text-dim)", fontSize: "var(--fs-xs)" }}>
-              You&apos;ll lose access to its shared projects. Projects you own move back to Personal.
+        <div className="danger-row">
+          <div>
+            <div className="t">Leave organization</div>
+            <div className="d">
+              You&apos;ll lose access to its shared projects. Projects you own move back to
+              Personal.
             </div>
           </div>
           {confirm === "leave" ? (
@@ -288,21 +277,12 @@ export default function OrgSettingsView({
         </div>
 
         {isOwner && (
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              gap: 12,
-              flexWrap: "wrap",
-              borderTop: "1px solid var(--border-light)",
-              paddingTop: 12,
-            }}
-          >
-            <div style={{ minWidth: 0 }}>
-              <div style={{ color: "var(--text-primary)", fontSize: "var(--fs-md)" }}>Delete organization</div>
-              <div style={{ color: "var(--text-dim)", fontSize: "var(--fs-xs)" }}>
-                Removes the org and its membership. Its projects are kept and return to their owners&apos; Personal space.
+          <div className="danger-row">
+            <div>
+              <div className="t">Delete organization</div>
+              <div className="d">
+                Removes the org and its membership. Its projects are kept and return to
+                their owners&apos; Personal space.
               </div>
             </div>
             {confirm === "delete" ? (

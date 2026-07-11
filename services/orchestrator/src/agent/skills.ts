@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import type { DesignTokens } from "@uniqus/api-types";
+import type { DesignTokens, ProjectSkillsTrust } from "@uniqus/api-types";
 
 /**
  * Per-project Skills (Plan 3.8).
@@ -22,6 +22,30 @@ const MAX_SKILLS_BYTES = 64 * 1024;
 
 export function skillsRelPath(): string {
   return SKILLS_PATH;
+}
+
+export function normalizeProjectSkillsTrust(value: unknown): ProjectSkillsTrust {
+  return value === "untrusted_import" ? "untrusted_import" : "trusted";
+}
+
+export function projectSkillsAreTrusted(value: unknown): boolean {
+  return normalizeProjectSkillsTrust(value) === "trusted";
+}
+
+export function isSkillsRelPath(relPath: string): boolean {
+  const normalized = relPath.replaceAll("\\", "/").replace(/^\.\/+/, "");
+  return normalized === SKILLS_PATH;
+}
+
+export async function hasSkillsFile(sandboxDir: string): Promise<boolean> {
+  const full = path.resolve(sandboxDir, SKILLS_PATH);
+  if (!full.startsWith(path.resolve(sandboxDir) + path.sep)) return false;
+  try {
+    const stat = await fs.stat(full);
+    return stat.isFile() && stat.size > 0;
+  } catch {
+    return false;
+  }
 }
 
 export async function readSkills(sandboxDir: string): Promise<string | null> {
