@@ -566,6 +566,18 @@ const ENTRIES: Entry[] = [
       },
     ],
   },
+  {
+    id: "v0-22",
+    date: "Jul 2026",
+    ver: "v0.22",
+    title: "A more consistent finish",
+    changes: [
+      {
+        tag: "improved",
+        text: "The new-project composer now matches the workspace chat surface, and marketing footers once again use a softly translucent gray panel.",
+      },
+    ],
+  },
 ];
 
 const DISPLAY_ENTRIES = [...ENTRIES].reverse();

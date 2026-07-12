@@ -4313,7 +4313,7 @@ select.sort-select { width: auto; flex: none; }
    magenta focus ring that picks up the brand gradient. */
 .dash-hero .newproj-form {
   border-radius: 16px;
-  background: var(--bg-code);
+  background: var(--bg-surface);
   box-shadow: 0 10px 44px rgba(0, 0, 0, 0.45);
   transition: border-color var(--dur-base) ease, box-shadow var(--dur-base) ease;
   text-align: left;
@@ -7999,8 +7999,10 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   padding: 48px;
   border: 1px solid var(--mk-line-strong);
   border-radius: 18px;
-  background: var(--mk-bg);
-  box-shadow: none;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 42%),
+    color-mix(in srgb, var(--bg-surface) 88%, transparent);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.26);
 }
 .footer-brand-block {
   display: flex;
