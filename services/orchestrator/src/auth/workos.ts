@@ -23,6 +23,19 @@ export interface ActiveSessionRecord {
   endedAt?: string | null;
 }
 
+export type WorkosCookieFailureReason =
+  | "missing_cookie_header"
+  | "missing_session_cookie"
+  | "invalid_session_cookie"
+  | "claims_mismatch"
+  | "session_inactive"
+  | "validation_error";
+
+export interface WorkosCookieValidation {
+  session: AuthKitSession | null;
+  failure: WorkosCookieFailureReason | null;
+}
+
 const COOKIE_NAME = "wos-session";
 const WORKOS_SESSION_CACHE_TTL_MS = 30_000;
 const WORKOS_SESSION_CACHE_MAX_ENTRIES = 10_000;
@@ -162,16 +175,16 @@ export function hasExpectedWorkosClaims(
  * WorkOS API call on every request. Any SDK/network failure on a cache miss is
  * a fail-closed unauthenticated result.
  */
-export async function unsealSessionFromCookieHeader(
+export async function validateWorkosSessionCookieHeader(
   cookieHeader: string | undefined,
-): Promise<AuthKitSession | null> {
-  if (!cookieHeader) return null;
+): Promise<WorkosCookieValidation> {
+  if (!cookieHeader) return { session: null, failure: "missing_cookie_header" };
+  const sealed = parseCookie(cookieHeader)[COOKIE_NAME];
+  if (!sealed) return { session: null, failure: "missing_session_cookie" };
   const password = process.env.WORKOS_COOKIE_PASSWORD;
   if (!password || password.length < 32) {
     throw new Error("WORKOS_COOKIE_PASSWORD must be at least 32 characters");
   }
-  const sealed = parseCookie(cookieHeader)[COOKIE_NAME];
-  if (!sealed) return null;
 
   try {
     const client = getWorkOS();
@@ -179,13 +192,15 @@ export async function unsealSessionFromCookieHeader(
       sessionData: sealed,
       cookiePassword: password,
     });
-    if (!result.authenticated) return null;
+    if (!result.authenticated) {
+      return { session: null, failure: "invalid_session_cookie" };
+    }
     if (!hasExpectedWorkosClaims(result.accessToken, {
       clientId: process.env.WORKOS_CLIENT_ID!,
       issuer: process.env.WORKOS_AUTHKIT_ISSUER ?? "https://api.workos.com",
       userId: result.user.id,
       sessionId: result.sessionId,
-    })) return null;
+    })) return { session: null, failure: "claims_mismatch" };
     const active = await workosSessionActivity.hasActive(
       result.sessionId,
       result.user.id,
@@ -194,22 +209,31 @@ export async function unsealSessionFromCookieHeader(
           await client.userManagement.listSessions(result.user.id, { limit: 100 })
         ).autoPagination()) as ActiveSessionRecord[],
     );
-    if (!active) return null;
+    if (!active) return { session: null, failure: "session_inactive" };
     return {
-      accessToken: result.accessToken,
-      sessionId: result.sessionId,
-      user: {
-        id: result.user.id,
-        email: result.user.email,
-        firstName: result.user.firstName,
-        lastName: result.user.lastName,
-        profilePictureUrl: result.user.profilePictureUrl,
+      session: {
+        accessToken: result.accessToken,
+        sessionId: result.sessionId,
+        user: {
+          id: result.user.id,
+          email: result.user.email,
+          firstName: result.user.firstName,
+          lastName: result.user.lastName,
+          profilePictureUrl: result.user.profilePictureUrl,
+        },
+        impersonator: result.impersonator,
       },
-      impersonator: result.impersonator,
+      failure: null,
     };
   } catch {
-    return null;
+    return { session: null, failure: "validation_error" };
   }
+}
+
+export async function unsealSessionFromCookieHeader(
+  cookieHeader: string | undefined,
+): Promise<AuthKitSession | null> {
+  return (await validateWorkosSessionCookieHeader(cookieHeader)).session;
 }
 
 // Retained for guest/session helpers that share the same iron-session format.

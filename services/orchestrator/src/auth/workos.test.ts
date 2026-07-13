@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   hasActiveWorkosSession,
   hasExpectedWorkosClaims,
+  validateWorkosSessionCookieHeader,
   WorkosSessionActivityCache,
 } from "./workos.js";
 
@@ -116,5 +117,18 @@ describe("WorkOS access-token claims", () => {
       sid: "session_1",
       exp: now / 1000 + 60,
     }), expected, now)).toBe(false);
+  });
+});
+
+describe("WorkOS cookie diagnostics", () => {
+  it("distinguishes a missing Cookie header from a missing WorkOS cookie", async () => {
+    await expect(validateWorkosSessionCookieHeader(undefined)).resolves.toEqual({
+      session: null,
+      failure: "missing_cookie_header",
+    });
+    await expect(validateWorkosSessionCookieHeader("other=value")).resolves.toEqual({
+      session: null,
+      failure: "missing_session_cookie",
+    });
   });
 });

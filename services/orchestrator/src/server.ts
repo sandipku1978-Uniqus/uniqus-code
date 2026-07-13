@@ -249,7 +249,11 @@ import {
   touchSession,
   type ChatSessionRecord,
 } from "./db/chatSessions.js";
-import { unsealSessionFromCookieHeader, type AuthKitSession } from "./auth/workos.js";
+import {
+  validateWorkosSessionCookieHeader,
+  type AuthKitSession,
+  type WorkosCookieFailureReason,
+} from "./auth/workos.js";
 import { isSensitiveProjectPath } from "./security/sensitivePaths.js";
 import {
   unsealGuestFromCookieHeader,
@@ -984,12 +988,18 @@ function rateLimitOk(key: string, limit: number, windowMs: number): boolean {
  * account. `kind` lets the few endpoints that care (guest restrictions, the
  * conversion + recovery-code routes) branch; `session` is only set for WorkOS.
  */
+const authFailureDiagnostics = new WeakMap<
+  IncomingMessage,
+  { workos: WorkosCookieFailureReason; guestCookiePresent: boolean }
+>();
+
 async function authenticate(req: IncomingMessage): Promise<{
   kind: "workos" | "guest";
   session?: AuthKitSession;
   user: UserRecord;
 } | null> {
-  const session = await unsealSessionFromCookieHeader(req.headers.cookie);
+  const workosValidation = await validateWorkosSessionCookieHeader(req.headers.cookie);
+  const session = workosValidation.session;
   if (session) {
     const user = await upsertUser({
       workos_id: session.user.id,
@@ -1012,6 +1022,12 @@ async function authenticate(req: IncomingMessage): Promise<{
       return { kind: "guest", user };
     }
   }
+  authFailureDiagnostics.set(req, {
+    workos: workosValidation.failure ?? "validation_error",
+    guestCookiePresent:
+      typeof req.headers.cookie === "string" &&
+      /(?:^|;\s*)uniqus-guest=/.test(req.headers.cookie),
+  });
   return null;
 }
 
@@ -1203,7 +1219,20 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
 
   const auth = await authenticate(req);
   if (!auth) {
-    return json(res, 401, { error: "not authenticated" });
+    const diagnostic = authFailureDiagnostics.get(req) ?? {
+      workos: "validation_error" as const,
+      guestCookiePresent: false,
+    };
+    console.warn(
+      `[auth] 401 ${req.method ?? "UNKNOWN"} ${req.url ?? "/"}: workos=${diagnostic.workos}, guest_cookie=${diagnostic.guestCookiePresent ? "present" : "absent"}`,
+    );
+    return json(res, 401, {
+      error: "not authenticated",
+      diagnostic: {
+        workos: diagnostic.workos,
+        guest_cookie_present: diagnostic.guestCookiePresent,
+      },
+    });
   }
   const { user } = auth;
 
