@@ -60,25 +60,25 @@ These are the only warm hues in the system.
 
 | Token | Value | Use |
 |---|---|---|
-| `--brand-ember` | `#FF6A00` | **Primary.** Safety orange: buttons, active state, focus, borders |
-| `--brand-ember-hi` | `#FF8124` | Hover / lifted ember |
-| `--brand-signal` | `#FFC53D` | Hazard yellow: highlights, the gradient's warm stop, numerals |
-| `--brand-rust` | `#B23F0A` | Deep oxide: shadow under ember, pressed state, orange text on light |
-| `--brand-gradient` | `linear-gradient(135deg, #FF5A1F, #FFC53D)` | Primary buttons, send button, active pills, gradient-text accent word |
-| `--accent` / `--accent-primary` | `#FF6A00` | The accent fill |
-| `--hazard` | `repeating-linear-gradient(45deg, #FF6A00 0 8px, transparent 8px 16px)` | The signature stripe (§3.2) |
+| `--brand-ember` | `#FF7700` | **Primary.** Safety orange: buttons, active state, focus, borders |
+| `--brand-ember-hi` | `#FF8C24` | Hover / lifted ember |
+| `--brand-signal` | `#FFCF3D` | Hazard yellow: highlights, the gradient's warm stop, numerals |
+| `--brand-rust` | `#AE460A` | Deep oxide: shadow under ember, pressed state, orange text on light |
+| `--brand-gradient` | `linear-gradient(135deg, #FF651F, #FFCF3D)` | Primary buttons, send button, active pills, gradient-text accent word |
+| `--accent` / `--accent-primary` | `#FF7700` | The accent fill |
+| `--hazard` | `repeating-linear-gradient(45deg, #FF7700 0 8px, transparent 8px 16px)` | The signature stripe (§3.2) |
 
 **Two contrast rules that are easy to get wrong — both are load-bearing:**
 
-1. **Ink on ember is near-black, never white.** `#FF6A00` + white is ~2.9:1 and
-   fails AA; `#FF6A00` + `#140D07` is ~9:1 — and black-on-orange *is* the correct
+1. **Ink on ember is near-black, never white.** `#FF7700` + white is ~2.7:1 and
+   fails AA; `#FF7700` + `#140D07` is ~7.2:1 — and black-on-orange *is* the correct
    industrial look (hazard signage). Primary buttons fill ember and set
    `color: #140D07`. Orange **text** on a dark surface is fine
-   (`#FF8124` on `#0A0B0C` ≈ 7:1); the rule only binds for text sitting **on**
+   (`#FF8C24` on `#0A0B0C` ≈ 8.5:1); the rule only binds for text sitting **on**
    ember.
-2. **Ember does not hold as text on white** (`#FF6A00` on white ≈ 2.9:1). That's
+2. **Ember does not hold as text on white** (`#FF7700` on white ≈ 2.7:1). That's
    what **`--accent-text`** is for — it is the one brand token that flips:
-   `#FF8124` on dark, `#B23F0A` (rust, ≈5.2:1) on light. Use `--accent-text` for
+   `#FF8C24` on dark, `#A04009` (deep oxide, ≈6.5:1) on light. Use `--accent-text` for
    every piece of orange **type**, link, and icon; use `--brand-ember` for
    **fills**, borders, and rings. Ember fills stay ember in both themes because
    they carry black ink.
@@ -119,7 +119,7 @@ tokens. These names are referenced ~250× — retune values, never rename.
 | `--mk-text` | `#F2F0EC` | Primary text — painted-steel off-white |
 | `--mk-muted` | `#A5A29C` | Secondary text |
 | `--mk-dim` | `#6F6D68` | Eyebrows, captions |
-| `--mk-amber` | `#FFC53D` | Hazard yellow, decorative |
+| `--mk-amber` | `#FFCF3D` | Hazard yellow, decorative |
 | `--mk-cyan` | `#7FA6C4` | **Cold steel — the one cool accent.** Used sparingly |
 | `--mk-teal` | `#4E9E86` | Patina |
 | `--mk-green` | `#64D29B` | Status-OK only (the "live" dot) |
@@ -147,7 +147,7 @@ Borders do the work; shadows stay restrained.
 | `--border-default` | `#2A2E33` | `#DDDCDA` | Default 1px hairline |
 | `--border-light` | `#1E2125` | `#E8E7E5` | Faint dividers |
 | `--border-strong` | `rgba(255,255,255,0.17)` | `rgba(23,24,26,0.22)` | Hover/focus emphasis — lift reads as a border change, not piled-on shadow |
-| `--border-active` | `#FF6A00` | `#FF6A00` | Active outlines (ember in both themes) |
+| `--border-active` | `#FF7700` | `#AE460A` | Active outlines (ember dark, oxide light) |
 
 ### 1.7 Semantic (confidence/status)
 
@@ -285,7 +285,7 @@ A 45° repeating ember/transparent gradient, used as a **thin rule (3–4px)**,
 never as a fill:
 
 ```css
---hazard: repeating-linear-gradient(45deg, #FF6A00 0 8px, transparent 8px 16px);
+--hazard: repeating-linear-gradient(45deg, #FF7700 0 8px, transparent 8px 16px);
 ```
 
 Live use sites: a 4px rule across the top of the closing CTA band, and a 3px rule
@@ -328,8 +328,8 @@ Behind the dashboard composer and the marketing hero copy, a soft low glow —
 
 ```css
 background:
-  radial-gradient(60% 60% at 50% 40%, rgba(255,106,0,0.16), transparent 70%),
-  radial-gradient(70% 70% at 35% 55%, rgba(255,197,61,0.13), transparent 72%);
+  radial-gradient(60% 60% at 50% 40%, rgba(255,119,0,0.16), transparent 70%),
+  radial-gradient(70% 70% at 35% 55%, rgba(255,207,61,0.13), transparent 72%);
 filter: blur(44px);
 ```
 
@@ -341,17 +341,17 @@ Accent exactly **one** word/phrase in a headline with `background-clip: text`
 (the `.grad` span). The rest stays in the foreground neutral. Never gradient-text
 a whole heading; never one per section.
 
-**`--brand-gradient` ends on signal yellow `#FFC53D`, which is ~1.7:1 on a
+**`--brand-gradient` ends on signal yellow `#FFCF3D`, which is ~1.5:1 on a
 near-white page — illegible.** Every `background-clip: text` gradient MUST swap
 to a darker ramp in the light theme so *every stop* clears 3:1:
 
 ```css
 .grad {                                   /* dark: ember → amber → signal */
-  background: linear-gradient(100deg, #ff8124 0%, #ffb03a 48%, #ffc53d 100%);
+  background: linear-gradient(100deg, #ff8c24 0%, #ffba3a 48%, #ffcf3d 100%);
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
 :root[data-theme="light"] .grad {         /* light: scorched → rust → deep ember */
-  background: linear-gradient(100deg, #8a3208 0%, #b23f0a 55%, #d2500c 100%);
+  background: linear-gradient(100deg, #8a3908 0%, #ae460a 55%, #d25a0c 100%);
   -webkit-background-clip: text; background-clip: text;
 }
 ```
@@ -374,7 +374,7 @@ box-shadow: 0 30px 80px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.04);
 ```
 
 - Hover lifts (`translateY(-2px)`) and tints the border toward ember.
-- `:focus-within` → ember ring: `0 0 0 3px rgba(255,106,0,0.20)`.
+- `:focus-within` → ember ring: `0 0 0 3px rgba(255,119,0,0.20)`.
 - The send control is a **gradient-filled circle** carrying a near-black glyph,
   with an ember glow shadow; press `scale(0.95)`.
 

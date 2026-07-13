@@ -7,7 +7,7 @@ function statusColor(status: SubAgentLive["status"]): string {
     ? "var(--conf-high, #34d399)"
     : status === "error"
       ? "var(--conf-low, #f87171)"
-      : "var(--accent, #FF6A00)";
+      : "var(--accent, #FF7700)";
 }
 
 function tokenLabel(s: SubAgentLive): string {

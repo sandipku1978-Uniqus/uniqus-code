@@ -7,6 +7,7 @@ import {
   stripWarmParam,
   previewAppCookieHeader,
   namespacePreviewSetCookie,
+  hasPreviewRoutingCookie,
 } from "./proxy.js";
 
 // Pull every <script>…</script> body out of an injected HTML document.
@@ -155,11 +156,24 @@ describe("preview warmup (first-load self-heal)", () => {
 });
 
 describe("preview credential isolation", () => {
+  it("recognizes every current and legacy preview-routing cookie", () => {
+    for (const name of [
+      "gate15_preview",
+      "gate15_preview_share",
+      "uniqus_preview",
+      "uniqus_preview_share",
+    ]) {
+      expect(hasPreviewRoutingCookie({ cookie: `other=x; ${name}=capability` })).toBe(true);
+    }
+    expect(hasPreviewRoutingCookie({ cookie: "other=x; gate15_previewish=capability" })).toBe(false);
+    expect(hasPreviewRoutingCookie({})).toBe(false);
+  });
+
   it("forwards only app cookies namespaced to the exact preview server", () => {
     const scoped = namespacePreviewSetCookie("sid=preview; Domain=.example.com; Path=/; HttpOnly", "srv_a")!;
     expect(scoped).not.toContain("Domain=");
     expect(scoped).toContain("Path=/");
-    const browserCookies = `wos-session=ambient; uniqus_preview=srv_a; ${scoped.split(";")[0]}`;
+    const browserCookies = `wos-session=ambient; gate15_preview=srv_a; ${scoped.split(";")[0]}`;
     expect(previewAppCookieHeader(browserCookies, "srv_a")).toBe("sid=preview");
     expect(previewAppCookieHeader(browserCookies, "srv_b")).toBeUndefined();
   });

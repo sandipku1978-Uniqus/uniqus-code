@@ -1,4 +1,4 @@
-# Uniqus Code — working notes for Claude
+# Gate 15 — working notes for Claude
 
 ## Working principles
 - **Fix the root cause; never paper over it.** Do not "resolve" an issue by
@@ -25,6 +25,16 @@
     this product's economics. Example: Grok 4.5 scores **54 @ $0.31/task** on
     the Intelligence Index vs GPT-5.5 at **55 @ $0.86/task** — statistical
     parity at ~1/3 the cost. A score-only table would have hidden that.
+
+## Brand / compatibility names
+- The public product and company brand is **Gate 15**. Do not describe it as an
+  extension of another brand or company.
+- The following are deliberate legacy operational identifiers, not public
+  branding: `.uniqus/skills.md`, `UNIQUS_*` environment variables,
+  `uniqus-orchestrator` / `uniqus-firecracker-net` systemd units,
+  `/opt/uniqus-code`, `/var/lib/uniqus`, `/var/log/uniqus-agent.log`, and
+  `uniqus_*` kernel parameters. Do not rename them without a coordinated data,
+  host, and compatibility migration.
 
 ## Branching / git
 - **Do NOT create new branches.** Work directly on `main` and commit there.
@@ -146,7 +156,7 @@
   text). Vision-capable providers are unchanged and get images natively. New
   general image reader for the bridge: `readImageBase64` in `agent/assets.ts`
   (any sandbox image path, not just uploads/screenshots).
-- **Built-in web search: all three providers.** Anthropic server-side
+- **Built-in web search: all four providers.** Anthropic server-side
   `web_search`; OpenAI via the **Responses API** built-in `{type:"web_search"}`
   tool (Chat Completions can't mix `web_search_options`/`reasoning_effort` with
   function tools — that's why OpenAI runs on `/v1/responses`); Gemini **3.x**

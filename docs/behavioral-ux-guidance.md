@@ -1,6 +1,6 @@
-# Uniqus Code — behavioral UX & conversion psychology guidance
+# Gate 15 — behavioral UX & conversion psychology guidance
 
-Guidance for the AIs (and humans) building Uniqus Code's onboarding, activation,
+Guidance for the AIs (and humans) building Gate 15's onboarding, activation,
 and pricing/upgrade flows. This is **not** a visual-design doc — see
 [`design-language.md`](./design-language.md) for the house look. This is about
 **behavior**: what measurably changes whether a visitor signs up, whether a new
@@ -57,7 +57,7 @@ signup screen back so users complete real lesson content first produced **"a
 20% increase in DAUs."** The mechanism isn't a vague "loss aversion" gloss —
 it's that people commit to something once they've already gotten value from
 it, and a value-first funnel converts better than a signup-first one.
-Uniqus Code's own landing page already does this (the hero prompt box lets a
+Gate 15's own landing page already does this (the hero prompt box lets a
 visitor start describing an app before any signup wall) — this is worth
 protecting as a deliberate choice, not accidentally undoing it.
 
@@ -96,7 +96,7 @@ subscribers, forcing users through a multi-page cancellation flow with repeated
 discount/downgrade offers before letting them leave — and that Amazon
 leadership *knowingly* slowed internal proposals to simplify cancellation
 because it would cost revenue. Amazon settled for **$2.5 billion** in September
-2025, three days into trial. This is directly relevant to Uniqus Code's own
+2025, three days into trial. This is directly relevant to Gate 15's own
 "compete on trust" positioning (see `notes/vibe-coding-research-consolidated-2026-06-22.md`)
 — an easy, honest downgrade/cancel flow is cheap insurance against both
 reputational and regulatory risk, and is consistent with the trust wedge
@@ -242,7 +242,7 @@ them should be treated as unverified until corroborated by a primary source.
 
 ---
 
-## 5. Applying this to Uniqus Code
+## 5. Applying this to Gate 15
 
 Given the actual product shape — a chat-based agent workspace, a live preview,
 and usage/subscription-based pricing — the strongest-evidenced principles
@@ -262,7 +262,7 @@ above point toward:
   "half-optional, gamified" middle ground is the version that demonstrably
   failed for Superhuman.
 - **Frame usage limits and upgrade prompts around value, not raw quota.**
-  Since Uniqus Code bills on agent turns/tokens/VM time (real marginal cost
+  Since Gate 15 bills on agent turns/tokens/VM time (real marginal cost
   per user, like other AI products, not classic zero-marginal-cost SaaS), the
   OpenAI and Google/Midjourney/Intercom pattern applies directly: gate on
   usage intensity and describe what the user is about to lose or gain in

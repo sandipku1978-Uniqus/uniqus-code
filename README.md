@@ -1,4 +1,4 @@
-# Uniqus Code
+# Gate 15
 
 A browser-based AI app builder — *engineering, on demand*. Describe what you
 want, and a multi-provider coding agent builds it in an isolated sandbox with a
@@ -13,7 +13,7 @@ live preview, then helps you ship it.
 
 ## What it does
 
-- **Describe → build.** Write a project in plain English; Uniqus names it,
+- **Describe → build.** Write a project in plain English; Gate 15 names it,
   sharpens it into a first prompt, opens the workspace, and (for new projects)
   proposes a plan before touching files. Or import existing code by **.zip** or
   **GitHub clone**.
@@ -40,7 +40,8 @@ live preview, then helps you ship it.
 - **Per-project isolation.** Each project runs in its own **Firecracker
   microVM** sandbox on the orchestrator; files sync to object Storage and the VM
   snapshots/restores so reopening is fast.
-- **Customization.** Per-project + account-wide **Skills** (`.uniqus/skills.md`),
+- **Customization.** Per-project + account-wide **Skills** (stored at the
+  compatibility path `.uniqus/skills.md`),
   25 curated **design packs**, account-wide custom prompt + default skills,
   light/dark theme + density.
 - **Ship it.** Deploy to **Vercel**, create a GitHub repo, and
@@ -80,6 +81,10 @@ changes in the Supabase SQL editor before restarting code that depends on them;
 the Hetzner deploy only pulls/rebuilds/restarts the service.
 
 See [CLAUDE.md](CLAUDE.md) for working notes (branching, deploy, providers).
+
+The `.uniqus/skills.md` path, `UNIQUS_*` environment variables, systemd service
+names, Firecracker paths, and kernel parameters are legacy operational
+identifiers retained for compatibility. Do not rename them without a migration.
 
 ## Setup
 

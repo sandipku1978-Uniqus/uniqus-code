@@ -175,6 +175,15 @@ function readPreviewShareCookie(headers: IncomingHttpHeaders): string | null {
   return readCookieAny(headers, PREVIEW_SHARE_COOKIE, LEGACY_PREVIEW_SHARE_COOKIE);
 }
 
+/**
+ * Whether this request carries one of the routing cookies understood by
+ * `resolveTarget`. Keep this check beside the cookie names/readers so the
+ * server's cheap pre-routing gate cannot drift when those names change.
+ */
+export function hasPreviewRoutingCookie(headers: IncomingHttpHeaders): boolean {
+  return readPreviewCookie(headers) !== null || readPreviewShareCookie(headers) !== null;
+}
+
 function buildPreviewCookie(serverId: string): string {
   // SameSite=None; Secure is required because the preview iframe is
   // typically embedded in a different origin (the web app). Path=/ so the
@@ -847,7 +856,7 @@ function elementPickerScript(serverId: string): string {
     box.setAttribute("data-gate15-picker", "1");
     var s = box.style;
     s.position = "fixed"; s.zIndex = "2147483646"; s.pointerEvents = "none";
-    s.border = "2px solid #FF6A00"; s.background = "rgba(255,106,0,0.12)";
+    s.border = "2px solid #FF7700"; s.background = "rgba(255,119,0,0.12)";
     s.borderRadius = "2px"; s.boxSizing = "border-box"; s.display = "none";
     s.transition = "left 40ms ease-out, top 40ms ease-out, width 40ms ease-out, height 40ms ease-out";
     label = document.createElement("div");
@@ -855,7 +864,7 @@ function elementPickerScript(serverId: string): string {
     var ls = label.style;
     ls.position = "fixed"; ls.zIndex = "2147483647"; ls.pointerEvents = "none";
     // Hazard-signage ink: near-black on ember (white on ember fails AA).
-    ls.background = "#FF6A00"; ls.color = "#140D07"; ls.display = "none";
+    ls.background = "#FF7700"; ls.color = "#140D07"; ls.display = "none";
     ls.font = "600 11px/1.4 ui-monospace,Menlo,Consolas,monospace";
     ls.padding = "2px 6px"; ls.borderRadius = "3px"; ls.whiteSpace = "nowrap";
     ls.maxWidth = "90vw"; ls.overflow = "hidden"; ls.textOverflow = "ellipsis";
@@ -1129,14 +1138,14 @@ export function previewWarmingPage(reloadUrl: string, startMs: number): string {
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:Archivo,-apple-system,"Segoe UI",Roboto,sans-serif;background:#0A0B0C;color:#EDEBE7;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
 .card{text-align:center;max-width:360px}
-.spin{width:36px;height:36px;margin:0 auto 18px;border:3px solid #2A2E33;border-top-color:#FF6A00;border-radius:50%;animation:s .8s linear infinite}
+.spin{width:36px;height:36px;margin:0 auto 18px;border:3px solid #2A2E33;border-top-color:#FF7700;border-radius:50%;animation:s .8s linear infinite}
 @keyframes s{to{transform:rotate(360deg)}}
 h1{font-size:16px;margin-bottom:8px;color:#EDEBE7;letter-spacing:-0.02em}
 p{font-size:13px;color:#9A9793;line-height:1.6}
 .track{height:4px;background:#16181B;border-radius:2px;margin-top:18px;overflow:hidden}
-.bar{height:100%;width:0;background:linear-gradient(90deg,#FF5A1F,#FFC53D);transition:width .5s linear}
+.bar{height:100%;width:0;background:linear-gradient(90deg,#FF651F,#FFCF3D);transition:width .5s linear}
 #giveup{display:none}
-button{margin-top:14px;background:#FF6A00;color:#140D07;border:0;border-radius:6px;padding:8px 16px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;cursor:pointer}
+button{margin-top:14px;background:#FF7700;color:#140D07;border:0;border-radius:6px;padding:8px 16px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;cursor:pointer}
 </style></head><body>
 <div class="card">
 <div id="spin" class="spin"></div>
@@ -1187,10 +1196,10 @@ export function previewErrorPage(status: number, title: string, detail: string):
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:Archivo,-apple-system,"Segoe UI",Roboto,sans-serif;background:#0A0B0C;color:#EDEBE7;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
 .card{text-align:center;max-width:420px}
-.code{font-size:64px;font-weight:700;color:#FF6A00;opacity:0.35;line-height:1;font-variant-numeric:tabular-nums}
+.code{font-size:64px;font-weight:700;color:#FF7700;opacity:0.35;line-height:1;font-variant-numeric:tabular-nums}
 h1{font-size:18px;margin:12px 0 8px;color:#EDEBE7;letter-spacing:-0.02em}
 p{font-size:13px;color:#9A9793;line-height:1.6;margin-bottom:16px}
-a{color:#FF8124;text-decoration:none;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.1em}
+a{color:#FF8C24;text-decoration:none;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.1em}
 a:hover{text-decoration:underline}
 .detail{background:#16181B;border:1px solid #2A2E33;border-radius:6px;padding:10px 14px;font-family:"JetBrains Mono",monospace;font-size:11px;color:#9A9793;margin-bottom:16px;text-align:left;word-break:break-all;max-height:120px;overflow:auto}
 </style></head><body>

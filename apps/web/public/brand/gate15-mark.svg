@@ -2,8 +2,8 @@
   <title>Gate 15</title>
   <defs>
     <linearGradient id="gate15-plate-grad" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#FF5A1F"/>
-      <stop offset="1" stop-color="#FFC53D"/>
+      <stop offset="0" stop-color="#FF651F"/>
+      <stop offset="1" stop-color="#FFCF3D"/>
     </linearGradient>
   </defs>
   <path d="M2 2 H20.6 L30 11.4 V30 H2 Z" fill="url(#gate15-plate-grad)"/>

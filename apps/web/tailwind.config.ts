@@ -31,13 +31,13 @@ const config: Config = {
         border: "#2A2E33",
         "border-light": "#1E2125",
         "border-strong": "rgba(255,255,255,0.17)",
-        "border-active": "#FF6A00",
+        "border-active": "#FF7700",
         // Brand — safety orange on steel. Ink ON ember is near-black (#140D07),
-        // never white: #FF6A00 + white is ~2.9:1 and fails AA.
-        ember: "#FF6A00",
-        "ember-hi": "#FF8124",
-        signal: "#FFC53D",
-        rust: "#B23F0A",
+        // never white: #FF7700 + white is ~2.7:1 and fails AA.
+        ember: "#FF7700",
+        "ember-hi": "#FF8C24",
+        signal: "#FFCF3D",
+        rust: "#AE460A",
         ink: "#140D07",
         // Semantic — status only. Never use brand `signal` yellow as a warning.
         "conf-high": "#34D399",
@@ -45,9 +45,9 @@ const config: Config = {
         "conf-low": "#F87171",
       },
       backgroundImage: {
-        "brand-gradient": "linear-gradient(135deg, #FF5A1F, #FFC53D)",
+        "brand-gradient": "linear-gradient(135deg, #FF651F, #FFCF3D)",
         hazard:
-          "repeating-linear-gradient(45deg, #FF6A00 0 8px, transparent 8px 16px)",
+          "repeating-linear-gradient(45deg, #FF7700 0 8px, transparent 8px 16px)",
       },
       borderRadius: {
         sm: "4px",

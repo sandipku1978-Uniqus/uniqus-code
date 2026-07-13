@@ -1,4 +1,4 @@
-# Uniqus Code — docs
+# Gate 15 — docs
 
 Code-grounded reference docs for the orchestrator, sandbox, and platform
 features. Each links to the source it describes; where something is not yet
@@ -38,7 +38,7 @@ implemented, the doc says so explicitly.
   project types (Node/Python/Go/static; Next/Vite via package.json) and
   runtime ceilings (VM memory, ext4 sizing, hydration/import caps).
 - [Private cloud / self-hosting your generated app](./private-cloud-deploy.md)
-  — how to take a Uniqus-built app off Uniqus-hosted infrastructure: GitHub
+  — how to take a Gate 15-built app off Gate 15-hosted infrastructure: GitHub
   publish to your own CI/CD, or a generated Dockerfile + deploy bundle you
   build and run on your own registry/cluster. Honest about scope — the
   control plane itself (orchestrator, VM fleet, web app) isn't self-hostable

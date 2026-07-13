@@ -1,6 +1,6 @@
 # Supported stacks & runtime limits
 
-What project types Uniqus runs and deploys, and the resource ceilings of the
+What project types Gate 15 runs and deploys, and the resource ceilings of the
 sandbox VM. Code-grounded in
 [`services/orchestrator/src/deploy.ts`](../services/orchestrator/src/deploy.ts)
 (the Vercel deploy pipeline),
@@ -63,7 +63,7 @@ what happens to that class of project today.
   cron-style schedulers) don't fit it — the pre-deploy safety check above
   flags these as blockers rather than silently shipping a broken deploy.
   There is currently no built-in always-on/container deploy target for that
-  class of project; see "Taking your app off Uniqus-hosted infrastructure"
+  class of project; see "Taking your app off Gate 15-hosted infrastructure"
   below for getting the code onto your own infrastructure instead.
 
 ## Sandbox VM resource limits (`fleet.ts`)
@@ -110,19 +110,19 @@ the sandbox disk at `FIRECRACKER_FS_REAP_MAX_IDLE_MS` (14 days). Full detail in
 [`infra/firecracker/README.md`](../infra/firecracker/README.md) and
 [`infra/firecracker/SECURITY.md`](../infra/firecracker/SECURITY.md).
 
-## Taking your app off Uniqus-hosted infrastructure (private cloud / self-host)
+## Taking your app off Gate 15-hosted infrastructure (private cloud / self-host)
 
 Some buyers — finance, GRC, regulated, or air-gapped environments — can't run
-production on public Vercel and need to run the **app Uniqus built** on
+production on public Vercel and need to run the **app Gate 15 built** on
 **their own** infrastructure (their CI/CD, their container registry, their
 Kubernetes/VMs). That is fully supported: your generated app is portable code,
-not a Uniqus-locked artifact. The full how-to with copy-pasteable commands lives
+not a Gate 15-locked artifact. The full how-to with copy-pasteable commands lives
 in [`docs/private-cloud-deploy.md`](./private-cloud-deploy.md); the summary
 below is the honest scope.
 
 ### What you can take with you (two paths)
 
-1. **GitHub publish → your own CI/CD.** Uniqus can create a (private) repo on
+1. **GitHub publish → your own CI/CD.** Gate 15 can create a (private) repo on
    your GitHub account and push the project's full source
    (`createUserRepo` / initial push in
    [`services/orchestrator/src/github.ts`](../services/orchestrator/src/github.ts)).
@@ -134,27 +134,27 @@ below is the honest scope.
    (`buildProjectZip` in
    [`services/orchestrator/src/export.ts`](../services/orchestrator/src/export.ts)),
    reusing the same secret/build-artifact exclusions as the Vercel deploy path
-   so `.env*` files and `node_modules`/`.git` never leave the server. **Uniqus
+   so `.env*` files and `node_modules`/`.git` never leave the server. **Gate 15
    does not auto-generate a `Dockerfile`, `.dockerignore`, or
    `docker-compose.yml`** — an earlier build had a per-shape generator tied to
    a built-in Fly.io deploy adapter; both were removed, so there is nothing to
    reuse here today. Write a standard Dockerfile for the project's stack the
-   way you would for any non-Uniqus app (e.g. `node:20-slim` for Node,
+   way you would for any ordinary app (e.g. `node:20-slim` for Node,
    `python:3.11-slim` for Python, `golang:1.22-alpine` multi-stage for Go, or
    `nginx:alpine` for static), then build/push/run on your own registry and
    cluster.
 
 ### What is explicitly out of scope (be honest)
 
-Self-hosting / air-gapping the **Uniqus Code control plane itself** — the
+Self-hosting / air-gapping the **Gate 15 control plane itself** — the
 orchestrator, the Firecracker microVM fleet, and the web app — is **not offered
 today**. Only the **generated app** is portable. So a customer can run *their
 app* on their own infrastructure, but the *builder* still runs on
-Uniqus-hosted infrastructure.
+Gate 15-hosted infrastructure.
 
 This is a **packaging-and-documentation gap, not a fundamental inability to
 leave Vercel**: the generated app is already plain code with no runtime
-dependency on Uniqus services (you supply your own Dockerfile, per path 2
+dependency on Gate 15 services (you supply your own Dockerfile, per path 2
 above). If full control-plane self-hosting is a hard requirement, say so
 during evaluation — it's a roadmap conversation, not something to pretend is
 shipped.

@@ -1,4 +1,5 @@
 import { lookup } from "node:dns/promises";
+import type { LookupAddress, LookupOptions } from "node:dns";
 import net, { type LookupFunction } from "node:net";
 import {
   Agent,
@@ -188,27 +189,37 @@ const CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorization"];
  * connects to exactly the address we return (no further DNS), a rebind between
  * resolve and connect can't slip a private target past the guard.
  */
-function pinningLookup(
+type PinningLookupCallback = (
+  err: NodeJS.ErrnoException | null,
+  address?: string | LookupAddress[],
+  family?: number,
+) => void;
+
+export function pinningLookup(
   hostname: string,
-  options: { family?: number },
-  callback: (err: Error | null, address?: string, family?: number) => void,
+  options: LookupOptions,
+  callback: PinningLookupCallback,
 ): void {
   resolvePublicHost(hostname)
     .then((addrs) => {
-      const wantFamily = options?.family;
-      if (wantFamily) {
-        // Honor the dns.lookup contract: when a specific family is requested and
-        // none resolved, ERROR — never hand undici a mismatched-family address
-        // (which would make it open the wrong socket type and fail the connect).
-        const match = addrs.find((a) => a.family === wantFamily);
-        if (!match) {
-          callback(new Error(`host ${hostname} has no address for family ${wantFamily}`));
-          return;
-        }
-        callback(null, match.address, match.family);
+      const wantFamily =
+        options.family === "IPv4" ? 4 : options.family === "IPv6" ? 6 : options.family;
+      const matches = wantFamily ? addrs.filter((a) => a.family === wantFamily) : addrs;
+      if (matches.length === 0) {
+        callback(new Error(`host ${hostname} has no address for family ${wantFamily}`));
         return;
       }
-      callback(null, addrs[0].address, addrs[0].family);
+
+      // Node's family auto-selection calls custom lookup functions with
+      // `all:true` and requires the dns.lookup(..., { all:true }) array shape.
+      // Returning the legacy (address, family) tuple in that case makes Node
+      // read an undefined address and every undici request fails before connect.
+      if (options.all) {
+        callback(null, matches);
+        return;
+      }
+
+      callback(null, matches[0].address, matches[0].family);
     })
     .catch((err) =>
       callback(err instanceof Error ? err : new Error(`could not resolve host: ${hostname}`)),
@@ -217,9 +228,9 @@ function pinningLookup(
 
 /** Shared dispatcher that validates + pins the connect-time IP for every request. */
 const pinningAgent = new Agent({
-  // The cast bridges our readable lookup signature to Node's LookupFunction —
-  // the runtime contract (hostname, options, callback(err, address, family)) is
-  // exactly what undici invokes.
+  // The cast bridges the callback's optional error-path address to Node's
+  // LookupFunction type. Successful calls honor both its single and all-address
+  // result shapes.
   connect: { lookup: pinningLookup as unknown as LookupFunction },
 });
 

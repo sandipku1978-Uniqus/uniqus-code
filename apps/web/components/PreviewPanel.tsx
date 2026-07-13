@@ -340,7 +340,7 @@ const dotStyle: CSSProperties = {
   width: 8,
   height: 8,
   borderRadius: "50%",
-  background: "var(--brand-ember, #FF6A00)",
+  background: "var(--brand-ember, #FF7700)",
   animation: "pulse-dim 1.5s ease-in-out infinite",
 };
 const reloadBtnStyle: CSSProperties = {
@@ -1113,7 +1113,7 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
                 cursor: "pointer",
                 border: "none",
                 borderRadius: "var(--radius-sm)",
-                background: "var(--brand-gradient, var(--brand-ember, #FF6A00))",
+                background: "var(--brand-gradient, var(--brand-ember, #FF7700))",
                 // Ink on ember is near-black, never white (white fails AA).
                 color: "#140D07",
                 fontWeight: 600,

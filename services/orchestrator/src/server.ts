@@ -275,7 +275,13 @@ import {
   removeObjects as storageRemoveObjects,
 } from "./storage/client.js";
 import { getTracker, clearTracker } from "./storage/sync.js";
-import { resolveTarget, proxyHttp, proxyWebSocket, previewErrorPage } from "./proxy.js";
+import {
+  resolveTarget,
+  proxyHttp,
+  proxyWebSocket,
+  previewErrorPage,
+  hasPreviewRoutingCookie,
+} from "./proxy.js";
 import { importZip, importGithub, validateCredentialedGithubRepo } from "./import.js";
 import {
   handleStart as githubStart,
@@ -843,8 +849,8 @@ function pickAllowedOrigin(reqOrigin: string | undefined): string | null {
  *
  * Yes if the path explicitly starts with `/preview/`, OR if the request
  * carries a Referer pointing at `/preview/...`, OR if the request carries
- * the `uniqus_preview` cookie that we set when an iframe initially loaded
- * a preview path. In all three cases we still bail for orchestrator-owned
+ * a preview-routing cookie that we set when an iframe initially loaded a
+ * preview path. In all three cases we still bail for orchestrator-owned
  * routes (`/api/*`, `/health`, the agent WS at `/` with `?project=`) so
  * those keep working when an iframe is open.
  *
@@ -869,14 +875,10 @@ function shouldProxy(url: string, headers: IncomingHttpHeaders): boolean {
       return false;
     }
   })();
-  // Match BOTH the owner preview cookie (uniqus_preview=) AND the share-recipient
-  // cookie (uniqus_preview_share=). The old `includes("uniqus_preview=")` test
-  // can't match "uniqus_preview_share=" (the "_" follows "preview"), so after an
-  // SPA soft-nav stripped the share path from URL+Referer, share recipients'
-  // fetches/HMR fell through to API routing and broke the shared preview (C-15).
-  const cookieHasPreview =
-    typeof headers.cookie === "string" &&
-    /(?:^|;\s*)uniqus_preview(?:_share)?=/.test(headers.cookie);
+  // This must recognize exactly the same current + legacy owner/share cookie
+  // names as resolveTarget. The names live in proxy.ts so a brand rename cannot
+  // make this pre-routing gate reject requests that resolveTarget can handle.
+  const cookieHasPreview = hasPreviewRoutingCookie(headers);
   if (!refererPointsAtPreview && !cookieHasPreview) return false;
   if (url.startsWith("/api/") || url === "/health") return false;
   // The orchestrator WS upgrade lives at `/` with `?project=...`. Anything
@@ -3965,20 +3967,42 @@ async function accountUsageStats(ownerId: string): Promise<AccountUsageStats> {
     // A GitHub-style calendar is 53 week columns (including the partial current
     // week), so retain enough history to populate every visible cell.
     const dailyRows = await getDailyUsageByModel(ownerId, 371);
-    const byDate = new Map<string, { cost_usd: number; tokens: number }>();
+    const byDate = new Map<
+      string,
+      { cost_usd: number; tokens: number; models: Map<string, { tokens: number; cost_usd: number }> }
+    >();
     for (const r of dailyRows) {
-      const slot = byDate.get(r.date) ?? { cost_usd: 0, tokens: 0 };
-      // r.cost_usd is already the band-accurate sum of this bucket's per-row costs.
-      slot.cost_usd += r.cost_usd;
-      slot.tokens +=
+      const slot = byDate.get(r.date) ?? { cost_usd: 0, tokens: 0, models: new Map() };
+      const tokens =
         r.input_tokens +
         r.cache_read_tokens +
         r.cache_creation_tokens +
         r.output_tokens;
+      // r.cost_usd is already the band-accurate sum of this bucket's per-row costs.
+      slot.cost_usd += r.cost_usd;
+      slot.tokens += tokens;
+      // Keep the per-model split (one sweep row per date+model) so the usage
+      // calendar's tooltip can say what produced the day's usage.
+      const modelSlot = slot.models.get(r.model) ?? { tokens: 0, cost_usd: 0 };
+      modelSlot.tokens += tokens;
+      modelSlot.cost_usd += r.cost_usd;
+      slot.models.set(r.model, modelSlot);
       byDate.set(r.date, slot);
     }
     daily = [...byDate.entries()]
-      .map(([date, v]) => ({ date, cost_usd: v.cost_usd, tokens: v.tokens }))
+      .map(([date, v]) => ({
+        date,
+        cost_usd: v.cost_usd,
+        tokens: v.tokens,
+        models: [...v.models.entries()]
+          .map(([model, t]) => ({
+            model,
+            label: MODEL_CATALOG.find((c) => c.model === model)?.label ?? model,
+            tokens: t.tokens,
+            cost_usd: t.cost_usd,
+          }))
+          .sort((a, b) => b.tokens - a.tokens),
+      }))
       .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   } catch (err) {
     console.error("accountUsageStats: getDailyUsageByModel failed:", err);

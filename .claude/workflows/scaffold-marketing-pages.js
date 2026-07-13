@@ -1,6 +1,6 @@
 export const meta = {
   name: 'scaffold-marketing-pages',
-  description: 'Build the remaining Uniqus Code marketing/resource pages from a shared design spec',
+  description: 'Build Gate 15 marketing/resource pages from the shared design system',
   phases: [
     { title: 'Write', detail: 'one agent writes each page from the shared spec + golden examples' },
     { title: 'Review', detail: 'each page is reviewed against the checklist and fixed in place' },
@@ -10,8 +10,8 @@ export const meta = {
 // ── Shared spec handed to every writer agent ──────────────────────────────
 const SHARED = `
 You are building ONE page (or a small set of tightly-coupled files) for the
-marketing site of **Uniqus Code** — an AI workspace where people describe what
-they want, pick the AI they trust (Claude / GPT / Gemini), and watch their app
+marketing site of **Gate 15** — an AI workspace where people describe what
+they want, pick the AI they trust (Claude / GLM / GPT / Gemini), and watch their app
 come to life in a private, isolated cloud workspace with a live preview.
 
 ## Ground truth — READ THESE FIRST (they define the exact patterns + CSS vocabulary)
@@ -26,7 +26,7 @@ Also skim apps/web/app/page.tsx and CLAUDE.md for product facts + voice.
 
 ## HARD RULES (violating these breaks the page)
 - The page is a **default-export React Server Component** (no "use client") UNLESS it
-  needs interactivity. Export a \`metadata\` object: { title: "… — Uniqus Code", description: "…" }.
+  needs interactivity. Export a \`metadata\` object: { title: "… — Gate 15", description: "…" }.
 - The \`(marketing)\` layout ALREADY renders the top nav, a bottom "Ready to build?"
   CTA, and the footer around your page. So your file must return ONLY the page
   content — a React fragment <>…</> starting with a <section className="mk-hero"> and
@@ -36,7 +36,7 @@ Also skim apps/web/app/page.tsx and CLAUDE.md for product facts + voice.
   landing primitives like section.band/.section-head/.label-eyebrow/.feature-grid +
   buttons .btn-primary/.btn-secondary/.btn-ghost/.btn-lg). If you need a one-off
   tweak, use an inline style={{…}} with CSS variables (var(--mk-text), var(--mk-muted),
-  var(--mk-line), var(--brand-magenta), var(--brand-gradient), --radius-*, etc.).
+  var(--mk-line), var(--brand-ember), var(--brand-gradient), --radius-*, etc.).
   **NEVER edit globals.css or any other shared file. Only create your own new file(s).**
 - Theme-aware: never hardcode hex colors in JSX/inline styles — always reference the
   --mk-* / --brand-* tokens so light mode keeps working. (Gradient *classes* already
@@ -46,7 +46,8 @@ Also skim apps/web/app/page.tsx and CLAUDE.md for product facts + voice.
 - Icons: inline <svg> (stroke="currentColor", width/height 18-22, aria-hidden). Match the
   PracticeIcon style in security/page.tsx. No icon libraries.
 - Voice: warm, plain-English, confident but not hypey. Match the landing copy. Use
-  real product facts (3 model providers, Auto routing, plan mode, private VM per project,
+  real product facts (4 model providers, task-aware Auto routing across Anthropic + Google,
+  plan mode, private VM per project,
   live preview, built-in web search, GitHub sync, Vercel deploy, encrypted secrets,
   checkpoints/rewind, skills & design packs). Do NOT invent fake customer logos, funding
   numbers, employee counts, or compliance certifications.
@@ -60,10 +61,10 @@ Also skim apps/web/app/page.tsx and CLAUDE.md for product facts + voice.
 - Hero: .mk-hero (+ .left), .mk-hero-inner, .mk-eyebrow (.dot), h1 + .grad, .mk-lede, .mk-hero-cta
 - Section heads: .mk-section-head (+ .center) with <span className="label-eyebrow"> + h2 + p
 - Containers: .mk-page (+ .narrow / .wide)
-- Grids/cards: .mk-grid (.cols-2/.cols-3/.cols-4), .mk-card (+ .hover), .mk-ic (+ .purple/.cyan/.green/.amber/.grad), .mk-card-num, .mk-checks > li
+- Grids/cards: .mk-grid (.cols-2/.cols-3/.cols-4), .mk-card (+ .hover), .mk-ic (+ .ember/.cyan/.green/.amber/.grad), .mk-card-num, .mk-checks > li
 - Feature rows: .mk-rows > .mk-row (+ .flip), .mk-row-art
 - Stats: .stat-grid > .stat > (.num + .lbl)
-- Logo cloud: .logo-cloud-label + .logo-cloud > span  (use REAL integrations only: GitHub, Vercel, Stripe, Supabase, Anthropic, OpenAI, Google)
+- Logo cloud: .logo-cloud-label + .logo-cloud > span  (use REAL integrations only: GitHub, Vercel, Stripe, Supabase, Anthropic, Z.ai, OpenAI, Google)
 - Pricing: .pricing-grid > .price-card (+ .featured), .price-badge, .price-name, .price-amount(.amt/.per), .price-desc, .price-cta, .price-features > li(.off); .compare-table
 - Templates: .template-grid > .template-card > .template-thumb(.t1..t5 + svg) + .template-body(h3/p/.template-tags > .mk-tag)
 - Changelog: .changelog > .changelog-entry > .changelog-date(.ver) + .changelog-body(h3 + ul>li with <span className="change-tag new|improved|fixed">)
@@ -86,12 +87,12 @@ const PAGES = [
     brief: `PAGE: /models — "AI models".
 Write apps/web/app/(marketing)/models/page.tsx.
 Sections:
-- Hero: eyebrow "AI models", a bold headline about picking the right AI for each step, lede explaining Auto mode + three providers.
-- "Auto mode" highlight (a .mk-card or short band): Uniqus picks the best AI for planning vs building automatically; you can always override.
-- The three providers as .mk-rows > .mk-row (alternating, use .flip on the 2nd) OR a .mk-grid cols-3 of rich .mk-card: Anthropic Claude (deep planning, careful changes, long focused sessions), OpenAI GPT-5.x / Codex (complex problem-solving, writing code, multi-step tasks), Google Gemini (working through lots of information, research-heavy, fast turnarounds). Each card lists strengths via .mk-checks.
+- Hero: eyebrow "AI models", a bold headline about picking the right AI for each step, lede explaining Auto mode + four providers.
+- "Auto mode" highlight (a .mk-card or short band): Gate 15 routes tasks across Anthropic and Google automatically; the manual picker exposes all four providers.
+- The four providers as .mk-rows > .mk-row (alternating, use .flip on the 2nd) OR a .mk-grid cols-4 of rich .mk-card: Anthropic Claude (deep planning, careful changes, long focused sessions), Z.ai GLM (long-context coding and built-in search), OpenAI GPT-5.x / Codex (complex problem-solving, writing code, multi-step tasks), Google Gemini (working through lots of information, research-heavy, fast turnarounds). Each card lists strengths via .mk-checks.
 - "Thinking effort" section: low / medium / high per-turn reasoning control (default medium), set in the composer or as an account default.
-- "Built-in web search" section: all three providers can search the web when the answer depends on up-to-date info.
-- A .compare-table comparing the providers across: Web search (yes/yes/yes), Thinking control, Best for. (Keep it accurate to the cheat-sheet facts.)
+- "Built-in web search" section: all four providers can search the web when the answer depends on up-to-date info.
+- A .compare-table comparing the providers across: Web search (yes/yes/yes/yes), Thinking control, Best for. (Keep it accurate to the cheat-sheet facts.)
 Note: low tiers (Haiku, Flash-Lite, mini/nano) are intentionally excluded from the curated list — mention curated selection.`,
   },
   {
@@ -140,11 +141,11 @@ Use <span className="change-tag new|improved|fixed"> on each bullet. Mix 2-4 bul
   {
     key: 'enterprise',
     files: ['apps/web/app/(marketing)/enterprise/page.tsx'],
-    brief: `PAGE: /enterprise — "Enterprise" (take layout cues from a clean B2B "close deals faster" page, but on the Uniqus dark brand).
+    brief: `PAGE: /enterprise — "Enterprise" (take layout cues from a clean B2B "close deals faster" page, but in the Gate 15 industrial design language).
 Write apps/web/app/(marketing)/enterprise/page.tsx.
 Sections:
 - Hero (the .mk-hero grid background suits this well): eyebrow "Enterprise", a bold outcome headline (e.g., "Ship internal tools at the speed of your roadmap."), lede about giving teams a governed, secure way to build with AI. .mk-hero-cta with a primary <Link href="/contact">Book a demo</Link> and a secondary <Link href="/security">Review our security</Link>.
-- A logo cloud of REAL integrations (NOT fake customers): .logo-cloud-label "Works with the stack you already use" + .logo-cloud spans: GitHub, Vercel, Stripe, Supabase, Anthropic, OpenAI, Google.
+- A logo cloud of REAL integrations (NOT fake customers): .logo-cloud-label "Works with the stack you already use" + .logo-cloud spans: GitHub, Vercel, Stripe, Supabase, Anthropic, Z.ai, OpenAI, Google.
 - Value cards .mk-grid cols-3 of .mk-card with .mk-ic icons: SSO / SAML & SCIM, Audit logs & role-based access, Dedicated VM capacity & SLAs, DPA & security review, Volume billing & invoicing, Dedicated success manager.
 - "Built for how enterprises build" .mk-rows: governance & approvals (plan-before-change), isolation per project, bring-your-own model keys, deploy to your targets.
 - .stat-grid (illustrative, no false precision).
@@ -157,9 +158,9 @@ Sections:
 Write apps/web/app/(marketing)/about/page.tsx.
 Sections:
 - Hero: eyebrow "About", a mission headline (e.g., "Software should be buildable by anyone with an idea."), lede.
-- A .mk-page narrow .mk-prose mission/story (2-4 short paragraphs): why Uniqus Code exists — make building real software accessible, keep the AI transparent (shows its plan, cites its work), give people a real machine per project. Mention it's part of Uniqus Consultech. Keep it about mission/principles; do NOT invent funding, headcount, or founding-date specifics.
+- A .mk-page narrow .mk-prose mission/story (2-4 short paragraphs): why Gate 15 exists — make building real software accessible, keep the AI transparent (shows its plan, cites its work), and give people a real machine per project. State that Gate 15 is an independent product. Keep it about mission/principles; do NOT invent funding, headcount, or founding-date specifics.
 - Values: .mk-grid cols-3 of .mk-card with .mk-ic: "Show your work" (transparency), "Trust by default" (security/guardrails), "Build in the open" (you stay in control), "Craft over hype", "Your choice of AI", "Ship, don't stall". (~6 values.)
-- A .stat-grid of illustrative, non-misleading figures (e.g., "3 AI providers", "1 VM per project", "Plan-first by default") — reuse facts, avoid invented metrics.
+- A .stat-grid of illustrative, non-misleading figures (e.g., "4 AI providers", "1 VM per project", "Plan-first by default") — reuse facts, avoid invented metrics.
 - Cross-link /careers ("We're hiring") and /contact.`,
   },
   {
@@ -171,8 +172,8 @@ Sections:
 - Hero: eyebrow "Careers", headline "Help build the future of software.", lede.
 - "Why join" .mk-grid cols-3 of .mk-card (with .mk-ic): work on a frontier AI product, small senior team, real ownership, remote-friendly, etc.
 - Perks .mk-grid cols-2/cols-3 of .mk-card: remote-first, competitive equity, learning budget, top-tier hardware, flexible time off, latest AI tools. (Keep generic/honest.)
-- Open roles: a .job-list with ~5 .job-row entries (e.g., Founding Frontend Engineer, Backend / Infrastructure Engineer, Product Designer, Developer Advocate, Member of Technical Staff). Each .job-info has h3 + .job-meta spans (Team · Remote · Full-time) and an "Apply" link on the right: <a href="mailto:careers@uniqus.com?subject=Application: ROLE">Apply</a>.
-- A closing line: "Don't see your role? Email careers@uniqus.com" — honest, since there's no ATS backend.`,
+- Open roles: a .job-list with ~5 .job-row entries (e.g., Founding Frontend Engineer, Backend / Infrastructure Engineer, Product Designer, Developer Advocate, Member of Technical Staff). Each .job-info has h3 + .job-meta spans (Team · Remote · Full-time) and an "Apply" link on the right: <a href="mailto:careers@gate15.dev?subject=Application: ROLE">Apply</a>.
+- A closing line: "Don't see your role? Email careers@gate15.dev" — honest, since there's no ATS backend.`,
   },
   {
     key: 'blog',
@@ -221,16 +222,16 @@ metadata lives on the page (server component); the interactive form is a separat
 1) apps/web/components/ContactForm.tsx — "use client". A controlled form with fields: name (required),
    email (required), company (optional), topic (<select>: Sales, Support, Security, Partnerships, Other),
    message (required textarea). Use .contact-form/.field/.field-row/.req classes. On submit
-   (e.preventDefault), build a mailto: URL to hello@uniqus.com with a subject from the topic and a body
+   (e.preventDefault), build a mailto: URL to hello@gate15.dev with a subject from the topic and a body
    composed of the fields, then set window.location.href to it; flip a local "sent" state that replaces the
    form with a .form-ok message ("Thanks — your email client should open with your message ready to send. If
-   it didn't, email us at hello@uniqus.com."). Include a .form-note under the button. This is honest, working
+   it didn't, email us at hello@gate15.dev."). Include a .form-note under the button. This is honest, working
    behavior (no fake backend). Submit button is .btn-primary.
 
 2) apps/web/app/(marketing)/contact/page.tsx — server component, exports metadata. Hero (eyebrow "Contact",
    headline "Let's talk.", lede). Then .mk-page with a .contact-grid: left column = <ContactForm />; right
    column = .contact-info with ~4 .contact-method cards: Sales (link to /enterprise), Support (link to
-   /support), Security (mailto:security@uniqus.com), Careers (link to /careers). Import ContactForm from
+   /support), Security (mailto:security@gate15.dev), Careers (link to /careers). Import ContactForm from
    "@/components/ContactForm".`,
   },
   {
@@ -267,9 +268,9 @@ snapshot with a "Last checked" line — do NOT claim real-time/continuous monito
 Sections:
 - A compact header (can be a smaller .mk-hero or just an .mk-page with .mk-section-head): eyebrow "Status", headline "System status".
 - A .status-banner (operational variant): .big-dot + strong "All systems operational" + span "Last checked: June 2026".
-- A .status-list with .status-row entries for each component, each with .status-name (.status-dot.ok + name) and .status-state.ok "Operational": Web app, Orchestrator API, Workspaces (VMs), Model routing — Anthropic, Model routing — OpenAI, Model routing — Google, Live previews, Deploys, GitHub sync.
+- A .status-list with .status-row entries for each component, each with .status-name (.status-dot.ok + name) and .status-state.ok "Operational": Web app, Orchestrator API, Workspaces (VMs), Model routing — Anthropic, Model routing — Z.ai, Model routing — OpenAI, Model routing — Google, Live previews, Deploys, GitHub sync.
 - An "Uptime (last 90 days)" .mk-grid cols-3 of small .mk-card, each with a component name + a .uptime-bar of ~30 <i> bars (mostly up, a couple .d to look real) + a "99.9% uptime" label.
-- A small note + a "Subscribe to updates" <a href="mailto:status@uniqus.com">.
+- A small note + a "Subscribe to updates" <a href="mailto:status@gate15.dev">.
 - A line linking to /support for help.`,
   },
 ]
@@ -283,7 +284,7 @@ const results = await pipeline(
   }),
   // Review + fix in place, independently per page (no barrier).
   (writeSummary, page) => agent(
-    `You are reviewing the newly-written page file(s) for the Uniqus Code marketing site and FIXING any problems in place (use Edit/Write).
+    `You are reviewing the newly-written page file(s) for the Gate 15 marketing site and FIXING any problems in place (use Edit/Write).
 Files to review: ${page.files.join(', ')}
 
 The writer reported:

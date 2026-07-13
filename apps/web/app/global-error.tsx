@@ -23,7 +23,7 @@ body{margin:0;}
 `;
 
 /** Ember → signal. Ink on ember is near-black, never white (hazard signage). */
-const EMBER_GRADIENT = "linear-gradient(135deg, #FF5A1F, #FFC53D)";
+const EMBER_GRADIENT = "linear-gradient(135deg, #FF651F, #FFCF3D)";
 
 export default function GlobalError({
   error,

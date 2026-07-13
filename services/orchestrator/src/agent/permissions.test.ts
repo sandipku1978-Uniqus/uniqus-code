@@ -18,6 +18,7 @@ describe("classifyToolRisk", () => {
       "grep",
       "list_servers",
       "screenshot_preview",
+      "interact_preview",
       "analyze_image",
       "knowledge_search",
       "ask_user",
@@ -50,8 +51,15 @@ describe("classifyToolRisk", () => {
   it("treats paid / expensive tools as dangerous", () => {
     expect(cat("generate_image", { prompt: "a logo" })).toBe("dangerous");
     expect(cat("spawn_agents", {})).toBe("dangerous");
-    expect(cat("interact_preview", { actions: [{ type: "click", selector: "#delete" }] })).toBe("dangerous");
     expect(cat("run_flow", { name: "checkout" })).toBe("dangerous");
+  });
+
+  it("never permission-gates interact_preview verification actions", () => {
+    const risk = cat("interact_preview", { actions: [{ type: "click", selector: "#delete" }] });
+    expect(risk).toBe("read");
+    for (const mode of ["plan", "default", "acceptEdits", "bypass"] as const) {
+      expect(decidePermission(mode, risk)).toBe("allow");
+    }
   });
 
   it("gates connector writes but lets connector reads through", () => {

@@ -563,8 +563,15 @@ export interface AccountUsageStats {
   turns: number;
   /** Models ranked by total tokens, most-used first. */
   top_models: ModelUsageRollup[];
-  /** Per-day spend/usage for a trend chart, oldest-first. */
-  daily?: Array<{ date: string; cost_usd: number; tokens: number }>;
+  /** Per-day spend/usage for a trend chart, oldest-first. `models` breaks the
+   *  day down per model (largest first) so the usage calendar's tooltip can
+   *  show what produced a day's usage; absent on older orchestrators. */
+  daily?: Array<{
+    date: string;
+    cost_usd: number;
+    tokens: number;
+    models?: Array<{ model: string; label: string; tokens: number; cost_usd: number }>;
+  }>;
   /** Per-project spend/usage rollup, highest-spend first. */
   by_project?: Array<{ project_id: string; project_name: string; cost_usd: number; tokens: number }>;
 }

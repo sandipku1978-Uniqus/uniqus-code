@@ -66,8 +66,8 @@ export function BrandMark({
           y2="32"
           gradientUnits="userSpaceOnUse"
         >
-          <stop offset="0" stopColor="#FF5A1F" />
-          <stop offset="1" stopColor="#FFC53D" />
+          <stop offset="0" stopColor="#FF651F" />
+          <stop offset="1" stopColor="#FFCF3D" />
         </linearGradient>
       </defs>
       <path d={PLATE} fill={`url(#${PLATE_GRADIENT_ID})`} />
@@ -93,7 +93,7 @@ export default function BrandLockup({
           className="wordmark code"
           style={{ fontWeight: 700, letterSpacing: "0.02em", whiteSpace: "nowrap" }}
         >
-          GATE <span style={{ color: "var(--accent-text, #FF6A00)" }}>15</span>
+          GATE <span style={{ color: "var(--accent-text, #FF7700)" }}>15</span>
         </span>
       )}
     </span>

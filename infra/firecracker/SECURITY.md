@@ -1,6 +1,6 @@
 # Firecracker — trust boundary & isolation model
 
-How the Uniqus sandbox isolates user/agent-controlled code, and where the
+How the Gate 15 sandbox isolates user/agent-controlled code, and where the
 current gaps are. Code-grounded in
 [`services/orchestrator/src/firecracker/fleet.ts`](../../services/orchestrator/src/firecracker/fleet.ts),
 [`host-setup.sh`](./host-setup.sh), and [`build-rootfs.sh`](./build-rootfs.sh).

@@ -1995,8 +1995,61 @@ type UsageCalendarCell = {
   key: string;
   level: UsageCalendarLevel;
   isFuture: boolean;
-  title?: string;
+  /** Tooltip payload, absent on future cells (they're inert). */
+  tip?: {
+    dateLabel: string;
+    tokens: number;
+    costUsd: number;
+    /** Per-model split for the day, largest first (may be empty on old data). */
+    models: Array<{ label: string; tokens: number }>;
+  };
 };
+
+/** Where the calendar hover tooltip is anchored: cell index + viewport coords. */
+type UsageTipAnchor = { index: number; x: number; y: number };
+
+/**
+ * The 371 cell <span>s as their own memo'd child, so the hover-tooltip state in
+ * UsageCalendar re-renders ONE tooltip div, not the whole grid. Hover is
+ * delegated to the grid container — zero per-cell listeners.
+ */
+const UsageCalendarGrid = memo(function UsageCalendarGrid({
+  cells,
+  summary,
+  onHover,
+}: {
+  cells: UsageCalendarCell[];
+  summary: string;
+  onHover: (anchor: UsageTipAnchor | null) => void;
+}) {
+  function anchorFromEvent(e: React.PointerEvent): UsageTipAnchor | null {
+    const el = (e.target as HTMLElement).closest?.(".usage-calendar-cell");
+    if (!(el instanceof HTMLElement) || el.dataset.i === undefined) return null;
+    const index = Number(el.dataset.i);
+    if (!cells[index]?.tip) return null;
+    const rect = el.getBoundingClientRect();
+    return { index, x: rect.left + rect.width / 2, y: rect.top };
+  }
+  return (
+    <div
+      className="usage-calendar-grid"
+      role="img"
+      aria-label={summary}
+      onPointerOver={(e) => onHover(anchorFromEvent(e))}
+      onPointerLeave={() => onHover(null)}
+      onPointerDown={() => onHover(null)}
+    >
+      {cells.map((cell, index) => (
+        <span
+          key={cell.key}
+          data-i={index}
+          className={`usage-calendar-cell level-${cell.level}${cell.isFuture ? " future" : ""}`}
+          aria-hidden="true"
+        />
+      ))}
+    </div>
+  );
+});
 
 /**
  * Contribution-style activity grid — 53 weeks × 7 days = 371 cells.
@@ -2040,6 +2093,7 @@ const UsageCalendar = memo(function UsageCalendar({
         key,
         tokens: usage?.tokens ?? 0,
         costUsd: usage?.cost_usd ?? 0,
+        models: (usage?.models ?? []).map((m) => ({ label: m.label, tokens: m.tokens })),
         isFuture: date > today,
       };
     });
@@ -2067,15 +2121,16 @@ const UsageCalendar = memo(function UsageCalendar({
     // Future cells are inert (no tooltip), so they skip formatting entirely.
     const cells: UsageCalendarCell[] = rawDays.map((day) => {
       if (day.isFuture) return { key: day.key, level: 0, isFuture: true };
-      const dateLabel = USAGE_DAY_FORMAT.format(day.date);
       return {
         key: day.key,
         level: levelFor(day.tokens),
         isFuture: false,
-        title:
-          day.tokens > 0
-            ? `${formatTokens(day.tokens)} tokens on ${dateLabel} · ${formatUsd(day.costUsd)} estimated`
-            : `No usage on ${dateLabel}`,
+        tip: {
+          dateLabel: USAGE_DAY_FORMAT.format(day.date),
+          tokens: day.tokens,
+          costUsd: day.costUsd,
+          models: day.models,
+        },
       };
     });
 
@@ -2097,6 +2152,11 @@ const UsageCalendar = memo(function UsageCalendar({
 
     return { cells, monthLabels, summary };
   }, [stats]);
+
+  // Hover tooltip anchor — the only state here, and the grid is its own memo'd
+  // child, so crossing cells re-renders just the tooltip div.
+  const [tip, setTip] = useState<UsageTipAnchor | null>(null);
+  const tipCell = tip ? cells[tip.index] : null;
 
   return (
     <div className="usage-calendar-card">
@@ -2122,18 +2182,47 @@ const UsageCalendar = memo(function UsageCalendar({
             <span style={{ gridRow: 4 }}>Wed</span>
             <span style={{ gridRow: 6 }}>Fri</span>
           </div>
-          <div className="usage-calendar-grid" role="img" aria-label={summary}>
-            {cells.map((cell) => (
-              <span
-                key={cell.key}
-                className={`usage-calendar-cell level-${cell.level}${cell.isFuture ? " future" : ""}`}
-                title={cell.title}
-                aria-hidden="true"
-              />
-            ))}
-          </div>
+          <UsageCalendarGrid cells={cells} summary={summary} onHover={setTip} />
         </div>
       </div>
+
+      {tipCell?.tip && tip && (
+        <div
+          className="usage-tooltip"
+          role="tooltip"
+          style={{
+            left: Math.min(Math.max(tip.x, 140), window.innerWidth - 140),
+            top: tip.y,
+          }}
+        >
+          <b>{tipCell.tip.dateLabel}</b>
+          {tipCell.tip.tokens > 0 ? (
+            <>
+              <span className="usage-tooltip-total">
+                {formatTokens(tipCell.tip.tokens)} tokens · {formatUsd(tipCell.tip.costUsd)} est.
+              </span>
+              {tipCell.tip.models.length > 0 && (
+                <span className="usage-tooltip-models">
+                  {tipCell.tip.models.slice(0, 4).map((m) => (
+                    <span key={m.label}>
+                      <i>{m.label}</i>
+                      <em>{formatTokens(m.tokens)}</em>
+                    </span>
+                  ))}
+                  {tipCell.tip.models.length > 4 && (
+                    <span className="more">
+                      +{tipCell.tip.models.length - 4} more model
+                      {tipCell.tip.models.length - 4 === 1 ? "" : "s"}
+                    </span>
+                  )}
+                </span>
+              )}
+            </>
+          ) : (
+            <span className="usage-tooltip-total">No usage</span>
+          )}
+        </div>
+      )}
 
       <div className="usage-calendar-legend" aria-hidden="true">
         <span>Less</span>

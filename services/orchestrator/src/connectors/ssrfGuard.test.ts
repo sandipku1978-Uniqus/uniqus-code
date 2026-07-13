@@ -1,5 +1,36 @@
 import { describe, expect, it } from "vitest";
-import { isBlockedIp, assertPublicHost, validatePathComponent } from "./ssrfGuard.js";
+import type { LookupOptions } from "node:dns";
+import {
+  isBlockedIp,
+  assertPublicHost,
+  pinningLookup,
+  validatePathComponent,
+} from "./ssrfGuard.js";
+
+function pinnedLookup(options: LookupOptions): Promise<{ address: unknown; family?: number }> {
+  return new Promise((resolve, reject) => {
+    pinningLookup("8.8.8.8", options, (err, address, family) => {
+      if (err) reject(err);
+      else resolve({ address, family });
+    });
+  });
+}
+
+describe("pinningLookup", () => {
+  it("returns every vetted address when Node requests all for family auto-selection", async () => {
+    await expect(pinnedLookup({ all: true })).resolves.toEqual({
+      address: [{ address: "8.8.8.8", family: 4 }],
+      family: undefined,
+    });
+  });
+
+  it("retains the legacy single-address callback shape when all is false", async () => {
+    await expect(pinnedLookup({ family: 4 })).resolves.toEqual({
+      address: "8.8.8.8",
+      family: 4,
+    });
+  });
+});
 
 describe("isBlockedIp — IPv4", () => {
   it("blocks loopback / private / link-local / metadata / CGNAT", () => {

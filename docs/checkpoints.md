@@ -19,7 +19,7 @@ SANDBOX_ROOT/<id>.checkpoints/.git       ← the shadow repo (work-tree points b
 shadow `.git` never appears in the user's file tree and never fights the
 project's own real `.git` (which imported repos often have). The shadow repo is
 initialized on its own `checkpoints` branch with a fixed identity
-(`Uniqus Agent <agent@uniqus.local>`) and `core.hooksPath=/dev/null` to bypass
+(`Gate 15 Agent <agent@gate15.local>`) and `core.hooksPath=/dev/null` to bypass
 any global pre-commit hooks the user installed.
 
 ## What's captured / excluded

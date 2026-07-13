@@ -1,6 +1,6 @@
 ---
 name: verify-push
-description: Run the Uniqus Code verify-and-push workflow. Use when the user asks for the Codex equivalent of /verify-push, to verify the monorepo, update changelog when needed, and push the current branch.
+description: Run the Gate 15 verify-and-push workflow. Use when the user asks for the Codex equivalent of /verify-push, to verify the monorepo, update changelog when needed, and push the current branch.
 ---
 
 # Verify Push

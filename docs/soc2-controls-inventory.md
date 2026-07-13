@@ -1,8 +1,8 @@
-# SOC 2 Controls Inventory — Uniqus Code
+# SOC 2 Controls Inventory — Gate 15
 
 **Document type:** Internal security process documentation
 **Status:** Pre-audit self-assessment (Type I readiness)
-**Last reviewed:** 2026-07-05
+**Last reviewed:** 2026-07-13
 **Owner:** Engineering / Security
 
 ---
@@ -10,12 +10,12 @@
 ## 1. Purpose & scope
 
 This document is an internal **controls inventory**. It maps the security
-mechanisms that already exist in the Uniqus Code codebase to the AICPA SOC 2
+mechanisms that already exist in the Gate 15 codebase to the AICPA SOC 2
 Trust Services Criteria (the Common Criteria, CC1–CC8), and it lists, honestly,
 the gaps that remain before the platform could credibly enter a SOC 2 Type I
 examination.
 
-**This is a self-assessment, not a compliance claim.** Uniqus Code is **not**
+**This is a self-assessment, not a compliance claim.** Gate 15 is **not**
 SOC 2 certified, has not completed a Type I or Type II examination, has not
 engaged an auditor, and has not had an independent penetration test. Nothing in
 this document should be read, quoted, or marketed as a certification, an
@@ -35,7 +35,7 @@ Scope of the system under assessment:
 - The Postgres/Supabase database that backs the orchestrator.
 
 Out of scope for this revision: customer end-user applications built *with*
-Uniqus Code (those are the customer's own systems), and the sub-processors'
+Gate 15 (those are the customer's own systems), and the sub-processors'
 internal controls (covered only by reference; see §4).
 
 ---
@@ -182,7 +182,7 @@ activities, to lift CC8.1 from Partial.
 
 ## 4. Sub-processor register
 
-These third parties process or store Uniqus Code customer data. This register
+These third parties process or store Gate 15 customer data. This register
 is **not yet formally published** (see §3, P5); it is reproduced here for
 internal tracking.
 
@@ -207,7 +207,7 @@ for a given turn; only one provider receives a given turn's content.
 To keep this assessment honest, the following are explicitly **out of scope as
 claims**:
 
-- **Not certified.** Uniqus Code has no SOC 2 Type I or Type II report. No
+- **Not certified.** Gate 15 has no SOC 2 Type I or Type II report. No
   auditor has been engaged. "Implemented" in §2 means the mechanism exists in
   code, not that it has been independently tested or is operating effectively
   over a period.

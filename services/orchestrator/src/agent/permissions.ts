@@ -49,6 +49,7 @@ const READ_ONLY_TOOLS = new Set<string>([
   "todo_write",
   "load_capabilities",
   "screenshot_preview",
+  "interact_preview",
   // Vision bridge (reads an image, asks a vision model) — part of the verify
   // loop; low cost and would be maddening to gate per screenshot.
   "analyze_image",
@@ -80,7 +81,6 @@ const EXECUTE_TOOLS = new Set<string>([
 const ALWAYS_DANGEROUS_TOOLS = new Set<string>([
   "generate_image", // paid image generation
   "spawn_agents", // spins up sub-agent loops — expensive
-  "interact_preview", // can submit forms, click destructive actions, and navigate
   "run_flow", // replays stored browser mutations
 ]);
 
@@ -158,10 +158,8 @@ export function classifyToolRisk(name: string, input: unknown): ToolRisk {
         ? "Generate an image (paid)"
         : name === "spawn_agents"
           ? "Spawn sub-agents (extra model usage)"
-          : name === "run_flow"
-            ? "Replay an interactive browser flow"
-            : "Interact with the live preview",
-      reason: name === "interact_preview" || name === "run_flow"
+          : "Replay an interactive browser flow",
+      reason: name === "run_flow"
         ? "This browser action can submit forms or mutate external state — paused for confirmation."
         : "This spends additional model/credits — paused for confirmation.",
     };

@@ -53,8 +53,8 @@ const LIGHT_THEME = "gate15-light";
  * The chrome is deliberately COLD (graphite/concrete surfaces, steel selection)
  * — that's what makes the warm signal read as hi-vis. The brand orange is
  * reserved for the live-state marks the eye tracks: the caret, the matched
- * bracket, the dragged scrollbar. On light it drops from ember (#FF6A00, only
- * 2.9:1 on concrete) to the deep oxide --brand-rust (#B23F0A), exactly as the
+ * bracket, the dragged scrollbar. On light it drops from ember (#FF7700, only
+ * 2.3:1 on concrete) to the deep oxide --brand-rust (#AE460A), exactly as the
  * spec requires of every orange mark on a light ground.
  *
  * Syntax keeps six well-separated hues, because an editor is a functional
@@ -72,8 +72,8 @@ function defineGate15Themes(monaco: typeof import("monaco-editor")): void {
     rules: [
       { token: "", foreground: "edebe7" }, // --text-primary
       { token: "comment", foreground: "7c7a76", fontStyle: "italic" }, // --text-dim, 4.6:1
-      { token: "keyword", foreground: "ff8124" }, // ember-hi — the structural spine, 8.0:1
-      { token: "number", foreground: "ffc53d" }, // brand signal — numerals, 12.6:1
+      { token: "keyword", foreground: "ff8c24" }, // ember-hi — the structural spine, 8.5:1
+      { token: "number", foreground: "ffcf3d" }, // brand signal — numerals, 13.5:1
       { token: "string", foreground: "a8cf7e" }, // lichen, 11.3:1
       { token: "type", foreground: "5ec9b0" }, // patina, 9.9:1
       { token: "type.identifier", foreground: "5ec9b0" },
@@ -97,17 +97,17 @@ function defineGate15Themes(monaco: typeof import("monaco-editor")): void {
       // this palette must never become).
       "editor.selectionBackground": "#28323A",
       "editor.inactiveSelectionBackground": "#1E2429",
-      "editorCursor.foreground": "#FF6A00", // ember
+      "editorCursor.foreground": "#FF7700", // ember
       "editorWidget.background": "#16181B", // --bg-surface
       "editorWidget.border": "#2A2E33", // --border-default
       "editorIndentGuide.background": "#1E2125", // --border-light
       "editorIndentGuide.activeBackground": "#3C3A37",
       "editorBracketMatch.background": "#28323A",
-      "editorBracketMatch.border": "#FF6A00", // ember
+      "editorBracketMatch.border": "#FF7700", // ember
       "editorGutter.background": "#08090A",
       "scrollbarSlider.background": "#2A2E3380",
       "scrollbarSlider.hoverBackground": "#3C3A37",
-      "scrollbarSlider.activeBackground": "#FF6A0080", // ember while dragging
+      "scrollbarSlider.activeBackground": "#FF770080", // ember while dragging
       "minimap.background": "#08090A",
     },
   });
@@ -122,7 +122,7 @@ function defineGate15Themes(monaco: typeof import("monaco-editor")): void {
     rules: [
       { token: "", foreground: "17181a" }, // --text-primary, 15.0:1
       { token: "comment", foreground: "64676c", fontStyle: "italic" }, // 4.8:1
-      { token: "keyword", foreground: "b23f0a" }, // --brand-rust — the spine, 4.9:1
+      { token: "keyword", foreground: "ae460a" }, // --brand-rust — the spine, 4.8:1
       { token: "number", foreground: "6b4600" }, // deep ochre — numerals, 7.1:1
       { token: "string", foreground: "4a6b1e" }, // moss (lichen, darkened), 5.2:1
       { token: "type", foreground: "0f6b5c" }, // patina, 5.4:1
@@ -146,17 +146,17 @@ function defineGate15Themes(monaco: typeof import("monaco-editor")): void {
       // (keyword/rust) still clears 4.5:1 sitting on a selected run.
       "editor.selectionBackground": "#E1E8ED",
       "editor.inactiveSelectionBackground": "#EAEEF1",
-      "editorCursor.foreground": "#B23F0A", // rust — ember is only 2.9:1 here
+      "editorCursor.foreground": "#AE460A", // rust — ember is only 2.3:1 here
       "editorWidget.background": "#FFFFFF", // --bg-surface
       "editorWidget.border": "#DDDCDA", // --border-default
       "editorIndentGuide.background": "#E8E7E5", // --border-light
       "editorIndentGuide.activeBackground": "#B5B7BA",
       "editorBracketMatch.background": "#E1E8ED",
-      "editorBracketMatch.border": "#B23F0A", // rust
+      "editorBracketMatch.border": "#AE460A", // rust
       "editorGutter.background": "#EDECEA",
       "scrollbarSlider.background": "#DDDCDA80",
       "scrollbarSlider.hoverBackground": "#B5B7BA",
-      "scrollbarSlider.activeBackground": "#B23F0A80", // rust while dragging
+      "scrollbarSlider.activeBackground": "#AE460A80", // rust while dragging
       "minimap.background": "#EDECEA",
     },
   });

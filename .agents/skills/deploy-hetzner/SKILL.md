@@ -1,6 +1,6 @@
 ---
 name: deploy-hetzner
-description: Deploy the latest committed Uniqus Code orchestrator/sandbox code to Hetzner. Use when the user asks for the Codex equivalent of /deploy-hetzner, to SSH to production, pull, rebuild only what changed, and restart uniqus-orchestrator.
+description: Deploy the latest committed Gate 15 orchestrator/sandbox code to Hetzner. Use when the user asks for the Codex equivalent of /deploy-hetzner, to SSH to production, pull, rebuild only what changed, and restart uniqus-orchestrator.
 ---
 
 # Deploy Hetzner
