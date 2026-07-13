@@ -45,7 +45,7 @@ The simplest export is a **`.zip` of the project**:
 ```bash
 # Download the project as a zip (auth header omitted for brevity)
 curl -L -o myapp.zip \
-  "https://api2.uniqus-code.com/api/projects/<PROJECT_ID>/export.zip"
+  "https://api.gate15.dev/api/projects/<PROJECT_ID>/export.zip"
 unzip myapp.zip -d myapp
 cd myapp
 ```

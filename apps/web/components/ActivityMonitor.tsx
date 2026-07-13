@@ -8,6 +8,80 @@ import SubAgentList from "./SubAgentList";
 
 type ToolItem = Extract<ChatItem, { kind: "tool" }>;
 
+interface DiffTurn {
+  /** Stable for the lifetime of the chat: normally the opening user message id. */
+  id: string;
+  prompt: string | null;
+  edits: ToolItem[];
+  complete: boolean;
+}
+
+function isDiffTool(item: ChatItem): item is ToolItem {
+  return item.kind === "tool" && (item.name === "write_file" || item.name === "edit_file");
+}
+
+/**
+ * Group file-edit tool calls by user turn. The Activity Monitor used to flatten
+ * the entire conversation, reverse it, and keep only twelve entries. Besides
+ * hiding larger changesets, that made old edits look like part of the current
+ * run. Chat already carries explicit user/complete boundaries, so retain every
+ * edit and use those boundaries as the history model instead.
+ */
+export function buildDiffTurns(chat: ChatItem[]): DiffTurn[] {
+  const turns: DiffTurn[] = [];
+  let current: DiffTurn | null = null;
+
+  const finish = () => {
+    if (!current) return;
+    turns.push(current);
+    current = null;
+  };
+
+  for (const item of chat) {
+    if (item.kind === "user") {
+      finish();
+      current = { id: item.id, prompt: item.content, edits: [], complete: false };
+      continue;
+    }
+
+    if (item.kind === "complete") {
+      if (current) {
+        current.complete = true;
+        finish();
+      }
+      continue;
+    }
+
+    if (!isDiffTool(item)) continue;
+    // Defensive fallback for a streamed/replayed tool that arrived without its
+    // opening user event. Its first tool id remains stable when complete lands.
+    current ??= { id: `tool:${item.id}`, prompt: null, edits: [], complete: false };
+    current.edits.push(item);
+  }
+
+  finish();
+  return turns;
+}
+
+function compactPrompt(prompt: string | null): string {
+  const oneLine = prompt?.replace(/\s+/g, " ").trim() ?? "";
+  if (!oneLine) return "Agent activity";
+  return oneLine.length > 46 ? `${oneLine.slice(0, 43)}…` : oneLine;
+}
+
+function diffTurnLabel(turn: DiffTurn, index: number, latestIndex: number): string {
+  const distance = latestIndex - index;
+  const relative =
+    distance === 0
+      ? turn.complete
+        ? "Latest turn"
+        : "Current turn"
+      : distance === 1
+        ? "Previous turn"
+        : `${distance} turns ago`;
+  return `${relative} · ${turn.edits.length} diff${turn.edits.length === 1 ? "" : "s"} · ${compactPrompt(turn.prompt)}`;
+}
+
 function fmtTokens(n: number): string {
   if (n <= 0) return "0";
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
@@ -77,7 +151,9 @@ function DiffCard({ item, defaultOpen }: { item: ToolItem; defaultOpen: boolean 
   const added = item.lines_added ?? 0;
   const removed = item.lines_removed ?? 0;
   const running = item.result === undefined;
-  const { lines, truncated } = useMemo(() => diffForTool(item), [item]);
+  // Large turns can contain scores of writes. Keep every header mounted, but
+  // only split/copy a tool's content into display lines once the user opens it.
+  const diff = useMemo(() => (open ? diffForTool(item) : null), [item, open]);
 
   return (
     <div className="am-diff-card">
@@ -101,9 +177,9 @@ function DiffCard({ item, defaultOpen }: { item: ToolItem; defaultOpen: boolean 
         )}
         {running && <span className="am-diff-running">writing…</span>}
       </button>
-      {open && (
+      {open && diff && (
         <pre className="am-diff-body">
-          {lines.map((l, i) => (
+          {diff.lines.map((l, i) => (
             <div
               key={i}
               className={l.sign === "+" ? "am-diff-add" : l.sign === "-" ? "am-diff-del" : "am-diff-ctx"}
@@ -112,7 +188,7 @@ function DiffCard({ item, defaultOpen }: { item: ToolItem; defaultOpen: boolean 
               {l.text || " "}
             </div>
           ))}
-          {truncated > 0 && <div className="am-diff-more">… {truncated} more lines</div>}
+          {diff.truncated > 0 && <div className="am-diff-more">… {diff.truncated} more lines</div>}
         </pre>
       )}
     </div>
@@ -122,10 +198,11 @@ function DiffCard({ item, defaultOpen }: { item: ToolItem; defaultOpen: boolean 
 /**
  * The Activity Monitor — fills the Builder stage while there's no live preview
  * to show, turning the dead space into a live build dashboard: token/cost meter,
- * the agent's task list, background sub-agents, and a feed of edited files with
- * full diffs (newest on top). Yields to the real preview the moment one exists
- * (BuilderStage swaps it out). When there's no activity yet it shows the
- * "Start preview" call-to-action instead.
+ * the agent's task list, background sub-agents, and a turn-scoped feed of edited
+ * files (newest on top). A new user turn starts with an empty feed; completed
+ * turns remain available in the turn picker. Yields to the real preview the
+ * moment one exists (BuilderStage swaps it out). When there's no activity yet
+ * it shows the "Start preview" call-to-action instead.
  */
 export default function ActivityMonitor({
   onStartPreview,
@@ -142,17 +219,36 @@ export default function ActivityMonitor({
   const todos = useStore((s) => s.todos);
   const chat = useStore((s) => s.chat);
 
-  const edits = useMemo(
-    () =>
-      (chat.filter((c) => c.kind === "tool" && (c.name === "write_file" || c.name === "edit_file")) as ToolItem[])
-        .slice()
-        .reverse()
-        .slice(0, 12),
-    [chat],
-  );
+  const diffTurns = useMemo(() => buildDiffTurns(chat), [chat]);
+  const latestTurnId = diffTurns.length > 0 ? diffTurns[diffTurns.length - 1].id : null;
+  // Keep turns that actually have diffs, plus the newest turn even while it is
+  // still empty. That last entry is what makes the feed clear immediately when
+  // the user starts the next turn without cluttering history with empty runs.
+  const selectableTurns = useMemo(() => {
+    const latestIndex = diffTurns.length - 1;
+    return diffTurns.filter((turn, index) => index === latestIndex || turn.edits.length > 0);
+  }, [diffTurns]);
+  const [turnSelection, setTurnSelection] = useState<{
+    latestId: string | null;
+    selectedId: string | null;
+  }>({ latestId: null, selectedId: null });
+  // Reset synchronously when a new latest turn appears. Tracking which latest
+  // id the manual selection belongs to avoids an effect (and a one-frame flash
+  // of the previous turn's diffs after the user presses Send).
+  const selectedTurnId =
+    turnSelection.latestId === latestTurnId &&
+    selectableTurns.some((turn) => turn.id === turnSelection.selectedId)
+      ? turnSelection.selectedId
+      : latestTurnId;
+  const selectedTurn =
+    selectableTurns.find((turn) => turn.id === selectedTurnId) ??
+    selectableTurns[selectableTurns.length - 1] ??
+    null;
+  const edits = selectedTurn ? selectedTurn.edits.slice().reverse() : [];
+  const hasDiffHistory = diffTurns.some((turn) => turn.edits.length > 0);
 
   const hasActivity =
-    busy || todos.length > 0 || subagents.length > 0 || liveUsage !== null || edits.length > 0;
+    busy || todos.length > 0 || subagents.length > 0 || liveUsage !== null || hasDiffHistory;
 
   if (!hasActivity) {
     // Standalone tab (no start handler): a quiet idle state, no CTA.
@@ -221,17 +317,53 @@ export default function ActivityMonitor({
 
       <SubAgentList />
 
-      {edits.length > 0 && (
+      {hasDiffHistory && selectedTurn && (
         <div className="am-section">
           <div className="am-section-head">
-            <span className="am-section-title">Edited files</span>
+            <span className="am-section-title">File diffs</span>
             <span className="am-section-count">{edits.length}</span>
+            {selectableTurns.length > 1 && (
+              <select
+                className="am-turn-picker"
+                aria-label="Show file diffs from turn"
+                value={selectedTurn.id}
+                onChange={(event) =>
+                  setTurnSelection({
+                    latestId: latestTurnId,
+                    selectedId: event.target.value,
+                  })
+                }
+              >
+                {selectableTurns.map((turn) => {
+                  const turnIndex = diffTurns.indexOf(turn);
+                  return (
+                    <option key={turn.id} value={turn.id}>
+                      {diffTurnLabel(turn, turnIndex, diffTurns.length - 1)}
+                    </option>
+                  );
+                })}
+              </select>
+            )}
           </div>
-          <div className="am-diff-feed">
-            {edits.map((item, i) => (
-              <DiffCard key={item.id} item={item} defaultOpen={i === 0} />
-            ))}
-          </div>
+          {edits.length > 0 ? (
+            <div className="am-diff-feed" key={selectedTurn.id}>
+              {edits.map((item, i) => (
+                // When a new live diff becomes newest, remount the previous
+                // leader as a collapsed history card. Manually opened history
+                // cards keep their stable key and remain under user control.
+                <DiffCard
+                  key={`${item.id}:${i === 0 ? "latest" : "history"}`}
+                  item={item}
+                  defaultOpen={i === 0}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="am-diff-empty">
+              No file diffs {selectedTurn.complete ? "in" : "yet in"} this turn. Choose an earlier turn to
+              review its changes.
+            </div>
+          )}
         </div>
       )}
     </div>

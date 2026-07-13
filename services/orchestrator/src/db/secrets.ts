@@ -1,13 +1,16 @@
 import { db } from "./client.js";
 import { encryptToken, decryptToken } from "../auth/encrypt.js";
+import { isModelVisibleProjectConfig } from "../security/projectSecretPolicy.js";
 
 /**
  * Per-project encrypted secrets (Plan §1.6, §6).
  *
  * Values are AES-256-GCM encrypted with OAUTH_TOKEN_ENCRYPTION_KEY (shared
  * with the OAuth-token store — see auth/encrypt.ts). The DB never sees
- * plaintext. Connectors read secrets server-side and pass ephemeral
- * results to the agent loop; the agent never sees the literal token.
+ * plaintext. Connectors read sensitive credentials server-side and pass
+ * ephemeral results to the agent loop. A narrow set of connector-declared
+ * public client config (currently Supabase URL + anon key) remains visible so
+ * the agent can wire the generated app without exposing privileged values.
  *
  * Per-environment scoping (Phase 2.x): the same secret name can carry
  * different values for `default` / `development` / `staging` / `production`
@@ -40,27 +43,64 @@ export interface SecretRecord {
   name: string;
   env: string;
   description: string | null;
+  /** Admin-approved exact hostnames this secret may be sent to by HTTP connector. */
+  allowed_hosts: string[];
   created_at: string;
   updated_at: string;
+}
+
+const SECRET_RECORD_COLUMNS =
+  "id, project_id, name, env, description, allowed_hosts, created_at, updated_at";
+const LEGACY_SECRET_RECORD_COLUMNS =
+  "id, project_id, name, env, description, created_at, updated_at";
+
+interface DbErrorLike {
+  code?: string | null;
+  message?: string | null;
+  details?: string | null;
+  hint?: string | null;
+}
+
+/** Recognize only the hosted-schema skew caused by the allowed_hosts migration. */
+export function isMissingAllowedHostsColumn(error: DbErrorLike | null | undefined): boolean {
+  if (!error) return false;
+  const detail = [error.message, error.details, error.hint].filter(Boolean).join(" ").toLowerCase();
+  return detail.includes("allowed_hosts") && (error.code === "42703" || error.code === "PGRST204");
+}
+
+function normalizeSecretRecord(row: Record<string, unknown>): SecretRecord {
+  return {
+    ...(row as unknown as Omit<SecretRecord, "allowed_hosts">),
+    allowed_hosts: normalizeAllowedSecretHosts(
+      Array.isArray(row.allowed_hosts)
+        ? row.allowed_hosts.filter((host): host is string => typeof host === "string")
+        : [],
+    ),
+  };
 }
 
 export async function listSecrets(
   projectId: string,
   env?: string | null,
 ): Promise<SecretRecord[]> {
-  let query = db()
-    .from("project_secrets")
-    .select("id, project_id, name, env, description, created_at, updated_at")
-    .eq("project_id", projectId);
-  // Pass env=null explicitly to fetch every env. Pass nothing or a string to
-  // filter — defaults to the `default` env so existing single-env callers
-  // see the same view they always have.
-  if (env !== null) {
-    query = query.eq("env", normalizeEnv(env));
+  const run = async (withAllowedHosts: boolean) => {
+    let query = db()
+      .from("project_secrets")
+      .select(withAllowedHosts ? SECRET_RECORD_COLUMNS : LEGACY_SECRET_RECORD_COLUMNS)
+      .eq("project_id", projectId);
+    // Pass env=null explicitly to fetch every env. Pass nothing or a string to
+    // filter — defaults to the `default` env so existing single-env callers
+    // see the same view they always have.
+    if (env !== null) query = query.eq("env", normalizeEnv(env));
+    return await query.order("env").order("name", { ascending: true });
+  };
+
+  let { data, error } = await run(true);
+  if (isMissingAllowedHostsColumn(error)) {
+    ({ data, error } = await run(false));
   }
-  const { data, error } = await query.order("env").order("name", { ascending: true });
   if (error) throw new Error(`listSecrets failed: ${error.message}`);
-  return (data ?? []) as SecretRecord[];
+  return ((data ?? []) as unknown as Record<string, unknown>[]).map(normalizeSecretRecord);
 }
 
 export async function upsertSecret(input: {
@@ -69,25 +109,110 @@ export async function upsertSecret(input: {
   value: string;
   description?: string | null;
   env?: string | null;
+  allowed_hosts?: string[];
 }): Promise<SecretRecord> {
   const env = normalizeEnv(input.env);
   const encrypted = encryptToken(input.value);
+  const allowedHosts = input.allowed_hosts === undefined
+    ? undefined
+    : normalizeAllowedSecretHosts(input.allowed_hosts);
+  const row: Record<string, unknown> = {
+    project_id: input.project_id,
+    name: input.name,
+    env,
+    encrypted_value: encrypted,
+    description: input.description ?? null,
+  };
+  if (allowedHosts !== undefined) row.allowed_hosts = allowedHosts;
+
+  const run = async (withAllowedHosts: boolean) => {
+    const candidate = withAllowedHosts
+      ? row
+      : Object.fromEntries(Object.entries(row).filter(([key]) => key !== "allowed_hosts"));
+    return await db()
+      .from("project_secrets")
+      .upsert(candidate, { onConflict: "project_id,name,env" })
+      .select(withAllowedHosts ? SECRET_RECORD_COLUMNS : LEGACY_SECRET_RECORD_COLUMNS)
+      .single();
+  };
+
+  let { data, error } = await run(true);
+  if (isMissingAllowedHostsColumn(error)) {
+    if (allowedHosts && allowedHosts.length > 0) {
+      throw new Error(
+        "upsertSecret failed: project_secrets.allowed_hosts migration is required before saving HTTP destination bindings",
+      );
+    }
+    ({ data, error } = await run(false));
+  }
+  if (error || !data) throw new Error(`upsertSecret failed: ${error?.message}`);
+  return normalizeSecretRecord(data as unknown as Record<string, unknown>);
+}
+
+export function normalizeAllowedSecretHosts(hosts: string[]): string[] {
+  const normalized = new Set<string>();
+  for (const raw of hosts) {
+    if (typeof raw !== "string" || !raw.trim()) continue;
+    if (raw.includes("*")) throw new Error("secret host bindings cannot contain wildcards");
+    let parsed: URL;
+    try {
+      parsed = new URL(raw.includes("://") ? raw : `https://${raw}`);
+    } catch {
+      throw new Error(`invalid secret destination host '${raw}'`);
+    }
+    if (parsed.username || parsed.password) {
+      throw new Error("secret destination hosts cannot contain credentials");
+    }
+    const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+    if (!hostname) throw new Error(`invalid secret destination host '${raw}'`);
+    normalized.add(hostname);
+  }
+  return [...normalized].sort();
+}
+
+export async function getSecretWithBinding(
+  projectId: string,
+  name: string,
+  env?: string | null,
+): Promise<{ value: string; allowedHosts: string[] } | null> {
+  const e = normalizeEnv(env);
+  const run = async (withAllowedHosts: boolean) =>
+    await db()
+      .from("project_secrets")
+      .select(withAllowedHosts ? "encrypted_value, allowed_hosts" : "encrypted_value")
+      .eq("project_id", projectId)
+      .eq("name", name)
+      .eq("env", e)
+      .maybeSingle();
+
+  let { data, error } = await run(true);
+  if (isMissingAllowedHostsColumn(error)) {
+    ({ data, error } = await run(false));
+  }
+  if (error) throw new Error(`getSecretWithBinding failed: ${error.message}`);
+  if (!data) return null;
+  return {
+    value: decryptToken((data as unknown as { encrypted_value: string }).encrypted_value),
+    allowedHosts: normalizeAllowedSecretHosts(
+      ((data as unknown as { allowed_hosts?: string[] }).allowed_hosts ?? []),
+    ),
+  };
+}
+
+/** Sensitive plaintexts used only for last-mile redaction before model context. */
+export async function getProjectSecretPlaintexts(projectId: string): Promise<string[]> {
   const { data, error } = await db()
     .from("project_secrets")
-    .upsert(
-      {
-        project_id: input.project_id,
-        name: input.name,
-        env,
-        encrypted_value: encrypted,
-        description: input.description ?? null,
-      },
-      { onConflict: "project_id,name,env" },
-    )
-    .select("id, project_id, name, env, description, created_at, updated_at")
-    .single();
-  if (error || !data) throw new Error(`upsertSecret failed: ${error?.message}`);
-  return data as SecretRecord;
+    .select("name, encrypted_value")
+    .eq("project_id", projectId);
+  if (error) throw new Error(`getProjectSecretPlaintexts failed: ${error.message}`);
+  const values = new Set<string>();
+  for (const row of (data ?? []) as { name: string; encrypted_value: string }[]) {
+    if (isModelVisibleProjectConfig(row.name)) continue;
+    const value = decryptToken(row.encrypted_value);
+    if (value) values.add(value);
+  }
+  return [...values].sort((a, b) => b.length - a.length);
 }
 
 export async function getSecretValue(

@@ -1,5 +1,12 @@
 import { chromium, type Page } from "playwright";
 import { persistScreenshot, resolvePreviewUrl } from "./screenshot.js";
+import {
+  assertBrowserRequestAllowed,
+  BROWSER_SSRF_PROXY_LAUNCH_ARGS,
+  installBrowserSsrfGuard,
+  startBrowserSsrfProxy,
+  type BrowserSsrfProxy,
+} from "./browserSsrfGuard.js";
 
 /**
  * `interact_preview` (P2.1/P2.2) — the agent operates the running preview like a
@@ -80,10 +87,9 @@ export interface InteractOpts {
   a11y?: boolean;
   /**
    * Run the deterministic layout/contrast pass on the final state (overflow,
-   * off-screen elements, clipped text, low-contrast text). Default OFF — the
-   * loop enables it ONLY for text-only models, as a model-free substitute for
-   * "look at the screenshot and tell me if the UI is broken/legible". Vision
-   * models see the screenshot natively, so they don't need it.
+   * off-screen elements, clipped text, low-contrast text). Default ON. It is a
+   * deterministic release gate for every model; vision inspection complements
+   * it but does not replace exact DOM geometry and contrast checks.
    */
   layoutChecks?: boolean;
   /**
@@ -120,6 +126,33 @@ export interface InteractResult {
   blocking_console_errors: string[];
   /** Subset that are React hydration mismatches — highest-priority, always blocking. */
   hydration_errors: string[];
+}
+
+/**
+ * One source of truth for preview release gates. A screenshot can look plausible
+ * while interaction, accessibility, responsive geometry, or contrast is broken;
+ * every high-confidence finding therefore blocks a passing result.
+ */
+export function previewBlockingReasons(result: Pick<
+  InteractResult,
+  | "steps"
+  | "assertion_failures"
+  | "blocking_console_errors"
+  | "hydration_errors"
+  | "a11y_issues"
+  | "layout_issues"
+>): string[] {
+  const failedSteps = result.steps.filter((step) => !step.ok).length;
+  const hydration = result.hydration_errors.length;
+  const otherConsole = Math.max(0, result.blocking_console_errors.length - hydration);
+  return [
+    failedSteps ? `${failedSteps} failed interaction step(s)` : "",
+    result.assertion_failures.length ? `${result.assertion_failures.length} assertion failure(s)` : "",
+    hydration ? `${hydration} React hydration error(s)` : "",
+    otherConsole ? `${otherConsole} other console error(s)` : "",
+    result.a11y_issues.length ? `${result.a11y_issues.length} accessibility finding(s)` : "",
+    result.layout_issues.length ? `${result.layout_issues.length} layout/contrast finding(s)` : "",
+  ].filter(Boolean);
 }
 
 const cap = (ms: number | undefined, def: number): number =>
@@ -192,9 +225,19 @@ export async function runInteractPreview(opts: InteractOpts): Promise<InteractRe
   const assertionFailures: string[] = [];
   const steps: InteractStep[] = [];
 
-  const browser = await chromium.launch({ headless: true });
+  const allowedPrivateOrigin = opts.serverId ? new URL(targetUrl).origin : undefined;
+  const browser = await chromium.launch({
+    headless: true,
+    args: BROWSER_SSRF_PROXY_LAUNCH_ARGS,
+  });
+  let ssrfProxy: BrowserSsrfProxy | null = null;
   try {
-    const ctx = await browser.newContext({ viewport });
+    ssrfProxy = await startBrowserSsrfProxy(allowedPrivateOrigin);
+    const ctx = await browser.newContext({
+      viewport,
+      proxy: { server: ssrfProxy.url },
+    });
+    await installBrowserSsrfGuard(ctx, allowedPrivateOrigin);
     const page = await ctx.newPage();
 
     // Evidence collection (P2.2): console errors, JS page errors, and any
@@ -254,6 +297,7 @@ export async function runInteractPreview(opts: InteractOpts): Promise<InteractRe
     };
 
     await gotoWithFallback(page, targetUrl);
+    await assertBrowserRequestAllowed(page.url(), allowedPrivateOrigin);
     await captureFrame("Opened the app", true);
 
     for (let i = 0; i < opts.actions.length; i++) {
@@ -263,6 +307,11 @@ export async function runInteractPreview(opts: InteractOpts): Promise<InteractRe
       let detail: string | undefined;
       try {
         await runAction(page, a, targetUrl, assertionFailures, i);
+        // Clicks and scripted navigation can change the top-level URL without
+        // going through this function's initial goto. The context route blocks
+        // network requests; this additionally rejects non-network schemes and
+        // makes the final state explicit after every action.
+        await assertBrowserRequestAllowed(page.url(), allowedPrivateOrigin);
       } catch (err) {
         ok = false;
         detail = err instanceof Error ? err.message.slice(0, 300) : String(err);
@@ -272,7 +321,7 @@ export async function runInteractPreview(opts: InteractOpts): Promise<InteractRe
     }
 
     const a11yIssues = opts.a11y === false ? [] : await runA11yPass(page).catch(() => []);
-    const layoutIssues = opts.layoutChecks ? await runLayoutPass(page).catch(() => []) : [];
+    const layoutIssues = opts.layoutChecks === false ? [] : await runLayoutPass(page).catch(() => []);
 
     // The final-state screenshot IS persisted (it's the asset_path the agent and
     // tool result reference) — named + retention-capped like every other shot.
@@ -286,13 +335,21 @@ export async function runInteractPreview(opts: InteractOpts): Promise<InteractRe
     // benign dev noise); hydration mismatches are called out specially.
     const blockingErrors = blockingConsoleErrors(consoleErrors);
     const hydrationErrors = consoleErrors.filter(isHydrationError);
+    const previewBlockers = previewBlockingReasons({
+      steps,
+      assertion_failures: assertionFailures,
+      blocking_console_errors: blockingErrors,
+      hydration_errors: hydrationErrors,
+      a11y_issues: a11yIssues,
+      layout_issues: layoutIssues,
+    });
     // Final done-frame: settles the live view on the end state and clears the
     // "LIVE" indicator. Reuses the PNG just captured (no extra screenshot).
     if (opts.onFrame) {
       opts.onFrame({
         seq: frameSeq,
         label: "Final state",
-        ok: assertionFailures.length === 0 && blockingErrors.length === 0,
+        ok: previewBlockers.length === 0,
         url: page.url(),
         image: finalBuf ? finalBuf.toString("base64") : "",
         mime: "image/png",
@@ -316,6 +373,7 @@ export async function runInteractPreview(opts: InteractOpts): Promise<InteractRe
     };
   } finally {
     await browser.close().catch(() => {});
+    await ssrfProxy?.close().catch(() => {});
   }
 }
 
@@ -535,14 +593,34 @@ async function runLayoutPass(page: Page): Promise<{ id: string; help: string; no
       });
       return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2];
     }
+    function blend(fg, bg) {
+      var a = Math.max(0, Math.min(1, fg.a));
+      return {
+        r: fg.r * a + bg.r * (1 - a),
+        g: fg.g * a + bg.g * (1 - a),
+        b: fg.b * a + bg.b * (1 - a),
+        a: 1
+      };
+    }
     function bgOf(el) {
       var n = el;
+      var layers = [];
       while (n && n.nodeType === 1) {
         var bg = parseColor(getComputedStyle(n).backgroundColor);
-        if (bg && bg.a > 0) return bg;
+        if (bg && bg.a > 0) layers.push(bg);
         n = n.parentElement;
       }
-      return { r: 255, g: 255, b: 255, a: 1 };
+      var out = { r: 255, g: 255, b: 255, a: 1 };
+      for (var j = layers.length - 1; j >= 0; j--) out = blend(layers[j], out);
+      return out;
+    }
+    function hasImageBackground(el) {
+      var n = el;
+      while (n && n.nodeType === 1) {
+        if (getComputedStyle(n).backgroundImage !== "none") return true;
+        n = n.parentElement;
+      }
+      return false;
     }
     var offscreen = 0, clipped = 0, lowContrast = 0;
     for (var i = 0; i < nodes.length; i++) {
@@ -553,7 +631,8 @@ async function runLayoutPass(page: Page): Promise<{ id: string; help: string; no
       if (st.display === "none" || st.visibility === "hidden" || parseFloat(st.opacity) === 0) continue;
       if (r.left > vw + 2) offscreen++;
       if ((st.overflow === "hidden" || st.overflowX === "hidden" || st.textOverflow === "ellipsis") &&
-          el.scrollWidth > el.clientWidth + 2 && (el.textContent || "").trim().length > 0) {
+          el.scrollWidth > el.clientWidth + 2 && (el.textContent || "").trim().length > 0 &&
+          !el.getAttribute("title") && !el.getAttribute("aria-label")) {
         clipped++;
       }
       var hasText = false;
@@ -563,8 +642,9 @@ async function runLayoutPass(page: Page): Promise<{ id: string; help: string; no
       }
       if (hasText) {
         var fg = parseColor(st.color);
-        if (fg && fg.a > 0) {
+        if (fg && fg.a > 0 && !hasImageBackground(el)) {
           var bg = bgOf(el);
+          fg = blend(fg, bg);
           var L1 = lum(fg) + 0.05, L2 = lum(bg) + 0.05;
           var ratio = L1 > L2 ? L1 / L2 : L2 / L1;
           var size = parseFloat(st.fontSize) || 16;

@@ -72,10 +72,13 @@ scalpel, never a paint roller.
   word with gradient text (`.grad`), not by bumping weight.
 
 **Composition**
-- Asymmetry is the default. Splits are `0.74/1` or `0.78/1` — **never `6/6`**.
-  Equal repetition only for true collections (project grid, model cards).
-- No two adjacent sections share width + alignment + structure: alternate
-  full-bleed ↔ contained. One breakout per screen.
+- Start from the five-line UX brief: USER, JOB, HIERARCHY, FLOW, RISK. The house
+  look serves the task; remove any signature move that makes the flow less clear.
+- Asymmetry is the expressive default. Prefer `0.74/1` or `0.78/1`; use `6/6`
+  for genuine equal comparisons. Repetition is valid for true collections,
+  operational rows, predictable settings/forms, and narrow mobile layouts.
+- Narrative sections should vary their skeleton. Stable product workflows may
+  keep one shell. Use zero or one breakout per screen, depending on the task.
 - One depth technique per element (hairline border + faint top sheen). Never
   border + shadow + tinted fill stacked.
 
@@ -119,7 +122,8 @@ scalpel, never a paint roller.
 - The template hero (centered heading + paragraph + two buttons + three identical
   icon-title cards). Re-skinning that skeleton with the brand palette is still slop.
 - Inter/system-ui as the visible identity; heavy-weight-everything type.
-- 3+ identical cards or repeated `6/6` splits outside true collections.
+- 3+ identical cards or repeated `6/6` splits without a collection, comparison,
+  or stable operational reason.
 - Effect stacking (grain + glow + aurora + outlined words + marquee) — at most
   two page-wide devices.
 - Faded-gradient disabled buttons (use a flat gray); color-only status;
@@ -127,9 +131,9 @@ scalpel, never a paint roller.
 
 ## Self-check (after a screenshot)
 
-1. **Structure first** — squint: column of same-width boxes? Adjacent sections
-   sharing a skeleton? Every grid card the same size? Structural failures need
-   recomposition, not re-skinning.
+1. **Structure first** — squint: same-width boxes without a content reason?
+   Repeated narrative skeletons that do not help orientation? Equal cards hiding
+   unequal importance? Structural failures need recomposition, not re-skinning.
 2. **Brand** — exactly one gradient moment carrying the eye (or a deliberate
    hero+CTA pair), or has magenta leaked into every section?
 3. **Type** — does the display type commit, or is it timid?

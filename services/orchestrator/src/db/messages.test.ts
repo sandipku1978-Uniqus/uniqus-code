@@ -10,6 +10,7 @@ import {
   createCompactedHistorySnapshot,
   loadHistory,
   loadModelHistory,
+  latestMessageId,
   mergeCompactedHistory,
   parseCompactedHistorySnapshot,
 } from "./messages.js";
@@ -71,6 +72,22 @@ function messageRows(firstId: number, count: number): TestRow[] {
 
 beforeEach(() => {
   dbMock.mockReset();
+});
+
+describe("message cursor lookup", () => {
+  it("returns the latest persisted id for manual compaction snapshots", async () => {
+    const maybeSingle = vi.fn().mockResolvedValue({ data: { id: 42 }, error: null });
+    const builder: Record<string, unknown> = {};
+    builder.select = () => builder;
+    builder.eq = () => builder;
+    builder.order = () => builder;
+    builder.limit = () => builder;
+    builder.maybeSingle = maybeSingle;
+    dbMock.mockReturnValue({ from: () => builder });
+
+    await expect(latestMessageId("project-1", "session-1")).resolves.toBe(42);
+    expect(maybeSingle).toHaveBeenCalledOnce();
+  });
 });
 
 describe("batched message persistence", () => {

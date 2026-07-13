@@ -64,7 +64,6 @@ function getOauthConfig(): { clientId: string; clientSecret: string; callback: s
   }
   const base = (
     process.env.PUBLIC_BASE_URL ??
-    process.env.PREVIEW_BASE_URL ??
     "http://localhost:8787"
   ).replace(/\/$/, "");
   return { clientId, clientSecret, callback: `${base}/api/supabase/callback` };

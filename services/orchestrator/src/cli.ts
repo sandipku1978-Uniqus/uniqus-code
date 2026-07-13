@@ -41,6 +41,9 @@ async function main(): Promise<void> {
   await runAgentLoop(userMessage, {
     sandbox: { rootDir: sandboxDir },
     apiKey,
+    // The CLI is an explicitly local, operator-driven surface with no remote
+    // approval channel. Keep its historical autonomous behavior explicit.
+    getPermissionMode: () => "bypass",
     onText: (t) => process.stdout.write(t),
     onToolCall: (_id, name, input) => {
       toolCalls++;

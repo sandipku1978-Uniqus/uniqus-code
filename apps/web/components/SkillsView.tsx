@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { skillInvocationName } from "@uniqus/api-types";
 import Modal from "./Modal";
 import { toast } from "@/lib/toast";
 import {
@@ -18,10 +19,10 @@ import {
 } from "@/lib/api";
 
 /**
- * Skills tab on the projects homepage. An account-level LIBRARY of reusable,
- * markdown rule-sets the user authors once and attaches to any project (via the
- * project's Skills modal). Attached skills are injected into the agent system
- * prompt ahead of the project's own .uniqus/skills.md (the override layer).
+ * Skills tab on the projects homepage. An account-level library of reusable,
+ * SKILL.md-compatible instruction sets. Attached skills advertise compact
+ * metadata; the agent loads a matching body on demand ahead of the project's
+ * own .uniqus/skills.md (the always-on override layer).
  *
  * Three ways in: write one by hand, AI-generate one from a brief (unsaved
  * draft → review in the editor → save), or add a curated starter pack from the
@@ -62,10 +63,10 @@ function relativeTime(iso: string): string {
 
 /**
  * Parse an imported skill file into name/description/body. Supports the standard
- * skill format — a `.md` (or `.txt`/SKILL.md) file with an OPTIONAL YAML-ish
- * frontmatter block (`---\nname: …\ndescription: …\n---`), same shape Claude
- * Code / Anthropic skills use. Falls back to the filename (sans extension) as
- * the name and the whole file as the body when there's no frontmatter.
+ * skill format — a `.md` (or `.txt`/SKILL.md) file with YAML frontmatter
+ * (`---\nname: …\ndescription: …\n---`), including folded/literal multiline
+ * descriptions. Missing metadata is returned empty so import can explain that
+ * modern skills require it.
  */
 function parseSkillFile(
   filename: string,
@@ -76,10 +77,21 @@ function parseSkillFile(
   if (!fm) return { name: fallbackName, description: "", body: text.trim() };
   const [, front, rest] = fm;
   const field = (key: string): string => {
-    const m = front.match(new RegExp(`^${key}\\s*:\\s*(.*)$`, "im"));
-    if (!m) return "";
+    const lines = front.split(/\r?\n/);
+    const index = lines.findIndex((line) => new RegExp(`^${key}\\s*:`, "i").test(line));
+    if (index < 0) return "";
+    const match = lines[index].match(new RegExp(`^${key}\\s*:\\s*(.*)$`, "i"));
+    if (!match) return "";
+    const raw = match[1].trim();
+    if (raw === ">" || raw === "|") {
+      const continuation: string[] = [];
+      for (let i = index + 1; i < lines.length && /^\s+/.test(lines[i]); i++) {
+        continuation.push(lines[i].trim());
+      }
+      return (raw === ">" ? continuation.join(" ") : continuation.join("\n")).trim();
+    }
     // Strip surrounding quotes a YAML string may carry.
-    return m[1].trim().replace(/^["']|["']$/g, "").trim();
+    return raw.replace(/^["']|["']$/g, "").trim();
   };
   const name = field("name") || fallbackName;
   const description = field("description");
@@ -184,8 +196,8 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
           continue;
         }
         const parsed = parseSkillFile(file.name, text);
-        if (!parsed.name.trim() || !parsed.body.trim()) {
-          toast.error(`"${file.name}" looks empty — skipped`);
+        if (!parsed.name.trim() || !parsed.description.trim() || !parsed.body.trim()) {
+          toast.error(`"${file.name}" needs name and description frontmatter plus instructions — skipped`);
           continue;
         }
         await createSkillLibraryApi({
@@ -229,16 +241,18 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
     if (!editor || busy) return;
     const name = editor.name.trim();
     if (!name) return toast.error("Give the skill a name first.");
+    const description = editor.description.trim();
+    if (!description) return toast.error("Add a description so the agent knows when to load this skill.");
     if (editor.body.length > MAX_BODY) return toast.error("Skill body exceeds the 64 KB limit.");
     setBusy(true);
     try {
       if (editor.id === null) {
-        await createSkillLibraryApi({ name, description: editor.description.trim() || null, body: editor.body });
+        await createSkillLibraryApi({ name, description, body: editor.body });
         toast.success("Skill created");
       } else {
         await updateSkillLibraryApi(editor.id, {
           name,
-          description: editor.description.trim() || null,
+          description,
           body: editor.body,
         });
         toast.success("Skill saved");
@@ -266,6 +280,26 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  function exportCurrent() {
+    if (!editor) return;
+    const yamlString = (value: string): string => JSON.stringify(value.trim());
+    const content = [
+      "---",
+      `name: ${yamlString(editor.name)}`,
+      `description: ${yamlString(editor.description)}`,
+      "---",
+      "",
+      editor.body.trim(),
+      "",
+    ].join("\n");
+    const url = URL.createObjectURL(new Blob([content], { type: "text/markdown;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "SKILL.md";
+    anchor.click();
+    URL.revokeObjectURL(url);
   }
 
   async function generate() {
@@ -334,8 +368,8 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
       <span className="page-eyebrow">Agent</span>
       <h1>Skills</h1>
       <p className="lede">
-        Reusable instruction sets — coding conventions, review checklists, brand voice — you write once and
-        attach to any project. Attached skills steer the agent on top of each project&apos;s own skills file.
+        Reusable, SKILL.md-compatible expertise you attach to projects. The agent discovers skills by name and
+        description, then loads the full instructions only when a task matches or you invoke one explicitly.
       </p>
       <div className="skills-actions">
         <button type="button" className="btn-primary" onClick={() => setGenOpen(true)}>
@@ -353,7 +387,7 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
           className="btn-secondary"
           onClick={() => fileInputRef.current?.click()}
           disabled={importBusy}
-          title="Import a skill from a .md file (with optional name/description frontmatter)"
+          title="Import a SKILL.md with required name and description frontmatter"
         >
           {importBusy ? "Importing…" : "↑ Import skill"}
         </button>
@@ -369,11 +403,7 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
         />
       </div>
 
-      {/* How attached library skills get APPLIED when the agent builds a project.
-          Spells out the attach→apply mental model: a skill lives in the library
-          until you attach it to a project (from that project's Skills panel);
-          attached bodies are injected into the system prompt BEFORE the
-          project's own .uniqus/skills.md, which stays the per-project override. */}
+      {/* Attach → discover → load, with .uniqus/skills.md as always-on guidance. */}
       <div
         className="dash-card"
         style={{
@@ -395,14 +425,15 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
           }}
         >
           <span aria-hidden="true" style={{ color: "var(--brand-magenta)" }}>↳</span>
-          How attached skills apply
+          How modern skills apply
         </div>
         <p style={{ margin: 0, fontSize: "var(--fs-sm)", color: "var(--text-dim)", lineHeight: 1.55 }}>
-          A skill here is just a reusable rule-set — it does nothing on its own until you{" "}
+          A skill becomes available after you{" "}
           <strong style={{ color: "var(--text-primary)", fontWeight: 600 }}>attach it to a project</strong>{" "}
-          from that project&apos;s workspace Skills panel. When the agent builds, every attached skill is
-          injected into its system prompt{" "}
-          <strong style={{ color: "var(--text-primary)", fontWeight: 600 }}>before</strong> the project&apos;s own{" "}
+          from the workspace Skills panel. Its name and description stay discoverable; the agent loads the full
+          instructions only when the task matches. To invoke one explicitly, type <code>$skill-name</code> in chat.
+          Skills use <code>$</code>; <code>/name</code> is reserved for commands. This keeps context
+          focused. The project&apos;s own{" "}
           <code
             style={{
               fontFamily: "var(--font-mono)",
@@ -412,8 +443,7 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
           >
             .uniqus/skills.md
           </code>
-          . So attached skills set the baselines for that project, and the project&apos;s own skills file
-          refines or overrides them.
+          {" "}file remains always-on and can refine loaded skills.
         </p>
       </div>
 
@@ -473,6 +503,7 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
         <div className="proj-grid">
           {skills.map((s) => {
             const isDefault = defaultSet.has(s.id);
+            const invocation = `$${skillInvocationName(s.name)}`;
             return (
               <div key={s.id} className="proj proj-tile">
                 <div className="proj-cover" style={{ background: coverBackground(s.id) }} aria-hidden="true" />
@@ -517,6 +548,10 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
                 >
                   <h3>{s.name}</h3>
                   <p className="desc">{s.description || "No description"}</p>
+                  <div className="skill-invocation-hint">
+                    <span>Use in chat</span>
+                    <code>{invocation}</code>
+                  </div>
                   <div className="meta">
                     {isDefault && <span className="tile-chip live">★ Auto-applied to new projects</span>}
                     <span>{(s.body.length / 1024).toFixed(1)} KB</span>
@@ -586,7 +621,7 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
       {editor && (
         <Modal
           title={editor.id === null ? "New skill" : "Edit skill"}
-          subtitle="Plain markdown, injected into the agent's system prompt on projects it's attached to"
+          subtitle="SKILL.md compatible · discovered by metadata and loaded only when relevant"
           width={760}
           onClose={requestCloseEditor}
           footer={
@@ -612,6 +647,9 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
                     Delete
                   </button>
                 )}
+                <button type="button" className="btn-ghost" onClick={exportCurrent} disabled={busy}>
+                  Export SKILL.md
+                </button>
                 <button type="button" className="btn-secondary" onClick={requestCloseEditor} disabled={busy}>
                   Cancel
                 </button>
@@ -636,13 +674,14 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
               </div>
               <div className="skill-field">
                 <label>
-                  Description <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(optional)</span>
+                  Description{" "}
+                  <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(required trigger metadata)</span>
                 </label>
                 <input
                   className="ds-name"
                   value={editor.description}
                   onChange={(e) => setEditor({ ...editor, description: e.target.value })}
-                  placeholder="One line — what this skill is for"
+                  placeholder="What it does and when the agent should load it"
                   maxLength={280}
                 />
               </div>

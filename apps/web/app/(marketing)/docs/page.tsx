@@ -162,7 +162,7 @@ const CONFIG_ITEMS = [
   },
   {
     title: "Secrets",
-    body: "Encrypted API keys and tokens. Panel-set secrets are written straight to .env in the sandbox; the agent can use them, but raw secret values are never printed back into chat.",
+    body: "Encrypted API keys and tokens stay outside the coding sandbox and model context. Trusted connectors and deployment backends resolve them server-side.",
   },
   {
     title: "Default model",
@@ -194,7 +194,7 @@ const PROMPTING_PRINCIPLES = [
   },
   {
     title: "Secrets stay server-side",
-    body: "Add API keys and tokens in the Secrets pane — they're written to .env automatically and resolve server-side. The agent won't print secret values back into chat or bake a service-role key into client code, so don't paste live credentials into a normal message; use Secrets instead.",
+    body: "Add API keys and tokens in the Secrets pane. They remain encrypted outside the coding sandbox and resolve only inside trusted connectors or the deployment backend. Don't paste live credentials into a normal message.",
   },
   {
     title: "Let Uniqus run things for you",

@@ -53,6 +53,13 @@ afterEach(async () => {
 });
 
 describe("bounded sandbox reads", () => {
+  it("blocks model-facing reads of secret-bearing paths while retaining trusted cleanup access", async () => {
+    const sandbox = await makeSandbox();
+    await writeFile(path.join(sandbox.rootDir, ".env"), "TOKEN=secret", "utf-8");
+    await expect(readFileResult(sandbox, ".env", {})).rejects.toThrow(/secret-bearing/);
+    await expect(readFile(sandbox, ".env")).resolves.toBe("TOKEN=secret");
+  });
+
   it("caps a default read before returning and exposes explicit truncation metadata", async () => {
     const sandbox = await makeSandbox();
     await writeFile(
@@ -183,10 +190,13 @@ describe("bounded sandbox grep", () => {
 describe("sandbox I/O safety", () => {
   it("preserves local command-output truncation as non-serializing metadata", async () => {
     const sandbox = await makeSandbox();
-    const result = await runCommand(
-      sandbox,
-      `node -e "process.stdout.write('x'.repeat(20000))"`,
-    );
+    const previous = process.env.UNIQUS_ALLOW_HOST_SANDBOX;
+    process.env.UNIQUS_ALLOW_HOST_SANDBOX = "1";
+    const result = await runCommand(sandbox, `node -e "process.stdout.write('x'.repeat(20000))"`)
+      .finally(() => {
+        if (previous === undefined) delete process.env.UNIQUS_ALLOW_HOST_SANDBOX;
+        else process.env.UNIQUS_ALLOW_HOST_SANDBOX = previous;
+      });
     const wrapped = commandResultText(result);
 
     expect(result.truncated).toBe(true);

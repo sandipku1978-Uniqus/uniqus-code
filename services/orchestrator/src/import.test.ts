@@ -8,6 +8,7 @@ import {
   detectSingleRoot,
   importZip,
   scrubPat,
+  validateCredentialedGithubRepo,
 } from "./import.js";
 
 // --- helpers -----------------------------------------------------------------
@@ -109,20 +110,30 @@ describe("buildCloneUrl", () => {
     expect(url).toContain("x-access-token:ghp_secret123@github.com");
   });
 
-  it("does NOT inject a PAT into ssh-style urls (not a parseable https URL)", () => {
-    const ssh = "git@github.com:foo/bar.git";
-    expect(buildCloneUrl(ssh, "ghp_secret123")).toBe(ssh);
+  it("rejects ssh-style URLs when a credential is present", () => {
+    expect(() => buildCloneUrl("git@github.com:foo/bar.git", "ghp_secret123")).toThrow();
   });
 
-  it("leaves non-https (e.g. http) urls untouched even with a PAT", () => {
-    const http = "http://example.com/foo/bar.git";
-    expect(buildCloneUrl(http, "ghp_secret123")).toBe(http);
+  it("never injects a credential into an attacker-controlled host or subdomain", () => {
+    expect(() => buildCloneUrl("https://example.com/foo/bar.git", "ghp_secret123")).toThrow();
+    expect(() => buildCloneUrl("https://github.com.evil.test/foo/bar.git", "ghp_secret123")).toThrow();
   });
 
   it("trims surrounding whitespace from the repo url", () => {
     expect(buildCloneUrl("  https://github.com/foo/bar.git  ")).toBe(
       "https://github.com/foo/bar.git",
     );
+  });
+});
+
+describe("validateCredentialedGithubRepo", () => {
+  it("requires the clone identity to match the trusted picker identity", () => {
+    expect(validateCredentialedGithubRepo("https://github.com/OpenAI/codex.git", "openai/codex").fullName)
+      .toBe("OpenAI/codex");
+    expect(() => validateCredentialedGithubRepo(
+      "https://github.com/attacker/repo.git",
+      "openai/codex",
+    )).toThrow(/does not match/);
   });
 });
 

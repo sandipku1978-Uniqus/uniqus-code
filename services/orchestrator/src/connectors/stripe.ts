@@ -91,6 +91,7 @@ export const stripeConnector: ConnectorDefinition = {
   methods: [
     {
       name: "create_checkout_session",
+      risk: "write",
       description:
         "Create a Checkout Session and return its `url` (redirect the customer there). Pass mode ('subscription' | 'payment'), line_items (e.g. [{ price: 'price_123', quantity: 1 }]), success_url and cancel_url. Optionally customer or customer_email.",
       args_schema: {
@@ -123,6 +124,7 @@ export const stripeConnector: ConnectorDefinition = {
     },
     {
       name: "create_customer",
+      risk: "write",
       description: "Create a Stripe customer. Returns the customer object (id is cus_...).",
       args_schema: {
         type: "object",
@@ -144,6 +146,7 @@ export const stripeConnector: ConnectorDefinition = {
     },
     {
       name: "create_portal_session",
+      risk: "write",
       description:
         "Create a Billing Customer Portal session for a customer to manage their subscription/payment methods. Returns its `url`. Requires customer (cus_...) and return_url.",
       args_schema: {
@@ -165,6 +168,7 @@ export const stripeConnector: ConnectorDefinition = {
     },
     {
       name: "retrieve",
+      risk: "read",
       description:
         "Retrieve a single Stripe object by id. resource is the API collection (e.g. 'customers', 'subscriptions', 'checkout/sessions', 'invoices', 'prices', 'products').",
       args_schema: {
@@ -188,6 +192,7 @@ export const stripeConnector: ConnectorDefinition = {
     },
     {
       name: "list",
+      risk: "read",
       description:
         "List Stripe objects in a collection (e.g. 'customers', 'subscriptions', 'invoices'). Optional limit (max 100) and filters (e.g. { customer: 'cus_...' }).",
       args_schema: {

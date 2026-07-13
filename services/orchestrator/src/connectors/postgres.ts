@@ -13,6 +13,7 @@ export const postgresConnector: ConnectorDefinition = {
   methods: [
     {
       name: "query",
+      risk: "write",
       description: "Run a SQL statement. Returns rows + rowCount. Use parameterized queries via the params array — never concatenate user input into SQL.",
       args_schema: {
         type: "object",

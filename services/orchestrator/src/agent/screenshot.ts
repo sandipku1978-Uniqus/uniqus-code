@@ -4,6 +4,13 @@ import { randomUUID } from "node:crypto";
 import { chromium } from "playwright";
 import { getServer } from "./sandbox.js";
 import { assertPublicHost } from "../connectors/ssrfGuard.js";
+import {
+  assertBrowserRequestAllowed,
+  BROWSER_SSRF_PROXY_LAUNCH_ARGS,
+  installBrowserSsrfGuard,
+  startBrowserSsrfProxy,
+  type BrowserSsrfProxy,
+} from "./browserSsrfGuard.js";
 
 /**
  * `screenshot_preview` (Plan §3.2 — "closes the perception loop").
@@ -108,9 +115,19 @@ export async function takeScreenshot(opts: ShotOpts): Promise<ShotResult> {
   }
 
   const viewport = opts.viewport ?? { width: 1280, height: 800 };
-  const browser = await chromium.launch({ headless: true });
+  const allowedPrivateOrigin = opts.serverId ? new URL(targetUrl).origin : undefined;
+  const browser = await chromium.launch({
+    headless: true,
+    args: BROWSER_SSRF_PROXY_LAUNCH_ARGS,
+  });
+  let ssrfProxy: BrowserSsrfProxy | null = null;
   try {
-    const ctx = await browser.newContext({ viewport });
+    ssrfProxy = await startBrowserSsrfProxy(allowedPrivateOrigin);
+    const ctx = await browser.newContext({
+      viewport,
+      proxy: { server: ssrfProxy.url },
+    });
+    await installBrowserSsrfGuard(ctx, allowedPrivateOrigin);
     const page = await ctx.newPage();
 
     // Track HTTP errors so we can surface them to the agent.
@@ -131,6 +148,7 @@ export async function takeScreenshot(opts: ShotOpts): Promise<ShotResult> {
         throw err;
       });
     });
+    await assertBrowserRequestAllowed(page.url(), allowedPrivateOrigin);
 
     // If the page returned an error HTTP status, try to capture the body text.
     if (httpError) {
@@ -158,6 +176,7 @@ export async function takeScreenshot(opts: ShotOpts): Promise<ShotResult> {
     };
   } finally {
     await browser.close().catch(() => {});
+    await ssrfProxy?.close().catch(() => {});
   }
 }
 

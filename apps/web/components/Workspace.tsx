@@ -352,7 +352,7 @@ export default function Workspace({
           setOverflowOpen(false);
         }}
         className="toggle-btn"
-        title="Manage project secrets (encrypted at rest; the agent gets values via get_secret only)"
+        title="Manage project secrets (encrypted; available only to trusted connectors and deployments)"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <rect x="3" y="11" width="18" height="11" rx="2" />

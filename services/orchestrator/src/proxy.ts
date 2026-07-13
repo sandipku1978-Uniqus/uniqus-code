@@ -4,13 +4,14 @@ import http, {
   type IncomingHttpHeaders,
 } from "node:http";
 import type { Duplex } from "node:stream";
+import { createHash } from "node:crypto";
 import { getServer } from "./agent/sandbox.js";
 import { touch as touchVm } from "./firecracker/index.js";
 import { resolveShareToken } from "./previewShare.js";
 
 // Match `/preview/{serverId}` optionally followed by `/...` rest.
-// The serverId starts with `srv_` (see startServer in sandbox.ts) and is followed
-// by 8 hex chars. Keep this loose so future id formats work without code changes.
+// The serverId starts with `srv_` (see startServer in sandbox.ts) and carries a
+// full random UUID's 128 bits. Keep this loose so future id formats work.
 // The rest after the id may be absent, a `/path...`, OR start directly with a
 // query/fragment (`/preview/srv_x?foo=1`). The old `(\/.*)?$` rejected the
 // no-slash-but-has-query form, 404ing it (C-105). innerPath is normalized to a
@@ -36,6 +37,53 @@ const PREVIEW_SHARE_COOKIE = "uniqus_preview_share";
  * URL and the Referer; the cookie keeps the routing sticky.
  */
 const PREVIEW_COOKIE = "uniqus_preview";
+
+// Browser credentials belong to the workspace/API origin and must never reach
+// user-controlled preview code. Preview-app cookies are namespaced by server
+// capability below, then selectively unwrapped for that one sandbox server.
+const NEVER_FORWARD_HEADERS = new Set([
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "x-forwarded-for",
+  "x-forwarded-host",
+  "x-forwarded-proto",
+  "x-real-ip",
+]);
+
+function appCookiePrefix(serverId: string): string {
+  const scope = createHash("sha256").update(serverId).digest("hex").slice(0, 16);
+  return `__uniqus_app_${scope}_`;
+}
+
+/** Return only cookies previously set by this exact preview server. */
+export function previewAppCookieHeader(
+  cookieHeader: string | undefined,
+  serverId: string,
+): string | undefined {
+  if (!cookieHeader) return undefined;
+  const prefix = appCookiePrefix(serverId);
+  const cookies: string[] = [];
+  for (const raw of cookieHeader.split(";")) {
+    const part = raw.trim();
+    const eq = part.indexOf("=");
+    if (eq <= prefix.length) continue;
+    const name = part.slice(0, eq);
+    if (!name.startsWith(prefix)) continue;
+    cookies.push(`${name.slice(prefix.length)}=${part.slice(eq + 1)}`);
+  }
+  return cookies.length ? cookies.join("; ") : undefined;
+}
+
+/** Scope an upstream app cookie to this preview server and never a parent domain. */
+export function namespacePreviewSetCookie(value: string, serverId: string): string | null {
+  const match = value.match(/^([^=;\s]+)(=.*)$/s);
+  if (!match) return null;
+  let scoped = `${appCookiePrefix(serverId)}${match[1]}${match[2]}`;
+  scoped = scoped.replace(/;\s*Domain=[^;]*/gi, "");
+  scoped = scoped.replace(/;\s*Path=[^;]*/gi, "");
+  return `${scoped}; Path=/`;
+}
 
 export interface ProxyTarget {
   serverId: string;
@@ -271,9 +319,11 @@ export function proxyHttp(
   for (const [k, v] of Object.entries(req.headers)) {
     if (v === undefined) continue;
     const lower = k.toLowerCase();
-    if (HOP_BY_HOP.has(lower)) continue;
+    if (HOP_BY_HOP.has(lower) || NEVER_FORWARD_HEADERS.has(lower)) continue;
     headers[k] = v;
   }
+  const appCookies = previewAppCookieHeader(req.headers.cookie, target.serverId);
+  if (appCookies) headers.cookie = appCookies;
   // Drop Accept-Encoding so HTML responses come back uncompressed. We need to
   // inject a script and don't want to gunzip/regzip on every request. Other
   // assets (JS, CSS, images) are passed through unchanged.
@@ -305,6 +355,7 @@ export function proxyHttp(
       for (const [k, v] of Object.entries(upRes.headers)) {
         if (v === undefined) continue;
         if (HOP_BY_HOP.has(k.toLowerCase())) continue;
+        if (k.toLowerCase() === "set-cookie") continue;
         outHeaders[k] = v;
       }
       // Pin the iframe's browser to this preview server. We append rather
@@ -313,14 +364,14 @@ export function proxyHttp(
       const ourCookie = target.shareToken
         ? buildShareCookie(target.shareToken)
         : buildPreviewCookie(target.serverId);
-      const existing = outHeaders["set-cookie"];
-      if (Array.isArray(existing)) {
-        outHeaders["set-cookie"] = [...existing, ourCookie];
-      } else if (typeof existing === "string") {
-        outHeaders["set-cookie"] = [existing, ourCookie];
-      } else {
-        outHeaders["set-cookie"] = ourCookie;
-      }
+      const upstreamCookies = (Array.isArray(upRes.headers["set-cookie"])
+        ? upRes.headers["set-cookie"]
+        : typeof upRes.headers["set-cookie"] === "string"
+          ? [upRes.headers["set-cookie"]]
+          : [])
+        .map((value) => namespacePreviewSetCookie(value, target.serverId))
+        .filter((value): value is string => value !== null);
+      outHeaders["set-cookie"] = [...upstreamCookies, ourCookie];
 
       const contentType = String(upRes.headers["content-type"] ?? "");
       const isHtml = contentType.toLowerCase().startsWith("text/html");
@@ -449,8 +500,12 @@ export function proxyWebSocket(
   const headers: Record<string, string | string[]> = {};
   for (const [k, v] of Object.entries(req.headers)) {
     if (v === undefined) continue;
+    const lower = k.toLowerCase();
+    if (NEVER_FORWARD_HEADERS.has(lower)) continue;
     headers[k] = v;
   }
+  const appCookies = previewAppCookieHeader(req.headers.cookie, target.serverId);
+  if (appCookies) headers.cookie = appCookies;
   headers.host = `${target.host}:${target.port}`;
 
   const upstream = http.request({

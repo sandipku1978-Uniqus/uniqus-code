@@ -26,6 +26,9 @@ import type { ProjectSummary } from "@uniqus/api-types";
 import {
   DEFAULT_DESIGN_TOKENS,
   type DesignComponentTokens,
+  type DesignFoundationTokens,
+  type DesignPatternTokens,
+  type DesignBehaviorTokens,
   type ButtonVariantSpec,
 } from "@uniqus/api-types";
 import { toast } from "@/lib/toast";
@@ -299,10 +302,40 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
     if (!draft) return;
     let t = draft.tokens;
     if (!approved.colors) t = { ...t, colors: DEFAULT_DESIGN_TOKENS.colors };
-    if (!approved.typography) t = { ...t, fonts: DEFAULT_DESIGN_TOKENS.fonts, typeScale: DEFAULT_DESIGN_TOKENS.typeScale };
-    if (!approved.spacing) t = { ...t, radius: DEFAULT_DESIGN_TOKENS.radius, spacing: DEFAULT_DESIGN_TOKENS.spacing };
+    if (!approved.typography)
+      t = {
+        ...t,
+        fonts: DEFAULT_DESIGN_TOKENS.fonts,
+        typeScale: DEFAULT_DESIGN_TOKENS.typeScale,
+        foundations: { ...t.foundations, typography: DEFAULT_DESIGN_TOKENS.foundations?.typography },
+      };
+    if (!approved.spacing)
+      t = {
+        ...t,
+        radius: DEFAULT_DESIGN_TOKENS.radius,
+        spacing: DEFAULT_DESIGN_TOKENS.spacing,
+        foundations: {
+          ...t.foundations,
+          spacingScale: DEFAULT_DESIGN_TOKENS.foundations?.spacingScale,
+          radii: DEFAULT_DESIGN_TOKENS.foundations?.radii,
+          elevations: DEFAULT_DESIGN_TOKENS.foundations?.elevations,
+          layout: DEFAULT_DESIGN_TOKENS.foundations?.layout,
+          motion: DEFAULT_DESIGN_TOKENS.foundations?.motion,
+        },
+      };
     if (!approved.components) t = { ...t, components: DEFAULT_DESIGN_TOKENS.components };
-    if (!approved.notes) t = { ...t, notes: "" };
+    if (!approved.notes)
+      t = {
+        ...t,
+        notes: "",
+        foundations: {
+          ...t.foundations,
+          iconography: DEFAULT_DESIGN_TOKENS.foundations?.iconography,
+          imagery: DEFAULT_DESIGN_TOKENS.foundations?.imagery,
+        },
+        patterns: DEFAULT_DESIGN_TOKENS.patterns,
+        behavior: DEFAULT_DESIGN_TOKENS.behavior,
+      };
     // Keep only the catalog components the user approved.
     if (t.components?.catalog && t.components.catalog.length && approvedCatalog.length) {
       const kept = t.components.catalog.filter((_, i) => approvedCatalog[i] !== false);
@@ -382,6 +415,21 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
   // ── token editing helpers ──
   function patchTokens(patch: Partial<DesignTokens>) {
     setDraft((d) => (d ? { ...d, tokens: { ...d.tokens, ...patch } } : d));
+  }
+  function patchFoundations(patch: Partial<DesignFoundationTokens>) {
+    setDraft((d) =>
+      d ? { ...d, tokens: { ...d.tokens, foundations: { ...(d.tokens.foundations ?? {}), ...patch } } } : d,
+    );
+  }
+  function patchPatterns(patch: Partial<DesignPatternTokens>) {
+    setDraft((d) =>
+      d ? { ...d, tokens: { ...d.tokens, patterns: { ...(d.tokens.patterns ?? {}), ...patch } } } : d,
+    );
+  }
+  function patchBehavior(patch: Partial<DesignBehaviorTokens>) {
+    setDraft((d) =>
+      d ? { ...d, tokens: { ...d.tokens, behavior: { ...(d.tokens.behavior ?? {}), ...patch } } } : d,
+    );
   }
   function commitRows(rows: { id: string; name: string; value: string }[]) {
     setColorRows(rows);
@@ -699,6 +747,10 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
     const inp = d.tokens.components?.input ?? {};
     const card = d.tokens.components?.card ?? {};
     const badge = d.tokens.components?.badge ?? {};
+    const navigation = d.tokens.components?.navigation ?? {};
+    const table = d.tokens.components?.table ?? {};
+    const overlay = d.tokens.components?.overlay ?? {};
+    const feedback = d.tokens.components?.feedback ?? {};
     const variants = b.variants ?? [];
     return (
       <>
@@ -759,12 +811,51 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
             <input value={card.shadow ?? ""} onChange={(e) => setComp("card", { ...card, shadow: e.target.value })} style={inputStyle} placeholder="none" />
           </Field>
         </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <Field label="Navigation">
+            <LabeledInput label="Height" value={navigation.height ?? ""} onChange={(v) => setComp("navigation", { ...navigation, height: v })} />
+            <RuleTextarea label="Active" value={navigation.active ?? ""} onChange={(v) => setComp("navigation", { ...navigation, active: v })} />
+            <RuleTextarea label="Responsive" value={navigation.responsive ?? ""} onChange={(v) => setComp("navigation", { ...navigation, responsive: v })} />
+          </Field>
+          <Field label="Tables">
+            <LabeledInput label="Row" value={table.rowHeight ?? ""} onChange={(v) => setComp("table", { ...table, rowHeight: v })} />
+            <RuleTextarea label="Header" value={table.header ?? ""} onChange={(v) => setComp("table", { ...table, header: v })} />
+            <RuleTextarea label="Numeric" value={table.numeric ?? ""} onChange={(v) => setComp("table", { ...table, numeric: v })} />
+            <RuleTextarea label="Responsive" value={table.responsive ?? ""} onChange={(v) => setComp("table", { ...table, responsive: v })} />
+          </Field>
+          <Field label="Overlays">
+            <LabeledInput label="Radius" value={overlay.radius ?? ""} onChange={(v) => setComp("overlay", { ...overlay, radius: v })} />
+            <LabeledInput label="Shadow" value={overlay.shadow ?? ""} onChange={(v) => setComp("overlay", { ...overlay, shadow: v })} />
+            <RuleTextarea label="Behavior" value={overlay.behavior ?? ""} onChange={(v) => setComp("overlay", { ...overlay, behavior: v })} />
+          </Field>
+          <Field label="Feedback">
+            <RuleTextarea label="Status" value={feedback.status ?? ""} onChange={(v) => setComp("feedback", { ...feedback, status: v })} />
+            <RuleTextarea label="Empty" value={feedback.empty ?? ""} onChange={(v) => setComp("feedback", { ...feedback, empty: v })} />
+            <RuleTextarea label="Loading" value={feedback.loading ?? ""} onChange={(v) => setComp("feedback", { ...feedback, loading: v })} />
+            <RuleTextarea label="Toast" value={feedback.toast ?? ""} onChange={(v) => setComp("feedback", { ...feedback, toast: v })} />
+          </Field>
+        </div>
+
+        <Field label="Named component rules">
+          <TokenMapInput
+            value={d.tokens.components?.rules}
+            onChange={(value) => setComp("rules", value)}
+            ariaLabel="Named component rules"
+          />
+        </Field>
       </>
     );
   }
 
   function renderEditor(d: DesignSystem) {
     const reviewing = reviewFindings != null;
+    const foundations = d.tokens.foundations ?? {};
+    const typography = foundations.typography ?? {};
+    const layout = foundations.layout ?? {};
+    const motion = foundations.motion ?? {};
+    const patterns = d.tokens.patterns ?? {};
+    const behavior = d.tokens.behavior ?? {};
     return (
       <>
         {reviewing && reviewFindings ? renderFindings(reviewFindings) : null}
@@ -867,11 +958,67 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
               </div>
             </Collapsible>
 
+            <Collapsible title="Structured foundations">
+              <Field label="Typography scales">
+                <TokenMapInput value={typography.sizes} onChange={(value) => patchFoundations({ typography: { ...typography, sizes: value } })} ariaLabel="Typography sizes" />
+                <TokenMapInput value={typography.lineHeights} onChange={(value) => patchFoundations({ typography: { ...typography, lineHeights: value } })} ariaLabel="Line heights" />
+                <TokenMapInput value={typography.weights} onChange={(value) => patchFoundations({ typography: { ...typography, weights: value } })} ariaLabel="Typography weights" />
+                <TokenMapInput value={typography.measures} onChange={(value) => patchFoundations({ typography: { ...typography, measures: value } })} ariaLabel="Text measures" />
+              </Field>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <Field label="Spacing scale">
+                  <TokenMapInput value={foundations.spacingScale} onChange={(value) => patchFoundations({ spacingScale: value })} ariaLabel="Spacing scale" />
+                </Field>
+                <Field label="Radius scale">
+                  <TokenMapInput value={foundations.radii} onChange={(value) => patchFoundations({ radii: value })} ariaLabel="Radius scale" />
+                </Field>
+                <Field label="Elevations">
+                  <TokenMapInput value={foundations.elevations} onChange={(value) => patchFoundations({ elevations: value })} ariaLabel="Elevation scale" />
+                </Field>
+                <Field label="Breakpoints">
+                  <TokenMapInput value={layout.breakpoints} onChange={(value) => patchFoundations({ layout: { ...layout, breakpoints: value } })} ariaLabel="Breakpoints" />
+                </Field>
+                <Field label="Containers">
+                  <TokenMapInput value={layout.containers} onChange={(value) => patchFoundations({ layout: { ...layout, containers: value } })} ariaLabel="Containers" />
+                </Field>
+                <Field label="Motion durations">
+                  <TokenMapInput value={motion.durations} onChange={(value) => patchFoundations({ motion: { ...motion, durations: value } })} ariaLabel="Motion durations" />
+                </Field>
+                <Field label="Motion easings">
+                  <TokenMapInput value={motion.easings} onChange={(value) => patchFoundations({ motion: { ...motion, easings: value } })} ariaLabel="Motion easings" />
+                </Field>
+              </div>
+              <RuleTextarea label="Grid" value={layout.grid ?? ""} onChange={(value) => patchFoundations({ layout: { ...layout, grid: value } })} />
+              <RuleTextarea label="Reduced motion" value={motion.reducedMotion ?? ""} onChange={(value) => patchFoundations({ motion: { ...motion, reducedMotion: value } })} />
+              <RuleTextarea label="Iconography" value={foundations.iconography ?? ""} onChange={(value) => patchFoundations({ iconography: value })} />
+              <RuleTextarea label="Imagery" value={foundations.imagery ?? ""} onChange={(value) => patchFoundations({ imagery: value })} />
+            </Collapsible>
+
             <Collapsible title="Components" defaultOpen>
               {renderComponentEditor(d)}
             </Collapsible>
 
-            <Collapsible title="Notes (voice, density, motion)">
+            <Collapsible title="Cross-component patterns">
+              <RuleTextarea label="Responsive" value={patterns.responsive ?? ""} onChange={(value) => patchPatterns({ responsive: value })} />
+              <RuleTextarea label="Navigation" value={patterns.navigation ?? ""} onChange={(value) => patchPatterns({ navigation: value })} />
+              <RuleTextarea label="Forms" value={patterns.forms ?? ""} onChange={(value) => patchPatterns({ forms: value })} />
+              <RuleTextarea label="Tables" value={patterns.tables ?? ""} onChange={(value) => patchPatterns({ tables: value })} />
+              <RuleTextarea label="Overlays" value={patterns.overlays ?? ""} onChange={(value) => patchPatterns({ overlays: value })} />
+              <RuleTextarea label="Data visualization" value={patterns.dataVisualization ?? ""} onChange={(value) => patchPatterns({ dataVisualization: value })} />
+              <RuleTextarea label="States" value={patterns.states ?? ""} onChange={(value) => patchPatterns({ states: value })} />
+            </Collapsible>
+
+            <Collapsible title="Interaction & behavior">
+              <RuleTextarea label="Interaction" value={behavior.interaction ?? ""} onChange={(value) => patchBehavior({ interaction: value })} />
+              <RuleTextarea label="Focus" value={behavior.focus ?? ""} onChange={(value) => patchBehavior({ focus: value })} />
+              <RuleTextarea label="Validation" value={behavior.validation ?? ""} onChange={(value) => patchBehavior({ validation: value })} />
+              <RuleTextarea label="Loading" value={behavior.loading ?? ""} onChange={(value) => patchBehavior({ loading: value })} />
+              <RuleTextarea label="Destructive actions" value={behavior.destructiveActions ?? ""} onChange={(value) => patchBehavior({ destructiveActions: value })} />
+              <RuleTextarea label="Accessibility" value={behavior.accessibility ?? ""} onChange={(value) => patchBehavior({ accessibility: value })} />
+              <RuleTextarea label="Content" value={behavior.content ?? ""} onChange={(value) => patchBehavior({ content: value })} />
+            </Collapsible>
+
+            <Collapsible title="Additional notes">
               <textarea value={d.tokens.notes ?? ""} onChange={(e) => patchTokens({ notes: e.target.value })} rows={4} style={{ ...inputStyle, resize: "vertical", lineHeight: 1.5 }} />
             </Collapsible>
           </div>
@@ -1093,6 +1240,66 @@ function LabeledInput({
       <span style={{ width: 60, fontSize: 11, color: "var(--text-muted)" }}>{label}</span>
       <input value={value} onChange={(e) => onChange(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
     </div>
+  );
+}
+
+function TokenMapInput({
+  value,
+  onChange,
+  ariaLabel,
+}: {
+  value?: Record<string, string>;
+  onChange: (value: Record<string, string>) => void;
+  ariaLabel: string;
+}) {
+  const serialized = Object.entries(value ?? {})
+    .map(([key, entry]) => `${key}=${entry}`)
+    .join("\n");
+  const [text, setText] = useState(serialized);
+  useEffect(() => setText(serialized), [serialized]);
+  const commit = () => {
+    const next: Record<string, string> = {};
+    for (const part of text.split(/\r?\n/)) {
+      const at = part.indexOf("=");
+      if (at <= 0) continue;
+      const key = part.slice(0, at).trim();
+      const entry = part.slice(at + 1).trim();
+      if (key && entry) next[key] = entry;
+    }
+    onChange(next);
+  };
+  return (
+    <textarea
+      value={text}
+      onChange={(event) => setText(event.target.value)}
+      onBlur={commit}
+      aria-label={ariaLabel}
+      placeholder={"name=value\nname=value"}
+      rows={3}
+      style={{ ...inputStyle, marginBottom: 6, resize: "vertical", lineHeight: 1.45, fontFamily: "var(--font-mono-stack, ui-monospace, monospace)" }}
+    />
+  );
+}
+
+function RuleTextarea({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label style={{ display: "grid", gridTemplateColumns: "92px minmax(0, 1fr)", gap: 8, alignItems: "start", marginBottom: 6 }}>
+      <span style={{ fontSize: 10, color: "var(--text-muted)", paddingTop: 7 }}>{label}</span>
+      <textarea
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        rows={2}
+        style={{ ...inputStyle, resize: "vertical", lineHeight: 1.45 }}
+      />
+    </label>
   );
 }
 

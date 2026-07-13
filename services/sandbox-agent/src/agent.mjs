@@ -36,7 +36,7 @@
 import http from "node:http";
 import net from "node:net";
 import { createReadStream, promises as fs } from "node:fs";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID, timingSafeEqual } from "node:crypto";
@@ -263,6 +263,9 @@ async function handleRequest(req, res) {
         ? Math.min(MAX_TEXT_READ_BYTES, Math.max(1, requestedCap))
         : MAX_TEXT_READ_BYTES;
       const headTail = ["1", "true"].includes((url.searchParams.get("head_tail") ?? "").toLowerCase());
+      if (url.searchParams.get("allow_sensitive") !== "1" && isSensitiveProjectPath(path.relative(SANDBOX_DIR, p))) {
+        throw new Error("access to secret-bearing project paths is blocked");
+      }
       if (offsetRaw !== null || limitRaw !== null) {
         const start = Math.max(1, parseInt(offsetRaw ?? "1", 10) || 1);
         const count = Math.max(1, parseInt(limitRaw ?? "2000", 10) || 2000);
@@ -379,8 +382,10 @@ async function handleRequest(req, res) {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 function resolveSandbox(rel) {
-  const root = path.resolve(SANDBOX_DIR);
-  const full = path.resolve(root, rel || ".");
+  const lexicalRoot = path.resolve(SANDBOX_DIR);
+  const root = existsSync(lexicalRoot) ? realpathSync(lexicalRoot) : lexicalRoot;
+  const lexical = path.resolve(lexicalRoot, rel || ".");
+  const full = existsSync(lexical) ? realpathSync(lexical) : lexical;
   if (full !== root && !full.startsWith(root + path.sep)) {
     throw new Error(`path escapes sandbox: ${rel}`);
   }
@@ -435,6 +440,19 @@ function readBody(req) {
 function truncate(s) {
   if (s.length <= HALF_MAX * 2) return s;
   return `${s.slice(0, HALF_MAX)}\n\n[... truncated ${s.length - HALF_MAX * 2} bytes ...]\n\n${s.slice(-HALF_MAX)}`;
+}
+
+function isSensitiveProjectPath(rel) {
+  const parts = String(rel).replaceAll("\\", "/").replace(/^\.\//, "").split("/").filter(Boolean);
+  const lower = parts.map((part) => part.toLowerCase());
+  const base = lower.at(-1) ?? "";
+  if (lower.includes(".ssh")) return true;
+  if (lower.includes(".aws") && base === "credentials") return true;
+  if (lower.includes(".config") && lower.includes("gcloud")) return true;
+  if (base === ".env" || base.startsWith(".env.")) return true;
+  if ([".npmrc", ".pypirc", ".netrc", ".git-credentials"].includes(base)) return true;
+  if (/^id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?$/.test(base)) return true;
+  return /\.(?:key|pem|p12|pfx|crt|cer)$/.test(base);
 }
 
 /** Return a UTF-8 prefix no larger than maxBytes without splitting a codepoint. */
@@ -646,7 +664,7 @@ async function buildManifest() {
 
 async function grep(pattern, sub, opts = {}) {
   const target = sub ? resolveSandbox(sub) : SANDBOX_DIR;
-  const root = path.resolve(SANDBOX_DIR);
+  const root = resolveSandbox("");
   // A literal request — or a pattern that won't compile as a regex (e.g. it
   // contains literal parens/brackets the model meant verbatim) — degrades to a
   // case-aware substring test rather than erroring, matching shell grep.
@@ -820,6 +838,7 @@ async function grepWithRipgrep(pattern, target, root, ci, literal) {
         parseFailed = true;
         break;
       }
+      if (isSensitiveProjectPath(rel)) continue;
       pushBoundedMatch(
         bounded,
         `${rel.startsWith("./") ? rel.slice(2) : rel}:${lineNo}: ${source.trim()}`,
@@ -837,12 +856,16 @@ async function grepWithRipgrep(pattern, target, root, ci, literal) {
 async function walkForGrep(target, root, test, bounded) {
   async function scanFile(full) {
     try {
-      const lines = createInterface({ input: createReadStream(full), crlfDelay: Infinity });
+      const resolved = await fs.realpath(full);
+      if (resolved !== root && !resolved.startsWith(root + path.sep)) return;
+      const rel = path.relative(root, resolved);
+      if (isSensitiveProjectPath(rel)) return;
+      const lines = createInterface({ input: createReadStream(resolved), crlfDelay: Infinity });
       let lineNo = 0;
       for await (const line of lines) {
         lineNo++;
         if (test(line)) {
-          pushBoundedMatch(bounded, `${path.relative(root, full)}:${lineNo}: ${line.trim()}`);
+          pushBoundedMatch(bounded, `${rel}:${lineNo}: ${line.trim()}`);
         }
       }
     } catch {

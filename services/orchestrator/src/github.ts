@@ -54,11 +54,10 @@ function getOauthConfig(): { clientId: string; clientSecret: string; callback: s
     );
   }
   // Public callback URL must match exactly what's configured on the OAuth App.
-  // We derive from PUBLIC_BASE_URL (already used for preview URLs) so there's
-  // a single canonical orchestrator base URL configured per environment.
+  // OAuth callbacks belong to the authenticated API origin, never the isolated
+  // preview origin (whose whole purpose is to receive no application cookies).
   const base = (
     process.env.PUBLIC_BASE_URL ??
-    process.env.PREVIEW_BASE_URL ??
     "http://localhost:8787"
   ).replace(/\/$/, "");
   return { clientId, clientSecret, callback: `${base}/api/github/callback` };

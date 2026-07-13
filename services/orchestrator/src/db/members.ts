@@ -4,10 +4,9 @@ import type { Role, Organization, OrgMember, ProjectMember } from "@uniqus/api-t
 /**
  * Org + project membership and RBAC (P3.1/P3.2/P3.5).
  *
- * Access model is ADDITIVE and backward-compatible: a project's `owner_id` is
- * always the implicit `owner` role, so every existing single-user project keeps
- * working with zero data migration. Shared access layers `project_members` (and
- * org-level `org_members` for a project's `org_id`) on top.
+ * Personal projects use `owner_id` as their implicit owner. Organization-owned
+ * projects deliberately ignore `owner_id`: org/project membership is the only
+ * authority, so removing a creator from the org revokes access completely.
  *
  * Every membership query degrades gracefully if the new tables haven't been
  * applied yet (the operator runs schema.sql manually) — a missing relation is
@@ -21,7 +20,7 @@ function isMissingTable(err: { code?: string; message?: string } | null): boolea
 }
 
 interface ProjectOwnerOrg {
-  owner_id: string;
+  owner_id: string | null;
   org_id: string | null;
 }
 
@@ -41,7 +40,7 @@ async function projectOwnerOrg(projectId: string): Promise<ProjectOwnerOrg | nul
     return null;
   }
   if (!data) return null;
-  const row = data as { owner_id: string; org_id: string | null };
+  const row = data as { owner_id: string | null; org_id: string | null };
   return { owner_id: row.owner_id, org_id: row.org_id ?? null };
 }
 
@@ -52,7 +51,7 @@ async function projectOwnerOrg(projectId: string): Promise<ProjectOwnerOrg | nul
 export async function getProjectRole(projectId: string, userId: string): Promise<Role | null> {
   const po = await projectOwnerOrg(projectId);
   if (!po) return null;
-  if (po.owner_id === userId) return "owner";
+  let projectRole: Role | null = null;
 
   const pm = await db()
     .from("project_members")
@@ -60,12 +59,13 @@ export async function getProjectRole(projectId: string, userId: string): Promise
     .eq("project_id", projectId)
     .eq("user_id", userId)
     .maybeSingle();
-  if (!pm.error && pm.data) return (pm.data as { role: Role }).role;
+  if (!pm.error && pm.data) projectRole = (pm.data as { role: Role }).role;
   if (pm.error && !isMissingTable(pm.error)) {
     // A real error (not a missing table) shouldn't silently grant/deny — log it.
     console.error(`[members] project_members lookup failed: ${pm.error.message}`);
   }
 
+  let orgRole: Role | null = null;
   if (po.org_id) {
     const om = await db()
       .from("org_members")
@@ -73,7 +73,35 @@ export async function getProjectRole(projectId: string, userId: string): Promise
       .eq("org_id", po.org_id)
       .eq("user_id", userId)
       .maybeSingle();
-    if (!om.error && om.data) return (om.data as { role: Role }).role;
+    if (!om.error && om.data) orgRole = (om.data as { role: Role }).role;
+  }
+  return resolveEffectiveProjectRole({
+    orgId: po.org_id,
+    ownerId: po.owner_id,
+    userId,
+    projectRole,
+    orgRole,
+  });
+}
+
+export function resolveEffectiveProjectRole(input: {
+  orgId: string | null;
+  ownerId: string | null;
+  userId: string;
+  projectRole: Role | null;
+  orgRole: Role | null;
+}): Role | null {
+  const roles: Role[] = [];
+  if (!input.orgId && input.ownerId === input.userId) roles.push("owner");
+  if (input.projectRole) roles.push(input.projectRole);
+  if (input.orgId && input.orgRole) roles.push(input.orgRole);
+  return strongestRole(roles);
+}
+
+function strongestRole(roles: readonly Role[]): Role | null {
+  const order: Role[] = ["viewer", "editor", "admin", "owner"];
+  for (let i = order.length - 1; i >= 0; i -= 1) {
+    if (roles.includes(order[i])) return order[i];
   }
   return null;
 }
@@ -106,13 +134,13 @@ interface MemberRow {
   users?: { email: string | null; display_name: string | null } | null;
 }
 
-/** Project members with the owner synthesized in as `owner`. */
+/** Direct project members; personal projects also synthesize their owner. */
 export async function listProjectMembers(projectId: string): Promise<ProjectMember[]> {
   const po = await projectOwnerOrg(projectId);
   const out: ProjectMember[] = [];
   const seen = new Set<string>();
 
-  if (po) {
+  if (po && !po.org_id && po.owner_id) {
     const ownerUser = await db()
       .from("users")
       .select("email, display_name")
@@ -154,7 +182,7 @@ export async function listProjectMembers(projectId: string): Promise<ProjectMemb
   return out;
 }
 
-async function findUserByEmail(email: string): Promise<{ id: string } | null> {
+export async function findUserByEmail(email: string): Promise<{ id: string } | null> {
   const { data } = await db().from("users").select("id").ilike("email", email.trim()).maybeSingle();
   return (data as { id: string } | null) ?? null;
 }
@@ -164,14 +192,17 @@ export async function addProjectMemberByEmail(
   projectId: string,
   email: string,
   role: Role,
-): Promise<{ ok: true; member: ProjectMember } | { ok: false; reason: "no_user" | "error"; message?: string }> {
+): Promise<{ ok: true; member: ProjectMember } | { ok: false; reason: "no_user" | "exists" | "error"; message?: string }> {
   const user = await findUserByEmail(email);
   if (!user) return { ok: false, reason: "no_user" };
   const { data, error } = await db()
     .from("project_members")
-    .upsert({ project_id: projectId, user_id: user.id, role }, { onConflict: "project_id,user_id" })
+    // Invites create membership only. Existing roles must go through the PATCH
+    // path, which checks the caller/target role before changing authority.
+    .insert({ project_id: projectId, user_id: user.id, role })
     .select("id, user_id, role, created_at")
     .single();
+  if (error?.code === "23505") return { ok: false, reason: "exists" };
   if (error || !data) return { ok: false, reason: "error", message: error?.message };
   const row = data as { id: string; user_id: string; role: Role; created_at: string };
   return {
@@ -202,17 +233,13 @@ export async function removeProjectMember(projectId: string, userId: string): Pr
 
 export async function createOrganization(name: string, ownerId: string): Promise<Organization> {
   const { data, error } = await db()
-    .from("organizations")
-    .insert({ name, owner_id: ownerId })
-    .select("*")
+    .rpc("create_organization_with_owner", {
+      p_name: name,
+      p_owner_id: ownerId,
+    })
     .single();
   if (error || !data) throw new Error(`createOrganization failed: ${error?.message}`);
-  const org = data as Organization;
-  // The creator is the org owner.
-  await db()
-    .from("org_members")
-    .upsert({ org_id: org.id, user_id: ownerId, role: "owner" }, { onConflict: "org_id,user_id" });
-  return org;
+  return data as Organization;
 }
 
 export async function listOrganizationsForUser(userId: string): Promise<Organization[]> {
@@ -264,12 +291,16 @@ export async function addOrgMemberByEmail(
   orgId: string,
   email: string,
   role: Role,
-): Promise<{ ok: true } | { ok: false; reason: "no_user" | "error"; message?: string }> {
+): Promise<{ ok: true } | { ok: false; reason: "no_user" | "exists" | "error"; message?: string }> {
   const user = await findUserByEmail(email);
   if (!user) return { ok: false, reason: "no_user" };
   const { error } = await db()
     .from("org_members")
-    .upsert({ org_id: orgId, user_id: user.id, role }, { onConflict: "org_id,user_id" });
+    // Never let the invite endpoint double as an unchecked role mutation. In
+    // particular, an admin must not be able to demote an existing owner by
+    // inviting the same address again with a lower role.
+    .insert({ org_id: orgId, user_id: user.id, role });
+  if (error?.code === "23505") return { ok: false, reason: "exists" };
   if (error) return { ok: false, reason: "error", message: error.message };
   return { ok: true };
 }
@@ -290,12 +321,14 @@ export async function renameOrganization(orgId: string, name: string): Promise<v
 }
 
 /**
- * Delete an org. `org_members` cascade-delete with it; `projects.org_id` is ON
- * DELETE SET NULL, so the org's projects fall back to their owners' personal
- * workspace rather than being destroyed.
+ * Delete an org transactionally. Every org project is first reassigned to the
+ * deleting owner as a personal project, avoiding stale historical creators.
  */
-export async function deleteOrganization(orgId: string): Promise<void> {
-  const { error } = await db().from("organizations").delete().eq("id", orgId);
+export async function deleteOrganization(orgId: string, recoveryOwnerId: string): Promise<void> {
+  const { error } = await db().rpc("delete_organization_with_recovery", {
+    p_org_id: orgId,
+    p_recovery_owner_id: recoveryOwnerId,
+  });
   if (error) throw new Error(`deleteOrganization failed: ${error.message}`);
 }
 

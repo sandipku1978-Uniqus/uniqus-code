@@ -898,6 +898,7 @@ export interface SecretSummary {
    */
   env: string;
   description: string | null;
+  allowed_hosts: string[];
   updated_at: string;
 }
 
@@ -914,7 +915,13 @@ export const fetchSecretsApi = (
 
 export const upsertSecretApi = (
   projectId: string,
-  body: { name: string; value: string; env?: string; description?: string | null },
+  body: {
+    name: string;
+    value: string;
+    env?: string;
+    description?: string | null;
+    allowed_hosts?: string[];
+  },
 ): Promise<{ secret: SecretSummary }> =>
   api(`/api/projects/${projectId}/secrets`, {
     method: "POST",

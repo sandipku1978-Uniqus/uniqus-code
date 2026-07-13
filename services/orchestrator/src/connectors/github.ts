@@ -37,6 +37,7 @@ export const githubConnector: ConnectorDefinition = {
   methods: [
     {
       name: "list_issues",
+      risk: "read",
       description: "List issues for a repo. Pulls token from secrets (default GITHUB_TOKEN).",
       args_schema: {
         type: "object",
@@ -61,6 +62,7 @@ export const githubConnector: ConnectorDefinition = {
     },
     {
       name: "get_issue",
+      risk: "read",
       description: "Get a single issue or PR by number.",
       args_schema: {
         type: "object",
@@ -84,6 +86,7 @@ export const githubConnector: ConnectorDefinition = {
     },
     {
       name: "list_pulls",
+      risk: "read",
       description: "List pull requests for a repo.",
       args_schema: {
         type: "object",
@@ -108,6 +111,7 @@ export const githubConnector: ConnectorDefinition = {
     },
     {
       name: "get_branch",
+      risk: "read",
       description: "Get a branch (its latest commit sha + protection). Useful before opening a PR or branching from it.",
       args_schema: {
         type: "object",
@@ -128,6 +132,7 @@ export const githubConnector: ConnectorDefinition = {
     },
     {
       name: "create_branch",
+      risk: "write",
       description:
         "Create a new branch off an existing one. from_branch defaults to the repo default (commonly 'main'). Resolves the base sha, then creates refs/heads/<branch>.",
       args_schema: {
@@ -161,6 +166,7 @@ export const githubConnector: ConnectorDefinition = {
     },
     {
       name: "create_pull",
+      risk: "write",
       description:
         "Open a pull request from head into base (base defaults to 'main'). Returns the PR number + html_url. Requires the branch to already exist and have commits ahead of base.",
       args_schema: {
@@ -193,6 +199,7 @@ export const githubConnector: ConnectorDefinition = {
     },
     {
       name: "list_pull_comments",
+      risk: "read",
       description: "List the issue-style comments on a pull request (the GitHub /issues/{number}/comments endpoint also serves PRs).",
       args_schema: {
         type: "object",

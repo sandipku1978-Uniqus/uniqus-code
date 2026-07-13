@@ -57,7 +57,7 @@ export interface RpcTextResult {
 export async function readFileResult(
   vm: VmHandle,
   p: string,
-  opts?: { offset?: number; limit?: number; maxBytes?: number; headTail?: boolean },
+  opts?: { offset?: number; limit?: number; maxBytes?: number; headTail?: boolean; allowSensitive?: boolean },
 ): Promise<RpcTextResult> {
   let url = `/fs/file?path=${encodeURIComponent(p)}`;
   const range = opts && (opts.offset !== undefined || opts.limit !== undefined);
@@ -70,6 +70,7 @@ export async function readFileResult(
     url += `&max_bytes=${Math.max(1, Math.floor(opts.maxBytes))}`;
   }
   if (opts?.headTail === true) url += "&head_tail=1";
+  if (opts?.allowSensitive === true) url += "&allow_sensitive=1";
   const r = await rpc<TextReadResponse>(vm, "GET", url);
   // Range reads are sliced in-guest. The agent stops once the requested
   // window/cap is resolved, so total_lines is nullable and known_lines is a
@@ -131,7 +132,7 @@ export async function readFileResult(
 export async function readFile(
   vm: VmHandle,
   p: string,
-  opts?: { offset?: number; limit?: number; maxBytes?: number; headTail?: boolean },
+  opts?: { offset?: number; limit?: number; maxBytes?: number; headTail?: boolean; allowSensitive?: boolean },
 ): Promise<string> {
   return (await readFileResult(vm, p, opts)).text;
 }

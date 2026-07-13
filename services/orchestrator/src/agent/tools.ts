@@ -384,7 +384,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "interact_preview",
     description:
-      "Drive a running preview like a real user, then capture what happened. Runs an ordered list of actions (navigate, click, type/fill, select, press, scroll, wait, wait_for_text) plus assertions (assert_text, assert_url, assert_visible) against a server you started (server_id) or a URL, and returns a RESULT: PASSED/FAILED verdict plus: a screenshot of the final state, the resulting URL/title, per-step pass/fail, console errors, failed network requests, assertion failures, and a quick accessibility scan. Reach for this AUTOMATICALLY after you change UI, forms, routing, auth, data entry, checkout, or dashboards — fill and submit the flow, assert the result. A FAILED verdict is BLOCKING: assertion failures, uncaught errors, AND console errors — ESPECIALLY React hydration mismatches (\"hydration failed\" / \"did not match\" / \"Text content does not match\") — mean the app is broken even when the screenshot looks fine; fix the root cause and re-run until it PASSES, and never report success on a FAILED run. Selectors are CSS (prefer stable ones: roles, labels, ids, data-testid). If it errors that the browser/Playwright is unavailable, report that to the user — you cannot install it from the sandbox.",
+      "Drive a running preview like a real user, then capture what happened. Runs an ordered list of actions (navigate, click, type/fill, select, press, scroll, wait, wait_for_text) plus assertions (assert_text, assert_url, assert_visible) against a server you started (server_id) or a URL, and returns a RESULT: PASSED/FAILED verdict plus: a screenshot of the final state, the resulting URL/title, per-step pass/fail, console errors, failed network requests, assertion failures, accessibility findings, and deterministic layout/contrast findings. Reach for this AUTOMATICALLY after you change UI, forms, routing, auth, data entry, checkout, or dashboards — fill and submit the flow, assert the result. A FAILED verdict is BLOCKING: failed steps, assertion failures, uncaught/console errors (especially React hydration mismatches), accessibility issues, horizontal/off-screen/clipped layout, or low contrast mean the app is not done even when the screenshot looks plausible; fix the root cause and re-run until it PASSES. Selectors are CSS (prefer stable ones: roles, labels, ids, data-testid). If it errors that the browser/Playwright is unavailable, report that to the user — you cannot install it from the sandbox.",
     input_schema: {
       type: "object",
       properties: {
@@ -393,7 +393,6 @@ export const TOOLS: Anthropic.Tool[] = [
         path: { type: "string", description: "Optional sub-path to append when server_id is set (e.g. \"/login\")." },
         viewport_width: { type: "number", description: "Optional, default 1280." },
         viewport_height: { type: "number", description: "Optional, default 800." },
-        a11y: { type: "boolean", description: "Optional, default true. Run a quick accessibility scan on the final state." },
         actions: {
           type: "array",
           description: "Ordered list of interactions to perform. Each is executed in sequence; a failed step is recorded and the rest still run.",
@@ -504,7 +503,6 @@ export const TOOLS: Anthropic.Tool[] = [
         path: { type: "string", description: "Optional sub-path override (defaults to the flow's start_path)." },
         viewport_width: { type: "number", description: "Optional, default 1280." },
         viewport_height: { type: "number", description: "Optional, default 800." },
-        a11y: { type: "boolean", description: "Optional, default true." },
       },
     },
   },
@@ -585,27 +583,6 @@ export const TOOLS: Anthropic.Tool[] = [
             "Optional. Env name to filter by (e.g. 'development', 'staging', 'production'), or '*' to list every env. Default 'default'.",
         },
       },
-    },
-  },
-  {
-    name: "get_secret",
-    description:
-      "Fetch a project secret by name and write it as an env var into a .env file in the sandbox so generated code can read it via process.env / os.environ. Returns the env-var name on success — does NOT return the plaintext to the agent context. The .env file is gitignored by default. Every read is audit-logged. Use the optional 'env' field to read a specific environment's slot (defaults to 'default').",
-    input_schema: {
-      type: "object",
-      properties: {
-        name: { type: "string", description: "Secret name (e.g. 'STRIPE_API_KEY')." },
-        env_file: {
-          type: "string",
-          description: "Optional. .env file relative to sandbox root. Default '.env'.",
-        },
-        env: {
-          type: "string",
-          description:
-            "Optional. Which environment's slot to read (e.g. 'development', 'staging', 'production'). Default 'default'.",
-        },
-      },
-      required: ["name"],
     },
   },
   {

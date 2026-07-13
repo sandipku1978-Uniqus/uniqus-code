@@ -35,7 +35,7 @@ let sweeperTimer: ReturnType<typeof setInterval> | null = null;
 /**
  * Tear down one guest project: best-effort Storage + VM + sandbox-dir cleanup.
  * Mirrors the non-DB half of handleProjectDelete in server.ts — the DB rows
- * themselves go away via ON DELETE CASCADE when the user row is deleted.
+ * themselves are deleted by deleteUser before the user row is removed.
  */
 async function teardownGuestProject(
   projectId: string,
@@ -108,8 +108,8 @@ async function runSweep(
         console.log(`[guest-sweeper] skipping ${guestId} — no longer eligible (returned/converted)`);
         continue;
       }
-      // Enumerate the projects BEFORE deleting the user — once the user row
-      // is gone the projects cascade away and can't be listed.
+      // Enumerate the projects BEFORE deleting the user — deleteUser removes
+      // personal project rows first, so they cannot be listed afterward.
       const projects = await listProjects(guestId);
       for (const project of projects) {
         await teardownGuestProject(project.id, sandboxDirFor(project.id));
@@ -120,7 +120,7 @@ async function runSweep(
         console.log(`[guest-sweeper] ${guestId} became active during teardown — keeping row`);
         continue;
       }
-      // CASCADE clears projects, messages, chat sessions, deployments, audit.
+      // deleteUser removes personal projects first; their dependent rows cascade.
       await deleteUser(guestId);
       console.log(
         `[guest-sweeper] deleted guest ${guestId} (${projects.length} project(s))`,

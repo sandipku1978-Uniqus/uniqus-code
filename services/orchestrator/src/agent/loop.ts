@@ -13,6 +13,7 @@ import {
   estimateFixedPromptTokens,
   estimateMessageChars,
   estimateMessageTokens,
+  compactionTriggerTokens,
   contextWindowTokensForModel,
   type CompactionResult,
 } from "./compact.js";
@@ -23,6 +24,7 @@ import {
   formatLibrarySkillsForPrompt,
   formatSkillsForPrompt,
   readSkills,
+  type AttachedLibrarySkill,
 } from "./skills.js";
 import {
   isImageAsset,
@@ -39,7 +41,12 @@ import {
   killJob,
 } from "./background.js";
 import { takeScreenshot } from "./screenshot.js";
-import { runInteractPreview, type InteractAction, type InteractFrame } from "./interact.js";
+import {
+  previewBlockingReasons,
+  runInteractPreview,
+  type InteractAction,
+  type InteractFrame,
+} from "./interact.js";
 import { generateImage } from "./imagegen.js";
 import { recordArtifact } from "../db/artifacts.js";
 import { recordUsageEvent } from "../db/usage.js";
@@ -91,9 +98,12 @@ import type {
   ThinkingEffort,
   ToolRiskCategory,
 } from "@uniqus/api-types";
-import { classifyToolRisk, decidePermission } from "./permissions.js";
+import { approvalScopeKey, classifyToolRisk, decidePermission } from "./permissions.js";
 import { setTodos, type TodoItem } from "./todos.js";
-import { listProjectSecrets, plumbSecretToEnvFile } from "../secrets.js";
+import { listProjectSecrets, removeLegacyMaterializedSecret } from "../secrets.js";
+import { getProjectSecretPlaintexts } from "../db/secrets.js";
+import { createSecretRedactor } from "./secretRedaction.js";
+import { isSensitiveProjectPath } from "../security/sensitivePaths.js";
 import { callConnector, listProjectConnectors } from "../connectors/index.js";
 import {
   formatSelectedElementBlock,
@@ -192,6 +202,32 @@ export function formatLiveProjectStateBlock(
   return `${LIVE_PROJECT_STATE_MARKER}\n${runningServersSection}\n\n${availableConnectorsSection}\n</live-project-state>`;
 }
 
+/**
+ * Dynamic because the enum is the project's actual attached skill ids. Keeping
+ * this as one small discovery tool mirrors modern SKILL.md runtimes without
+ * adding every skill body (or one schema per skill) to the cached prompt.
+ */
+export function createLoadSkillTool(skills: AttachedLibrarySkill[]): Anthropic.Tool | null {
+  if (skills.length === 0) return null;
+  return {
+    name: "load_skill",
+    description:
+      "Load one attached skill's full instructions into non-compactable system context for the rest of this turn. " +
+      "Call this before acting when the user names a skill (including $SkillName) or the request clearly matches an attached skill's description. Load only relevant skills.",
+    input_schema: {
+      type: "object",
+      properties: {
+        skill_id: {
+          type: "string",
+          enum: skills.map((skill) => skill.id),
+          description: "Exact id from the <available_skills> catalog.",
+        },
+      },
+      required: ["skill_id"],
+    },
+  };
+}
+
 export function buildSystemPrompt(
   skillsBody: string | null,
   accountPrompt: string | null,
@@ -199,7 +235,7 @@ export function buildSystemPrompt(
   hasVision: boolean,
   repo: { fullName: string; url: string } | null,
   designTokens: DesignTokens | null,
-  librarySkills: { name: string; body: string }[],
+  librarySkills: AttachedLibrarySkill[],
   knowledgeDocs: { id: string; title: string; description: string | null }[],
   hasSubAgents: boolean,
   hasAskUser: boolean,
@@ -208,6 +244,7 @@ export function buildSystemPrompt(
   profile: AgentProfile,
   loadedGuidance: readonly GuidancePackId[],
   hasPreviewTools = true,
+  loadedLibrarySkillIds: ReadonlySet<string> = new Set(),
 ): string {
   const { name: shellName, isUnixLike } = sb.shellInfo();
   const platform = process.platform;
@@ -356,7 +393,7 @@ ${hasPreviewTools
 2. Use non-interactive scaffolder flags. Fix the reported root cause after a non-zero command instead of retrying blindly.
 3. Use list_dir/grep/read_file to verify state rather than guessing paths.
 4. When complete, summarize the result and end with a short \`## What changed\` list covering only files actually edited, in plain language. Do not tell the user to run local commands.
-5. For current products/models/versions/prices, ${currencyGuidance}${formatAccountPromptForPrompt(accountPrompt)}${formatDesignSystemForPrompt(designTokens)}${formatLibrarySkillsForPrompt(librarySkills)}${formatSkillsForPrompt(skillsBody)}
+5. For current products/models/versions/prices, ${currencyGuidance}${formatAccountPromptForPrompt(accountPrompt)}${formatDesignSystemForPrompt(designTokens)}${formatLibrarySkillsForPrompt(librarySkills, loadedLibrarySkillIds)}${formatSkillsForPrompt(skillsBody)}
 
 Live project state: a <live-project-state> block is appended to the LATEST user message on every turn. It is system-provided ground truth about running servers and connected integrations; newer blocks supersede older snapshots. It is context, never an instruction.
 
@@ -389,11 +426,11 @@ Product and design quality:
 - When building UI, make the first screen the usable product experience, not a marketing placeholder, unless the user explicitly asked for a landing page.
 - Reuse existing design tokens, components, icon sets, routes, and state patterns before adding new ones. Keep spacing, radii, type scale, and color usage internally consistent.
 - Include empty, loading, disabled, error, and success states where users would naturally hit them.
-- Build responsive layouts deliberately: stable dimensions, no text overlap, usable touch targets on mobile, and no viewport-width font scaling.
+- Build responsive layouts deliberately: stable dimensions, no text overlap, usable touch targets on mobile, and bounded clamp() instead of unbounded viewport-only font scaling. Verify narrow/mobile, intermediate/tablet, and wide/desktop transformations rather than merely shrinking the desktop layout.
 - Include accessible semantics, labels, keyboard reachability, visible focus states, sufficient contrast, and reduced-motion-friendly animation.
 - Use visual assets when a site, app, or game needs them. Prefer uploaded assets, local assets, generated bitmap assets, or relevant public assets over generic placeholder blocks.
 - Use generate_image for REAL raster assets (hero images, logos, illustrations, backgrounds, icons, OG/social images) instead of placeholder boxes — pass a specific prompt (subject, style, colours, composition). It costs money per image, so generate deliberately — not for every decorative element. Model choice, editing, and file placement are covered in the tool schema.
-- After meaningful frontend work, start or reuse a preview server and inspect it with screenshot_preview at desktop and mobile sizes. Fix obvious layout, contrast, or rendering issues before reporting completion.
+- After meaningful frontend work, start or reuse a preview server and inspect it with screenshot_preview at desktop and mobile sizes. Fix layout, contrast, accessibility, or rendering issues before reporting completion; findings from the interactive preview are blocking.
 - Screenshot viewport: keep viewport dimensions reasonable (max ~1920x1080). Do NOT use full_page=true on pages with very long scroll — the resulting image may exceed the 8000px dimension limit and fail. For long pages, take multiple viewport-sized screenshots at different scroll positions instead.
 - When you change something interactive — a form, login/signup, routing, data entry, checkout, a dashboard action — don't just screenshot it: drive the real flow with interact_preview (fill fields, submit, navigate, assert the outcome) and treat a FAILED verdict as BLOCKING — fix the root cause and re-run until it PASSES before telling the user it works (the failure modes and verdict details are in the tool schema). The user watches each step live in a "Preview (Agent)" tab, so this doubles as showing your work — treat it as quiet QA you do for yourself, not a stage you make the user run.
 - Before claiming a web app is ready to deploy (to Vercel, a prod URL, or "shipped"), run predeploy_check and treat a FAILED verdict as blocking, like interact_preview: fix the root cause and re-run until it PASSES. Never tell the user the app is deployable when predeploy_check failed.
@@ -402,16 +439,13 @@ Product and design quality:
 
 Backend data & end-user login (Supabase rails):
 - API routing in the generated app: call your own backend with PLAIN root-relative paths (\`fetch("/api/...")\`) and same-origin relative URLs. These work in the live preview AND after a real deploy. NEVER scrape \`window.location\` for a \`/preview/<id>\` prefix, hardcode the preview/orchestrator origin, or special-case the preview host — the preview routes relative requests for you, and any such hack silently breaks the moment the app is deployed.
-- The supabase connector (call_connector connector:"supabase") is the backend substrate: provision_database, get_schema (inspect tables/columns before you change them), run_sql, get_database. Provisioning stores SUPABASE_URL / SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY / DATABASE_URL as project secrets — read public values with get_secret; the service-role key stays server-only and must NEVER be written into client code.
+- The supabase connector (call_connector connector:"supabase") is the backend substrate: provision_database, get_schema (inspect tables/columns before you change them), run_sql, get_database. Provisioning stores all values as encrypted project secrets, but returns exactly two public client values: SUPABASE_URL and SUPABASE_ANON_KEY. Write those public values into app env/config as needed. SUPABASE_SERVICE_ROLE_KEY, DATABASE_URL, and SUPABASE_DB_PASSWORD stay server-side and must NEVER be written into project files or client code.
 - "Add login" recipe (end-user auth for the GENERATED app — distinct from the workspace's own Supabase connection): (1) ensure a linked Supabase project (provision_database if missing); (2) detect the stack — Next.js is first-class; (3) install deps (@supabase/supabase-js, plus @supabase/ssr for Next.js so sessions live in cookies and reach server components/route handlers); (4) write env (NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY for Next.js client code — only the public URL + anon key, never the service role key); (5) generate /login, /signup, /forgot-password, /auth/callback, /account screens + a browser client, an SSR/server client, and a getCurrentUser()/requireUser() helper; (6) protect routes with middleware/guards (signed-out → /login; signed-in away from /login); (7) run_sql for a profiles table keyed to auth.users.id, user-owned columns (user_id uuid not null default auth.uid()), RLS enabled, and policies ("users can read/write only rows where user_id = auth.uid()"); (8) verify the whole flow with interact_preview (signup → login → logout → protected route); (9) hand back a short review card: screens added, protected pages, tables/policies created, and any manual Supabase dashboard steps. V1 default is email+password (+ reset); offer magic link/OTP; defer social OAuth (needs provider setup).
 - Payments (Stripe): take payments via call_connector connector:"stripe" — create checkout sessions, billing customer-portal sessions, and customers. Requires a STRIPE_API_KEY project secret; the key resolves server-side and never enters client code. Call list_connectors for the exact methods.
 - Safe data changes: run_sql refuses destructive statements (DROP/TRUNCATE/DELETE/ALTER…DROP/REVOKE) unless you pass confirm:true. On the first (blocked) call it returns an impact preview — tell the user in plain language what will be permanently lost, get approval, THEN re-run with confirm:true. Prefer reversible changes (add a column with a default, archive instead of delete) and always scope DELETE/UPDATE with a WHERE clause.
 
-Secrets & env vars (the user's "set it like in Vercel" expectation):
-- When the user adds a secret in the Secrets pane, it is AUTOMATICALLY written to \`.env\` in the sandbox (default env). You do NOT need to call get_secret just to materialize a panel-set secret — it's already there. Use get_secret only to plumb a value into a DIFFERENT file/env, or for a non-default env.
-- Make the generated app actually READ \`.env\`: Next.js/Vite/CRA load it automatically; a plain Node script does not — start it with \`node --env-file=.env\` (Node 20.6+) or \`require('dotenv').config()\`; Python uses \`python-dotenv\`.
-- Footgun to avoid (this bit a real user): \`node --env-file=.env\` will NOT override a variable that is already present in the process environment, even if it's present-but-EMPTY. So don't pre-declare \`process.env.FOO = ""\` or export an empty \`FOO=\` anywhere, and when checking "is it set" treat empty-string as unset. If in doubt, read \`.env\` yourself and prefer a non-empty value from either source.
-- After adding/changing env vars, restart the dev server (stop_server then start_server) so the new process picks them up — a running process won't see env changes.
+Secrets & env vars:
+- Sensitive credentials added in the Secrets pane remain encrypted outside the coding sandbox. Their plaintext is never available through files, shell commands, uploads, or model tools. Use trusted connectors for API actions; configured secrets are injected only by the deployment backend into the selected deployment environment. Connector-declared public client config (currently only Supabase URL + anon key) is the explicit exception and may be written into app env files.
 
 Building for serverless deploy (apps deploy to Vercel serverless — you verify in the preview, but WRITE for that target):
 - PERSISTENCE: NEVER use the filesystem (fs.writeFile, a JSON file, SQLite/better-sqlite3/Prisma-sqlite, lowdb) or module-level in-memory state (let rows=[], new Map(), a global cache) as a database, session store, or cache. It works in the preview (a long-lived dev server with a writable disk) but Vercel's filesystem is read-only and every request is an isolated, ephemeral function — writes vanish and the data resets. Silently losing data is worse than not building the feature. For real persistence use a database (see "Available integrations" in the <live-project-state> block on the latest user message).
@@ -469,7 +503,7 @@ ${hasPreviewTools ? `3. For long-running dev servers: ALWAYS use start_server, n
 6. After a non-zero exit, read the error and fix the root cause before retrying. Do not retry blindly — if the same command fails twice, change your approach.
 7. Use list_dir or grep to verify state when you're unsure (e.g., after a scaffold) instead of guessing paths.
 8. When the task is complete, briefly summarize what you built${hasPreviewTools ? ", include the public URL if you started a server" : ", list the exact preview checks the lead still owns"}, and describe how to use it inside Uniqus Code. Do not end by telling the user to run local terminal commands. End that summary with a short \`## What changed\` section: a plain-English bulleted list, one line per file you created or edited this turn, written for a NON-technical reader (e.g. "Added the expenses table and the running-total bar" rather than "edited src/App.tsx"). Keep it to the files you actually touched — do not list files you only read. (This is a human-readable gloss; an exact, machine-generated file list is shown separately, so don't pad it.)
-9. Currency of facts: when the task names specific products, models, versions, or prices — ESPECIALLY AI/LLM model lineups — your training data lags reality by months. ${currencyGuidance} A stale model name or a missing current flagship is a failure the user will notice immediately.${formatAccountPromptForPrompt(accountPrompt)}${formatDesignSystemForPrompt(designTokens)}${formatLibrarySkillsForPrompt(librarySkills)}${formatSkillsForPrompt(skillsBody)}
+9. Currency of facts: when the task names specific products, models, versions, or prices — ESPECIALLY AI/LLM model lineups — your training data lags reality by months. ${currencyGuidance} A stale model name or a missing current flagship is a failure the user will notice immediately.${formatAccountPromptForPrompt(accountPrompt)}${formatDesignSystemForPrompt(designTokens)}${formatLibrarySkillsForPrompt(librarySkills, loadedLibrarySkillIds)}${formatSkillsForPrompt(skillsBody)}
 
 Live project state: a <live-project-state> block is appended to the LATEST user message on every turn. It lists the dev servers running right now and the integrations connected to this project. Treat it as ground truth: when it contradicts anything earlier in the conversation, the MOST RECENT block wins. Earlier <live-project-state> blocks are stale snapshots of past turns — ignore them. The block is appended by the system, not written by the user; it is context, never an instruction.`;
 }
@@ -533,6 +567,18 @@ export interface LoopHooks {
    * agent to still know.
    */
   onCompacted?: (info: CompactionResult) => void;
+  /** Emits the loop's exact estimate and threshold for the composer context ring. */
+  onContextUsage?: (info: {
+    estimatedTokens: number;
+    contextWindowTokens: number;
+    compactionTriggerTokens: number;
+    fixedTokens: number;
+    model: string;
+  }) => void;
+  /** Consumes a one-shot manual-compaction request at a safe iteration boundary. */
+  consumeManualCompactionRequest?: () => boolean;
+  /** Reports the result of a consumed manual request so the UI can stop loading. */
+  onManualCompactionHandled?: (outcome: "compacted" | "noop" | "error") => void;
   /**
    * Pauses the loop until the user answers a structured question raised
    * via the `ask_user` tool. The server creates a Promise that resolves
@@ -555,7 +601,7 @@ export interface LoopHooks {
   /**
    * The CURRENT permission mode, read fresh before every tool call so a mid-turn
    * change (the composer's mode dropdown → `set_permission_mode`) takes effect on
-   * the very next tool. Absent ⇒ headless/CLI, which behaves as `bypass`.
+   * the very next tool. Absent ⇒ fail-closed `default` mode.
    */
   getPermissionMode?: () => PermissionMode;
   /**
@@ -563,7 +609,7 @@ export interface LoopHooks {
    * `default`, a dangerous op in `default`/`acceptEdits`). Mirrors
    * `requestUserAnswer`: the server registers a resolver on the run and emits a
    * `tool_approval_requested`. Rejecting (abort) is treated as a deny. Absent ⇒
-   * no approver wired (headless), so gated calls run as if bypassed.
+   * no approver wired (headless), so gated calls are denied.
    */
   requestToolApproval?: (
     callId: string,
@@ -680,12 +726,12 @@ export interface LoopOptions extends LoopHooks {
    */
   skills?: string | null;
   /**
-   * Reusable account-level Skills the project has ATTACHED from the user's Skills
-   * library (projects.skill_library_ids → bodies). Injected ahead of the
-   * project's own skills.md so the per-project file stays the override layer.
-   * Resolved by the caller once per turn; empty ⇒ omitted.
+   * Reusable account-level Skills the project has ATTACHED from the user's
+   * library. Name + description are advertised up front; bodies are installed
+   * on demand through load_skill, ahead of the project's own skills.md so that
+   * file remains the override layer. Resolved once per turn; empty ⇒ omitted.
    */
-  librarySkills?: { name: string; body: string }[];
+  librarySkills?: AttachedLibrarySkill[];
   /**
    * The account-level Knowledge documents available to the agent this turn
    * (id + title + description, NOT the full text). Resolved by the caller once
@@ -944,6 +990,33 @@ export async function runAgentLoop(
   userMessage: string,
   opts: LoopOptions,
 ): Promise<LoopResult> {
+  // Resolve the redaction set before routing, compaction, or provider calls.
+  // Failure is intentionally fatal: running without this boundary could put a
+  // stored project secret into model context through a legacy file or command.
+  let secretRedactor = createSecretRedactor(
+    opts.projectId ? await getProjectSecretPlaintexts(opts.projectId) : [],
+  );
+  if (opts.projectId) {
+    const names = new Set((await listProjectSecrets(opts.projectId, null)).map((row) => row.name));
+    for (const name of names) {
+      await removeLegacyMaterializedSecret({
+        sandbox: opts.sandbox,
+        name,
+        preservePublicConfig: true,
+      });
+    }
+  }
+  userMessage = secretRedactor.text(userMessage);
+  secretRedactor.redactInPlace(opts.messages);
+  if (opts.skills) opts.skills = secretRedactor.text(opts.skills);
+  if (opts.accountPrompt) opts.accountPrompt = secretRedactor.text(opts.accountPrompt);
+  secretRedactor.redactInPlace(opts.librarySkills);
+  secretRedactor.redactInPlace(opts.knowledgeDocs);
+  secretRedactor.redactInPlace(opts.repo);
+  secretRedactor.redactInPlace(opts.designSystem);
+  secretRedactor.redactInPlace(opts.selectedElement);
+  secretRedactor.redactInPlace(opts.runningServers);
+  secretRedactor.redactInPlace(opts.activeConnectors);
   const nestedAgentRun = isNestedAgentRun(opts);
   const executionBudget = opts.executionBudget ?? null;
   let wallBudgetExpired = false;
@@ -1171,10 +1244,9 @@ export async function runAgentLoop(
   };
   // Consecutive pause_turn continuations so far (see MAX_PAUSE_TURN_RETRIES).
   let pauseTurnRetries = 0;
-  // Tools the user chose "don't ask again" for, this turn. Keyed by tool name;
-  // a gated call whose name is here skips the approval prompt for the rest of
-  // the run (reset next turn — deliberately not persisted).
-  const alwaysAllowTools = new Set<string>();
+  // Exact actions the user approved for the remainder of this turn. Any change
+  // to a command, path, connector method, destination, or argument re-prompts.
+  const alwaysAllowScopes = new Set<string>();
   const skillsBody =
     opts.skills !== undefined ? opts.skills : await readSkills(opts.sandbox.rootDir);
   // Web search is wired on Anthropic, OpenAI (Responses built-in), Z.ai (GLM's
@@ -1250,6 +1322,8 @@ export async function runAgentLoop(
   }
 
   const loadedGuidance: GuidancePackId[] = [...agentProfile.guidance];
+  const attachedLibrarySkills = opts.librarySkills ?? [];
+  const loadedLibrarySkillIds = new Set<string>();
   const toolState = createCapabilityToolState(agentProfile, !hasVision);
   const toolAllowed = (tool: Anthropic.Tool): boolean =>
     (allowSubAgents || !SUBAGENT_BLOCKED_TOOLS.has(tool.name)) &&
@@ -1258,6 +1332,8 @@ export async function runAgentLoop(
   // Built once for the common path. Explicit capability expansion only appends
   // missing schemas, preserving every previously sent definition as a prefix.
   const activeTools: Anthropic.Tool[] = toolState.tools().filter(toolAllowed);
+  const loadSkillTool = createLoadSkillTool(attachedLibrarySkills);
+  if (loadSkillTool) activeTools.push(loadSkillTool);
   if (allowSubAgents) activeTools.push(SPAWN_AGENTS_TOOL, AWAIT_SUBAGENTS_TOOL);
   if (!nestedAgentRun) {
     opts.metrics?.observeInitialHarness(activeTools.length, toolState.loadedCapabilities().length);
@@ -1278,7 +1354,7 @@ export async function runAgentLoop(
       hasVision,
       opts.repo ?? null,
       opts.designSystem ?? null,
-      opts.librarySkills ?? [],
+      attachedLibrarySkills,
       opts.knowledgeDocs ?? [],
       allowSubAgents,
       hasAskUser,
@@ -1287,6 +1363,7 @@ export async function runAgentLoop(
       agentProfile,
       loadedGuidance,
       allowSubAgents,
+      loadedLibrarySkillIds,
     );
   // Capability guidance is trusted harness state, not conversation data. Keep
   // it in the system prompt so context compaction can never truncate or discard
@@ -1296,6 +1373,22 @@ export async function runAgentLoop(
   let systemPrompt = rebuildSystemPrompt();
   let toolSchemaChars = JSON.stringify(activeTools).length;
   let fixedPromptTokens = estimateFixedPromptTokens(systemPrompt, activeTools);
+  const loadSkill = (rawSkillId: unknown): string => {
+    if (typeof rawSkillId !== "string" || !rawSkillId.trim()) {
+      throw new Error("load_skill requires skill_id from the attached skill catalog");
+    }
+    const skill = attachedLibrarySkills.find((candidate) => candidate.id === rawSkillId);
+    if (!skill) {
+      throw new Error("That skill is not attached to this project. Choose an id from <available_skills>.");
+    }
+    if (loadedLibrarySkillIds.has(skill.id)) {
+      return `Skill already loaded: ${skill.name}. Continue using its installed instructions.`;
+    }
+    loadedLibrarySkillIds.add(skill.id);
+    systemPrompt = rebuildSystemPrompt();
+    fixedPromptTokens = estimateFixedPromptTokens(systemPrompt, activeTools);
+    return `Loaded skill: ${skill.name}. Its full instructions are now available in system context for the rest of this turn.`;
+  };
   const loadCapabilities = (rawGroups: unknown): string => {
     if (!toolState.progressive) return "All capability groups are already loaded for this turn.";
     if (!Array.isArray(rawGroups) || rawGroups.length === 0) {
@@ -1707,22 +1800,44 @@ export async function runAgentLoop(
     // compaction threshold on multi-megabyte screenshot history.
     pruneStaleImagesInPlace(messages);
     const messageChars = estimateMessageChars(messages);
+    const contextWindowTokens = contextWindowTokensForModel(resolved.model);
+    const compactionBudget = {
+      fixedTokens: fixedPromptTokens,
+      contextWindowTokens,
+      reserveTokens: MAX_TOKENS,
+    };
+    const emitContextUsage = (): void =>
+      opts.onContextUsage?.({
+        estimatedTokens: fixedPromptTokens + estimateMessageTokens(messages),
+        contextWindowTokens,
+        compactionTriggerTokens: compactionTriggerTokens(compactionBudget),
+        fixedTokens: fixedPromptTokens,
+        model: resolved.model,
+      });
     opts.metrics?.observeContextSize({
       systemPromptChars: systemPrompt.length,
       toolSchemaChars,
       messageChars,
       estimatedContextTokens: fixedPromptTokens + estimateMessageTokens(messages),
     });
+    emitContextUsage();
 
     // Compact older turns when the running history estimate crosses the
     // threshold (Plan §3.6). No-op below threshold. Runs after normalize
     // so the older portion handed to the summarizer is well-formed
     // (every tool_use already paired with a tool_result).
+    const manualCompaction = opts.consumeManualCompactionRequest?.() ?? false;
+    let compactionFailed = false;
     const compacted = await maybeCompact(messages, opts.apiKey, runSignal, {
-      fixedTokens: fixedPromptTokens,
-      contextWindowTokens: contextWindowTokensForModel(resolved.model),
-      reserveTokens: MAX_TOKENS,
-      onFailure: () => opts.metrics?.recordCompaction({ failed: true }),
+      ...compactionBudget,
+      force: manualCompaction,
+      // A manual request keeps the latest real user turn raw and summarizes
+      // everything older, even when the automatic 80k keep target was not met.
+      keepTokens: manualCompaction ? 1 : undefined,
+      onFailure: () => {
+        compactionFailed = true;
+        opts.metrics?.recordCompaction({ failed: true });
+      },
       onUsage: (usage) => {
         opts.metrics?.recordProviderCall({ usage });
         auxCostUsd += recordBridgeUsage(
@@ -1744,6 +1859,12 @@ export async function runAgentLoop(
       // [user, assistant] pair; re-normalize defensively in case the
       // splice landed adjacent to anything quirky in `messages`.
       normalizeMessageHistoryInPlace(messages);
+      emitContextUsage();
+    }
+    if (manualCompaction) {
+      opts.onManualCompactionHandled?.(
+        compactionFailed ? "error" : compacted ? "compacted" : "noop",
+      );
     }
 
     // Live output estimation between real usage reports (see liveUsage.ts:
@@ -2081,31 +2202,39 @@ export async function runAgentLoop(
       // Re-read the mode LIVE (not a per-turn snapshot) so a switch made while
       // this turn is running takes effect on the next tool. Read-only tools and
       // `bypass` resolve to "allow" without a prompt; an edit/command/dangerous
-      // op under default/acceptEdits pauses for the user's verdict. When no
-      // approver is wired (headless), gated calls just run.
+      // op under default/acceptEdits pauses for the user's verdict. Headless
+      // runs fail closed when an action requires an approver.
       {
-        const mode = opts.getPermissionMode?.() ?? "bypass";
+        const mode = opts.getPermissionMode?.() ?? "default";
         const risk = classifyToolRisk(call.name, call.input);
         let gate = decidePermission(mode, risk.category);
-        if (gate === "ask" && alwaysAllowTools.has(call.name)) gate = "allow";
-        if (gate === "ask" && opts.requestToolApproval) {
+        const scopeKey = approvalScopeKey(call.name, call.input);
+        if (gate === "ask" && alwaysAllowScopes.has(scopeKey)) gate = "allow";
+        if (gate === "ask") {
           let verdict: { decision: "approve" | "approve_always" | "deny"; feedback?: string };
-          const stopUserWait = opts.metrics?.startPhase("userWait");
-          try {
-            verdict = await opts.requestToolApproval(call.id, {
-              tool: call.name,
-              category: risk.category as ToolRiskCategory,
-              summary: risk.summary,
-              reason: risk.reason,
-              input: call.input,
-            });
-          } catch {
-            // The approval wait was rejected — an abort woke it. Treat as a deny
-            // so the tool_use gets a matching result (well-formed history); the
-            // next iteration's abort check unwinds the rest of the turn.
-            verdict = { decision: "deny", feedback: "(aborted)" };
-          } finally {
-            stopUserWait?.();
+          if (!opts.requestToolApproval) {
+            verdict = {
+              decision: "deny",
+              feedback: "This action requires explicit interactive approval, but no approver is attached to this run.",
+            };
+          } else {
+            const stopUserWait = opts.metrics?.startPhase("userWait");
+            try {
+              verdict = await opts.requestToolApproval(call.id, {
+                tool: call.name,
+                category: risk.category as ToolRiskCategory,
+                summary: risk.summary,
+                reason: risk.reason,
+                input: call.input,
+              });
+            } catch {
+              // The approval wait was rejected — an abort woke it. Treat as a deny
+              // so the tool_use gets a matching result (well-formed history); the
+              // next iteration's abort check unwinds the rest of the turn.
+              verdict = { decision: "deny", feedback: "(aborted)" };
+            } finally {
+              stopUserWait?.();
+            }
           }
           if (verdict.decision === "deny") {
             const fb = verdict.feedback?.trim();
@@ -2120,7 +2249,7 @@ export async function runAgentLoop(
               is_error: true,
             };
           }
-          if (verdict.decision === "approve_always") alwaysAllowTools.add(call.name);
+          if (verdict.decision === "approve_always") alwaysAllowScopes.add(scopeKey);
         }
       }
 
@@ -2168,8 +2297,17 @@ export async function runAgentLoop(
               opts.metrics?.recordProviderCall({ usage });
             },
             loadCapabilities,
+            loadSkill,
             usageRunId,
           );
+          // Connectors can provision/rotate secrets during this tool call. Load
+          // the post-call set before any result, error echo, or persisted block
+          // is exposed to the model.
+          if (opts.projectId) {
+            secretRedactor = createSecretRedactor(
+              await getProjectSecretPlaintexts(opts.projectId),
+            );
+          }
         } finally {
           stopToolPhase?.();
         }
@@ -2179,21 +2317,23 @@ export async function runAgentLoop(
             content: Array<{ type: string; [k: string]: unknown }>;
             __imagePaths?: string[];
           };
-          const textSummary = mm.content.find((b) => b.type === "text") as { text: string } | undefined;
+          const safeContent = secretRedactor.clone(mm.content);
+          const textSummary = safeContent.find((b) => b.type === "text") as { text: string } | undefined;
           reportToolResult(textSummary?.text ?? "(image)", false, {
             imagePaths: mm.__imagePaths,
           });
           return {
             type: "tool_result",
             tool_use_id: call.id,
-            content: mm.content as any,
+            content: safeContent as any,
           };
         } else {
           const sandboxText = sb.isSandboxTextResult(result) ? result : null;
-          const raw =
+          const raw = secretRedactor.text(
             (sandboxText?.text ??
               (typeof result === "string" ? result : JSON.stringify(result))) ||
-            "(no output)";
+              "(no output)",
+          );
           // Cap any single tool result so one huge read_file/grep/log can't
           // blow past the context window or get re-sent at full size every
           // iteration. Not every tool truncates at the source (run_command
@@ -2235,7 +2375,7 @@ export async function runAgentLoop(
           };
         }
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = secretRedactor.text(err instanceof Error ? err.message : String(err));
         reportToolResult(msg, true);
         return {
           type: "tool_result",
@@ -2394,20 +2534,11 @@ async function buildInteractToolResult(
   const a11yLines = result.a11y_issues.map((a) => `${a.help} (${a.nodes})`);
   // Deterministic layout/contrast findings (text-only runs only — empty otherwise).
   const layoutLines = result.layout_issues.map((a) => `${a.help} (${a.nodes})`);
-  // Hard pass/fail verdict so the model can't read "0 assertion failures" as
-  // success while a blocking console / hydration error is present (the exact gap
-  // that shipped a broken app). Hydration mismatches and uncaught errors are
-  // failures here, not advisories.
-  const blocking = result.blocking_console_errors ?? [];
-  const hydration = result.hydration_errors ?? [];
-  const failed = result.assertion_failures.length > 0 || blocking.length > 0;
-  const reasons = [
-    result.assertion_failures.length ? `${result.assertion_failures.length} assertion failure(s)` : "",
-    hydration.length ? `${hydration.length} React hydration error(s)` : "",
-    blocking.length - hydration.length > 0 ? `${blocking.length - hydration.length} other console error(s)` : "",
-  ]
-    .filter(Boolean)
-    .join(", ");
+  // Hard pass/fail verdict so visual plausibility cannot hide broken behavior,
+  // accessibility, responsive geometry, contrast, or console state.
+  const blockerReasons = previewBlockingReasons(result);
+  const failed = blockerReasons.length > 0;
+  const reasons = blockerReasons.join(", ");
   const verdict = failed
     ? `RESULT: FAILED — ${reasons}. These are BLOCKING: fix the root cause and re-run interact_preview until it PASSES before telling the user it works.`
     : `RESULT: PASSED`;
@@ -2668,6 +2799,12 @@ function visionBridgeSpec(
   }
 }
 
+function assertModelReadablePath(candidate: string): void {
+  if (isSensitiveProjectPath(candidate)) {
+    throw new Error("access to secret-bearing project paths is blocked");
+  }
+}
+
 export async function executeTool(
   sandbox: Sandbox,
   name: string,
@@ -2716,6 +2853,8 @@ export async function executeTool(
   onAuxCost?: (costUsd: number, usage?: TokenUsage) => void,
   /** Monotonic progressive-profile expansion, scoped to this loop turn. */
   loadCapabilities?: (groups: unknown) => string,
+  /** Progressive disclosure for attached reusable skills, scoped to this turn. */
+  loadSkill?: (skillId: unknown) => string,
   /** Top-level run UUID for exact auxiliary cost-per-task correlation. */
   usageRunId?: string | null,
 ): Promise<
@@ -2729,6 +2868,7 @@ export async function executeTool(
       if (typeof args.path !== "string") {
         throw new Error("read_file requires 'path' as a string");
       }
+      assertModelReadablePath(args.path);
       return await sb.readFileResult(sandbox, args.path, {
         offset: typeof args.offset === "number" ? args.offset : undefined,
         limit: typeof args.limit === "number" ? args.limit : undefined,
@@ -2737,6 +2877,10 @@ export async function executeTool(
       if (typeof args.path !== "string") {
         throw new Error("write_file requires 'path' as a string");
       }
+      // Sensitive paths are a model-output boundary, not a write denylist: the
+      // model may create app config such as .env.local from values it was
+      // explicitly given, while read/list/grep still cannot disclose an
+      // existing secret-bearing file back into model context.
       if (typeof args.content !== "string") {
         throw new Error(
           "write_file requires 'content' as a string. This usually means your previous response hit the max output tokens (~16k) — the file you tried to write was too large for one tool call. Split it: write a smaller initial version, then grow it with edit_file or additional write_file calls.",
@@ -2771,10 +2915,18 @@ export async function executeTool(
       return sb.commandResultText(r);
     }
     case "list_dir": {
+      if (typeof args.path === "string") assertModelReadablePath(args.path);
       const entries = await sb.listDir(sandbox, args.path);
-      return entries.length > 0 ? entries.join("\n") : "(empty)";
+      const visible = entries.filter((entry) => {
+        const child = [typeof args.path === "string" ? args.path : "", entry.replace(/\/$/, "")]
+          .filter(Boolean)
+          .join("/");
+        return !isSensitiveProjectPath(child);
+      });
+      return visible.length > 0 ? visible.join("\n") : "(empty)";
     }
     case "grep":
+      if (typeof args.path === "string") assertModelReadablePath(args.path);
       return await sb.grepResult(sandbox, args.pattern, args.path, {
         caseInsensitive: args.case_insensitive === true,
         literal: args.literal === true,
@@ -2936,11 +3088,10 @@ export async function executeTool(
         url: typeof args.url === "string" ? args.url : undefined,
         pathSuffix: typeof args.path === "string" ? args.path : undefined,
         viewport,
-        a11y: args.a11y !== false,
-        // Text-only models can't see the screenshot — run the model-free layout/
-        // contrast pass so they still verify the UI from exact DOM geometry.
-        // Vision models read the screenshot directly and skip it.
-        layoutChecks: hasVision === false,
+        a11y: true,
+        // Deterministic geometry/contrast is a release gate for every model;
+        // vision inspection complements exact DOM checks rather than replacing them.
+        layoutChecks: true,
         actions: args.actions as InteractAction[],
         // P2 live view: stream each step's screenshot to the "Preview (Agent)"
         // tab so the user watches the agent operate the browser as it happens.
@@ -3150,18 +3301,14 @@ export async function executeTool(
         url: typeof args.url === "string" ? args.url : undefined,
         pathSuffix: typeof args.path === "string" ? args.path : (flow.start_path ?? undefined),
         viewport: fvp,
-        a11y: args.a11y !== false,
-        layoutChecks: hasVision === false,
+        a11y: true,
+        layoutChecks: true,
         actions: flow.steps as unknown as InteractAction[],
         onFrame: onPreviewFrame ? (frame) => onPreviewFrame(callId, frame, flow.name) : undefined,
       });
-      const status: "pass" | "fail" =
-        result.assertion_failures.length > 0 ||
-        result.blocking_console_errors.length > 0 ||
-        result.steps.some((s) => !s.ok)
-          ? "fail"
-          : "pass";
-      const summary = `${result.steps.length} step(s), ${result.assertion_failures.length} assertion failure(s), ${result.blocking_console_errors.length} blocking console error(s)`;
+      const blockerReasons = previewBlockingReasons(result);
+      const status: "pass" | "fail" = blockerReasons.length ? "fail" : "pass";
+      const summary = `${result.steps.length} step(s), ${blockerReasons.length ? blockerReasons.join(", ") : "all release gates passed"}`;
       void setFlowRunResult(projectId, flow.id, {
         status,
         summary,
@@ -3258,7 +3405,7 @@ export async function executeTool(
     case "list_secrets": {
       if (!projectId) return "(secrets unavailable in non-project session)";
       // env="*" → list across every env; default → only the `default` env so
-      // the agent doesn't accidentally try to plumb a production secret.
+      // the agent doesn't accidentally select production metadata.
       const envArg =
         typeof args.env === "string" && args.env.trim() ? args.env.trim() : undefined;
       const envFilter = envArg === "*" ? null : envArg;
@@ -3271,34 +3418,9 @@ export async function executeTool(
       return rows
         .map(
           (r) =>
-            `${r.name}\t[env=${r.env}]${r.description ? `\t${r.description}` : ""}`,
+            `${r.name}\t[env=${r.env}]${r.allowed_hosts.length ? `\tHTTP hosts=${r.allowed_hosts.join(",")}` : ""}${r.description ? `\t${r.description}` : ""}`,
         )
         .join("\n");
-    }
-    case "get_secret": {
-      if (!projectId) {
-        throw new Error("get_secret requires a project session");
-      }
-      if (typeof args.name !== "string" || !args.name.trim()) {
-        throw new Error("get_secret requires 'name' as a non-empty string");
-      }
-      const r = await plumbSecretToEnvFile({
-        sandbox,
-        projectId,
-        userId,
-        name: args.name.trim(),
-        envFile: typeof args.env_file === "string" ? args.env_file : undefined,
-        env: typeof args.env === "string" ? args.env : undefined,
-      });
-      return JSON.stringify({
-        env_var: r.env_var,
-        env_file: r.env_file,
-        env: r.env,
-        note:
-          `The plaintext value (from env '${r.env}') was written to ${r.env_file} in the sandbox; the value is NOT in the agent's tool-result context. ` +
-          `Next.js/Vite/CRA load ${r.env_file} automatically. A bare Node script does NOT — run it with \`node --env-file=${r.env_file} <script>\` (Node 20.6+) or \`require('dotenv').config()\`; Python: \`python-dotenv\` / \`os.environ["${r.env_var}"]\`. Then read it from process.env.${r.env_var}. ` +
-          `NOTE: \`--env-file\` will NOT override a variable already present in the process env, even an EMPTY one — never pre-set \`${r.env_var}=\`/\`process.env.${r.env_var}=""\`, and treat empty-string as unset. Restart the server after changing env so the new process sees it.`,
-      });
     }
     case "knowledge_search": {
       if (typeof args.query !== "string" || !args.query.trim()) {
@@ -3520,6 +3642,12 @@ export async function executeTool(
         return "All capability groups are already loaded for this turn.";
       }
       return loadCapabilities(args.groups);
+    }
+    case "load_skill": {
+      if (!loadSkill) {
+        throw new Error("load_skill is unavailable because this project has no attached skills");
+      }
+      return loadSkill(args.skill_id);
     }
     case "spawn_agents": {
       if (!runSubAgents) {

@@ -26,9 +26,9 @@ mechanism exists in code today — it does **not** mean an auditor has tested it
 Scope of the system under assessment:
 
 - **`apps/web`** — the Next.js front end, deployed to Vercel
-  (`app.uniqus-code.com`, production = `main` branch).
+  (`app.gate15.dev`, production = `main` branch).
 - **`services/orchestrator`** — the control-plane API on Hetzner
-  (`api2.uniqus-code.com`), which owns auth, secrets, the VM fleet, connectors,
+  (`api.gate15.dev`), which owns auth, secrets, the VM fleet, connectors,
   and the audit log.
 - **`services/sandbox-agent`** — the in-VM agent running inside each project's
   Firecracker microVM.
@@ -52,11 +52,11 @@ the objective. **Gap** = no implemented control today.
 |---|---|---|---|
 | CC6.1 | Secrets/credentials encrypted at rest | AES-256-GCM, random 12-byte IV, 16-byte auth tag, 256-bit key from `OAUTH_TOKEN_ENCRYPTION_KEY`. Layout `IV‖TAG‖CIPHERTEXT` base64. `services/orchestrator/src/auth/encrypt.ts` (`encryptToken`/`decryptToken`) | Implemented |
 | CC6.1 | Project secrets stored encrypted, never exposed to the VM/agent | `project_secrets.encrypted_value` (`services/orchestrator/src/db/schema.sql` ~263–296); decrypted server-side only; connectors pass ephemeral handles, never plaintext, to the agent loop | Implemented |
-| CC6.1 | Per-tenant authorization on data access | Owner-only routes resolve through `getProject(id, ownerId)`, which filters `.eq("owner_id", ownerId)`; member-accessible routes instead call `getProjectForUser(id, userId, minRole)`, which falls back to a `project_members`/`org_members` role check (`services/orchestrator/src/db/projects.ts` ~210–263). Database tables have RLS enabled (`schema.sql`) | Implemented |
+| CC6.1 | Per-tenant authorization on data access | Routes resolve through `getProjectForUser(id, userId, minRole)` and the effective `project_members`/`org_members` role. `owner_id` is authoritative only for personal projects and is ignored for organization projects (`services/orchestrator/src/db/projects.ts`, `db/members.ts`). Database tables have RLS enabled (`schema.sql`) | Implemented |
 | CC6.1 | Tenant isolation of compute | One Firecracker microVM per project + per-project sandbox directories (`services/orchestrator/src/firecracker/fleet.ts`). VMs share the `fcbr0` bridge, but VM↔VM traffic is dropped at L3 via `br_netfilter` + an `fcbr0→fcbr0` DROP rule (`infra/firecracker/host-setup.sh`; re-asserted at runtime by `fleet.ts` `ensureVmIsolation`) | Implemented in code (P0.3) — requires `host-setup.sh` re-run + host validation that a peer-IP connection fails |
-| CC6.6 | Restrict outbound egress (anti-SSRF) | `services/orchestrator/src/connectors/ssrfGuard.ts` blocks private/loopback/link-local/CGNAT/multicast/fleet-bridge ranges (IPv4 **and** IPv6, reasoning over raw bytes to defeat alternate spellings), re-validates **every** redirect hop, and strips credential headers on cross-origin redirects. `http` connector additionally requires `allowed_secret_hosts` | Implemented |
+| CC6.6 | Restrict outbound egress (anti-SSRF) | `services/orchestrator/src/connectors/ssrfGuard.ts` blocks private/loopback/link-local/CGNAT/multicast/fleet-bridge ranges (IPv4 **and** IPv6, reasoning over raw bytes to defeat alternate spellings), re-validates **every** redirect hop, and strips credential headers on cross-origin redirects. HTTP connector secrets additionally require an owner/admin-managed exact-host binding stored outside model input | Implemented |
 | CC6.6 | Restrict inbound access to the in-VM agent | The sandbox-agent on `0.0.0.0:51000` requires a per-VM bearer token on every non-`/health` request, validated in constant time (`services/sandbox-agent/src/main.rs` ~290–311; `src/agent.mjs` ~190–197). Enforcement is **mandatory** — hard-coded on at boot (`fleet.ts` `AGENT_AUTH_ENFORCED`), re-provisioned + enforced on golden-snapshot clones via `/net/configure`. Combined with the L2 isolation above (CC6.1), a peer VM can neither route to nor authenticate against another tenant's agent | Implemented (P0.1/P0.2/P0.3) |
-| CC6.7 | Protect data in transit | TLS 1.3 on both public domains: `app.uniqus-code.com` (Vercel) and `api2.uniqus-code.com` (Hetzner) | Implemented |
+| CC6.7 | Protect data in transit | TLS 1.3 on the public application and API domains: `app.gate15.dev` (Vercel) and `api.gate15.dev` (Hetzner); user previews use the separate TLS origin `preview.gate15.app` | Implemented |
 | CC6.7 | Scope preview access to authorized holders | 128-bit unguessable capability `serverId`; preview cookie is `HttpOnly; Secure; SameSite=None; Max-Age=3600` (`services/orchestrator/src/proxy.ts` ~78–86) | Implemented |
 | CC6.1/6.3 | Role-based access control for shared projects/orgs | `project_members` / `org_members` tables (`owner`/`admin`/`editor`/`viewer`, `schema.sql` ~589–611). Every membership route resolves the caller's effective role via `getProjectRole`/`getProjectForUser` before acting, with a privilege-escalation guard (a member can never grant a role above their own) (`services/orchestrator/src/collabRoutes.ts`, `services/orchestrator/src/db/members.ts`) | Implemented |
 | CC6.1/6.3 | SSO, SAML, SCIM provisioning/deprovisioning | No SAML/SSO/SCIM backend. Authentication is WorkOS AuthKit (email/OAuth) plus guest accounts only; no enterprise identity-provider integration | **Gap (see §3)** |
@@ -192,8 +192,8 @@ internal tracking.
 | Z.ai | LLM inference when a user selects a GLM model (or Auto routes a turn to it) | Prompts, project code/context for that turn, outputs |
 | OpenAI | LLM inference when a user selects an OpenAI model | Prompts, project code/context for that turn, outputs |
 | Google | LLM inference when a user selects a Gemini model | Prompts, project code/context for that turn, outputs |
-| Vercel | Front-end hosting (`app.uniqus-code.com`) | Web traffic, request metadata for the web app |
-| Hetzner | Orchestrator + Firecracker fleet hosting (`api2.uniqus-code.com`) | All control-plane data at the infrastructure layer (encrypted secrets at rest, project files in VMs) |
+| Vercel | Front-end hosting (`gate15.dev` and `app.gate15.dev`) | Web traffic, request metadata for the marketing site and web app |
+| Hetzner | Orchestrator + Firecracker fleet hosting (`api.gate15.dev` and `preview.gate15.app`) | All control-plane data at the infrastructure layer (encrypted secrets at rest, project files in VMs) |
 | Supabase | Managed Postgres for the orchestrator | Project metadata, messages, encrypted secrets, audit/usage events |
 | WorkOS | Authentication | User identity / auth profile data |
 

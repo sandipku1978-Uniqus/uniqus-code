@@ -48,7 +48,7 @@ The same secret *name* can hold different values per environment
 - `listSecrets(projectId, env)` filters to one env by default; pass `env=null`
   explicitly to list across all envs.
 
-## Values are never returned to the model
+## Sensitive values are never returned to the model
 
 - `getSecretValue` / `getProjectSecretsAsEnv` return the decrypted plaintext
   **only to server-side callers** — the connector registry and the deploy
@@ -58,10 +58,13 @@ The same secret *name* can hold different values per environment
   request *result* to the agent. See
   [`docs/connector-security.md`](./connector-security.md).
 - `listSecrets` and the `SecretRecord` shape expose only metadata — `id`,
-  `name`, `env`, `description`, timestamps. **There is no `value` field** in
-  the record returned to API/UI callers.
-- The agent passes secret **names**, never values, and never receives the
-  plaintext in its context.
+  `name`, `env`, `description`, exact HTTP destination bindings, timestamps.
+  **There is no `value` field** in the record returned to API/UI callers.
+- The agent passes sensitive secret **names**, never values, and never receives
+  privileged plaintext in its context. The narrow public-config exception is
+  the Supabase connector's `SUPABASE_URL` + `SUPABASE_ANON_KEY`; they are stored
+  here for deploy injection but deliberately returned so generated clients can
+  be configured. See the explicit policy in `security/projectSecretPolicy.ts`.
 
 ## Audit trail
 

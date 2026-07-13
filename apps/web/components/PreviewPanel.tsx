@@ -16,16 +16,18 @@ import PreviewAnnotator from "./PreviewAnnotator";
 import Modal from "./Modal";
 import Popover from "./Popover";
 
-// Match the page's TLS state for the dev fallback so the iframe doesn't get
-// mixed-content blocked when the app is loaded over HTTPS. Production should
-// always set NEXT_PUBLIC_ORCHESTRATOR_URL explicitly.
-const ORCHESTRATOR_URL =
-  process.env.NEXT_PUBLIC_ORCHESTRATOR_URL ??
+// Preview content must live on a dedicated origin that has no workspace/API
+// cookies. Production deliberately has no API-origin fallback.
+const PREVIEW_ORIGIN =
+  process.env.NEXT_PUBLIC_PREVIEW_URL ??
   (typeof window !== "undefined"
-    ? window.location.protocol === "https:"
-      ? `https://${window.location.hostname}`
+    ? process.env.NODE_ENV === "production"
+      ? ""
       : `http://${window.location.hostname}:8787`
     : "");
+if (process.env.NODE_ENV === "production" && !process.env.NEXT_PUBLIC_PREVIEW_URL) {
+  throw new Error("NEXT_PUBLIC_PREVIEW_URL is required for the isolated production preview origin");
+}
 
 interface PreviewNavMessage {
   type: "uniqus:preview-nav";
@@ -390,7 +392,7 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
     try {
       const { createPreviewShareApi } = await import("@/lib/api");
       const r = await createPreviewShareApi(projectId, server.id);
-      setShareUrl(`${ORCHESTRATOR_URL}${r.path}`);
+      setShareUrl(`${PREVIEW_ORIGIN}${r.path}`);
       setShareExpires(r.expires_at);
       setShareToken(r.token);
     } catch (err) {
@@ -493,7 +495,7 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
 
   // Route through the orchestrator's preview proxy so the iframe works in
   // production (Vercel + Hetzner) where the dev server isn't on a public port.
-  const baseUrl = `${ORCHESTRATOR_URL}/preview/${server.id}/`;
+  const baseUrl = `${PREVIEW_ORIGIN}/preview/${server.id}/`;
   const displayedUrl = `${baseUrl.replace(/\/$/, "")}${iframePath.startsWith("/") ? iframePath : `/${iframePath}`}`;
 
   // Re-point the iframe to an in-app path. Setting the src of a frame you own is
@@ -1183,6 +1185,8 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
               src={baseUrl}
               className="preview-iframe"
               title={`preview ${server.port}`}
+              sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups allow-downloads"
+              referrerPolicy="no-referrer"
               onLoad={() => {
                 setStatus("ready");
                 // Re-arm pick-mode if the iframe reloaded mid-pick.

@@ -29,6 +29,9 @@ import type {
   ModelProvider,
   DesignTokens,
   DesignComponentTokens,
+  DesignFoundationTokens,
+  DesignPatternTokens,
+  DesignBehaviorTokens,
   DesignFindings,
   DesignSystemDraft,
   ChangedFile,
@@ -48,6 +51,12 @@ import { decidePermission } from "./agent/permissions.js";
 import { readCitations } from "./agent/citations.js";
 import { inlineFileRefs as inlineFileRefsConcurrent } from "./agent/inlineFileRefs.js";
 import { LIVE_PROJECT_STATE_MARKER, runAgentLoop } from "./agent/loop.js";
+import {
+  compactionTriggerTokens,
+  contextWindowTokensForModel,
+  estimateMessageTokens,
+  maybeCompact,
+} from "./agent/compact.js";
 import { providerKeysFromEnv } from "./agent/providers/index.js";
 import { sanitizeMessagesForPersistence } from "./agent/messageHistory.js";
 import {
@@ -61,7 +70,11 @@ import {
 import { detectActiveConnectors } from "./connectors/detector.js";
 import { createRunMetrics, type RunMetricsCollector } from "./telemetry/runMetrics.js";
 import { looksLikeImmediateCorrection } from "./telemetry/correctionSignal.js";
-import { runInteractPreview, type InteractAction } from "./agent/interact.js";
+import {
+  previewBlockingReasons,
+  runInteractPreview,
+  type InteractAction,
+} from "./agent/interact.js";
 import { getFlow, setFlowRunResult } from "./db/flows.js";
 import { recordArtifact } from "./db/artifacts.js";
 import {
@@ -84,8 +97,16 @@ import {
   findPackById,
 } from "./agent/skills.js";
 import { expandSlashCommand, listSlashCommands } from "./agent/slashCommands.js";
-import { listSecrets, upsertSecret, deleteSecret, normalizeEnv, DEFAULT_ENV } from "./db/secrets.js";
-import { plumbSecretToEnvFile, removeEnvVarFromSandbox } from "./secrets.js";
+import {
+  getProjectSecretPlaintexts,
+  listSecrets,
+  upsertSecret,
+  deleteSecret,
+  normalizeAllowedSecretHosts,
+  normalizeEnv,
+} from "./db/secrets.js";
+import { removeLegacyMaterializedSecret } from "./secrets.js";
+import { createSecretRedactor } from "./agent/secretRedaction.js";
 import { audit, listAudit } from "./db/audit.js";
 import { handleCollabRoute } from "./collabRoutes.js";
 import { listProjectConnectors } from "./connectors/index.js";
@@ -150,6 +171,8 @@ import {
   getProjectForUser,
   touchProject,
   deleteProject,
+  deleteProjectByIdForRollback,
+  transferPersonalProjectOwnership,
   updateProject,
   setGithubRepo,
   clearGithubRepo,
@@ -188,6 +211,7 @@ import { extractText } from "./agent/knowledgeExtract.js";
 import {
   loadHistory,
   loadModelHistory,
+  latestMessageId,
   appendMessages,
   saveCompactedHistory,
   invalidateCompactedHistory,
@@ -196,6 +220,8 @@ import {
 import {
   claimNextQueuedTask,
   updateAgentTask,
+  cancelTasksForUserInProject,
+  getAgentTask,
 } from "./db/agentTasks.js";
 import {
   recordUsageEvent,
@@ -205,7 +231,14 @@ import {
   orgMonthToDateSpendUsd,
 } from "./db/usage.js";
 import { markAgentRunCorrection, recordAgentRunMetrics } from "./db/runMetrics.js";
-import { getOrganization, getProjectOrgId, getOrgRole, getProjectRole } from "./db/members.js";
+import {
+  findUserByEmail,
+  getOrganization,
+  getProjectOrgId,
+  getOrgRole,
+  getProjectRole,
+  listOrgMembers,
+} from "./db/members.js";
 import {
   ensureDefaultSession,
   listSessions,
@@ -217,6 +250,7 @@ import {
   type ChatSessionRecord,
 } from "./db/chatSessions.js";
 import { unsealSessionFromCookieHeader, type AuthKitSession } from "./auth/workos.js";
+import { isSensitiveProjectPath } from "./security/sensitivePaths.js";
 import {
   unsealGuestFromCookieHeader,
   handleGuestCreate,
@@ -235,7 +269,7 @@ import {
 } from "./storage/client.js";
 import { getTracker, clearTracker } from "./storage/sync.js";
 import { resolveTarget, proxyHttp, proxyWebSocket, previewErrorPage } from "./proxy.js";
-import { importZip, importGithub } from "./import.js";
+import { importZip, importGithub, validateCredentialedGithubRepo } from "./import.js";
 import {
   handleStart as githubStart,
   handleCallback as githubCallback,
@@ -283,6 +317,15 @@ import {
   type DeploymentState,
 } from "./db/deployments.js";
 import Busboy from "busboy";
+import {
+  assertSandboxModeConfigured,
+  hostSandboxExplicitlyAllowed,
+} from "./sandboxMode.js";
+import {
+  createRunReconnectCapability,
+  mayReconnectToRun,
+} from "./agent/runAuthorization.js";
+import { assertPreviewOriginConfigured } from "./previewOrigin.js";
 
 // Railway/Fly inject PORT; local dev sets ORCHESTRATOR_PORT or falls back to 8787.
 const PORT = Number(process.env.PORT ?? process.env.ORCHESTRATOR_PORT ?? 8787);
@@ -293,6 +336,7 @@ const SANDBOX_ROOT = path.resolve(REPO_ROOT, ".sandbox");
 // http://localhost:{PORT} for local dev.
 const PREVIEW_BASE_URL =
   process.env.PREVIEW_BASE_URL ?? process.env.PUBLIC_BASE_URL ?? `http://localhost:${PORT}`;
+const PREVIEW_HOST = new URL(PREVIEW_BASE_URL).host.toLowerCase();
 
 function sandboxDirFor(projectId: string): string {
   return path.resolve(SANDBOX_ROOT, projectId);
@@ -364,8 +408,13 @@ interface SessionCtx {
   projectId: string;
   /** Which chat session this socket is bound to (history is per-session). */
   sessionId: string;
+  close: () => void;
 }
 const sessions = new Set<SessionCtx>();
+const activeTaskRuns = new Map<
+  string,
+  { projectId: string; userId: string | null; controller: AbortController }
+>();
 
 // ── Run registry (A1: build survives a browser refresh) ──────────────────────
 // A single in-flight agent turn, keyed by `${projectId}:${sessionId}`, hoisted
@@ -379,6 +428,10 @@ const sessions = new Set<SessionCtx>();
 // ask_user) live here too so a reconnected socket can answer a run that began
 // on a previous one.
 interface RunHandle {
+  /** Account whose credentials/context this run is executing under. */
+  initiatorUserId: string;
+  /** Random bearer required for that initiator to reconnect after refresh. */
+  reconnectCapability: string;
   abort: AbortController;
   /** Coalesced replay log of this turn's ServerEvents (text/thinking merged). */
   buffer: ServerEvent[];
@@ -427,9 +480,53 @@ interface RunHandle {
       category: ToolRiskCategory;
     }
   >;
+  /** One-shot user request, consumed by the loop at its next safe boundary. */
+  manualCompactionRequested: boolean;
 }
 const runs = new Map<string, RunHandle>();
+/** Session keys currently compacting outside an agent turn. */
+const manualCompactionsInFlight = new Set<string>();
 const runKey = (projectId: string, sessionId: string): string => `${projectId}:${sessionId}`;
+
+async function revokeUnauthorizedProjectActivity(projectId: string, userId: string): Promise<void> {
+  const role = await getProjectRole(projectId, userId).catch(() => null);
+  if (roleAtLeast(role, "editor")) return;
+
+  for (const [key, run] of runs) {
+    if (key.startsWith(`${projectId}:`) && run.initiatorUserId === userId) {
+      if (!run.abort.signal.aborted) run.abort.abort(new Error("project access revoked"));
+      run.wake();
+    }
+  }
+  for (const session of [...sessions]) {
+    if (session.projectId === projectId && session.user.id === userId) session.close();
+  }
+  for (const active of activeTaskRuns.values()) {
+    if (active.projectId === projectId && active.userId === userId) {
+      active.controller.abort(new Error("project access revoked"));
+    }
+  }
+  await cancelTasksForUserInProject(projectId, userId).catch((err) =>
+    console.error(`[revocation] task cancellation failed for ${projectId}/${userId}:`, err),
+  );
+}
+
+/** Project deletion removes every actor's authority, not just one membership. */
+function revokeAllProjectActivity(projectId: string): void {
+  for (const [key, run] of runs) {
+    if (!key.startsWith(`${projectId}:`)) continue;
+    if (!run.abort.signal.aborted) run.abort.abort(new Error("project deleted"));
+    run.wake();
+  }
+  for (const session of [...sessions]) {
+    if (session.projectId === projectId) session.close();
+  }
+  for (const active of activeTaskRuns.values()) {
+    if (active.projectId === projectId) {
+      active.controller.abort(new Error("project deleted"));
+    }
+  }
+}
 
 // ── Session history revision (A1 follow-up: keep reconnected sockets honest) ──
 // The per-socket `history` array is a cache hydrated once at connect. A run that
@@ -504,8 +601,11 @@ function registerRun(
   abort: AbortController,
   prompt: string,
   socketSend: Sender,
+  initiatorUserId: string,
 ): RunHandle {
   const handle: RunHandle = {
+    initiatorUserId,
+    reconnectCapability: createRunReconnectCapability(),
     abort,
     buffer: [],
     socketSend,
@@ -520,6 +620,7 @@ function registerRun(
     steerQueue: [],
     steerWaiters: [],
     approvalResolvers: new Map(),
+    manualCompactionRequested: false,
   };
   runs.set(key, handle);
   return handle;
@@ -606,11 +707,18 @@ process.on("unhandledRejection", (reason) => {
 });
 
 async function main(): Promise<void> {
+  // Arbitrary project commands must never fall back onto the orchestrator host.
+  // Local development has a separate, explicit opt-in in sandboxMode.ts.
+  assertSandboxModeConfigured();
+  assertPreviewOriginConfigured();
   const required = [
     "ANTHROPIC_API_KEY",
     "SUPABASE_URL",
     "SUPABASE_SERVICE_ROLE_KEY",
     "WORKOS_COOKIE_PASSWORD",
+    "WORKOS_COOKIE_DOMAIN",
+    "WORKOS_API_KEY",
+    "WORKOS_CLIENT_ID",
   ];
   const missing = required.filter((k) => !process.env[k]);
   if (missing.length > 0) {
@@ -741,6 +849,9 @@ function pickAllowedOrigin(reqOrigin: string | undefined): string | null {
  * them resolve too.
  */
 function shouldProxy(url: string, headers: IncomingHttpHeaders): boolean {
+  // A server id is a preview-only capability. Never render user-controlled
+  // preview content on the workspace/API origin.
+  if ((headers.host ?? "").toLowerCase() !== PREVIEW_HOST) return false;
   if (url.startsWith("/preview/")) return true;
   const refererPointsAtPreview = (() => {
     const ref = headers.referer ?? headers.referrer;
@@ -929,6 +1040,7 @@ function guestForbidden(res: ServerResponse, user: UserRecord): boolean {
  */
 function healthSnapshot(): {
   ok: true;
+  sandbox: { mode: "firecracker" | "host-development"; hostExecution: boolean };
   firecracker?: {
     vms: number;
     agents: { rust: number; node: number; unknown: number };
@@ -936,7 +1048,10 @@ function healthSnapshot(): {
     agentAuthEnforced: boolean;
   };
 } {
-  if (!isFirecrackerEnabled()) return { ok: true };
+  const sandbox = isFirecrackerEnabled()
+    ? { mode: "firecracker" as const, hostExecution: false }
+    : { mode: "host-development" as const, hostExecution: hostSandboxExplicitlyAllowed() };
+  if (!isFirecrackerEnabled()) return { ok: true, sandbox };
   const agents = { rust: 0, node: 0, unknown: 0 };
   const handles = listVms();
   for (const vm of handles) {
@@ -945,6 +1060,7 @@ function healthSnapshot(): {
   }
   return {
     ok: true,
+    sandbox,
     firecracker: { vms: handles.length, agents, agentAuthEnforced: AGENT_AUTH_ENFORCED },
   };
 }
@@ -1106,7 +1222,11 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // true once it has answered; falls through to the rest of the router otherwise.
   // (Flow CRUD lives there; the live-streaming `/run` below stays here because it
   // needs the sandbox + broadcast plumbing.)
-  if (await handleCollabRoute(req, res, user, { json, readJsonBody })) return;
+  if (await handleCollabRoute(req, res, user, {
+    json,
+    readJsonBody,
+    onProjectAuthorizationChanged: revokeUnauthorizedProjectActivity,
+  })) return;
 
   // ── Saved-flow replay (P2.4) ───────────────────────────────────────────────
   // One-click replay of a saved smoke-flow from the Preview (Agent) tab. Drives
@@ -1134,6 +1254,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         serverId: typeof body.server_id === "string" ? body.server_id : undefined,
         url: typeof body.url === "string" ? body.url : undefined,
         pathSuffix: typeof body.path === "string" ? body.path : (flow.start_path ?? undefined),
+        layoutChecks: true,
         actions: flow.steps as unknown as InteractAction[],
         onFrame: (frame) =>
           broadcastToProject(projectId, {
@@ -1151,13 +1272,9 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
             flow_name: flow.name,
           }),
       });
-      const status: "pass" | "fail" =
-        result.assertion_failures.length > 0 ||
-        result.blocking_console_errors.length > 0 ||
-        result.steps.some((s) => !s.ok)
-          ? "fail"
-          : "pass";
-      const summary = `${result.steps.length} step(s), ${result.assertion_failures.length} assertion failure(s), ${result.blocking_console_errors.length} blocking console error(s)`;
+      const blockerReasons = previewBlockingReasons(result);
+      const status: "pass" | "fail" = blockerReasons.length ? "fail" : "pass";
+      const summary = `${result.steps.length} step(s), ${blockerReasons.length ? blockerReasons.join(", ") : "all release gates passed"}`;
       const ranAt = new Date().toISOString();
       void setFlowRunResult(projectId, flow.id, { status, summary, ranAt });
       void recordArtifact({
@@ -1444,6 +1561,16 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       }
       authToken = stored;
     }
+    if (authToken) {
+      if (body.use_oauth && !body.repo_full_name?.trim()) {
+        return json(res, 400, { error: "repo_full_name is required for an OAuth clone" });
+      }
+      try {
+        validateCredentialedGithubRepo(repoUrl, body.repo_full_name);
+      } catch (err) {
+        return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
 
     const project = await createProject({
       owner_id: user.id,
@@ -1477,13 +1604,12 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       // clone already succeeded — so we just log and return the unlinked project.
       let linkedProject = project;
       if (body.link_repo) {
-        const fullName =
-          body.repo_full_name?.trim() || parseGithubFullName(repoUrl);
+        const fullName = parseGithubFullName(repoUrl);
         if (fullName) {
           try {
             const htmlUrl = `https://github.com/${fullName}`;
             await setGithubRepo(project.id, user.id, htmlUrl, fullName);
-            linkedProject = (await getProject(project.id, user.id)) ?? project;
+            linkedProject = (await getProjectForUser(project.id, user.id, "viewer")) ?? project;
           } catch (err) {
             console.error(`[import-github] link repo failed for ${project.id}:`, err);
           }
@@ -1505,7 +1631,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (branchSwitchMatch && req.method === "POST") {
     if (guestForbidden(res, user)) return;
     const projectId = branchSwitchMatch[1];
-    const project = await getProject(projectId, user.id); // P3.2: owner-only — branch tracking is owner-managed project config
+    const project = await getProjectForUser(projectId, user.id, "editor");
     if (!project) return json(res, 404, { error: "project not found" });
     const b = await readJsonBody<{ branch?: string }>(req);
     const branch = (b.branch ?? "").trim();
@@ -1537,9 +1663,15 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const project = await getProjectForUser(projectId, user.id, "viewer");
     if (!project) return json(res, 404, { error: "project not found" });
     const relPath = decodeURIComponent(rawFileMatch[2]);
+    if (isSensitiveProjectPath(relPath)) {
+      return json(res, 404, { error: "file not found" });
+    }
     const dest = sandboxDirFor(projectId);
     try {
       const full = await resolveSandboxChildReal(dest, relPath);
+      if (isSensitiveProjectPath(path.relative(await fs.realpath(dest), full))) {
+        return json(res, 404, { error: "file not found" });
+      }
       const buf = await fs.readFile(full);
       const ext = path.extname(relPath).toLowerCase();
       const mimeMap: Record<string, string> = {
@@ -1549,15 +1681,18 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         ".gif": "image/gif",
         ".webp": "image/webp",
         ".bmp": "image/bmp",
-        ".svg": "image/svg+xml",
         ".ico": "image/x-icon",
         ".pdf": "application/pdf",
       };
-      const ct = mimeMap[ext] ?? "application/octet-stream";
+      const isSvg = ext === ".svg";
+      const ct = isSvg ? "text/plain; charset=utf-8" : (mimeMap[ext] ?? "application/octet-stream");
       res.writeHead(200, {
         "Content-Type": ct,
         "Content-Length": buf.length,
         "Cache-Control": "no-cache",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        ...(isSvg ? { "Content-Disposition": `attachment; filename="${path.basename(relPath).replace(/["\r\n]/g, "_")}"` } : {}),
       });
       res.end(buf);
     } catch {
@@ -1574,13 +1709,30 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return await handleProjectDelete(res, user, projectIdMatch[1]);
   }
 
-  // Move a project between workspaces (P3.1): personal ⇄ org. Owner-only (the
-  // project owner decides where it lives); moving INTO an org additionally
-  // requires ≥editor on that org. org_id: null moves it back to personal.
+  // Transfer a personal project's durable ownership to another account.
+  const projectOwnerMatch = req.url?.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/owner$/);
+  if (projectOwnerMatch && req.method === "PATCH") {
+    const projectId = projectOwnerMatch[1];
+    const owned = await getProject(projectId, user.id);
+    if (!owned) return json(res, 404, { error: "personal project not found" });
+    const body = await readJsonBody<{ email?: string }>(req);
+    const email = (body.email ?? "").trim();
+    if (!email) return json(res, 400, { error: "email is required" });
+    const target = await findUserByEmail(email);
+    if (!target) return json(res, 404, { error: "no Uniqus account with that email" });
+    if (target.id === user.id) return json(res, 400, { error: "that account already owns the project" });
+    await transferPersonalProjectOwnership(projectId, user.id, target.id);
+    await revokeUnauthorizedProjectActivity(projectId, user.id);
+    void audit({ project_id: projectId, user_id: user.id, kind: "role_change", target: target.id, metadata: { ownership_transferred: true } });
+    return json(res, 200, { ok: true });
+  }
+
+  // Move a project between workspaces. Effective project owners only; the
+  // historical creator column grants no authority while a project is in an org.
   const projectOrgMatch = req.url?.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/org$/);
   if (projectOrgMatch && req.method === "PATCH") {
     const projectId = projectOrgMatch[1];
-    const owned = await getProject(projectId, user.id);
+    const owned = await getProjectForUser(projectId, user.id, "owner");
     if (!owned) {
       // Either it doesn't exist or the caller isn't the owner. A shared member
       // can't reassign someone else's project, so this is a flat 404/403.
@@ -1590,9 +1742,18 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const body = await readJsonBody<{ org_id?: string | null }>(req);
     const ws = await resolveCreateOrgId(user.id, body.org_id);
     if (!ws.ok) return json(res, 403, { error: ws.error });
+    const formerOrgUserIds =
+      owned.org_id && owned.org_id !== ws.orgId
+        ? (await listOrgMembers(owned.org_id)).map((member) => member.user_id)
+        : [];
     await setProjectOrg(projectId, user.id, ws.orgId);
+    await Promise.all(
+      formerOrgUserIds.map((memberId) =>
+        revokeUnauthorizedProjectActivity(projectId, memberId),
+      ),
+    );
     void audit({ project_id: projectId, user_id: user.id, kind: "project_update", target: "move_workspace", metadata: { org_id: ws.orgId } });
-    const updated = await getProject(projectId, user.id);
+    const updated = await getProjectForUser(projectId, user.id, "owner");
     return json(res, 200, { project: updated ? toProjectSummary(updated) : null });
   }
 
@@ -1872,6 +2033,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         name: r.name,
         env: r.env,
         description: r.description,
+        allowed_hosts: r.allowed_hosts,
         updated_at: r.updated_at,
       })),
     });
@@ -1886,6 +2048,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       value?: string;
       env?: string;
       description?: string | null;
+      allowed_hosts?: string[];
     }>(req);
     const name = String(body.name ?? "").trim();
     const value = body.value;
@@ -1900,6 +2063,33 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (value.length > 32_768) {
       return json(res, 400, { error: "value exceeds 32 KB cap" });
     }
+    let allowedHosts = body.allowed_hosts;
+    if (allowedHosts !== undefined) {
+      if (!Array.isArray(allowedHosts)) {
+        return json(res, 400, { error: "allowed_hosts must be an array of exact hostnames" });
+      }
+      try {
+        allowedHosts = normalizeAllowedSecretHosts(allowedHosts);
+        const role = await getProjectRole(projectId, user.id);
+        if (!roleAtLeast(role, "admin")) {
+          // Editors may rotate a value while echoing the binding they already
+          // received, but only admins can create or alter that egress policy.
+          const existing = (await listSecrets(projectId, normalizeEnv(body.env))).find(
+            (secret) => secret.name === name,
+          );
+          const existingHosts = existing
+            ? normalizeAllowedSecretHosts(existing.allowed_hosts)
+            : null;
+          if (!existingHosts || JSON.stringify(existingHosts) !== JSON.stringify(allowedHosts)) {
+            return json(res, 403, {
+              error: "only project admins may change HTTP secret destinations",
+            });
+          }
+        }
+      } catch (err) {
+        return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
     let row;
     try {
       row = await upsertSecret({
@@ -1908,6 +2098,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         value,
         env: body.env,
         description: body.description ?? null,
+        allowed_hosts: allowedHosts,
       });
     } catch (err) {
       return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
@@ -1917,29 +2108,24 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       user_id: user.id,
       kind: "secret_write",
       target: name,
-      metadata: { env: row.env },
+      metadata: { env: row.env, allowed_hosts: row.allowed_hosts },
     });
-    // Auto-sync the default-env secret into the sandbox `.env` so the running
-    // app picks it up WITHOUT the user re-prompting the agent to plumb it — the
-    // "set it like a Vercel env var" experience. VM-aware (writes inside the VM
-    // where the app runs when one is booted). Non-default envs are deploy-target
-    // scoped and intentionally NOT written to the local .env. Best-effort.
-    if (row.env === DEFAULT_ENV) {
-      const vm = listVms().find((v) => v.projectId === projectId);
-      void plumbSecretToEnvFile({
-        sandbox: { rootDir: sandboxDirFor(projectId), vm },
-        projectId,
-        userId: user.id,
-        name,
-        env: row.env,
-      }).catch((err) => console.error(`[secrets] auto-write .env failed for ${name}:`, err));
-    }
+    // Clean up plaintext left by the retired sandbox-materialization design.
+    // Sensitive new values stay encrypted and are exposed only to trusted
+    // connectors/deploy; connector-declared public app config is preserved.
+    const vm = listVms().find((v) => v.projectId === projectId);
+    void removeLegacyMaterializedSecret({
+      sandbox: { rootDir: sandboxDirFor(projectId), vm },
+      name,
+      preservePublicConfig: true,
+    }).catch((err) => console.error(`[secrets] legacy cleanup failed for ${name}:`, err));
     return json(res, 200, {
       secret: {
         id: row.id,
         name: row.name,
         env: row.env,
         description: row.description,
+        allowed_hosts: row.allowed_hosts,
         updated_at: row.updated_at,
       },
     });
@@ -1966,15 +2152,12 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       target: name,
       metadata: { env: envParam ?? null },
     });
-    // Keep the auto-synced .env in lockstep: drop the line when a default-env
-    // secret is deleted from the pane.
-    if (normalizeEnv(envParam) === DEFAULT_ENV) {
-      const vm = listVms().find((v) => v.projectId === projectId);
-      void removeEnvVarFromSandbox({
-        sandbox: { rootDir: sandboxDirFor(projectId), vm },
-        name,
-      }).catch((err) => console.error(`[secrets] auto-remove .env failed for ${name}:`, err));
-    }
+    // Also remove any plaintext assignment left by the retired design.
+    const vm = listVms().find((v) => v.projectId === projectId);
+    void removeLegacyMaterializedSecret({
+      sandbox: { rootDir: sandboxDirFor(projectId), vm },
+      name,
+    }).catch((err) => console.error(`[secrets] legacy cleanup failed for ${name}:`, err));
     return json(res, 200, { ok: true });
   }
   // Audit log (recent events for a project).
@@ -2106,7 +2289,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   );
   if (repoDisconnectMatch && req.method === "DELETE") {
     const projectId = repoDisconnectMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "admin");
     if (!project) return json(res, 404, { error: "project not found" });
     await clearGithubRepo(projectId, user.id);
     return json(res, 200, { ok: true });
@@ -2123,7 +2306,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (createRepoMatch && req.method === "POST") {
     if (guestForbidden(res, user)) return;
     const projectId = createRepoMatch[1];
-    const project = await getProject(projectId, user.id);
+    const project = await getProjectForUser(projectId, user.id, "admin");
     if (!project) return json(res, 404, { error: "project not found" });
     if (project.github_repo_url) {
       return json(res, 409, {
@@ -2302,7 +2485,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (!name) return json(res, 400, { error: "name is required" });
     const tokens =
       body.tokens && typeof body.tokens === "object" && !Array.isArray(body.tokens)
-        ? (body.tokens as DesignTokens)
+        ? mergeDesignTokens(DEFAULT_DESIGN_TOKENS, body.tokens)
         : undefined;
     const ds = await createDesignSystem(user.id, { name, tokens });
     return json(res, 201, { design_system: ds });
@@ -2320,7 +2503,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       const patch: { name?: string; tokens?: DesignTokens } = {};
       if (typeof body.name === "string" && body.name.trim()) patch.name = body.name.trim();
       if (body.tokens && typeof body.tokens === "object" && !Array.isArray(body.tokens)) {
-        patch.tokens = body.tokens as DesignTokens;
+        patch.tokens = mergeDesignTokens(DEFAULT_DESIGN_TOKENS, body.tokens);
       }
       const ds = await updateDesignSystem(user.id, id, patch);
       if (!ds) return json(res, 404, { error: "design system not found" });
@@ -2345,13 +2528,21 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const body = await readJsonBody<{ name?: string; description?: string | null; body?: string }>(req);
     const name = (body.name ?? "").trim().slice(0, MAX_SKILL_NAME);
     if (!name) return json(res, 400, { error: "name is required" });
+    const description =
+      typeof body.description === "string" ? body.description.trim().slice(0, MAX_SKILL_DESC) : "";
+    if (!description) {
+      return json(res, 400, { error: "description is required so the agent knows when to load the skill" });
+    }
+    if (typeof body.body !== "string" || !body.body.trim()) {
+      return json(res, 400, { error: "skill instructions are required" });
+    }
     if (typeof body.body === "string" && body.body.length > MAX_SKILL_BODY) {
       return json(res, 400, { error: "skill body exceeds 64 KB cap" });
     }
     const skill = await createSkillLibrary(user.id, {
       name,
-      description: typeof body.description === "string" ? body.description.trim().slice(0, MAX_SKILL_DESC) : null,
-      body: typeof body.body === "string" ? body.body : "",
+      description,
+      body: body.body,
     });
     return json(res, 201, { skill });
   }
@@ -2368,10 +2559,16 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       const patch: { name?: string; description?: string | null; body?: string } = {};
       if (typeof body.name === "string" && body.name.trim()) patch.name = body.name.trim().slice(0, MAX_SKILL_NAME);
       if (body.description !== undefined) {
-        patch.description = typeof body.description === "string" ? body.description.trim().slice(0, MAX_SKILL_DESC) : null;
+        const description =
+          typeof body.description === "string" ? body.description.trim().slice(0, MAX_SKILL_DESC) : "";
+        if (!description) {
+          return json(res, 400, { error: "description is required so the agent knows when to load the skill" });
+        }
+        patch.description = description;
       }
       if (typeof body.body === "string") {
         if (body.body.length > MAX_SKILL_BODY) return json(res, 400, { error: "skill body exceeds 64 KB cap" });
+        if (!body.body.trim()) return json(res, 400, { error: "skill instructions are required" });
         patch.body = body.body;
       }
       const skill = await updateSkillLibrary(user.id, id, patch);
@@ -2448,7 +2645,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   const projSkillsMatch = req.url?.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/skill-libraries$/);
   if (projSkillsMatch && req.method === "POST") {
     const projectId = projSkillsMatch[1];
-    const project = await getProject(projectId, user.id); // P3.2: owner-only — skill libraries are the owner's account-level resource
+    const project = await getProjectForUser(projectId, user.id, "admin");
     if (!project) return json(res, 404, { error: "project not found" });
     const body = await readJsonBody<{ skill_library_ids?: unknown }>(req);
     const ids = Array.isArray(body.skill_library_ids)
@@ -2481,7 +2678,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // Infer a design system from a GitHub repo: clone → extract tokens → save.
   if (req.url === "/api/design-systems/infer-github" && req.method === "POST") {
     if (guestForbidden(res, user)) return;
-    const body = await readJsonBody<{ name?: string; repo_url?: string; branch?: string; pat?: string; use_oauth?: boolean }>(req);
+    const body = await readJsonBody<{ name?: string; repo_url?: string; repo_full_name?: string; branch?: string; pat?: string; use_oauth?: boolean }>(req);
     const name = (body.name ?? "").trim();
     const repoUrl = (body.repo_url ?? "").trim();
     if (!name) return json(res, 400, { error: "name is required" });
@@ -2500,6 +2697,16 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         });
       }
       authToken = stored;
+    }
+    if (authToken) {
+      if (body.use_oauth && !body.repo_full_name?.trim()) {
+        return json(res, 400, { error: "repo_full_name is required for an OAuth clone" });
+      }
+      try {
+        validateCredentialedGithubRepo(repoUrl, body.repo_full_name);
+      } catch (err) {
+        return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      }
     }
     const tmp = path.join(tmpdir(), `uniqus-ds-${randomUUID()}`);
     try {
@@ -2564,7 +2771,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   const projDsMatch = req.url?.match(/^\/api\/projects\/([0-9a-fA-F-]{8,})\/design-system$/);
   if (projDsMatch && req.method === "POST") {
     const projectId = projDsMatch[1];
-    const project = await getProject(projectId, user.id); // P3.2: owner-only — design system is the owner's account-level resource
+    const project = await getProjectForUser(projectId, user.id, "admin");
     if (!project) return json(res, 404, { error: "project not found" });
     const body = await readJsonBody<{ design_system_id?: string | null }>(req);
     const resolved = await resolveDesignSystemId(user.id, body.design_system_id);
@@ -2580,7 +2787,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   );
   if (projectUsageMatch && req.method === "GET") {
     const projectId = projectUsageMatch[1];
-    const project = await getProject(projectId, user.id); // P3.2: owner-only — usage rollup is owner-scoped (per-actor usage_events)
+    const project = await getProjectForUser(projectId, user.id, "admin");
     if (!project) return json(res, 404, { error: "project not found" });
     return json(res, 200, { stats: await projectUsageStats(user.id, projectId) });
   }
@@ -2607,7 +2814,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (deployStartMatch && req.method === "POST") {
     if (guestForbidden(res, user)) return;
     const projectId = deployStartMatch[1];
-    const project = await getProject(projectId, user.id); // P3.2: owner-only — Vercel deploy uses the owner's connected Vercel account
+    const project = await getProjectForUser(projectId, user.id, "editor");
     if (!project) return json(res, 403, { error: "project not found or access denied" });
 
     const auth2 = await getVercelAuth(user);
@@ -2981,6 +3188,11 @@ async function handleProjectUploads(
       });
 
       bb.on("file", (_field, file, info) => {
+        if (isSensitiveProjectPath(info.filename || "upload")) {
+          parseError = "secret-bearing files cannot be uploaded into model-accessible project assets";
+          file.resume();
+          return;
+        }
         const originalName = sanitizeUploadFileName(info.filename || "upload");
         const relPath = `${UPLOAD_ROOT}/${randomUUID().slice(0, 8)}-${originalName}`;
         const chunks: Buffer[] = [];
@@ -3099,6 +3311,11 @@ async function handleKnowledgeUpload(
         limits: { fileSize: KNOWLEDGE_MAX_FILE_SIZE, files: KNOWLEDGE_MAX_FILES },
       });
       bb.on("file", (_field, file, info) => {
+        if (isSensitiveProjectPath(info.filename || "document")) {
+          parseError = `${info.filename || "document"} is a protected credential path and cannot be uploaded`;
+          file.resume();
+          return;
+        }
         const fileName = sanitizeUploadFileName(info.filename || "document");
         const chunks: Buffer[] = [];
         let hitLimit = false;
@@ -3268,7 +3485,7 @@ async function handleProjectPatch(
   user: UserRecord,
   projectId: string,
 ): Promise<void> {
-  const project = await getProject(projectId, user.id);
+  const project = await getProjectForUser(projectId, user.id, "admin");
   if (!project) return json(res, 404, { error: "project not found" });
 
   const body = await readJsonBody<{
@@ -3327,7 +3544,7 @@ async function handleProjectDelete(
   user: UserRecord,
   projectId: string,
 ): Promise<void> {
-  const project = await getProject(projectId, user.id);
+  const project = await getProjectForUser(projectId, user.id, "owner");
   if (!project) return json(res, 404, { error: "project not found" });
 
   // 1. Delete the DB row first. CASCADE handles messages + deployments.
@@ -3341,6 +3558,7 @@ async function handleProjectDelete(
       error: `deleteProject failed: ${err instanceof Error ? err.message : String(err)}`,
     });
   }
+  revokeAllProjectActivity(projectId);
 
   // 2. Best-effort: clean up Storage + the local sandbox dir + any
   //    in-memory tracker. Swallow errors here — the user's "project
@@ -3526,7 +3744,7 @@ async function rollbackImport(
   source: string,
 ): Promise<void> {
   try {
-    await deleteProject(projectId, ownerId);
+    await deleteProjectByIdForRollback(projectId);
   } catch (err) {
     console.error(`[${source} import rollback] deleteProject(${projectId}) failed:`, err);
   }
@@ -3558,6 +3776,9 @@ async function validateCloneUrl(repoUrl: string): Promise<string | null> {
   if (!parsed.hostname) {
     return "repo_url is missing a hostname";
   }
+  if (parsed.username || parsed.password) {
+    return "repo_url must not contain embedded credentials; use the OAuth/PAT field instead";
+  }
   // Reject hosts that resolve to a private / loopback / link-local / metadata /
   // fleet-bridge address — otherwise an authenticated user makes the
   // orchestrator host `git clone` to an internal target, turning clone
@@ -3583,7 +3804,7 @@ function parseGithubFullName(repoUrl: string): string | null {
   } catch {
     return null;
   }
-  if (!/(^|\.)github\.com$/i.test(parsed.hostname)) return null;
+  if (parsed.hostname.toLowerCase() !== "github.com") return null;
   const segments = parsed.pathname.split("/").filter(Boolean);
   if (segments.length < 2) return null;
   const owner = segments[0];
@@ -3683,13 +3904,19 @@ async function accountUsageStats(ownerId: string): Promise<AccountUsageStats> {
   // slice rather than failing the whole rollup.
   let daily: AccountUsageStats["daily"];
   try {
-    const dailyRows = await getDailyUsageByModel(ownerId, 30);
+    // A GitHub-style calendar is 53 week columns (including the partial current
+    // week), so retain enough history to populate every visible cell.
+    const dailyRows = await getDailyUsageByModel(ownerId, 371);
     const byDate = new Map<string, { cost_usd: number; tokens: number }>();
     for (const r of dailyRows) {
       const slot = byDate.get(r.date) ?? { cost_usd: 0, tokens: 0 };
       // r.cost_usd is already the band-accurate sum of this bucket's per-row costs.
       slot.cost_usd += r.cost_usd;
-      slot.tokens += r.input_tokens + r.output_tokens;
+      slot.tokens +=
+        r.input_tokens +
+        r.cache_read_tokens +
+        r.cache_creation_tokens +
+        r.output_tokens;
       byDate.set(r.date, slot);
     }
     daily = [...byDate.entries()]
@@ -3711,7 +3938,11 @@ async function accountUsageStats(ownerId: string): Promise<AccountUsageStats> {
         byProjectId.get(r.project_id) ??
         { project_name: r.project_name, cost_usd: 0, tokens: 0 };
       slot.cost_usd += r.cost_usd; // band-accurate per-row sum from the sweep
-      slot.tokens += r.input_tokens + r.output_tokens;
+      slot.tokens +=
+        r.input_tokens +
+        r.cache_read_tokens +
+        r.cache_creation_tokens +
+        r.output_tokens;
       byProjectId.set(r.project_id, slot);
     }
     byProject = [...byProjectId.entries()]
@@ -3957,6 +4188,7 @@ async function handleUpgrade(
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
   const projectId = url.searchParams.get("project");
   if (!projectId) return reject(400, "Missing project query parameter");
+  const runCapability = url.searchParams.get("run_capability");
 
   const project = await getProjectForUser(projectId, auth.user.id, "editor");
   if (!project) return reject(403, "Project not found or access denied");
@@ -3982,7 +4214,7 @@ async function handleUpgrade(
   await fs.mkdir(sandboxDirFor(projectId), { recursive: true });
 
   wss.handleUpgrade(req, socket as import("node:net").Socket, head, (ws) => {
-    handleConnection(ws, auth.user, project, session).catch((err) => {
+    handleConnection(ws, auth.user, project, session, runCapability).catch((err) => {
       console.error("Connection handler crashed:", err);
       try {
         ws.close();
@@ -4004,6 +4236,7 @@ async function handleConnection(
     updated_at: string;
   },
   session: ChatSessionRecord,
+  presentedRunCapability: string | null,
 ): Promise<void> {
   const sessionId = session.id;
   const apiKey = process.env.ANTHROPIC_API_KEY!;
@@ -4012,8 +4245,31 @@ async function handleConnection(
   const send: Sender = (event) => {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(event));
   };
-  const ctx: SessionCtx = { send, user, projectId: project.id, sessionId };
+  const ctx: SessionCtx = {
+    send,
+    user,
+    projectId: project.id,
+    sessionId,
+    close: () => ws.close(4403, "project access revoked"),
+  };
   sessions.add(ctx);
+
+  const canControlRun = (run: RunHandle | undefined): run is RunHandle =>
+    !!run &&
+    run.initiatorUserId === user.id &&
+    (run.socketSend === send ||
+      mayReconnectToRun({
+        initiatorUserId: run.initiatorUserId,
+        reconnectCapability: run.reconnectCapability,
+        actorUserId: user.id,
+        suppliedCapability: presentedRunCapability,
+      }));
+
+  const denyRunControl = (): void =>
+    send({
+      type: "error",
+      message: "An agent run is active in this session, but only its initiator can view or control it.",
+    });
 
   // WS heartbeat (C-58). Without ping/pong, a half-open TCP drop (NAT/idle
   // timeout, abrupt client loss) never fires ws.on("close"), so the run is never
@@ -4063,6 +4319,152 @@ async function handleConnection(
   // user who only opens the workspace to read files doesn't spin up a
   // VM. Idle VMs auto-pause via the fleet's sweeper.
   let vmHandle: VmHandle | null = null;
+  let lastContextUsage: {
+    estimatedTokens: number;
+    contextWindowTokens: number;
+    compactionTriggerTokens: number;
+    fixedTokens: number;
+    model: string;
+  } | null = null;
+
+  const publishContextUsage = (
+    usage: NonNullable<typeof lastContextUsage>,
+    target: Sender = send,
+  ): void => {
+    lastContextUsage = usage;
+    target({
+      type: "context_usage",
+      estimated_tokens: usage.estimatedTokens,
+      context_window_tokens: usage.contextWindowTokens,
+      compaction_trigger_tokens: usage.compactionTriggerTokens,
+      model: usage.model,
+    });
+  };
+
+  const performManualContextCompaction = async (lockAlreadyHeld = false): Promise<void> => {
+    const key = runKey(project.id, sessionId);
+    if (!lockAlreadyHeld) {
+      if (manualCompactionsInFlight.has(key)) {
+        send({ type: "context_compaction_state", state: "running" });
+        return;
+      }
+      manualCompactionsInFlight.add(key);
+    }
+    broadcastToSession(project.id, sessionId, {
+      type: "context_compaction_state",
+      state: "running",
+    });
+
+    let summarizerFailed = false;
+    const startedAt = Date.now();
+    const usageRunId = randomUUID();
+    try {
+      const [modelHistory, throughMessageId, secretValues] = await Promise.all([
+        loadModelHistory(project.id, sessionId),
+        latestMessageId(project.id, sessionId),
+        getProjectSecretPlaintexts(project.id),
+      ]);
+      createSecretRedactor(secretValues).redactInPlace(modelHistory);
+      if (throughMessageId === null) {
+        broadcastToSession(project.id, sessionId, {
+          type: "context_compaction_state",
+          state: "idle",
+          outcome: "nothing_to_compact",
+        });
+        return;
+      }
+
+      const fallbackModel = resolveModel("agent").model;
+      const model = lastContextUsage?.model ?? fallbackModel;
+      const contextWindowTokens =
+        lastContextUsage?.contextWindowTokens ?? contextWindowTokensForModel(model);
+      const fixedTokens = lastContextUsage?.fixedTokens ?? 0;
+      const triggerTokens =
+        lastContextUsage?.compactionTriggerTokens ??
+        compactionTriggerTokens({ contextWindowTokens });
+      const compacted = await maybeCompact(modelHistory, apiKey, undefined, {
+        fixedTokens,
+        contextWindowTokens,
+        force: true,
+        keepTokens: 1,
+        onFailure: () => {
+          summarizerFailed = true;
+        },
+        onUsage: (usage) => {
+          void recordUsageEvent({
+            projectId: project.id,
+            userId: user.id,
+            runId: usageRunId,
+            provider: usage.provider,
+            model: usage.model,
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            cacheReadTokens: usage.cacheReadTokens,
+            cacheCreationTokens: usage.cacheCreationTokens,
+            costUsd: estimateTurnCostUsd(usage.model, usage),
+            elapsedMs: Date.now() - startedAt,
+          }).catch((err) => console.error("manual compaction usage write failed:", err));
+        },
+      });
+
+      if (!compacted) {
+        broadcastToSession(project.id, sessionId, {
+          type: "context_compaction_state",
+          state: "idle",
+          outcome: summarizerFailed ? "failed" : "nothing_to_compact",
+        });
+        return;
+      }
+
+      const saved = await saveCompactedHistory(
+        project.id,
+        sessionId,
+        sanitizeMessagesForPersistence(modelHistory),
+        throughMessageId,
+        { strategy: compacted.snapshotStrategy, model: compacted.snapshotModel },
+      );
+      if (!saved) throw new Error("compacted context could not be saved");
+
+      history.splice(0, history.length, ...modelHistory);
+      historyPreparedForModel = true;
+      syncedHistoryRev = bumpSessionHistoryRev(key);
+      const updatedUsage = {
+        estimatedTokens: compacted.afterTokens,
+        contextWindowTokens,
+        compactionTriggerTokens: triggerTokens,
+        fixedTokens,
+        model,
+      };
+      lastContextUsage = updatedUsage;
+      broadcastToSession(project.id, sessionId, {
+        type: "context_usage",
+        estimated_tokens: updatedUsage.estimatedTokens,
+        context_window_tokens: updatedUsage.contextWindowTokens,
+        compaction_trigger_tokens: updatedUsage.compactionTriggerTokens,
+        model: updatedUsage.model,
+      });
+      broadcastToSession(project.id, sessionId, {
+        type: "history_compacted",
+        removed_messages: compacted.removedMessages,
+        before_tokens: compacted.beforeTokens,
+        after_tokens: compacted.afterTokens,
+      });
+      broadcastToSession(project.id, sessionId, {
+        type: "context_compaction_state",
+        state: "idle",
+        outcome: "compacted",
+      });
+    } catch (err) {
+      console.error(`[ws ${project.id}] manual context compaction failed:`, err);
+      broadcastToSession(project.id, sessionId, {
+        type: "context_compaction_state",
+        state: "idle",
+        outcome: "failed",
+      });
+    } finally {
+      manualCompactionsInFlight.delete(key);
+    }
+  };
 
   // Attach handlers SYNCHRONOUSLY before any async work.
   // Otherwise messages that arrive during hydration (especially the
@@ -4093,6 +4495,25 @@ async function handleConnection(
       return;
     }
 
+    // Membership can change after the WebSocket upgrade. Re-authorize every
+    // event so a removed/demoted collaborator cannot keep a stale privileged
+    // channel alive or control a run after revocation.
+    const stillEditor = await getProjectForUser(project.id, user.id, "editor").catch((err) => {
+      console.error(`[ws ${project.id}] live authorization check failed:`, err);
+      return null;
+    });
+    if (!stillEditor) {
+      const run = runs.get(runKey(project.id, sessionId));
+      if (run?.initiatorUserId === user.id) {
+        if (!run.abort.signal.aborted) run.abort.abort();
+        run.wake();
+      }
+      try {
+        ws.close(4403, "project access revoked");
+      } catch {}
+      return;
+    }
+
     // True only for the invocation that actually started a turn (set busy).
     // ws.on("message") fires concurrently per inbound frame, so a bystander
     // handler (request_file, abort, …) that throws while a turn is in flight
@@ -4105,6 +4526,10 @@ async function handleConnection(
         // Resolve via the run registry so a reconnected socket can approve a
         // plan whose run started on a previous socket (A1).
         const run = runs.get(runKey(project.id, sessionId));
+        if (run && !canControlRun(run)) {
+          denyRunControl();
+          return;
+        }
         if (run?.resolvePlan) {
           const r = run.resolvePlan;
           run.resolvePlan = null;
@@ -4115,6 +4540,10 @@ async function handleConnection(
 
       if (event.type === "user_question_answered") {
         const run = runs.get(runKey(project.id, sessionId));
+        if (run && !canControlRun(run)) {
+          denyRunControl();
+          return;
+        }
         const pending = run?.answerResolvers.get(event.call_id);
         if (pending) {
           run!.answerResolvers.delete(event.call_id);
@@ -4128,6 +4557,10 @@ async function handleConnection(
         // run is active the client just changed its own next-turn default, which
         // rides on the next user_message — nothing to do server-side.
         const run = runs.get(runKey(project.id, sessionId));
+        if (run && !canControlRun(run)) {
+          denyRunControl();
+          return;
+        }
         if (run) {
           run.permissionMode = event.mode;
           // Auto-resolve any approval the new mode would no longer gate (e.g. the
@@ -4150,6 +4583,10 @@ async function handleConnection(
 
       if (event.type === "tool_approval_response") {
         const run = runs.get(runKey(project.id, sessionId));
+        if (run && !canControlRun(run)) {
+          denyRunControl();
+          return;
+        }
         const pending = run?.approvalResolvers.get(event.call_id);
         if (pending) {
           run!.approvalResolvers.delete(event.call_id);
@@ -4167,12 +4604,18 @@ async function handleConnection(
       }
 
       if (event.type === "request_tree") {
-        const entries = await walkSandbox(sandboxDir);
+        const entries = (await walkSandbox(sandboxDir)).filter(
+          (entry) => !isSensitiveProjectPath(entry.path),
+        );
         send({ type: "tree_listing", entries });
         return;
       }
 
       if (event.type === "request_file") {
+        if (isSensitiveProjectPath(event.path)) {
+          send({ type: "error", message: "access to secret-bearing project paths is blocked" });
+          return;
+        }
         // When a VM is active it's the authoritative copy — the agent, the
         // editor save path, and the preview process all read/write there; the
         // host `sandboxDir` is only a mirror for the file tree / storage sync
@@ -4181,7 +4624,7 @@ async function handleConnection(
         // just-saved edit shows its new content; fall back to the host copy.
         let content: string | null = null;
         if (vmHandle) {
-          content = await sandboxReadFile({ rootDir: sandboxDir, vm: vmHandle }, event.path).catch(
+          content = await sandboxReadFile({ rootDir: sandboxDir, vm: vmHandle }, event.path, {}).catch(
             () => null,
           );
         }
@@ -4212,6 +4655,35 @@ async function handleConnection(
         return;
       }
 
+      if (event.type === "compact_context") {
+        if (!ready) {
+          send({
+            type: "context_compaction_state",
+            state: "idle",
+            outcome: "failed",
+          });
+          return;
+        }
+        const key = runKey(project.id, sessionId);
+        const run = runs.get(key);
+        if (run) {
+          if (!canControlRun(run)) {
+            denyRunControl();
+            return;
+          }
+          if (!run.manualCompactionRequested) {
+            run.manualCompactionRequested = true;
+            broadcastToSession(project.id, sessionId, {
+              type: "context_compaction_state",
+              state: "queued",
+            });
+          }
+          return;
+        }
+        await performManualContextCompaction();
+        return;
+      }
+
       if (event.type === "abort") {
         // User clicked Stop. Cancel via the run registry so it works even from a
         // socket that reconnected to a run started on a previous one (A1). The
@@ -4221,6 +4693,10 @@ async function handleConnection(
         // Promises (Stop during plan review used to freeze until Approve).
         const run = runs.get(runKey(project.id, sessionId));
         if (run) {
+          if (!canControlRun(run)) {
+            denyRunControl();
+            return;
+          }
           if (!run.abort.signal.aborted) run.abort.abort();
           run.wake();
         }
@@ -4230,6 +4706,10 @@ async function handleConnection(
       }
 
       if (event.type === "client_write_file") {
+        if (isSensitiveProjectPath(event.path)) {
+          send({ type: "client_write_ack", path: event.path, ok: false, error: "secret-bearing paths are blocked" });
+          return;
+        }
         // User edited a file in the IDE. Persist + sync to Storage. Always ack
         // back so the editor can show "saved" / "save failed" state.
         try {
@@ -4281,12 +4761,24 @@ async function handleConnection(
           send({ type: "error", message: "session is still loading, try again in a moment" });
           return;
         }
+        if (manualCompactionsInFlight.has(runKey(project.id, sessionId))) {
+          send({
+            type: "error",
+            message: "Context compaction is still running. Send your message again when it finishes.",
+            retryable: true,
+          });
+          return;
+        }
         // "Already running" is now a cross-socket fact (A1): the registry, not
         // this socket's local flag, is the source of truth, so a reconnected
         // socket can't start a second turn over a run that began on another.
         const runK = runKey(project.id, sessionId);
         const activeRun = runs.get(runK);
         if (activeRun) {
+          if (!canControlRun(activeRun)) {
+            denyRunControl();
+            return;
+          }
           // A turn is already in flight for this session → treat this as a
           // MID-TURN "steering" message: queue it for the running (main) agent
           // loop to pick up at its next iteration boundary, instead of rejecting
@@ -4319,7 +4811,14 @@ async function handleConnection(
         // (not orphans) it, and so every event routes through the registry —
         // following whichever socket is bound and buffering a replay log while
         // none is (A1).
-        const runHandle = registerRun(runK, currentAbort, event.content, send);
+        const runHandle = registerRun(runK, currentAbort, event.content, send, user.id);
+        // The capability is intentionally sent only to the initiating socket;
+        // it is never buffered, persisted, or broadcast to collaborators.
+        send({
+          type: "run_capability",
+          session_id: sessionId,
+          capability: runHandle.reconnectCapability,
+        });
         const runSend = routedSendFor(runK);
         runHandle.wake = () => {
           if (runHandle.resolvePlan) {
@@ -4608,6 +5107,26 @@ async function handleConnection(
                 }
                 runHandle.steerWaiters.push(resolve);
               }),
+            {
+              consumeManualCompactionRequest: () => {
+                if (!runHandle.manualCompactionRequested) return false;
+                runHandle.manualCompactionRequested = false;
+                runSend({ type: "context_compaction_state", state: "running" });
+                return true;
+              },
+              onContextUsage: (info) => publishContextUsage(info, runSend),
+              onManualCompactionHandled: (outcome) =>
+                runSend({
+                  type: "context_compaction_state",
+                  state: "idle",
+                  outcome:
+                    outcome === "compacted"
+                      ? "compacted"
+                      : outcome === "error"
+                        ? "failed"
+                        : "nothing_to_compact",
+                }),
+            },
             runMetrics,
           );
           // The loop has already emitted complete. Project-recency metadata is
@@ -4677,6 +5196,8 @@ async function handleConnection(
           if (finishedMetrics.outcome.status === "success" && finishedMetrics.outcome.finalAnswerEmitted) {
             rememberMetricRun(runK, runMetrics.runId, user.id, metricsPersisted);
           }
+          const compactAfterRun = runHandle.manualCompactionRequested;
+          if (compactAfterRun) manualCompactionsInFlight.add(runK);
           busy = false;
           currentAbort = null;
           // unregisterRun also drops this run's ask_user resolvers so a
@@ -4687,6 +5208,7 @@ async function handleConnection(
           // socket bound to this session re-syncs from the DB before its next
           // turn, and mark ourselves in sync so we don't reload before our own.
           syncedHistoryRev = bumpSessionHistoryRev(runK);
+          if (compactAfterRun) await performManualContextCompaction(true);
         }
       }
     } catch (err) {
@@ -4723,7 +5245,13 @@ async function handleConnection(
     // Capture the revision BEFORE the read: if a turn persists between this
     // line and the read, we may reload once redundantly next turn — never miss.
     syncedHistoryRev = sessionHistoryRev.get(runKey(project.id, sessionId)) ?? 0;
-    const loaded = await loadHistory(project.id, sessionId);
+    const [loaded, secretValues] = await Promise.all([
+      loadHistory(project.id, sessionId),
+      getProjectSecretPlaintexts(project.id),
+    ]);
+    // Historical turns may predate the brokered-secret boundary. Never replay
+    // a stored plaintext value to a collaborator or back into a provider.
+    createSecretRedactor(secretValues).redactInPlace(loaded);
     history.push(...loaded);
   } catch (err) {
     console.error("loadHistory failed:", err);
@@ -4732,7 +5260,6 @@ async function handleConnection(
       message: `failed to load chat history: ${err instanceof Error ? err.message : String(err)}`,
     });
   }
-
   send({
     type: "session_started",
     sandbox_dir: sandboxDir,
@@ -4750,6 +5277,26 @@ async function handleConnection(
 
   replayHistory(send, history);
 
+  // Load the model-facing snapshot after replay without delaying session-ready.
+  // The loop replaces this approximate message-only figure with its exact
+  // system+tools+history estimate on the next turn.
+  void loadModelHistory(project.id, sessionId)
+    .then((modelHistory) => {
+      // A fast user turn may already have emitted the loop's exact
+      // system+tools+history figure while this background read was pending.
+      if (lastContextUsage) return;
+      const model = resolveModel("agent").model;
+      const contextWindowTokens = contextWindowTokensForModel(model);
+      publishContextUsage({
+        estimatedTokens: estimateMessageTokens(modelHistory),
+        contextWindowTokens,
+        compactionTriggerTokens: compactionTriggerTokens({ contextWindowTokens }),
+        fixedTokens: 0,
+        model,
+      });
+    })
+    .catch((err) => console.error("loadModelHistory for context estimate failed:", err));
+
   // A1: if a run for this session is STILL alive (this is the reconnect after a
   // mid-turn disconnect), rebind it to THIS socket, tell the client the build
   // kept running (so it doesn't treat the replayed history as finished), then
@@ -4759,13 +5306,25 @@ async function handleConnection(
   {
     const liveRun = runs.get(runKey(project.id, sessionId));
     if (liveRun) {
-      if (liveRun.graceTimer) {
-        clearTimeout(liveRun.graceTimer);
-        liveRun.graceTimer = null;
+      if (canControlRun(liveRun)) {
+        if (liveRun.graceTimer) {
+          clearTimeout(liveRun.graceTimer);
+          liveRun.graceTimer = null;
+        }
+        liveRun.socketSend = send;
+        send({
+          type: "run_capability",
+          session_id: sessionId,
+          capability: liveRun.reconnectCapability,
+        });
+        send({ type: "run_active", session_id: sessionId, prompt: liveRun.prompt });
+        for (const ev of liveRun.buffer) send(ev);
+      } else {
+        send({
+          type: "system",
+          content: "An agent run is active in this session. Live details and controls are private to its initiator.",
+        });
       }
-      liveRun.socketSend = send;
-      send({ type: "run_active", session_id: sessionId, prompt: liveRun.prompt });
-      for (const ev of liveRun.buffer) send(ev);
     }
   }
 
@@ -5127,6 +5686,17 @@ async function runSession(
   * sub-agents so a user message wakes it right away. Undefined ⇒ no steer-wake.
   */
   waitForSteer?: () => Promise<void>,
+  contextHooks?: {
+    consumeManualCompactionRequest: () => boolean;
+    onContextUsage: (info: {
+      estimatedTokens: number;
+      contextWindowTokens: number;
+      compactionTriggerTokens: number;
+      fixedTokens: number;
+      model: string;
+    }) => void;
+    onManualCompactionHandled: (outcome: "compacted" | "noop" | "error") => void;
+  },
   metrics?: RunMetricsCollector,
 ): Promise<SessionRunOutcome> {
   const start = Date.now();
@@ -5192,7 +5762,15 @@ async function runSession(
       content: `\n[command] /${slashed.matched} expanded\n`,
     });
   }
-  const messageWithUploads = formatUserMessageWithUploads(slashed.expanded, attachments);
+  // This boundary runs before Auto routing and plan mode, both of which can
+  // call a provider before runAgentLoop's own last-mile redaction.
+  const ingressSecretRedactor = createSecretRedactor(
+    await getProjectSecretPlaintexts(projectId),
+  );
+  ingressSecretRedactor.redactInPlace(history);
+  const messageWithUploads = ingressSecretRedactor.text(
+    formatUserMessageWithUploads(slashed.expanded, attachments),
+  );
   const messageWithRefsBasePromise = inlineFileRefs(messageWithUploads, fileRefs, sandboxDir);
   // Preserve the Auto classifier, but move its network latency off the critical
   // path for execute-only turns. Plan mode intentionally keeps resolving from
@@ -5255,7 +5833,7 @@ async function runSession(
           return null;
         })
     : null;
-  const [
+  let [
     resolvedKeys,
     accountPrompt,
     projectRow,
@@ -5277,15 +5855,24 @@ async function runSession(
       designSystemPromise,
       librarySkillsPromise,
     ]);
+  accountPrompt = accountPrompt ? ingressSecretRedactor.text(accountPrompt) : accountPrompt;
+  skillsBody = skillsBody ? ingressSecretRedactor.text(skillsBody) : skillsBody;
+  ingressSecretRedactor.redactInPlace(librarySkills);
+  ingressSecretRedactor.redactInPlace(designSystem);
+  ingressSecretRedactor.redactInPlace(knowledgeDocs);
+  ingressSecretRedactor.redactInPlace(projectRow);
+  messageWithRefsBase = ingressSecretRedactor.text(messageWithRefsBase);
   const anthropicKey = resolvedKeys.anthropic ?? apiKey;
   // Prepend any out-of-band notice (e.g. a checkpoint rewind changed files under
   // the agent since the last turn) as a model-facing system-reminder so the model
   // re-grounds on the real file state instead of its memory of rolled-back edits.
   // Drained here so it rides the very next turn (plan or execute) exactly once.
   const projectNote = drainProjectNote(projectId);
-  const messageWithRefs = projectNote
-    ? `<system-reminder>${projectNote}</system-reminder>\n\n${messageWithRefsBase}`
-    : messageWithRefsBase;
+  const messageWithRefs = ingressSecretRedactor.text(
+    projectNote
+      ? `<system-reminder>${projectNote}</system-reminder>\n\n${messageWithRefsBase}`
+      : messageWithRefsBase,
+  );
   // Linked GitHub repo (per-turn read so connect/disconnect takes effect on the
   // next turn without a reconnect). Injected into the system prompt so the agent
   // knows the project has a repo. Non-fatal if the lookup fails.
@@ -5646,6 +6233,9 @@ async function runSession(
     pullSteeringMessages,
     // Wakes the loop from a park-on-sub-agents wait when the user sends a message.
     waitForSteer,
+    consumeManualCompactionRequest: contextHooks?.consumeManualCompactionRequest,
+    onContextUsage: contextHooks?.onContextUsage,
+    onManualCompactionHandled: contextHooks?.onManualCompactionHandled,
     previewBaseUrl: PREVIEW_BASE_URL,
     skills: skillsBody,
     accountPrompt,
@@ -6194,7 +6784,7 @@ async function executeAgentTask(task: {
   created_by: string | null;
   title: string;
   prompt: string;
-}): Promise<string> {
+}, signal: AbortSignal): Promise<string> {
   const projectId = task.project_id;
   // The queuing user is the acting user for key resolution + usage attribution.
   // A system-created task uses platform keys and a NULL account owner; never
@@ -6211,6 +6801,12 @@ async function executeAgentTask(task: {
   let loopResult: Awaited<ReturnType<typeof runAgentLoop>> | undefined;
 
   try {
+
+  if (signal.aborted) throw new Error("durable task canceled");
+  if (!userId) throw new Error("durable task has no acting user");
+  if (!roleAtLeast(await getProjectRole(projectId, userId), "editor")) {
+    throw new Error("durable task creator no longer has project access");
+  }
 
   // Org budget gate — the same one runSession enforces, so a task can't blow
   // past a team's cap just because it ran headless.
@@ -6255,7 +6851,7 @@ async function executeAgentTask(task: {
     vmHandle = await ensureVm({ projectId, hostSandboxDir: sandboxDir });
     touchVm(projectId);
   }
-  await ensureProjectDeps({ rootDir: sandboxDir, vm: vmHandle ?? undefined }, projectId);
+  await ensureProjectDeps({ rootDir: sandboxDir, vm: vmHandle ?? undefined }, projectId, { signal });
   stopSandboxMetrics();
   taskStage = "preflight";
 
@@ -6278,6 +6874,10 @@ async function executeAgentTask(task: {
         : Promise.resolve(null),
     ]),
   );
+  if (signal.aborted) throw new Error("durable task canceled");
+  if (!roleAtLeast(await getProjectRole(projectId, userId), "editor")) {
+    throw new Error("durable task creator no longer has project access");
+  }
 
   // 4. Pre-run checkpoint (background, best-effort — never blocks the task).
   commitCheckpoint(sandboxDir, projectId, `pre-task: ${task.title.slice(0, 80)}`).catch((err) =>
@@ -6303,6 +6903,8 @@ async function executeAgentTask(task: {
       skills: skillsBody,
       userId,
       thinkingEffort: "medium",
+      signal,
+      getPermissionMode: () => "acceptEdits",
       metrics: runMetrics,
       onCompacted: (info) => {
         historyCompacted = true;
@@ -6526,8 +7128,22 @@ function startTaskWorker(): void {
         }
         claimedId = task.id;
         console.log(`[task-worker] running task ${task.id} (project ${task.project_id.slice(0, 8)})`);
-        const summary = await executeAgentTask(task);
-        await updateAgentTask(task.id, { status: "done", result_summary: summary, error: null });
+        const controller = new AbortController();
+        activeTaskRuns.set(task.id, {
+          projectId: task.project_id,
+          userId: task.created_by,
+          controller,
+        });
+        let summary: string;
+        try {
+          summary = await executeAgentTask(task, controller.signal);
+        } finally {
+          activeTaskRuns.delete(task.id);
+        }
+        const latest = await getAgentTask(task.id);
+        if (latest?.status !== "canceled") {
+          await updateAgentTask(task.id, { status: "done", result_summary: summary, error: null });
+        }
         console.log(`[task-worker] task ${task.id} done`);
       } catch (err) {
         // A failure must never crash the worker. Mark the claimed task failed
@@ -6536,9 +7152,12 @@ function startTaskWorker(): void {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[task-worker] task ${claimedId ?? "(unclaimed)"} failed:`, message);
         if (claimedId) {
-          await updateAgentTask(claimedId, { status: "failed", error: message }).catch((e) =>
-            console.error(`[task-worker] could not mark task ${claimedId} failed:`, e),
-          );
+          const latest = await getAgentTask(claimedId);
+          if (latest?.status !== "canceled") {
+            await updateAgentTask(claimedId, { status: "failed", error: message }).catch((e) =>
+              console.error(`[task-worker] could not mark task ${claimedId} failed:`, e),
+            );
+          }
         }
         // Brief pause so a tight, repeatedly-failing condition (e.g. DB down)
         // doesn't spin the CPU.
@@ -6626,6 +7245,8 @@ async function readSandboxFile(rootDir: string, p: string): Promise<string | nul
     // so a symlink planted in the sandbox (e.g. via GitHub import) can't read
     // arbitrary host files. The lexical-only check here was bypassable that way.
     const full = await resolveSandboxChildReal(rootDir, p);
+    const realRoot = await fs.realpath(rootDir);
+    if (isSensitiveProjectPath(path.relative(realRoot, full))) return null;
     return await fs.readFile(full, "utf-8");
   } catch {
     return null;
@@ -6884,7 +7505,7 @@ function mergeDesignTokens(base: DesignTokens, raw: unknown): DesignTokens {
       : {};
   const fontsRaw = r.fonts && typeof r.fonts === "object" ? (r.fonts as Record<string, unknown>) : {};
   return {
-    mode: r.mode === "dark" || r.mode === "system" ? r.mode : base.mode,
+    mode: r.mode === "light" || r.mode === "dark" || r.mode === "system" ? r.mode : base.mode,
     colors: Object.keys(colors).length ? colors : base.colors,
     fonts: {
       body: typeof fontsRaw.body === "string" ? fontsRaw.body : base.fonts.body,
@@ -6895,12 +7516,111 @@ function mergeDesignTokens(base: DesignTokens, raw: unknown): DesignTokens {
     radius: typeof r.radius === "string" ? r.radius : base.radius,
     spacing: typeof r.spacing === "string" ? r.spacing : base.spacing,
     components: mergeComponents(base.components, r.components),
+    foundations: mergeFoundations(base.foundations, r.foundations),
+    patterns: mergePatterns(base.patterns, r.patterns),
+    behavior: mergeBehavior(base.behavior, r.behavior),
     assets: (() => {
       const a = r.assets && typeof r.assets === "object" ? (r.assets as Record<string, unknown>) : {};
       const logo = typeof a.logo === "string" && a.logo.trim() ? a.logo.trim() : base.assets?.logo;
       return logo ? { logo } : base.assets;
     })(),
     notes: typeof r.notes === "string" ? r.notes : base.notes,
+  };
+}
+
+const nonEmptyString = (value: unknown): string | undefined =>
+  typeof value === "string" && value.trim() ? value.trim() : undefined;
+
+function mergeStringMap(
+  base: Record<string, string> | undefined,
+  raw: unknown,
+  limit = 32,
+): Record<string, string> | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return base;
+  const entries = Object.entries(raw as Record<string, unknown>)
+    .map(([key, value]) => [key.trim(), nonEmptyString(value)] as const)
+    .filter((entry): entry is readonly [string, string] => !!entry[0] && !!entry[1])
+    .slice(0, limit);
+  return entries.length ? Object.fromEntries(entries) : base;
+}
+
+function mergeFoundations(
+  base: DesignFoundationTokens | undefined,
+  raw: unknown,
+): DesignFoundationTokens | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return base;
+  const r = raw as Record<string, unknown>;
+  const b = base ?? {};
+  const typographyRaw =
+    r.typography && typeof r.typography === "object" && !Array.isArray(r.typography)
+      ? (r.typography as Record<string, unknown>)
+      : {};
+  const layoutRaw =
+    r.layout && typeof r.layout === "object" && !Array.isArray(r.layout)
+      ? (r.layout as Record<string, unknown>)
+      : {};
+  const motionRaw =
+    r.motion && typeof r.motion === "object" && !Array.isArray(r.motion)
+      ? (r.motion as Record<string, unknown>)
+      : {};
+  return {
+    typography: {
+      sizes: mergeStringMap(b.typography?.sizes, typographyRaw.sizes),
+      lineHeights: mergeStringMap(b.typography?.lineHeights, typographyRaw.lineHeights),
+      weights: mergeStringMap(b.typography?.weights, typographyRaw.weights),
+      measures: mergeStringMap(b.typography?.measures, typographyRaw.measures),
+    },
+    spacingScale: mergeStringMap(b.spacingScale, r.spacingScale),
+    radii: mergeStringMap(b.radii, r.radii),
+    elevations: mergeStringMap(b.elevations, r.elevations),
+    layout: {
+      breakpoints: mergeStringMap(b.layout?.breakpoints, layoutRaw.breakpoints),
+      containers: mergeStringMap(b.layout?.containers, layoutRaw.containers),
+      grid: nonEmptyString(layoutRaw.grid) ?? b.layout?.grid,
+    },
+    motion: {
+      durations: mergeStringMap(b.motion?.durations, motionRaw.durations),
+      easings: mergeStringMap(b.motion?.easings, motionRaw.easings),
+      reducedMotion: nonEmptyString(motionRaw.reducedMotion) ?? b.motion?.reducedMotion,
+    },
+    iconography: nonEmptyString(r.iconography) ?? b.iconography,
+    imagery: nonEmptyString(r.imagery) ?? b.imagery,
+  };
+}
+
+function mergePatterns(
+  base: DesignPatternTokens | undefined,
+  raw: unknown,
+): DesignPatternTokens | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return base;
+  const r = raw as Record<string, unknown>;
+  const b = base ?? {};
+  return {
+    responsive: nonEmptyString(r.responsive) ?? b.responsive,
+    navigation: nonEmptyString(r.navigation) ?? b.navigation,
+    forms: nonEmptyString(r.forms) ?? b.forms,
+    tables: nonEmptyString(r.tables) ?? b.tables,
+    overlays: nonEmptyString(r.overlays) ?? b.overlays,
+    dataVisualization: nonEmptyString(r.dataVisualization) ?? b.dataVisualization,
+    states: nonEmptyString(r.states) ?? b.states,
+  };
+}
+
+function mergeBehavior(
+  base: DesignBehaviorTokens | undefined,
+  raw: unknown,
+): DesignBehaviorTokens | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return base;
+  const r = raw as Record<string, unknown>;
+  const b = base ?? {};
+  return {
+    interaction: nonEmptyString(r.interaction) ?? b.interaction,
+    focus: nonEmptyString(r.focus) ?? b.focus,
+    validation: nonEmptyString(r.validation) ?? b.validation,
+    loading: nonEmptyString(r.loading) ?? b.loading,
+    destructiveActions: nonEmptyString(r.destructiveActions) ?? b.destructiveActions,
+    accessibility: nonEmptyString(r.accessibility) ?? b.accessibility,
+    content: nonEmptyString(r.content) ?? b.content,
   };
 }
 
@@ -6964,6 +7684,41 @@ function mergeComponents(
           : b.badge?.variant,
     };
   }
+  if (r.navigation && typeof r.navigation === "object") {
+    const rn = r.navigation as Record<string, unknown>;
+    out.navigation = {
+      height: str(rn.height) ?? b.navigation?.height,
+      active: str(rn.active) ?? b.navigation?.active,
+      responsive: str(rn.responsive) ?? b.navigation?.responsive,
+    };
+  }
+  if (r.table && typeof r.table === "object") {
+    const rt = r.table as Record<string, unknown>;
+    out.table = {
+      rowHeight: str(rt.rowHeight) ?? b.table?.rowHeight,
+      header: str(rt.header) ?? b.table?.header,
+      numeric: str(rt.numeric) ?? b.table?.numeric,
+      responsive: str(rt.responsive) ?? b.table?.responsive,
+    };
+  }
+  if (r.overlay && typeof r.overlay === "object") {
+    const ro = r.overlay as Record<string, unknown>;
+    out.overlay = {
+      radius: str(ro.radius) ?? b.overlay?.radius,
+      shadow: str(ro.shadow) ?? b.overlay?.shadow,
+      behavior: str(ro.behavior) ?? b.overlay?.behavior,
+    };
+  }
+  if (r.feedback && typeof r.feedback === "object") {
+    const rf = r.feedback as Record<string, unknown>;
+    out.feedback = {
+      status: str(rf.status) ?? b.feedback?.status,
+      empty: str(rf.empty) ?? b.feedback?.empty,
+      loading: str(rf.loading) ?? b.feedback?.loading,
+      toast: str(rf.toast) ?? b.feedback?.toast,
+    };
+  }
+  out.rules = mergeStringMap(b.rules, r.rules, 48);
   if (Array.isArray(r.catalog)) {
     const catalog = r.catalog
       .filter((c): c is Record<string, unknown> => !!c && typeof c === "object")
@@ -7016,7 +7771,22 @@ const SUBMIT_DESIGN_SYSTEM_TOOL: Anthropic.Tool = {
       components: {
         type: "object",
         description:
-          'Component specs. Shape: {"button":{"radius":"..","paddingX":"..","paddingY":"..","fontWeight":600,"variants":[{"name":"primary","background":"primary","foreground":"#ffffff"},{"name":"secondary","background":"surface","foreground":"text","border":"border"},{"name":"outline","background":"transparent","foreground":"primary","border":"primary"},{"name":"ghost","background":"transparent","foreground":"muted"}]},"input":{"radius":"..","background":"background","border":"border"},"card":{"radius":"..","background":"surface","border":"border","shadow":"<css box-shadow or none>","padding":".."},"badge":{"radius":"999px","variant":"soft"},"catalog":[{"type":"primary-button","name":"Primary button","description":"short look/role","html":"<button>Label</button>"}]}. In color fields PREFER a token name (e.g. "primary"); raw hex only when necessary; "transparent" for ghost/outline fills.',
+          'Component specs. Shape: {"button":{"radius":"..","paddingX":"..","paddingY":"..","fontWeight":600,"variants":[...]},"input":{"radius":"..","background":"background","border":"border"},"card":{"radius":"..","background":"surface","border":"border","shadow":"..","padding":".."},"badge":{"radius":"999px","variant":"soft"},"navigation":{"height":"..","active":"..","responsive":".."},"table":{"rowHeight":"..","header":"..","numeric":"..","responsive":".."},"overlay":{"radius":"..","shadow":"..","behavior":".."},"feedback":{"status":"..","empty":"..","loading":"..","toast":".."},"rules":{"command-bar":".."},"catalog":[...]}. In color fields PREFER a token name (e.g. "primary"); raw hex only when necessary; "transparent" for ghost/outline fills.',
+      },
+      foundations: {
+        type: "object",
+        description:
+          'Structured foundations: {"typography":{"sizes":{"display":"..","body":".."},"lineHeights":{},"weights":{},"measures":{}},"spacingScale":{},"radii":{},"elevations":{},"layout":{"breakpoints":{"narrow":"360px","medium":"768px","wide":"1440px"},"containers":{},"grid":".."},"motion":{"durations":{},"easings":{},"reducedMotion":".."},"iconography":"..","imagery":".."}. Use complete named scales, not only one base value.',
+      },
+      patterns: {
+        type: "object",
+        description:
+          "Cross-component rules: responsive, navigation, forms, tables, overlays, dataVisualization, states. Each value is a concise actionable string explaining when and how the pattern transforms.",
+      },
+      behavior: {
+        type: "object",
+        description:
+          "Interaction and UX rules: interaction, focus, validation, loading, destructiveActions, accessibility, content. Include keyboard/focus behavior, error recovery, async feedback, WCAG-AA, and real-content requirements.",
       },
       assets: {
         type: "object",
@@ -7024,7 +7794,7 @@ const SUBMIT_DESIGN_SYSTEM_TOOL: Anthropic.Tool = {
           logo: { type: "string", description: "Absolute logo image URL, only if identifiable." },
         },
       },
-      notes: { type: "string", description: "Voice, density, motion guidance." },
+      notes: { type: "string", description: "Only additional voice or art-direction guidance not represented by the structured fields." },
       findings: {
         type: "object",
         description:
@@ -7051,7 +7821,7 @@ const SUBMIT_SKILL_TOOL: Anthropic.Tool = {
       name: { type: "string", description: "Short title-case name, max 60 chars." },
       description: {
         type: "string",
-        description: "One line: what it does / when to attach it, max 200 chars.",
+        description: "One line covering what it does and when the agent should load it, max 200 chars.",
       },
       body: { type: "string", description: "The full markdown skill body." },
     },
@@ -7103,8 +7873,8 @@ async function inferDesignTokensFromDir(dir: string): Promise<DesignTokens> {
   try {
     const system =
       "You extract a design system from a codebase. From the provided config/CSS/theme files, infer the visual " +
-      "tokens and submit them via the submit_design_system tool (mode, colors, fonts, typeScale, radius, spacing, " +
-      "notes). Use SEMANTIC color names (primary, accent, background, surface, text, muted, border, …), not raw " +
+      "tokens and submit them via the submit_design_system tool (mode, colors, fonts, legacy base values, structured " +
+      "foundations, expanded components, patterns, behavior, and notes). Use SEMANTIC color names (primary, accent, background, surface, text, muted, border, …), not raw " +
       "hue names. Omit any value you cannot determine.";
     const parsed = await forceStructured({
       apiKey,
@@ -7112,7 +7882,7 @@ async function inferDesignTokensFromDir(dir: string): Promise<DesignTokens> {
       system,
       content: files,
       tool: SUBMIT_DESIGN_SYSTEM_TOOL,
-      maxTokens: 1200,
+      maxTokens: 3000,
     });
     return mergeDesignTokens(DEFAULT_DESIGN_TOKENS, parsed);
   } catch (err) {
@@ -7134,20 +7904,21 @@ async function generateDesignTokensFromBrief(
   if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
   const system =
     "You are a senior product designer. From the user's brief, design a COMPLETE, coherent, tasteful design " +
-    "system and submit it via the submit_design_system tool — include name, mode, colors, fonts, typeScale, " +
-    "radius, spacing, components (button with the four standard variants, input, card, badge) and notes. " +
+    "system and submit it via the submit_design_system tool — include name, mode, colors, fonts, legacy base values, " +
+    "structured foundations, expanded components (button variants, input, card, badge, navigation, table, overlay, " +
+    "feedback, and any named component rules), cross-component patterns, behavior, and only then freeform notes. " +
     "Rules: use SEMANTIC color names (primary, accent, background, surface, text, muted, border; add success/warning " +
     "etc. if the brand needs them). Ensure WCAG-AA contrast (text on background; each button foreground on its " +
     "background). In component color fields PREFER referencing a color token BY NAME (e.g. \"primary\", \"surface\", " +
     "\"border\"); use a raw hex only when necessary (e.g. white labels) and \"transparent\" for ghost/outline fills. " +
-    "Make specific choices that fit the brief's industry, mood and audience — never generic filler.";
+    "Make specific choices that fit the brief's industry, mood, audience, primary task, responsive needs, and risk states — never generic filler.";
   const parsed = await forceStructured({
     apiKey,
     model: ensureAnthropic("design"),
     system,
     content: `Brief: ${brief}`,
     tool: SUBMIT_DESIGN_SYSTEM_TOOL,
-    maxTokens: 2000,
+    maxTokens: 5000,
   });
   const tokens = mergeDesignTokens(DEFAULT_DESIGN_TOKENS, parsed);
   const name =
@@ -7167,13 +7938,16 @@ async function generateSkillFromBrief(
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
   const system =
-    "You author reusable 'skills' for an AI coding agent. A skill is a concise markdown rule-set that is " +
-    "injected into the agent's system prompt on every turn of projects it is attached to — standing guidance " +
-    "like coding conventions, review checklists, domain rules, or brand voice. From the user's brief, write ONE " +
+    "You author modern reusable skills for an AI coding agent, compatible with the SKILL.md model used by " +
+    "Codex and Claude Code. The name and description are discovery metadata that remain visible; the markdown " +
+    "body is loaded only when the request matches. From the user's brief, write ONE " +
     "complete skill and submit it via the submit_skill tool. " +
+    "The description is load-bearing: state both what the skill does and concrete situations/phrases/file types " +
+    "that should trigger it. Put all trigger guidance in the description, not in a body section. " +
     "Rules for the body: start with a `# <name>` heading; use short sections and imperative bullet points " +
-    "(\"Always …\", \"Prefer …\", \"Never …\"); be specific and actionable, never generic filler; include concrete " +
-    "examples (code snippets, naming patterns, phrasings) where they sharpen the rule; stay under ~400 lines. " +
+    "and procedures; assume the agent is capable and include only non-obvious, domain-specific guidance; be " +
+    "specific and actionable, never generic filler; include concrete examples where they sharpen the rule; " +
+    "keep the core workflow concise and under ~400 lines. " +
     "Cover the brief's intent fully, and add the obvious adjacent rules an expert would expect, but do not pad.";
   const parsed = await forceStructured({
     apiKey,
@@ -7303,8 +8077,8 @@ async function analyzeDesignSystem(input: {
   const system =
     "You are a senior product designer. From the provided context (a brief, codebase/theme files, a live site's CSS, " +
     "Figma styles, and/or reference images), design a COMPLETE, coherent, tasteful design system AND report what you " +
-    "found — submit both via the submit_design_system tool (include name, mode, colors, fonts, typeScale, radius, " +
-    "spacing, components incl. catalog, assets, notes, and the findings field). " +
+    "found — submit both via the submit_design_system tool (include name, mode, colors, fonts, legacy base values, " +
+    "structured foundations, expanded components incl. catalog, cross-component patterns, behavior, assets, notes, and findings). " +
     "Rules: use SEMANTIC color names. Ensure WCAG-AA contrast (text on background; each button foreground on its " +
     "background). In component color fields PREFER a color token name (e.g. \"primary\"); use raw hex only when needed " +
     "and \"transparent\" for ghost/outline. When the context contains real values (detected colors/fonts/styles), " +
@@ -7344,7 +8118,7 @@ async function tweakDesignTokens(base: DesignTokens, instruction: string): Promi
   const system =
     "You refine an existing design system. Apply the user's instruction to the given tokens and submit the " +
     "COMPLETE updated tokens via the submit_design_system tool. Leave everything the instruction doesn't touch " +
-    "unchanged. Keep semantic color names and the component/variant structure; preserve WCAG-AA contrast.";
+    "unchanged. Preserve structured foundations, component/variant rules, patterns, and behavior; keep semantic color names and WCAG-AA contrast.";
   // Echoes the COMPLETE tokens (incl. any component catalog), so keep the
   // ceiling high enough that the tool call is never truncated.
   const parsed = await forceStructured({
@@ -7471,6 +8245,11 @@ async function handleDesignSystemAnalyze(
     await new Promise<void>((resolve, reject) => {
       const bb = Busboy({ headers: req.headers, limits: { fileSize: PER_FILE_BYTES, files: 8 } });
       bb.on("file", (field, file, info) => {
+        if (isSensitiveProjectPath(info.filename || "upload")) {
+          parseError = `${info.filename || "upload"} is a protected credential path and cannot be uploaded`;
+          file.resume();
+          return;
+        }
         const chunks: Buffer[] = [];
         file.on("data", (d: Buffer) => {
           totalBytes += d.length;
@@ -7582,6 +8361,16 @@ async function handleDesignSystemAnalyze(
         const stored = await getGithubToken(user.id);
         if (!stored) return fail(409, "github_not_connected");
         authToken = stored;
+      }
+      if (authToken) {
+        if (fields.use_oauth === "true" && !fields.repo_full_name?.trim()) {
+          return fail(400, "repo_full_name is required for an OAuth clone");
+        }
+        try {
+          validateCredentialedGithubRepo(repoUrl, fields.repo_full_name);
+        } catch (err) {
+          return fail(400, err instanceof Error ? err.message : String(err));
+        }
       }
       phase(`Cloning ${fields.repo_full_name || repoUrl}…`);
       const tmp = path.join(tmpdir(), `uniqus-ds-${randomUUID()}`);

@@ -13,10 +13,8 @@ import {
 /**
  * Secrets manager (Plan §6).
  *
- * Stores per-project secrets encrypted at rest. The agent never sees
- * plaintext values — it asks for one by name via `get_secret` and the
- * orchestrator plumbs the value into a sandbox .env file. Every read +
- * write here writes an audit_events row.
+ * Stores per-project secrets encrypted at rest. Plaintext is available only to
+ * trusted connector and deployment code, never to the model or sandbox.
  */
 export default function SecretsModal({
   projectId,
@@ -31,6 +29,8 @@ export default function SecretsModal({
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
   const [description, setDescription] = useState("");
+  const [allowedHosts, setAllowedHosts] = useState("");
+  const [allowedHostsTouched, setAllowedHostsTouched] = useState(false);
   // Same secret name can exist per env (default / development / staging /
   // production / etc.). Defaults to "default" so single-env projects never
   // see this knob unless they want to.
@@ -78,10 +78,15 @@ export default function SecretsModal({
         value,
         env,
         description: description || null,
+        allowed_hosts: allowedHostsTouched
+          ? allowedHosts.split(/[\s,]+/).map((host) => host.trim()).filter(Boolean)
+          : undefined,
       });
       setName("");
       setValue("");
       setDescription("");
+      setAllowedHosts("");
+      setAllowedHostsTouched(false);
       // Keep the selected env so the user can add several secrets to one env
       // back-to-back without re-picking.
       await load();
@@ -112,6 +117,8 @@ export default function SecretsModal({
     setName(s.name);
     setEnv(s.env);
     setDescription(s.description ?? "");
+    setAllowedHosts(s.allowed_hosts.join(", "));
+    setAllowedHostsTouched(true);
     setValue("");
     setNameAutoFormatted(false);
     requestAnimationFrame(() => valueInputRef.current?.focus());
@@ -123,7 +130,7 @@ export default function SecretsModal({
       title="Project Secrets"
       subtitle={
         <>
-          Encrypted at rest · auto-written to <code>.env</code> so your app reads them like Vercel env vars · values are NEVER returned to the chat
+          Encrypted at rest · available to trusted connectors and deployments · never written into the coding sandbox or sent to the model
         </>
       }
       onClose={onClose}
@@ -203,6 +210,18 @@ export default function SecretsModal({
               placeholder="Optional description (visible to the agent in list_secrets)"
               style={inputStyle}
             />
+            <input
+              type="text"
+              value={allowedHosts}
+              aria-label="Approved HTTP destination hosts"
+              onChange={(e) => {
+                setAllowedHosts(e.target.value);
+                setAllowedHostsTouched(true);
+              }}
+              placeholder="Approved HTTP hosts, comma-separated (admin only)"
+              title="Exact hostnames only. The HTTP connector may send this secret only to these destinations."
+              style={inputStyle}
+            />
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <button type="submit" disabled={saving} className="send-btn" style={{ padding: "4px 12px" }}>
                 {saving ? "Saving…" : "Save secret"}
@@ -261,6 +280,9 @@ export default function SecretsModal({
                           {s.description}
                         </div>
                       )}
+                      <div style={{ color: "var(--text-dim)", fontSize: 11 }}>
+                        HTTP destinations: {s.allowed_hosts.length ? s.allowed_hosts.join(", ") : "none"}
+                      </div>
                       <div style={{ color: "var(--text-dim)", fontSize: 11 }}>
                         Updated {new Date(s.updated_at).toLocaleString()}
                       </div>

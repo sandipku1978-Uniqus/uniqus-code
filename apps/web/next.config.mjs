@@ -27,6 +27,22 @@ if (fs.existsSync(envPath)) {
 const nextConfig = {
   reactStrictMode: true,
   transpilePackages: ["@uniqus/api-types"],
+  async redirects() {
+    return [
+      {
+        source: "/:path*",
+        has: [{ type: "host", value: "www.gate15.dev" }],
+        destination: "https://gate15.dev/:path*",
+        permanent: true,
+      },
+      {
+        source: "/:path*",
+        has: [{ type: "host", value: "gate15.app" }],
+        destination: "https://gate15.dev/:path*",
+        permanent: true,
+      },
+    ];
+  },
 };
 
 export default nextConfig;

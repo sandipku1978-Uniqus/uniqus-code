@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
+import { isSensitiveProjectPath } from "../security/sensitivePaths.js";
 
 const MAX_FILE_REFS = 8;
 const DEFAULT_FILE_BYTE_LIMIT = 32 * 1024;
@@ -98,7 +99,7 @@ export async function inlineFileRefs(
   const refs = fileRefs.slice(0, MAX_FILE_REFS).map((rawRef) => {
     if (typeof rawRef !== "string") return null;
     const ref = rawRef.trim().replace(/^@/, "");
-    if (!ref || ref.split("/").includes("..")) return null;
+    if (!ref || ref.split("/").includes("..") || isSensitiveProjectPath(ref)) return null;
     return ref;
   });
   const loaded: Array<LoadedFileRef | null> = new Array(refs.length).fill(null);

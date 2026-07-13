@@ -1,5 +1,5 @@
 import { audit } from "../db/audit.js";
-import { getSecretValue } from "../db/secrets.js";
+import { getSecretValue, getSecretWithBinding } from "../db/secrets.js";
 
 /**
  * First-party connector library (Plan §5).
@@ -23,6 +23,8 @@ import { getSecretValue } from "../db/secrets.js";
 export interface ConnectorMethod {
   name: string;
   description: string;
+  /** Explicit side-effect policy; permissions never infer risk from the name. */
+  risk: "read" | "write";
   /** JSONSchema for the method's args. */
   args_schema: Record<string, unknown>;
   /**
@@ -46,6 +48,11 @@ export interface ConnectorCtx {
    * server-side; the agent never sees the return value.
    */
   secret: (name: string) => Promise<string>;
+  /** Resolve a secret together with its owner/admin-approved destination policy. */
+  secretWithBinding: (
+    name: string,
+    env?: string | null,
+  ) => Promise<{ value: string; allowedHosts: string[] }>;
 }
 
 export interface ConnectorDefinition {
@@ -79,7 +86,7 @@ export function listProjectConnectors(): Array<{
   id: string;
   name: string;
   description: string;
-  methods: Array<{ name: string; description: string; args_schema: Record<string, unknown> }>;
+  methods: Array<{ name: string; description: string; risk: "read" | "write"; args_schema: Record<string, unknown> }>;
 }> {
   return listConnectors().map((c) => ({
     id: c.id,
@@ -88,6 +95,7 @@ export function listProjectConnectors(): Array<{
     methods: c.methods.map((m) => ({
       name: m.name,
       description: m.description,
+      risk: m.risk,
       args_schema: m.args_schema,
     })),
   }));
@@ -132,6 +140,22 @@ export async function callConnector(args: {
       });
       return v;
     },
+    secretWithBinding: async (name: string, env?: string | null) => {
+      const binding = await getSecretWithBinding(args.projectId, name, env);
+      if (!binding) {
+        throw new Error(
+          `Secret '${name}' is not configured for this project. Add it from the Secrets pane.`,
+        );
+      }
+      void audit({
+        project_id: args.projectId,
+        user_id: args.userId,
+        kind: "secret_read",
+        target: name,
+        metadata: { via_connector: `${args.connector}.${args.method}`, env: env ?? "default" },
+      });
+      return binding;
+    },
   };
 
   try {
@@ -155,4 +179,11 @@ export async function callConnector(args: {
     });
     return { ok: false, error: message };
   }
+}
+
+export function connectorMethodRisk(
+  connector: string,
+  method: string,
+): "read" | "write" | null {
+  return REGISTRY.get(connector)?.methods.find((entry) => entry.name === method)?.risk ?? null;
 }

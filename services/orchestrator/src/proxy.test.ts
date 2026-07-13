@@ -5,6 +5,8 @@ import {
   readWarmStart,
   withWarmParam,
   stripWarmParam,
+  previewAppCookieHeader,
+  namespacePreviewSetCookie,
 } from "./proxy.js";
 
 // Pull every <script>…</script> body out of an injected HTML document.
@@ -128,5 +130,16 @@ describe("preview warmup (first-load self-heal)", () => {
     expect(html).not.toContain("</script><x>");
     const body = /<script>([\s\S]*?)<\/script>/.exec(html)?.[1] ?? "";
     expect(() => new Function(body)).not.toThrow();
+  });
+});
+
+describe("preview credential isolation", () => {
+  it("forwards only app cookies namespaced to the exact preview server", () => {
+    const scoped = namespacePreviewSetCookie("sid=preview; Domain=.example.com; Path=/; HttpOnly", "srv_a")!;
+    expect(scoped).not.toContain("Domain=");
+    expect(scoped).toContain("Path=/");
+    const browserCookies = `wos-session=ambient; uniqus_preview=srv_a; ${scoped.split(";")[0]}`;
+    expect(previewAppCookieHeader(browserCookies, "srv_a")).toBe("sid=preview");
+    expect(previewAppCookieHeader(browserCookies, "srv_b")).toBeUndefined();
   });
 });

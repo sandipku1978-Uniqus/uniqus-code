@@ -6,8 +6,10 @@ live preview, then helps you ship it.
 
 ## Live links
 
-- `https://app.uniqus-code.com` — web app (Vercel, serves the `main` branch)
-- `https://api2.uniqus-code.com` — orchestrator (Hetzner box, Firecracker microVMs)
+- `https://gate15.dev` — marketing site (Vercel, serves the `main` branch)
+- `https://app.gate15.dev` — web app (Vercel, serves the `main` branch)
+- `https://api.gate15.dev` — orchestrator (Hetzner box, Firecracker microVMs)
+- `https://preview.gate15.app` — isolated, cookieless preview origin (Hetzner)
 
 ## What it does
 
@@ -72,6 +74,11 @@ live preview, then helps you ship it.
   Deploy with the `/deploy-hetzner` command. The Firecracker rootfs only rebuilds
   when `services/sandbox-agent/` or `infra/firecracker/build-rootfs.sh` changes.
 
+The hosted Supabase database does **not** auto-apply
+`services/orchestrator/src/db/schema.sql`. Apply any required idempotent schema
+changes in the Supabase SQL editor before restarting code that depends on them;
+the Hetzner deploy only pulls/rebuilds/restarts the service.
+
 See [CLAUDE.md](CLAUDE.md) for working notes (branching, deploy, providers).
 
 ## Setup
@@ -87,6 +94,14 @@ ANTHROPIC_API_KEY=sk-ant-...     # required (agent + compaction)
 ZAI_API_KEY=...                  # optional — only for GLM models (or GLM_API_KEY)
 OPENAI_API_KEY=sk-...            # optional — only for OpenAI models
 GOOGLE_API_KEY=...               # optional — only for Gemini models (or GEMINI_API_KEY)
+WORKOS_API_KEY=sk_...            # required — direct API/WS session validation
+WORKOS_CLIENT_ID=client_...      # required
+WORKOS_COOKIE_PASSWORD=...       # required, at least 32 characters
+WORKOS_COOKIE_DOMAIN=.example.com
+WORKOS_AUTHKIT_ISSUER=https://api.workos.com # set to the custom auth domain when configured
+PUBLIC_BASE_URL=https://api.example.com      # production API + OAuth callbacks
+PREVIEW_BASE_URL=https://preview.example.net # production, outside the cookie domain
+UNIQUS_ALLOW_HOST_SANDBOX=1      # local development only
 ```
 
 A missing optional key produces a clear "set X" error only when a user picks
@@ -104,8 +119,16 @@ Starts both in parallel:
 - Orchestrator on `http://localhost:8787` (HTTP + WebSocket)
 
 Open the web app, describe what to build, and (optionally) toggle plan mode in
-the composer. Locally the sandbox falls back to a local-process directory at
-`./.sandbox/` (Firecracker needs a Linux host with KVM, i.e. the Hetzner box).
+the composer. Local host execution is available only with the explicit
+`UNIQUS_ALLOW_HOST_SANDBOX=1` development opt-in. Production must set
+`UNIQUS_SANDBOX=firecracker` and fails startup otherwise.
+
+Production previews require a separate cookieless site outside
+`WORKOS_COOKIE_DOMAIN`: set `PUBLIC_BASE_URL` to the authenticated orchestrator
+API origin, `PREVIEW_BASE_URL` to the isolated preview origin, and use that same
+preview origin as `NEXT_PUBLIC_PREVIEW_URL` on Vercel. OAuth callbacks always
+use `PUBLIC_BASE_URL`; the orchestrator rejects a preview host that could receive
+application-domain cookies.
 
 ## Typecheck
 

@@ -2,12 +2,63 @@
 
 import type { ClientEvent, ServerEvent } from "@uniqus/api-types";
 import { useStore, flushAllPendingEdits } from "./store";
+import {
+  clearRunCapability as clearStoredRunCapability,
+  readStoredRunCapability,
+  storeRunCapability as storeStoredRunCapability,
+  type RunCapabilityStorage,
+} from "./run-capability-storage";
+
+function browserSessionStorage(): RunCapabilityStorage | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function readRunCapability(projectId: string, sessionId: string | null): string | null {
+  const storage = browserSessionStorage();
+  if (!storage) return null;
+  try {
+    return readStoredRunCapability(storage, projectId, sessionId);
+  } catch {
+    return null;
+  }
+}
+
+function storeRunCapability(
+  projectId: string,
+  sessionId: string,
+  capability: string,
+  requestedSessionId: string | null,
+): void {
+  const storage = browserSessionStorage();
+  if (!storage) return;
+  try {
+    storeStoredRunCapability(storage, projectId, sessionId, capability, requestedSessionId);
+  } catch {}
+}
+
+function clearRunCapability(projectId: string | null, sessionId: string | null): void {
+  if (!projectId || !sessionId) return;
+  const storage = browserSessionStorage();
+  if (!storage) return;
+  try {
+    clearStoredRunCapability(storage, projectId, sessionId);
+  } catch {}
+}
 
 function defaultWsUrl(projectId: string, sessionId: string | null): string {
   const explicit = process.env.NEXT_PUBLIC_WS_URL;
   const session = sessionId ? `&session=${encodeURIComponent(sessionId)}` : "";
+  const capability = readRunCapability(projectId, sessionId);
+  const runCapability = capability
+    ? `&run_capability=${encodeURIComponent(capability)}`
+    : "";
   if (explicit) {
-    return `${explicit}?project=${encodeURIComponent(projectId)}${session}`;
+    return `${explicit}?project=${encodeURIComponent(projectId)}${session}${runCapability}`;
   }
   // Match the page's TLS state so the browser doesn't refuse a `ws://`
   // upgrade from an `https://` origin (mixed content). Falls back to
@@ -17,14 +68,17 @@ function defaultWsUrl(projectId: string, sessionId: string | null): string {
     const proto = window.location.protocol === "https:" ? "wss" : "ws";
     const host = window.location.hostname;
     const port = window.location.protocol === "https:" ? "" : ":8787";
-    return `${proto}://${host}${port}?project=${encodeURIComponent(projectId)}${session}`;
+    return `${proto}://${host}${port}?project=${encodeURIComponent(projectId)}${session}${runCapability}`;
   }
-  return `ws://localhost:8787?project=${encodeURIComponent(projectId)}${session}`;
+  return `ws://localhost:8787?project=${encodeURIComponent(projectId)}${session}${runCapability}`;
 }
 
 let socket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let activeProjectId: string | null = null;
+/** Session id supplied by the route; null means "resolve the project default". */
+let activeRequestedSessionId: string | null = null;
+/** Concrete session id learned from session_started/run_capability. */
 let activeSessionId: string | null = null;
 
 // Reconnect backoff. A fixed 1.5s delay made every connected browser hammer
@@ -70,7 +124,7 @@ function openSocket(projectId: string, sessionId: string | null): void {
   // If asked to connect to a different project OR a different session within
   // the same project, close the old socket first — server-side history is
   // bound at upgrade time, so we have to reconnect to switch sessions.
-  if (socket && (activeProjectId !== projectId || activeSessionId !== sessionId)) {
+  if (socket && (activeProjectId !== projectId || activeRequestedSessionId !== sessionId)) {
     // Detach the old socket's handlers before closing it. Otherwise its async
     // `onclose` fires after we've assigned the freshly-opened socket below and
     // clobbers it (nulls the shared `socket`, bumps the reconnect counter,
@@ -91,6 +145,7 @@ function openSocket(projectId: string, sessionId: string | null): void {
     return;
   }
   activeProjectId = projectId;
+  activeRequestedSessionId = sessionId;
   activeSessionId = sessionId;
 
   const ws = new WebSocket(defaultWsUrl(projectId, sessionId));
@@ -132,7 +187,7 @@ function openSocket(projectId: string, sessionId: string | null): void {
     }
     const delay = nextReconnectDelay();
     reconnectTimer = setTimeout(() => {
-      if (activeProjectId) openSocket(activeProjectId, activeSessionId);
+      if (activeProjectId) openSocket(activeProjectId, activeRequestedSessionId);
     }, delay);
   };
 
@@ -152,6 +207,8 @@ function openSocket(projectId: string, sessionId: string | null): void {
 
 export function disconnect(): void {
   activeProjectId = null;
+  activeRequestedSessionId = null;
+  activeSessionId = null;
   reconnectAttempts = 0;
   discardStreamBuffers();
   if (reconnectTimer) {
@@ -263,6 +320,9 @@ function handleEvent(event: ServerEvent): void {
   const s = useStore.getState();
   switch (event.type) {
     case "session_started":
+      // Resolve a default-session connection to its concrete id so a reconnect
+      // can present the exact run capability minted for this session.
+      if (event.chat_session) activeSessionId = event.chat_session.id;
       // The server unconditionally replays the full history right after this
       // event (see startSession in server.ts). Treat session_started as the
       // contract that authoritative history is incoming and wipe whatever
@@ -450,6 +510,33 @@ function handleEvent(event: ServerEvent): void {
         model: event.model,
       });
       break;
+    case "run_capability":
+      if (activeProjectId) {
+        activeSessionId = event.session_id;
+        storeRunCapability(
+          activeProjectId,
+          event.session_id,
+          event.capability,
+          activeRequestedSessionId,
+        );
+      }
+      break;
+    case "context_usage":
+      s.setContextUsage({
+        estimatedTokens: event.estimated_tokens,
+        contextWindowTokens: event.context_window_tokens,
+        compactionTriggerTokens: event.compaction_trigger_tokens,
+        model: event.model,
+      });
+      break;
+    case "context_compaction_state":
+      s.setContextCompactionState(event.state);
+      if (event.state === "idle" && event.outcome === "nothing_to_compact") {
+        s.addSystem("Context is already compact — there are no older turns to summarize yet.");
+      } else if (event.state === "idle" && event.outcome === "failed") {
+        s.addSystem("Context compaction failed. Your conversation is unchanged; try again.");
+      }
+      break;
     case "subagent_update":
       s.upsertSubAgent({
         id: event.id,
@@ -468,6 +555,7 @@ function handleEvent(event: ServerEvent): void {
       });
       break;
     case "complete":
+      clearRunCapability(activeProjectId, activeSessionId);
       s.addCompleteMarker(
         event.tool_calls,
         event.elapsed_ms,
@@ -554,6 +642,7 @@ function handleEvent(event: ServerEvent): void {
       s.setTodos(event.todos);
       break;
     case "history_compacted":
+      s.setContextCompactionState("idle");
       s.addSystem(
         `compacted ${event.removed_messages} earlier turns (~${Math.round(
           (event.before_tokens - event.after_tokens) / 1000,

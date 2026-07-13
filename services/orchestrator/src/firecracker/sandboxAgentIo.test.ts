@@ -76,7 +76,17 @@ describe("Node fallback sandbox-agent bounded I/O wire contract", () => {
         `line-${String(index + 1).padStart(3, "0")}-${"x".repeat(1000)}`,
     );
     await writeFile(path.join(root, "large.txt"), lines.join("\n"), "utf-8");
+    await writeFile(path.join(root, ".env"), "TOKEN=secret", "utf-8");
     const base = await startNodeAgent(root);
+
+    const blockedSecret = await fetch(`${base}/fs/file?path=.env&max_bytes=1024`);
+    expect(blockedSecret.ok).toBe(false);
+    const blockedSecretRange = await fetch(
+      `${base}/fs/file?path=.env&offset=1&limit=1&max_bytes=1024`,
+    );
+    expect(blockedSecretRange.ok).toBe(false);
+    const trustedSecret = await fetch(`${base}/fs/file?path=.env&allow_sensitive=1`);
+    expect(trustedSecret.ok).toBe(true);
 
     const full = (await (
       await fetch(`${base}/fs/file?path=large.txt&max_bytes=${30 * 1024}&head_tail=1`)
@@ -149,6 +159,7 @@ describe("Node fallback sandbox-agent bounded I/O wire contract", () => {
       "literal [ marker",
       "utf-8",
     );
+    await writeFile(path.join(root, "client.pem"), "hit-secret", "utf-8");
     const base = await startNodeAgent(root);
 
     const response = await fetch(`${base}/fs/grep`, {
@@ -166,6 +177,7 @@ describe("Node fallback sandbox-agent bounded I/O wire contract", () => {
     expect(result.matches).toContain("hit-119-");
     expect(result.matches).toContain("middle matches omitted");
     expect(result.matches).not.toContain("ignored.txt");
+    expect(result.matches).not.toContain("client.pem");
     expect(Buffer.byteLength(result.matches)).toBeLessThan(32 * 1024);
 
     const singleFileResponse = await fetch(`${base}/fs/grep`, {

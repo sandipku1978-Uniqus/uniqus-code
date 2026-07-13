@@ -271,17 +271,50 @@ export function scrubPat(text: string): string {
 export function buildCloneUrl(repoUrl: string, pat?: string): string {
   const trimmed = repoUrl.trim();
   if (!pat) return trimmed;
-  // Only inject for https URLs; ssh URLs (git@github.com:...) ignore PAT.
-  let parsed: URL;
-  try {
-    parsed = new URL(trimmed);
-  } catch {
-    return trimmed;
-  }
-  if (parsed.protocol !== "https:") return trimmed;
+  const { parsed } = validateCredentialedGithubRepo(trimmed);
   parsed.username = "x-access-token";
   parsed.password = pat;
   return parsed.toString();
+}
+
+/**
+ * A credential is a capability for GitHub, not for an arbitrary user-supplied
+ * clone host. Validate both the exact host and canonical owner/repo identity
+ * before embedding OAuth/PAT material in a URL.
+ */
+export function validateCredentialedGithubRepo(
+  repoUrl: string,
+  expectedFullName?: string | null,
+): { parsed: URL; fullName: string } {
+  let parsed: URL;
+  try {
+    parsed = new URL(repoUrl.trim());
+  } catch {
+    throw new Error("credentialed clone URL must be a valid GitHub HTTPS URL");
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.hostname.toLowerCase() !== "github.com" ||
+    parsed.port ||
+    parsed.username ||
+    parsed.password
+  ) {
+    throw new Error("credentials may be sent only to the exact https://github.com origin");
+  }
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  if (segments.length !== 2) {
+    throw new Error("credentialed GitHub URL must identify exactly one owner/repository");
+  }
+  const owner = segments[0];
+  const repo = segments[1].replace(/\.git$/i, "");
+  if (!/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(repo)) {
+    throw new Error("credentialed GitHub URL has an invalid repository identity");
+  }
+  const fullName = `${owner}/${repo}`;
+  if (expectedFullName && fullName.toLowerCase() !== expectedFullName.trim().toLowerCase()) {
+    throw new Error("credentialed clone URL does not match the selected GitHub repository");
+  }
+  return { parsed, fullName };
 }
 
 /** Run git and capture stdout (for branch/remote lookups after a preserveGit clone). */

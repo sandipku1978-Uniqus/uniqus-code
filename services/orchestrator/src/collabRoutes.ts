@@ -5,6 +5,7 @@ import * as members from "./db/members.js";
 import * as comments from "./db/comments.js";
 import * as tasks from "./db/agentTasks.js";
 import * as flows from "./db/flows.js";
+import { listOrgProjects } from "./db/projects.js";
 import { orgMonthToDateSpendUsd, startOfMonthIso } from "./db/usage.js";
 import type { FlowStep, OrgUsageSummary } from "@uniqus/api-types";
 
@@ -16,14 +17,16 @@ const MAX_ORG_NAME = 60;
  * dispatch line; `json`/`readJsonBody` are passed in to reuse server.ts's exact
  * response + body helpers.
  *
- * Access is membership-aware (`members.getProjectRole`) — owner is the implicit
- * `owner`, so existing single-user projects keep working. A handler returns
- * `true` once it has written a response; `false` means "not my route, keep going".
+ * Access is membership-aware (`members.getProjectRole`). Personal-project
+ * owners retain implicit ownership; organization projects derive authority
+ * only from current org/project membership. A handler returns `true` once it
+ * has written a response; `false` means "not my route, keep going".
  */
 
 export interface CollabDeps {
   json: (res: ServerResponse, status: number, body: unknown) => void;
   readJsonBody: <T>(req: IncomingMessage) => Promise<T>;
+  onProjectAuthorizationChanged?: (projectId: string, userId: string) => void | Promise<void>;
 }
 
 interface SessionUser {
@@ -43,6 +46,13 @@ export async function handleCollabRoute(
   const url = (req.url ?? "").split("?")[0];
   const method = req.method ?? "GET";
   const { json, readJsonBody } = deps;
+  const notifyProjectAuthorizationChanged = async (projectId: string, userId: string): Promise<void> => {
+    await deps.onProjectAuthorizationChanged?.(projectId, userId);
+  };
+  const notifyOrgAuthorizationChanged = async (orgId: string, userId: string): Promise<void> => {
+    const projects = await listOrgProjects(orgId);
+    await Promise.all(projects.map((project) => notifyProjectAuthorizationChanged(project.id, userId)));
+  };
 
   // Resolve the caller's project role once; 403 if they need at least `min`.
   const requireProjectRole = async (projectId: string, min: Role): Promise<Role | null> => {
@@ -79,8 +89,13 @@ export async function handleCollabRoute(
       const r = await members.addProjectMemberByEmail(projectId, email, role);
       if (!r.ok) {
         return (
-          json(res, r.reason === "no_user" ? 404 : 500, {
-            error: r.reason === "no_user" ? "no Uniqus account with that email" : r.message ?? "failed",
+          json(res, r.reason === "no_user" ? 404 : r.reason === "exists" ? 409 : 500, {
+            error:
+              r.reason === "no_user"
+                ? "no Uniqus account with that email"
+                : r.reason === "exists"
+                  ? "that account is already a project member; change its role instead"
+                  : r.message ?? "failed",
           }),
           true
         );
@@ -99,6 +114,7 @@ export async function handleCollabRoute(
         return (json(res, 403, { error: `cannot grant a role higher than your own (${callerRole})` }), true);
       }
       await members.setProjectMemberRole(projectId, targetUserId, role);
+      await notifyProjectAuthorizationChanged(projectId, targetUserId);
       void audit({ project_id: projectId, user_id: user.id, kind: "role_change", target: targetUserId, metadata: { role } });
       json(res, 200, { ok: true });
       return true;
@@ -106,6 +122,7 @@ export async function handleCollabRoute(
     if (method === "DELETE" && targetUserId) {
       if (!(await requireProjectRole(projectId, "admin"))) return true;
       await members.removeProjectMember(projectId, targetUserId);
+      await notifyProjectAuthorizationChanged(projectId, targetUserId);
       void audit({ project_id: projectId, user_id: user.id, kind: "member_remove", target: targetUserId, metadata: null });
       json(res, 200, { ok: true });
       return true;
@@ -286,12 +303,21 @@ export async function handleCollabRoute(
       return true;
     }
     if (method === "DELETE") {
-      // Only an owner can dissolve the org. Projects fall back to personal
-      // (projects.org_id is ON DELETE SET NULL), they aren't destroyed.
+      // Only an owner can dissolve the org. The transactional DB function
+      // reassigns its projects to that owner before removing the org.
       if (role !== "owner") {
         return (json(res, role ? 403 : 404, { error: role ? "only an owner can delete the org" : "org not found" }), true);
       }
-      await members.deleteOrganization(orgId);
+      const [orgProjects, orgMembers] = await Promise.all([
+        listOrgProjects(orgId),
+        members.listOrgMembers(orgId),
+      ]);
+      await members.deleteOrganization(orgId, user.id);
+      await Promise.all(
+        orgMembers.flatMap((member) =>
+          orgProjects.map((project) => notifyProjectAuthorizationChanged(project.id, member.user_id)),
+        ),
+      );
       void audit({ project_id: null, user_id: user.id, kind: "org_update", target: orgId, metadata: { deleted: true } });
       json(res, 200, { ok: true });
       return true;
@@ -310,6 +336,7 @@ export async function handleCollabRoute(
       return (json(res, 409, { error: "you're the only owner — promote another owner or delete the org first" }), true);
     }
     await members.removeOrgMember(orgId, user.id);
+    await notifyOrgAuthorizationChanged(orgId, user.id);
     void audit({ project_id: null, user_id: user.id, kind: "member_remove", target: user.id, metadata: { org: orgId, left: true } });
     json(res, 200, { ok: true });
     return true;
@@ -364,7 +391,17 @@ export async function handleCollabRoute(
       }
       const r = await members.addOrgMemberByEmail(orgId, (body.email ?? "").trim(), role);
       if (!r.ok) {
-        return (json(res, r.reason === "no_user" ? 404 : 500, { error: r.reason === "no_user" ? "no Uniqus account with that email" : r.message ?? "failed" }), true);
+        return (
+          json(res, r.reason === "no_user" ? 404 : r.reason === "exists" ? 409 : 500, {
+            error:
+              r.reason === "no_user"
+                ? "no Uniqus account with that email"
+                : r.reason === "exists"
+                  ? "that account is already an organization member; change its role instead"
+                  : r.message ?? "failed",
+          }),
+          true
+        );
       }
       void audit({ project_id: null, user_id: user.id, kind: "member_invite", target: orgId, metadata: { email: body.email, role } });
       json(res, 200, { ok: true });
@@ -383,7 +420,12 @@ export async function handleCollabRoute(
       if (callerRole !== "owner" && (await members.getOrgRole(orgId, targetUserId)) === "owner") {
         return (json(res, 403, { error: "only an owner can change an owner's role" }), true);
       }
+      const targetWasOwner = (await members.getOrgRole(orgId, targetUserId)) === "owner";
+      if (targetWasOwner && role !== "owner" && (await members.countOrgOwners(orgId)) <= 1) {
+        return (json(res, 409, { error: "cannot demote the organization's last owner" }), true);
+      }
       await members.setOrgMemberRole(orgId, targetUserId, role);
+      await notifyOrgAuthorizationChanged(orgId, targetUserId);
       void audit({ project_id: null, user_id: user.id, kind: "role_change", target: targetUserId, metadata: { org: orgId, role } });
       json(res, 200, { ok: true });
       return true;
@@ -395,7 +437,11 @@ export async function handleCollabRoute(
       if (callerRole !== "owner" && (await members.getOrgRole(orgId, targetUserId)) === "owner") {
         return (json(res, 403, { error: "only an owner can remove an owner" }), true);
       }
+      if ((await members.getOrgRole(orgId, targetUserId)) === "owner" && (await members.countOrgOwners(orgId)) <= 1) {
+        return (json(res, 409, { error: "cannot remove the organization's last owner" }), true);
+      }
       await members.removeOrgMember(orgId, targetUserId);
+      await notifyOrgAuthorizationChanged(orgId, targetUserId);
       void audit({ project_id: null, user_id: user.id, kind: "member_remove", target: targetUserId, metadata: { org: orgId } });
       json(res, 200, { ok: true });
       return true;

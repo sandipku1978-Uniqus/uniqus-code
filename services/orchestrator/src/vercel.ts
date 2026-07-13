@@ -59,7 +59,6 @@ function getOauthConfig(): {
   }
   const base = (
     process.env.PUBLIC_BASE_URL ??
-    process.env.PREVIEW_BASE_URL ??
     "http://localhost:8787"
   ).replace(/\/$/, "");
   return { clientId, clientSecret, slug, callback: `${base}/api/vercel/callback` };

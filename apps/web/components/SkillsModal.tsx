@@ -275,10 +275,9 @@ export default function SkillsModal({
               Attach reusable skills
             </div>
             <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 10, lineHeight: 1.5 }}>
-              From your Skills library. Attached skills are injected{" "}
-              <strong style={{ color: "var(--text-primary)", fontWeight: 600 }}>before</strong> this
-              project&apos;s skills file, so they set baselines this file can then refine. Manage them in
-              the Skills tab.
+              From your Skills library. The agent discovers attached skills by their descriptions and loads
+              only the ones relevant to a task. Loaded instructions apply before this project&apos;s always-on
+              skills file, so this file can refine them. Manage reusable skills in the Skills tab.
             </div>
             <div style={{ display: "grid", gap: 6 }}>
               {library.map((sk) => {

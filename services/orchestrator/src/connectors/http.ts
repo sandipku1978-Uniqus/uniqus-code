@@ -1,6 +1,17 @@
 import type { ConnectorDefinition } from "./index.js";
 import { assertPublicUrl, safeFetch } from "./ssrfGuard.js";
 
+export function isAllowedSecretDestination(hostname: string, allowedHosts: readonly string[]): boolean {
+  const normalize = (host: string): string => host.trim().toLowerCase().replace(/\.$/, "");
+  return allowedHosts.map(normalize).includes(normalize(hostname));
+}
+
+export function assertSecureSecretTransport(url: URL): void {
+  if (url.protocol !== "https:") {
+    throw new Error("project secrets may be sent only over HTTPS");
+  }
+}
+
 /**
  * Generic HTTP connector. Lets the agent issue GET/POST/PUT/DELETE against
  * an arbitrary URL with optional secret-resolved bearer/header auth. The
@@ -15,6 +26,7 @@ export const httpConnector: ConnectorDefinition = {
   methods: [
     {
       name: "request",
+      risk: "write",
       description:
         "Make an HTTP request. Use auth_secret to pull a value from project secrets and use it as a bearer/header without exposing it to the agent context.",
       args_schema: {
@@ -37,11 +49,9 @@ export const httpConnector: ConnectorDefinition = {
             enum: ["bearer", "raw"],
             description: "Optional. 'bearer' wraps as 'Bearer <value>' (default); 'raw' sends the value as-is.",
           },
-          allowed_secret_hosts: {
-            type: "array",
-            items: { type: "string" },
-            description:
-              "REQUIRED when auth_secret is set: the exact hostname(s) the secret may be sent to (e.g. ['api.stripe.com']). The request is rejected if the URL host isn't listed, so a secret can't be exfiltrated to an attacker host.",
+          auth_secret_env: {
+            type: "string",
+            description: "Optional environment slot for auth_secret (defaults to 'default').",
           },
           timeout_ms: { type: "number" },
         },
@@ -62,37 +72,35 @@ export const httpConnector: ConnectorDefinition = {
         }
         const usingSecret = typeof args.auth_secret === "string" && args.auth_secret.trim() !== "";
         if (usingSecret) {
-          // Bind the secret to an explicit destination allowlist so it can't be
-          // sent to an agent-chosen attacker host (H-2). The host must match
-          // exactly; redirects aren't followed while a secret is attached (below).
+          assertSecureSecretTransport(parsed);
+          // Bind the secret to the destination allowlist stored by an
+          // owner/admin outside model tool input. The host must match exactly;
+          // redirects aren't followed while a secret is attached (below).
           // Normalize both sides (lower-case + strip a FQDN trailing dot) so a
           // valid send isn't rejected on a cosmetic 'API.Stripe.com' / trailing-
           // dot mismatch — still an equality test, so it never widens the host.
-          const normHost = (h: string): string => h.trim().toLowerCase().replace(/\.$/, "");
-          const allowed = Array.isArray(args.allowed_secret_hosts)
-            ? (args.allowed_secret_hosts as unknown[])
-                .filter((h): h is string => typeof h === "string")
-                .map(normHost)
-            : [];
-          if (allowed.length === 0) {
+          const secret = await ctx.secretWithBinding(
+            String(args.auth_secret).trim(),
+            typeof args.auth_secret_env === "string" ? args.auth_secret_env : undefined,
+          );
+          if (secret.allowedHosts.length === 0) {
             throw new Error(
-              "auth_secret requires allowed_secret_hosts (the hostname[s] the secret may be sent to)",
+              "This secret has no approved HTTP destination. An owner/admin must add an exact allowed host in Project Secrets.",
             );
           }
-          if (!allowed.includes(normHost(parsed.hostname))) {
+          if (!isAllowedSecretDestination(parsed.hostname, secret.allowedHosts)) {
             throw new Error(
-              `refusing to send secret to ${parsed.hostname}: not in allowed_secret_hosts`,
+              `refusing to send secret to ${parsed.hostname}: destination is not approved for this secret`,
             );
           }
-          const value = await ctx.secret(String(args.auth_secret).trim());
           const headerName = typeof args.auth_header === "string" && args.auth_header.trim()
             ? args.auth_header.trim()
             : "Authorization";
           const format = args.auth_format === "raw" ? "raw" : "bearer";
           headers[headerName] =
             format === "bearer" && headerName.toLowerCase() === "authorization"
-              ? `Bearer ${value}`
-              : value;
+              ? `Bearer ${secret.value}`
+              : secret.value;
         }
         let body: string | undefined;
         if (args.body !== undefined && args.body !== null) {

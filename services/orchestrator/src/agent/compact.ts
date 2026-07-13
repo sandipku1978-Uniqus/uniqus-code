@@ -70,6 +70,10 @@ export interface CompactionBudget {
   contextWindowTokens?: number;
   /** Output/reasoning headroom kept outside the input budget. */
   reserveTokens?: number;
+  /** Ignore the automatic threshold (used by the user's manual compact action). */
+  force?: boolean;
+  /** Override how much recent raw history is retained when compaction runs. */
+  keepTokens?: number;
   /** Privacy-safe failure observer; compaction itself remains fail-open. */
   onFailure?: () => void;
   /** Billed internal summarizer usage for run-level cost correlation. */
@@ -157,6 +161,13 @@ export function compactionTriggerTokens(budget: CompactionBudget = {}): number {
 }
 
 export function compactionKeepTokens(budget: CompactionBudget = {}): number {
+  if (
+    budget.keepTokens !== undefined &&
+    Number.isFinite(budget.keepTokens) &&
+    budget.keepTokens > 0
+  ) {
+    return Math.max(1, Math.floor(budget.keepTokens));
+  }
   const trigger = compactionTriggerTokens(budget);
   const fixed = Math.max(0, budget.fixedTokens ?? 0);
   // Leave space for the compacted summary itself and estimation error rather
@@ -391,7 +402,7 @@ export async function maybeCompact(
   budget: CompactionBudget = {},
 ): Promise<CompactionResult | null> {
   const beforeTokens = estimatedRequestTokens(messages, budget);
-  if (beforeTokens < compactionTriggerTokens(budget)) return null;
+  if (!budget.force && beforeTokens < compactionTriggerTokens(budget)) return null;
 
   const splitIdx = findSplitIndex(messages, compactionKeepTokens(budget));
   if (splitIdx <= 0) return null;

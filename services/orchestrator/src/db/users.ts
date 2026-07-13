@@ -630,11 +630,22 @@ export async function listGuestsToDelete(graceDays: number): Promise<string[]> {
 }
 
 /**
- * Hard-delete a user row. ON DELETE CASCADE clears their projects, messages,
- * chat sessions, deployments and audit events. Used by the guest sweeper after
+ * Hard-delete a user row. Personal projects must go first: their owner_id FK is
+ * ON DELETE SET NULL so durable organization projects can survive account
+ * offboarding, while projects_personal_owner_required forbids a personal row
+ * with no owner. Deleting those projects cascades their sessions/messages/etc.;
+ * organization projects remain intact. Used by the guest sweeper after
  * per-project Storage/VM teardown has run.
  */
 export async function deleteUser(id: string): Promise<void> {
+  const { error: projectsError } = await db()
+    .from("projects")
+    .delete()
+    .eq("owner_id", id)
+    .is("org_id", null);
+  if (projectsError) {
+    throw new Error(`deleteUser personal-project cleanup failed: ${projectsError.message}`);
+  }
   const { error } = await db().from("users").delete().eq("id", id);
   if (error) throw new Error(`deleteUser failed: ${error.message}`);
 }

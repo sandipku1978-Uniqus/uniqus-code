@@ -8,6 +8,13 @@ Deploy the latest committed code to the Hetzner production box.
 **Repo path:** `/opt/uniqus-code`
 **Service:** `uniqus-orchestrator` (systemd)
 
+**Blocking database precondition:** `services/orchestrator/src/db/schema.sql` is
+not applied by this deploy. If the commits being deployed change that file or
+start using a new column/function/trigger, stop before SSH and get explicit
+confirmation that the corresponding idempotent SQL has already been run in the
+hosted Supabase SQL editor. Do not restart the orchestrator first and plan to
+apply the schema afterward.
+
 Run **one** SSH command that does the full deploy in a single connection. Use this exact command (it `set -e`s, so any failed step aborts the rest):
 
 ```bash

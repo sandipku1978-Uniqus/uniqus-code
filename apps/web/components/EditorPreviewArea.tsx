@@ -20,7 +20,7 @@ import PreviewPanel from "./PreviewPanel";
 import AgentPreviewPanel from "./AgentPreviewPanel";
 import ActivityMonitor from "./ActivityMonitor";
 
-const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"]);
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico"]);
 
 function isImageFile(filePath: string): boolean {
   const ext = filePath.lastIndexOf(".") >= 0 ? filePath.slice(filePath.lastIndexOf(".")).toLowerCase() : "";

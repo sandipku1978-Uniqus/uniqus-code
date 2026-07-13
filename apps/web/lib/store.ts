@@ -710,6 +710,15 @@ interface State {
     cacheCreation: number;
     model?: string;
   } | null;
+  /** Latest server estimate for the model-facing context and compact boundary. */
+  contextUsage: {
+    estimatedTokens: number;
+    contextWindowTokens: number;
+    compactionTriggerTokens: number;
+    model: string;
+  } | null;
+  /** Manual context compaction progress for the composer ring. */
+  contextCompactionState: "idle" | "queued" | "running";
   /**
    * Element the user picked from the preview (element picker), waiting to be
    * attached to the next turn. Set by PreviewPanel, rendered as a chip and sent
@@ -857,6 +866,15 @@ interface State {
   setLiveUsage(
     usage: { input: number; output: number; cacheRead: number; cacheCreation: number; model?: string } | null,
   ): void;
+  setContextUsage(
+    usage: {
+      estimatedTokens: number;
+      contextWindowTokens: number;
+      compactionTriggerTokens: number;
+      model: string;
+    } | null,
+  ): void;
+  setContextCompactionState(state: "idle" | "queued" | "running"): void;
   /** Upsert one background sub-agent's live status (from `subagent_update`). */
   upsertSubAgent(s: SubAgentLive): void;
   /** Clear all sub-agents (a new turn starts). */
@@ -1020,6 +1038,8 @@ export const useStore = create<State>((set, get) => ({
   todos: [],
   subagents: [],
   liveUsage: null,
+  contextUsage: null,
+  contextCompactionState: "idle",
   pendingSelectedElement: null,
   queuedComposerFiles: [],
   briefFiles: [],
@@ -1410,6 +1430,8 @@ export const useStore = create<State>((set, get) => ({
       ],
     })),
   setLiveUsage: (usage) => set({ liveUsage: usage }),
+  setContextUsage: (usage) => set({ contextUsage: usage }),
+  setContextCompactionState: (state) => set({ contextCompactionState: state }),
   upsertSubAgent: (s) => set((st) => ({ subagents: upsertSubAgentList(st.subagents, s) })),
   clearSubAgents: () => set({ subagents: [] }),
   setPendingSelectedElement: (el) => set({ pendingSelectedElement: el }),
@@ -1625,6 +1647,8 @@ export const useStore = create<State>((set, get) => ({
       expandedTurns: {},
       redeploySuggested: false,
       liveUsage: null,
+      contextUsage: null,
+      contextCompactionState: "idle",
       subagents: [],
       pendingSelectedElement: null,
       queuedComposerFiles: [],
@@ -1668,6 +1692,8 @@ export const useStore = create<State>((set, get) => ({
       todos: [],
       subagents: [],
       liveUsage: null,
+      contextUsage: null,
+      contextCompactionState: "idle",
       pendingSelectedElement: null,
       queuedComposerFiles: [],
       // Clear run state on a project/session switch (C-28/C-30). The old project's

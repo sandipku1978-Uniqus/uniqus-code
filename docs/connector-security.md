@@ -59,7 +59,12 @@ values.**
   `ctx.userId`, not `ctx.secret`), because provisioning a database is an
   account-level action. The keys it produces (service_role key, DB password)
   are still written straight to `project_secrets` and never returned to the
-  agent — only the public URL + anon key come back in the result.
+  agent — only the public URL + anon key come back in the result. Those exact
+  two config names (`SUPABASE_URL`, `SUPABASE_ANON_KEY`) are intentionally
+  excluded from model redaction and routine legacy `.env` cleanup so the agent
+  can wire the client (explicit deletion still removes stale assignments). This
+  is an explicit allowlist, not a `NEXT_PUBLIC_*` convention;
+  service-role/database/password values remain redacted and server-only.
 
 See [`docs/secret-handling.md`](./secret-handling.md) for how the values are
 encrypted at rest and scoped per environment.
@@ -101,10 +106,10 @@ DoS or footgun:
   private, loopback, link-local, CGNAT, multicast, and cloud-metadata
   (`169.254.169.254`) addresses, re-validate every redirect hop, and pin the
   connect-time IP against a fresh re-resolution to close a DNS-rebind window.
-  When `auth_secret` is set, the caller must also pass `allowed_secret_hosts`
-  (the exact hostname(s) the secret may be sent to) and no redirect is
-  followed at all, so a 30x response can't bounce the credential to an
-  attacker-controlled host. Request timeout capped at 60s; the response body
+  When `auth_secret` is set, the destination must match an exact hostname bound
+  to that secret by a project owner/admin in the Secrets pane. The model cannot
+  create or widen this binding. No redirect is followed at all, so a 30x
+  response can't bounce the credential to an attacker-controlled host. Request timeout capped at 60s; the response body
   is truncated to ~32 KB so it can't balloon the agent context.
 - **Slack:** `post_webhook` rejects any URL that isn't a real
   `https://hooks.slack.com/` webhook (a misused secret can't be exfiltrated to

@@ -1,4 +1,5 @@
 import type { PermissionMode, ToolRiskCategory } from "@uniqus/api-types";
+import { connectorMethodRisk } from "../connectors/index.js";
 
 /**
  * Permission gating for the agent loop. Given a tool call and the user's
@@ -39,8 +40,8 @@ const READ_ONLY_TOOLS = new Set<string>([
   "list_flows",
   "list_connectors",
   "list_secrets",
-  "get_secret",
   "knowledge_search",
+  "load_skill",
   "list_assets",
   "read_asset",
   "list_background",
@@ -48,7 +49,6 @@ const READ_ONLY_TOOLS = new Set<string>([
   "todo_write",
   "load_capabilities",
   "screenshot_preview",
-  "interact_preview",
   // Vision bridge (reads an image, asks a vision model) — part of the verify
   // loop; low cost and would be maddening to gate per screenshot.
   "analyze_image",
@@ -80,6 +80,8 @@ const EXECUTE_TOOLS = new Set<string>([
 const ALWAYS_DANGEROUS_TOOLS = new Set<string>([
   "generate_image", // paid image generation
   "spawn_agents", // spins up sub-agent loops — expensive
+  "interact_preview", // can submit forms, click destructive actions, and navigate
+  "run_flow", // replays stored browser mutations
 ]);
 
 /**
@@ -124,11 +126,6 @@ export function isDestructiveCommand(command: string): boolean {
   return DESTRUCTIVE_COMMAND_PATTERNS.some((re) => re.test(command));
 }
 
-/** Connector methods that only read — safe to run without a prompt. */
-function isReadOnlyConnectorMethod(method: string): boolean {
-  return /^(get|list|describe|fetch|read|status|check)[_A-Z]/.test(method) || /^get_/.test(method);
-}
-
 function truncate(s: string, n = 100): string {
   const oneLine = s.replace(/\s+/g, " ").trim();
   return oneLine.length > n ? `${oneLine.slice(0, n - 1)}…` : oneLine;
@@ -157,11 +154,16 @@ export function classifyToolRisk(name: string, input: unknown): ToolRisk {
   if (ALWAYS_DANGEROUS_TOOLS.has(name)) {
     return {
       category: "dangerous",
-      summary:
-        name === "generate_image"
-          ? "Generate an image (paid)"
-          : "Spawn sub-agents (extra model usage)",
-      reason: "This spends additional model/credits — paused for confirmation.",
+      summary: name === "generate_image"
+        ? "Generate an image (paid)"
+        : name === "spawn_agents"
+          ? "Spawn sub-agents (extra model usage)"
+          : name === "run_flow"
+            ? "Replay an interactive browser flow"
+            : "Interact with the live preview",
+      reason: name === "interact_preview" || name === "run_flow"
+        ? "This browser action can submit forms or mutate external state — paused for confirmation."
+        : "This spends additional model/credits — paused for confirmation.",
     };
   }
 
@@ -185,7 +187,7 @@ export function classifyToolRisk(name: string, input: unknown): ToolRisk {
   if (name === "call_connector") {
     const connector = typeof args.connector === "string" ? args.connector : "connector";
     const method = typeof args.method === "string" ? args.method : "";
-    if (method && isReadOnlyConnectorMethod(method)) {
+    if (method && connectorMethodRisk(connector, method) === "read") {
       return { category: "read", summary: `${connector}.${method}`, reason: "read-only" };
     }
     return {
@@ -211,6 +213,25 @@ export function classifyToolRisk(name: string, input: unknown): ToolRisk {
     summary: name.replace(/_/g, " "),
     reason: "Paused for confirmation.",
   };
+}
+
+/**
+ * "Approve for this run" is intentionally scoped to the exact normalized
+ * action. A changed path, command, connector destination, method, or argument
+ * produces a different key and therefore another approval prompt.
+ */
+export function approvalScopeKey(tool: string, input: unknown): string {
+  return `${tool}:${stableJson(input)}`;
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "undefined";
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  return `{${Object.entries(value as Record<string, unknown>)
+    .filter(([, item]) => item !== undefined)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
+    .join(",")}}`;
 }
 
 /**

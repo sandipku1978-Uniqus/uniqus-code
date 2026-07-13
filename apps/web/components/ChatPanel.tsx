@@ -28,6 +28,7 @@ import Modal from "./Modal";
 import TodoList from "./TodoList";
 import SubAgentList from "./SubAgentList";
 import { ErrorBoundary } from "./ErrorBoundary";
+import Tooltip from "./Tooltip";
 
 /**
  * A few short, realistic starter prompts shown on the empty-chat onboarding so
@@ -40,6 +41,92 @@ const EXAMPLE_PROMPTS = [
   "Make a SOX control register: a table of controls with owner, test status, and an audit-ready evidence note.",
   "Create a budget vs. actuals dashboard by department with variance highlights and a month filter.",
 ];
+
+function ContextGauge() {
+  const usage = useStore((s) => s.contextUsage);
+  const state = useStore((s) => s.contextCompactionState);
+  const connected = useStore((s) => s.connected);
+  const setState = useStore((s) => s.setContextCompactionState);
+  const addSystem = useStore((s) => s.addSystem);
+  const compacting = state === "queued" || state === "running";
+  const progress = usage
+    ? Math.min(100, Math.max(0, (usage.estimatedTokens / usage.compactionTriggerTokens) * 100))
+    : 0;
+  const available = Math.max(0, 100 - progress);
+  const modelLabel = usage
+    ? MODEL_CATALOG.find((entry) => entry.model === usage.model)?.label ?? usage.model
+    : "Current model";
+  const label = usage
+    ? `Context is ${Math.round(progress)}% of the automatic compaction threshold. ${Math.round(
+        available,
+      )}% remains. Click to compact older turns now.`
+    : "Context usage is being estimated. Click to compact older turns now.";
+
+  const requestCompaction = (): void => {
+    if (compacting || !connected) return;
+    setState("queued");
+    if (!send({ type: "compact_context" })) {
+      setState("idle");
+      addSystem("Couldn't request context compaction while the workspace is offline.");
+    }
+  };
+
+  return (
+    <Tooltip
+      placement="top"
+      label={
+        <span className="context-gauge-tooltip">
+          <strong>
+            {state === "queued"
+              ? "Compaction queued"
+              : state === "running"
+                ? "Compacting context…"
+                : usage
+                  ? `${Math.round(progress)}% used before compaction`
+                  : "Estimating context usage"}
+          </strong>
+          {usage && (
+            <>
+              <span>
+                {formatTokens(usage.estimatedTokens)} / {formatTokens(usage.compactionTriggerTokens)} tokens
+              </span>
+              <span>{Math.round(available)}% available before automatic compaction</span>
+              <span>
+                {modelLabel} · {formatTokens(usage.contextWindowTokens)} context window
+              </span>
+            </>
+          )}
+          <span className="context-gauge-hint">
+            {compacting
+              ? "Your full transcript stays intact."
+              : "Click to compact older turns now."}
+          </span>
+        </span>
+      }
+    >
+      <button
+        type="button"
+        className={`context-gauge${compacting ? " compacting" : ""}`}
+        data-tone={progress >= 90 ? "danger" : progress >= 70 ? "warn" : "normal"}
+        onClick={requestCompaction}
+        disabled={!connected || compacting}
+        aria-label={label}
+      >
+        <svg viewBox="0 0 22 22" aria-hidden="true">
+          <circle className="context-gauge-track" cx="11" cy="11" r="8" pathLength="100" />
+          <circle
+            className="context-gauge-progress"
+            cx="11"
+            cy="11"
+            r="8"
+            pathLength="100"
+            style={{ strokeDashoffset: 100 - progress }}
+          />
+        </svg>
+      </button>
+    </Tooltip>
+  );
+}
 
 export default function ChatPanel() {
   const chat = useStore((s) => s.chat);
@@ -1328,6 +1415,7 @@ export default function ChatPanel() {
             </div>
             <PermissionModePicker />
             <ModelPicker variant="compact" />
+            <ContextGauge />
             <MicButton
               className="mic-btn"
               disabled={busy || uploading || !project || !connected}
@@ -2494,6 +2582,8 @@ function describeTool(
         verb: v("Searching your knowledge for", "Searched your knowledge for"),
         object: str(a.query) ? `"${str(a.query)}"` : "",
       };
+    case "load_skill":
+      return { verb: v("Loading skill", "Loaded skill"), object: str(a.skill_id), mono: true };
     case "start_server":
       return { verb: v("Starting the app", "Started the app"), object: a.port ? `on :${a.port}` : "" };
     case "stop_server":

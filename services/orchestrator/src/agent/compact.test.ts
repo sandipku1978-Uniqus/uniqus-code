@@ -42,6 +42,7 @@ describe("compaction request accounting", () => {
         fixedTokens: 30_000,
       }),
     ).toBe(42_000);
+    expect(compactionKeepTokens({ keepTokens: 1 })).toBe(1);
   });
 
   it("uses conservative model-family context windows", () => {

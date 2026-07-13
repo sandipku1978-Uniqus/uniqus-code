@@ -25,7 +25,7 @@ export default function Tooltip({
   placement = "bottom",
   children,
 }: {
-  label: string;
+  label: ReactNode;
   placement?: "top" | "bottom" | "left" | "right";
   children: ReactNode;
 }) {

@@ -22,8 +22,9 @@ export {
 export { FirecrackerClient, spawnFirecracker } from "./client.js";
 export type { VmHandle } from "./types.js";
 
+import { firecrackerModeConfigured } from "../sandboxMode.js";
+
 /** Whether the orchestrator should boot Firecracker VMs for project sandboxes. */
 export function isFirecrackerEnabled(): boolean {
-  const v = (process.env.UNIQUS_SANDBOX ?? "").toLowerCase().trim();
-  return v === "firecracker" || v === "fc";
+  return firecrackerModeConfigured();
 }

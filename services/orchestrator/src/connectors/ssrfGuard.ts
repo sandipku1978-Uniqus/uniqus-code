@@ -115,16 +115,21 @@ export function isBlockedIp(ip: string): boolean {
   return false;
 }
 
-/** Throw unless `hostname` (or every IP it resolves to) is publicly routable. */
-export async function assertPublicHost(hostname: string): Promise<void> {
+export interface ResolvedPublicAddress {
+  address: string;
+  family: number;
+}
+
+/** Resolve once and return only addresses proven publicly routable. */
+export async function resolvePublicHost(hostname: string): Promise<ResolvedPublicAddress[]> {
   const host = hostname.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
   if (net.isIP(host)) {
     if (isBlockedIp(host)) throw new Error(`blocked address: ${host}`);
-    return;
+    return [{ address: host, family: net.isIP(host) }];
   }
-  let results: { address: string }[];
+  let results: ResolvedPublicAddress[];
   try {
-    results = await lookup(host, { all: true });
+    results = await lookup(host, { all: true, verbatim: true });
   } catch {
     throw new Error(`could not resolve host: ${host}`);
   }
@@ -134,6 +139,12 @@ export async function assertPublicHost(hostname: string): Promise<void> {
       throw new Error(`host ${host} resolves to a blocked address (${r.address})`);
     }
   }
+  return results;
+}
+
+/** Throw unless `hostname` (or every IP it resolves to) is publicly routable. */
+export async function assertPublicHost(hostname: string): Promise<void> {
+  await resolvePublicHost(hostname);
 }
 
 /** Parse + validate an outbound URL. Returns the parsed URL on success. */
@@ -182,18 +193,8 @@ function pinningLookup(
   options: { family?: number },
   callback: (err: Error | null, address?: string, family?: number) => void,
 ): void {
-  lookup(hostname, { all: true, verbatim: true })
+  resolvePublicHost(hostname)
     .then((addrs) => {
-      if (!addrs.length) {
-        callback(new Error(`could not resolve host: ${hostname}`));
-        return;
-      }
-      for (const a of addrs) {
-        if (isBlockedIp(a.address)) {
-          callback(new Error(`host ${hostname} resolves to a blocked address (${a.address})`));
-          return;
-        }
-      }
       const wantFamily = options?.family;
       if (wantFamily) {
         // Honor the dns.lookup contract: when a specific family is requested and
@@ -209,7 +210,9 @@ function pinningLookup(
       }
       callback(null, addrs[0].address, addrs[0].family);
     })
-    .catch(() => callback(new Error(`could not resolve host: ${hostname}`)));
+    .catch((err) =>
+      callback(err instanceof Error ? err : new Error(`could not resolve host: ${hostname}`)),
+    );
 }
 
 /** Shared dispatcher that validates + pins the connect-time IP for every request. */

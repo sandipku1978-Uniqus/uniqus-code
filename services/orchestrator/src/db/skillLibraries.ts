@@ -1,12 +1,13 @@
 import { db } from "./client.js";
 import type { SkillLibrary } from "@uniqus/api-types";
+import type { AttachedLibrarySkill } from "../agent/skills.js";
 
 /**
  * Global, per-user Skill libraries. Each row is a reusable markdown rule-set the
  * user authors once and attaches to many projects (via projects.skill_library_ids).
- * The attached bodies are injected into the agent system prompt before the
- * project's own .uniqus/skills.md. All reads/writes are user-scoped — a user can
- * only see and edit their own skills. Mirrors db/designSystems.ts.
+ * Attached metadata is advertised to the agent; matching bodies are loaded on
+ * demand before the project's own .uniqus/skills.md. All reads/writes are
+ * user-scoped — a user can only see and edit their own skills.
  */
 
 const COLS = "id, name, description, body, created_at, updated_at";
@@ -100,22 +101,29 @@ export async function deleteSkillLibrary(userId: string, id: string): Promise<vo
 export async function getAttachedSkillBodies(
   userId: string | null,
   ids: string[] | null | undefined,
-): Promise<{ name: string; body: string }[]> {
+): Promise<AttachedLibrarySkill[]> {
   if (!userId || !ids || ids.length === 0) return [];
   const { data, error } = await db()
     .from("skill_libraries")
-    .select("id, name, body")
+    .select("id, name, description, body")
     .eq("user_id", userId)
     .in("id", ids);
   if (error) throw new Error(`getAttachedSkillBodies failed: ${error.message}`);
-  const byId = new Map<string, { name: string; body: string }>();
+  const byId = new Map<string, AttachedLibrarySkill>();
   for (const r of data ?? []) {
     const row = r as Record<string, unknown>;
     const body = ((row.body as string | null) ?? "").trim();
-    if (body) byId.set(row.id as string, { name: (row.name as string) ?? "Skill", body });
+    if (body) {
+      byId.set(row.id as string, {
+        id: row.id as string,
+        name: (row.name as string) ?? "Skill",
+        description: (row.description as string | null) ?? null,
+        body,
+      });
+    }
   }
   // Preserve the project's attach order; drop ids that didn't resolve.
-  return ids.map((id) => byId.get(id)).filter((x): x is { name: string; body: string } => !!x);
+  return ids.map((id) => byId.get(id)).filter((x): x is AttachedLibrarySkill => !!x);
 }
 
 /**

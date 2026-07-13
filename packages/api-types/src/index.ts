@@ -638,6 +638,8 @@ export type ClientEvent =
   | { type: "request_tree" }
   | { type: "request_file"; path: string }
   | { type: "reset_session" }
+  /** Summarize older model-facing history now, without deleting the raw transcript. */
+  | { type: "compact_context" }
   | { type: "abort" }
   | { type: "client_write_file"; path: string; content: string }
   | { type: "user_question_answered"; call_id: string; answer: string };
@@ -716,9 +718,10 @@ export interface DiscoveredComponent {
 
 /**
  * Structured component specs so a design system constrains not just color/type
- * but the SHAPE of common UI: buttons, inputs, cards, badges. The coding agent
- * generates components against these; the web preview renders them. Color-ish
- * fields accept a palette token name or a raw CSS color (see ButtonVariantSpec).
+ * but the SHAPE and behavior of common UI: controls, navigation, tables,
+ * overlays, and feedback. The coding agent generates components against these;
+ * the web preview renders the core visual set. Color-ish fields accept a palette
+ * token name or a raw CSS color (see ButtonVariantSpec).
  */
 export interface DesignComponentTokens {
   button?: {
@@ -746,9 +749,80 @@ export interface DesignComponentTokens {
     /** "soft" = tinted bg, "solid" = filled, "outline" = bordered. */
     variant?: "soft" | "solid" | "outline";
   };
+  navigation?: {
+    height?: string;
+    active?: string;
+    responsive?: string;
+  };
+  table?: {
+    rowHeight?: string;
+    header?: string;
+    numeric?: string;
+    responsive?: string;
+  };
+  overlay?: {
+    radius?: string;
+    shadow?: string;
+    behavior?: string;
+  };
+  feedback?: {
+    status?: string;
+    empty?: string;
+    loading?: string;
+    toast?: string;
+  };
+  /** Open-ended named component rules, e.g. composer, chart, command-bar. */
+  rules?: Record<string, string>;
   /** Open catalog of real components discovered from the source (renders in the
    *  preview; the user approves which to keep; injected into the agent prompt). */
   catalog?: DiscoveredComponent[];
+}
+
+/** Structured visual foundations shared by every component and screen. */
+export interface DesignFoundationTokens {
+  typography?: {
+    sizes?: Record<string, string>;
+    lineHeights?: Record<string, string>;
+    weights?: Record<string, string>;
+    measures?: Record<string, string>;
+  };
+  spacingScale?: Record<string, string>;
+  radii?: Record<string, string>;
+  elevations?: Record<string, string>;
+  layout?: {
+    breakpoints?: Record<string, string>;
+    containers?: Record<string, string>;
+    grid?: string;
+  };
+  motion?: {
+    durations?: Record<string, string>;
+    easings?: Record<string, string>;
+    reducedMotion?: string;
+  };
+  iconography?: string;
+  imagery?: string;
+}
+
+/** Cross-component composition and responsive patterns. */
+export interface DesignPatternTokens {
+  responsive?: string;
+  navigation?: string;
+  forms?: string;
+  tables?: string;
+  overlays?: string;
+  dataVisualization?: string;
+  states?: string;
+}
+
+/** Interaction, accessibility, content, and recovery behavior. */
+export interface DesignBehaviorTokens {
+  interaction?: string;
+  focus?: string;
+  validation?: string;
+  loading?: string;
+  destructiveActions?: string;
+  accessibility?: string;
+  content?: string;
 }
 
 export interface DesignTokens {
@@ -766,6 +840,12 @@ export interface DesignTokens {
   spacing?: string;
   /** Component-level specs so generated UIs stay on-system (buttons, inputs, …). */
   components?: DesignComponentTokens;
+  /** Structured scales, layout rails, motion, iconography, and imagery. */
+  foundations?: DesignFoundationTokens;
+  /** Reusable responsive/composition patterns spanning several components. */
+  patterns?: DesignPatternTokens;
+  /** Interaction, state, content, accessibility, and recovery requirements. */
+  behavior?: DesignBehaviorTokens;
   /** Brand assets pulled from the source, e.g. a logo image URL. */
   assets?: { logo?: string };
   /** Freeform guidance the agent should follow (voice, density, motion, etc.). */
@@ -785,8 +865,10 @@ export interface DesignSystem {
  * once and ATTACHES to any number of projects. Distinct from the per-project
  * `.uniqus/skills.md` file (which stays the project-specific override layer) and
  * from the code-defined curated `SKILL_PACKS`. At each turn, every attached
- * library skill's `body` is injected into the agent system prompt BEFORE the
- * project's own skills.md, so the project file can still override/extend it.
+ * the skill's name + description are advertised to the agent. Its `body` is
+ * loaded on demand when the task matches, before the project's own skills.md,
+ * so the project file can still override/extend it without every skill body
+ * consuming every turn's context.
  */
 export interface SkillLibrary {
   id: string;
@@ -796,6 +878,19 @@ export interface SkillLibrary {
   body: string;
   created_at: string;
   updated_at: string;
+}
+
+/** Canonical explicit-invocation handle shown in the UI and agent catalog. */
+export function skillInvocationName(name: string): string {
+  const normalized = name
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64)
+    .replace(/-+$/g, "");
+  return normalized || "skill";
 }
 
 /** Lightweight row for list views (no body). */
@@ -896,6 +991,69 @@ export const DEFAULT_DESIGN_TOKENS: DesignTokens = {
     input: { radius: "8px", background: "background", border: "border" },
     card: { radius: "12px", background: "surface", border: "border", shadow: "0 1px 2px rgba(0,0,0,0.06)", padding: "16px" },
     badge: { radius: "999px", variant: "soft" },
+    navigation: {
+      height: "56px",
+      active: "accent text plus a quiet tinted background; never color-only",
+      responsive: "collapse into a labeled mobile menu without hiding the primary action",
+    },
+    table: {
+      rowHeight: "40px",
+      header: "sticky when the table scrolls; concise labels with visible sort state",
+      numeric: "right-aligned tabular numerals with units",
+      responsive: "preserve row meaning; scroll the table region or transform rows deliberately",
+    },
+    overlay: {
+      radius: "12px",
+      shadow: "0 8px 24px rgba(0,0,0,0.12)",
+      behavior: "trap focus, close on Escape, restore focus to the trigger",
+    },
+    feedback: {
+      status: "pair semantic color with text or an icon",
+      empty: "explain the state and offer one clear next action",
+      loading: "skeletons match final geometry; announce long async work",
+      toast: "brief, dismissible, and announced without stealing focus",
+    },
+  },
+  foundations: {
+    typography: {
+      sizes: { display: "3rem", h1: "2.25rem", h2: "1.5rem", body: "1rem", small: "0.875rem" },
+      lineHeights: { tight: "1.1", heading: "1.25", body: "1.6" },
+      weights: { regular: "400", medium: "500", semibold: "600" },
+      measures: { body: "68ch", narrow: "48ch" },
+    },
+    spacingScale: { xs: "4px", sm: "8px", md: "16px", lg: "24px", xl: "32px", section: "96px" },
+    radii: { sm: "4px", md: "8px", lg: "12px", full: "9999px" },
+    elevations: { raised: "0 1px 2px rgba(0,0,0,0.06)", overlay: "0 8px 24px rgba(0,0,0,0.12)" },
+    layout: {
+      breakpoints: { narrow: "360px", medium: "768px", wide: "1024px", max: "1440px" },
+      containers: { content: "72rem", reading: "68ch" },
+      grid: "12 columns on wide screens; collapse by content priority, not by equal fractions",
+    },
+    motion: {
+      durations: { fast: "120ms", base: "200ms", slow: "300ms" },
+      easings: { out: "cubic-bezier(0.22, 1, 0.36, 1)", inOut: "cubic-bezier(0.65, 0, 0.35, 1)" },
+      reducedMotion: "remove travel and looping motion while preserving state changes",
+    },
+    iconography: "one coherent icon family and stroke weight; labels for unfamiliar actions",
+    imagery: "use product-relevant assets or deliberate generated visuals; never placeholder rectangles",
+  },
+  patterns: {
+    responsive: "define what stacks, collapses, scrolls, pins, hides, or reorders at narrow, intermediate, and wide widths",
+    navigation: "keep location, primary destination, and account access understandable at every width",
+    forms: "visible labels, inline help and validation, preserved values on error, one clear submit path",
+    tables: "optimize scanning; preserve headers and row identity; provide a deliberate narrow-screen treatment",
+    overlays: "use dialogs for blocking decisions and side panels/sheets for contextual work; avoid nested modals",
+    dataVisualization: "every chart answers a decision; include units, legends, accessible summaries, and underlying data when needed",
+    states: "design loading, empty, error, disabled, success, and partial-data states alongside the default state",
+  },
+  behavior: {
+    interaction: "every interactive element has hover where relevant, press, focus, disabled, and pending behavior",
+    focus: "logical keyboard order, visible focus, managed overlays, and restored focus after dismissal",
+    validation: "validate on blur or submit; explain what happened and how to fix it; focus an error summary after failed submit",
+    loading: "preserve layout, prevent duplicate actions, and communicate progress for work longer than a moment",
+    destructiveActions: "prefer undo for reversible actions; confirm irreversible actions with specific consequences",
+    accessibility: "WCAG 2.2 AA contrast, semantic controls, accessible names, keyboard operation, reduced motion, and 200% zoom/reflow",
+    content: "real concise copy in the product voice; labels describe outcomes rather than implementation",
   },
   notes: "",
 };
@@ -1213,6 +1371,20 @@ export type ServerEvent =
       after_tokens: number;
     }
   | {
+      /** Current estimated model request size and the automatic-compaction boundary. */
+      type: "context_usage";
+      estimated_tokens: number;
+      context_window_tokens: number;
+      compaction_trigger_tokens: number;
+      model: string;
+    }
+  | {
+      /** Progress/outcome for a user-requested context compaction. */
+      type: "context_compaction_state";
+      state: "queued" | "running" | "idle";
+      outcome?: "compacted" | "nothing_to_compact" | "failed";
+    }
+  | {
       /**
        * Agent invoked the `todo_write` tool. UI rerenders the Tasks pane.
        * Stored per-project on the orchestrator; survives across turns.
@@ -1227,6 +1399,12 @@ export type ServerEvent =
       short_sha: string;
       message: string;
       created_at: string;
+    }
+  | {
+      /** Private, per-run bearer used only to reattach after a socket refresh. */
+      type: "run_capability";
+      session_id: string;
+      capability: string;
     }
   | {
       /**
@@ -1483,7 +1661,7 @@ export function roleAtLeast(role: Role | null | undefined, min: Role): boolean {
 export interface Organization {
   id: string;
   name: string;
-  owner_id: string;
+  owner_id: string | null;
   monthly_budget_usd: number | null;
   created_at: string;
   updated_at: string;

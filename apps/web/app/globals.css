@@ -1188,13 +1188,122 @@ select.sort-select { width: auto; flex: none; }
 
 /* ── Dashboard usage widgets ─────────────────────────────────────────────── */
 .usage-widgets { margin-top: 8px; }
+.usage-calendar-card {
+  margin-bottom: 14px;
+  padding: 16px 18px 14px;
+  overflow: hidden;
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg, 12px);
+}
+.usage-calendar-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 14px;
+}
+.usage-calendar-head > div { min-width: 0; }
+.usage-calendar-title {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text-primary);
+  font-size: var(--fs-base);
+  font-weight: 600;
+}
+.usage-calendar-summary,
+.usage-calendar-range {
+  color: var(--text-muted);
+  font-family: var(--font-mono-stack);
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+}
+.usage-calendar-range { flex: none; }
+.usage-calendar-scroll {
+  overflow-x: auto;
+  padding-bottom: 5px;
+  scrollbar-width: thin;
+}
+.usage-calendar-layout {
+  --usage-cell: 11px;
+  --usage-gap: 3px;
+  display: grid;
+  grid-template-columns: 28px max-content;
+  grid-template-rows: 16px auto;
+  gap: 4px 8px;
+  min-width: max-content;
+}
+.usage-calendar-months {
+  grid-column: 2;
+  display: grid;
+  grid-template-columns: repeat(53, var(--usage-cell));
+  column-gap: var(--usage-gap);
+  color: var(--text-dim);
+  font-family: var(--font-mono-stack);
+  font-size: var(--fs-2xs);
+}
+.usage-calendar-months span { white-space: nowrap; }
+.usage-calendar-weekdays {
+  grid-row: 2;
+  display: grid;
+  grid-template-rows: repeat(7, var(--usage-cell));
+  row-gap: var(--usage-gap);
+  color: var(--text-dim);
+  font-family: var(--font-mono-stack);
+  font-size: var(--fs-2xs);
+  line-height: var(--usage-cell);
+}
+.usage-calendar-grid {
+  grid-column: 2;
+  grid-row: 2;
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(7, var(--usage-cell));
+  grid-template-columns: repeat(53, var(--usage-cell));
+  gap: var(--usage-gap);
+}
+.usage-calendar-cell {
+  display: block;
+  width: var(--usage-cell, 11px);
+  height: var(--usage-cell, 11px);
+  background: var(--bg-surface-active);
+  border: 1px solid color-mix(in srgb, var(--border-default) 72%, transparent);
+  border-radius: 2px;
+}
+.usage-calendar-cell.level-1 {
+  background: color-mix(in srgb, var(--brand-purple) 58%, var(--bg-surface-active));
+}
+.usage-calendar-cell.level-2 {
+  background: color-mix(in srgb, var(--brand-magenta) 42%, var(--brand-purple));
+}
+.usage-calendar-cell.level-3 {
+  background: color-mix(in srgb, var(--brand-magenta) 72%, var(--brand-purple));
+}
+.usage-calendar-cell.level-4 { background: var(--brand-magenta); }
+.usage-calendar-cell.future { visibility: hidden; }
+.usage-calendar-legend {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-top: 7px;
+  color: var(--text-dim);
+  font-family: var(--font-mono-stack);
+  font-size: var(--fs-2xs);
+}
+.usage-calendar-legend .usage-calendar-cell { margin-inline: 1px; }
 .usage-stat-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 14px;
 }
 @media (max-width: 1100px) { .usage-stat-grid { grid-template-columns: repeat(2, 1fr); } }
-@media (max-width: 560px)  { .usage-stat-grid { grid-template-columns: 1fr; } }
+@media (max-width: 560px)  {
+  .usage-calendar-card { padding-inline: 14px; }
+  .usage-calendar-head { align-items: flex-start; }
+  .usage-calendar-range { display: none; }
+  .usage-stat-grid { grid-template-columns: 1fr; }
+}
 
 .stat-card {
   display: flex;
@@ -2775,6 +2884,80 @@ select.sort-select { width: auto; flex: none; }
   background: var(--brand-gradient);
 }
 .composer .mic-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Circle-only context gauge. The ring fills toward the real automatic
+   compaction threshold; all explanatory copy lives in its hover/focus tooltip. */
+.composer .context-gauge {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--brand-magenta);
+  cursor: pointer;
+  transition: background var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out);
+}
+.composer .context-gauge:hover:not(:disabled) {
+  background: var(--bg-surface-hover);
+  transform: translateY(-1px);
+}
+.composer .context-gauge:focus-visible {
+  outline: 2px solid var(--brand-magenta);
+  outline-offset: 2px;
+}
+.composer .context-gauge:disabled { cursor: default; }
+.composer .context-gauge svg {
+  width: 22px;
+  height: 22px;
+  overflow: visible;
+}
+.context-gauge-track,
+.context-gauge-progress {
+  fill: none;
+  stroke-width: 2.4;
+}
+.context-gauge-track { stroke: var(--border-default); }
+.context-gauge-progress {
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-dasharray: 100;
+  transform: rotate(-90deg);
+  transform-origin: center;
+  transition: stroke-dashoffset var(--dur-base) var(--ease-out);
+}
+.context-gauge[data-tone="warn"] { color: var(--conf-medium); }
+.context-gauge[data-tone="danger"] { color: var(--conf-low); }
+.context-gauge.compacting .context-gauge-progress { stroke-dasharray: 24 76; }
+.context-gauge.compacting svg { animation: context-gauge-spin 900ms linear infinite; }
+@keyframes context-gauge-spin { to { transform: rotate(360deg); } }
+
+.context-gauge-tooltip {
+  display: grid;
+  gap: 3px;
+  width: 248px;
+  white-space: normal;
+  font-family: var(--font-mono-stack);
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+}
+.context-gauge-tooltip strong {
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+.context-gauge-tooltip > span { color: var(--text-muted); }
+.context-gauge-tooltip .context-gauge-hint {
+  margin-top: 3px;
+  color: var(--text-dim);
+}
+@media (prefers-reduced-motion: reduce) {
+  .context-gauge.compacting svg { animation: none; }
+}
 
 /* Circular gradient send button, matching the landing-page composer (.hp-send). */
 .composer .send-btn {
@@ -5993,6 +6176,22 @@ select.sort-select { width: auto; flex: none; }
 }
 .skill-body-input:focus { outline: none; border-color: var(--brand-magenta); }
 .skill-body-input::placeholder { color: var(--text-muted); }
+.skill-invocation-hint {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  line-height: 1.4;
+}
+.skill-invocation-hint code {
+  overflow: hidden;
+  color: var(--text-primary);
+  font: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* ── Databases tab (Supabase explorer) ────────────────────────────────────
    Tiles reuse the project-card language; these rules cover the inspector
@@ -9735,7 +9934,8 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .am-section-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 .am-section-title {
@@ -9749,10 +9949,38 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
+.am-turn-picker {
+  flex: 1 1 210px;
+  min-width: 0;
+  max-width: 420px;
+  margin-left: auto;
+  padding: 5px 26px 5px 8px;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono-stack);
+  font-size: var(--fs-2xs);
+  line-height: 1.3;
+  cursor: pointer;
+}
+.am-turn-picker:hover { border-color: var(--border-strong); }
+.am-turn-picker:focus-visible {
+  outline: 2px solid var(--brand-magenta);
+  outline-offset: 2px;
+}
 .am-diff-feed {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+.am-diff-empty {
+  padding: 11px 12px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
 }
 .am-diff-card {
   border: 1px solid var(--border-default);

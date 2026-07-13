@@ -11,7 +11,7 @@ import type { AgentTask, AgentTaskStatus } from "@uniqus/api-types";
 export interface CreateAgentTaskInput {
   projectId: string;
   orgId?: string | null;
-  createdBy: string | null;
+  createdBy: string;
   title: string;
   prompt: string;
   branch?: string | null;
@@ -68,6 +68,20 @@ export async function updateAgentTask(
 ): Promise<void> {
   const { error } = await db().from("agent_tasks").update(patch).eq("id", id);
   if (error) throw new Error(`updateAgentTask failed: ${error.message}`);
+}
+
+/** Revoke queued/running work created by a user who lost project access. */
+export async function cancelTasksForUserInProject(
+  projectId: string,
+  userId: string,
+): Promise<void> {
+  const { error } = await db()
+    .from("agent_tasks")
+    .update({ status: "canceled", error: "project access revoked" })
+    .eq("project_id", projectId)
+    .eq("created_by", userId)
+    .in("status", ["queued", "running"]);
+  if (error) throw new Error(`cancelTasksForUserInProject failed: ${error.message}`);
 }
 
 /** Claim the oldest queued task atomically-ish (best-effort; single worker). */

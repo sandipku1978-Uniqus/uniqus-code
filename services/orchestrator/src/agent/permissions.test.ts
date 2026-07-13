@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   classifyToolRisk,
+  approvalScopeKey,
   decidePermission,
   isDestructiveCommand,
   type RiskCategory,
@@ -17,7 +18,6 @@ describe("classifyToolRisk", () => {
       "grep",
       "list_servers",
       "screenshot_preview",
-      "interact_preview",
       "analyze_image",
       "knowledge_search",
       "ask_user",
@@ -50,6 +50,8 @@ describe("classifyToolRisk", () => {
   it("treats paid / expensive tools as dangerous", () => {
     expect(cat("generate_image", { prompt: "a logo" })).toBe("dangerous");
     expect(cat("spawn_agents", {})).toBe("dangerous");
+    expect(cat("interact_preview", { actions: [{ type: "click", selector: "#delete" }] })).toBe("dangerous");
+    expect(cat("run_flow", { name: "checkout" })).toBe("dangerous");
   });
 
   it("gates connector writes but lets connector reads through", () => {
@@ -58,11 +60,38 @@ describe("classifyToolRisk", () => {
       "dangerous",
     );
     expect(cat("call_connector", { connector: "supabase", method: "get_schema" })).toBe("read");
-    expect(cat("call_connector", { connector: "supabase", method: "list_tables" })).toBe("read");
+    expect(cat("call_connector", { connector: "supabase", method: "list_projects" })).toBe("read");
+    expect(cat("call_connector", { connector: "supabase", method: "list_tables" })).toBe("dangerous");
   });
 
   it("gates an unknown future tool rather than letting it slip through", () => {
     expect(cat("some_new_tool", {})).toBe("execute");
+  });
+});
+
+describe("approvalScopeKey", () => {
+  it("is stable across object key order", () => {
+    expect(approvalScopeKey("call_connector", { method: "run_sql", connector: "supabase" })).toBe(
+      approvalScopeKey("call_connector", { connector: "supabase", method: "run_sql" }),
+    );
+  });
+
+  it("changes for any argument, resource, or destination change", () => {
+    const base = approvalScopeKey("call_connector", {
+      connector: "http",
+      method: "request",
+      args: { url: "https://api.example.com/a", body: { amount: 1 } },
+    });
+    expect(approvalScopeKey("call_connector", {
+      connector: "http",
+      method: "request",
+      args: { url: "https://api.example.com/b", body: { amount: 1 } },
+    })).not.toBe(base);
+    expect(approvalScopeKey("call_connector", {
+      connector: "http",
+      method: "request",
+      args: { url: "https://api.example.com/a", body: { amount: 2 } },
+    })).not.toBe(base);
   });
 });
 

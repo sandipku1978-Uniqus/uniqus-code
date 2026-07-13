@@ -1,11 +1,11 @@
 import { db } from "./client.js";
 import type { DeploymentState } from "./deployments.js";
 import { roleAtLeast, type ProjectSkillsTrust, type Role } from "@uniqus/api-types";
-import { getProjectRole, listSharedProjectIds } from "./members.js";
+import { getOrgRole, getProjectRole, listSharedProjectIds } from "./members.js";
 
 export interface ProjectRecord {
   id: string;
-  owner_id: string;
+  owner_id: string | null;
   name: string;
   description: string | null;
   icon: string | null;
@@ -33,6 +33,11 @@ export interface ProjectRecord {
   supabase_project_ref?: string | null;
   /** Organization (workspace) the project lives in. Null = the owner's personal workspace. */
   org_id?: string | null;
+}
+
+async function assertProjectRole(id: string, userId: string, minimum: Role): Promise<void> {
+  const role = await getProjectRole(id, userId);
+  if (!roleAtLeast(role, minimum)) throw new Error("project access denied");
 }
 
 /**
@@ -71,6 +76,7 @@ export async function listProjects(ownerId: string): Promise<ProjectRecord[]> {
     .from("projects")
     .select("*, deployments(state, created_at)")
     .eq("owner_id", ownerId)
+    .is("org_id", null)
     .order("updated_at", { ascending: false });
   if (error) throw new Error(`listProjects failed: ${error.message}`);
   return (data ?? []).map((row) =>
@@ -173,11 +179,15 @@ export async function setProjectOrg(
   ownerId: string,
   orgId: string | null,
 ): Promise<void> {
+  await assertProjectRole(id, ownerId, "owner");
+  if (orgId) {
+    const targetRole = await getOrgRole(orgId, ownerId);
+    if (!roleAtLeast(targetRole, "admin")) throw new Error("target organization admin access required");
+  }
   const { error } = await db()
     .from("projects")
-    .update({ org_id: orgId })
-    .eq("id", id)
-    .eq("owner_id", ownerId);
+    .update(orgId ? { org_id: orgId } : { org_id: null, owner_id: ownerId })
+    .eq("id", id);
   if (error) throw new Error(`setProjectOrg failed: ${error.message}`);
 }
 
@@ -187,11 +197,11 @@ export async function setProjectDesignSystem(
   ownerId: string,
   designSystemId: string | null,
 ): Promise<void> {
+  await assertProjectRole(id, ownerId, "admin");
   const { error } = await db()
     .from("projects")
     .update({ design_system_id: designSystemId })
-    .eq("id", id)
-    .eq("owner_id", ownerId);
+    .eq("id", id);
   if (error) throw new Error(`setProjectDesignSystem failed: ${error.message}`);
 }
 
@@ -201,11 +211,11 @@ export async function setProjectSkillLibraries(
   ownerId: string,
   skillIds: string[],
 ): Promise<void> {
+  await assertProjectRole(id, ownerId, "admin");
   const { error } = await db()
     .from("projects")
     .update({ skill_library_ids: skillIds })
-    .eq("id", id)
-    .eq("owner_id", ownerId);
+    .eq("id", id);
   if (error) throw new Error(`setProjectSkillLibraries failed: ${error.message}`);
 }
 
@@ -230,6 +240,7 @@ export async function getProject(
     .select("*, deployments(state, created_at)")
     .eq("id", id)
     .eq("owner_id", ownerId)
+    .is("org_id", null)
     .maybeSingle();
   if (error) throw new Error(`getProject failed: ${error.message}`);
   if (!data) return null;
@@ -256,28 +267,22 @@ export async function getProjectById(id: string): Promise<ProjectRecord | null> 
  * Membership-aware project read for the HTTP/WS layer (P3.2 collaboration).
  *
  * Returns the project iff the acting user holds at least `minRole` on it — the
- * owner is the implicit `owner`; shared access comes from `project_members` /
+ * a personal owner is implicit; shared access comes from `project_members` /
  * org membership via getProjectRole. `minRole` defaults to `"owner"`, so a bare
  * call is identical to owner-only getProject and any route that doesn't opt into
  * a lower role stays owner-only (fail-safe: a missed route is under-permissive,
  * never an escalation).
  *
- * Owner fast-path: the owner-scoped getProject runs first (one round-trip,
- * unchanged hot path); the membership lookup only happens for a non-owner on a
- * route that actually allows members.
+ * Authorization always resolves the effective role first. This is load-bearing
+ * for org projects, where the historical creator column is not authority.
  */
 export async function getProjectForUser(
   id: string,
   userId: string,
   minRole: Role = "owner",
 ): Promise<ProjectRecord | null> {
-  const owned = await getProject(id, userId);
-  if (owned) return owned;
-  // Not the owner. Owner-only routes deny without a membership lookup.
-  if (minRole === "owner") return null;
   const role = await getProjectRole(id, userId);
   if (!roleAtLeast(role, minRole)) return null;
-  // Authorized as a shared member: fetch the row by id (not owner-scoped).
   return getProjectById(id);
 }
 
@@ -299,6 +304,7 @@ export async function updateProject(
   ownerId: string,
   patch: { name?: string; description?: string | null; icon?: string | null },
 ): Promise<ProjectRecord> {
+  await assertProjectRole(id, ownerId, "admin");
   const update: Record<string, unknown> = {};
   if (patch.name !== undefined) update.name = patch.name;
   if (patch.description !== undefined) update.description = patch.description;
@@ -310,7 +316,6 @@ export async function updateProject(
     .from("projects")
     .update(update)
     .eq("id", id)
-    .eq("owner_id", ownerId)
     .select("*")
     .single();
   if (error || !data) throw new Error(`updateProject failed: ${error?.message}`);
@@ -326,11 +331,11 @@ export async function updateProject(
  * any messages that may have been seeded for the doomed project.
  */
 export async function deleteProject(id: string, ownerId: string): Promise<void> {
+  await assertProjectRole(id, ownerId, "owner");
   const { error } = await db()
     .from("projects")
     .delete()
-    .eq("id", id)
-    .eq("owner_id", ownerId);
+    .eq("id", id);
   if (error) throw new Error(`deleteProject failed: ${error.message}`);
 }
 
@@ -345,14 +350,14 @@ export async function setGithubRepo(
   url: string,
   fullName: string,
 ): Promise<void> {
+  await assertProjectRole(id, ownerId, "admin");
   const { error } = await db()
     .from("projects")
     .update({
       github_repo_url: url,
       github_repo_full_name: fullName,
     })
-    .eq("id", id)
-    .eq("owner_id", ownerId);
+    .eq("id", id);
   if (error) throw new Error(`setGithubRepo failed: ${error.message}`);
 }
 
@@ -366,17 +371,19 @@ export async function setProjectGitMeta(
   ownerId: string,
   meta: { branch?: string | null; remoteUrl?: string | null },
 ): Promise<void> {
+  await assertProjectRole(id, ownerId, "editor");
   const patch: Record<string, string | null> = {};
   if (meta.branch !== undefined) patch.linked_branch = meta.branch;
   if (meta.remoteUrl !== undefined) patch.github_remote_url = meta.remoteUrl;
   if (Object.keys(patch).length === 0) return;
-  const { error } = await db().from("projects").update(patch).eq("id", id).eq("owner_id", ownerId);
+  const { error } = await db().from("projects").update(patch).eq("id", id);
   if (error) throw new Error(`setProjectGitMeta failed: ${error.message}`);
 }
 
 /** Update just the tracked branch for a project (P1.2 branch switcher). Owner-scoped. */
 export async function updateProjectLinkedBranch(id: string, ownerId: string, branch: string): Promise<void> {
-  const { error } = await db().from("projects").update({ linked_branch: branch }).eq("id", id).eq("owner_id", ownerId);
+  await assertProjectRole(id, ownerId, "editor");
+  const { error } = await db().from("projects").update({ linked_branch: branch }).eq("id", id);
   if (error) throw new Error(`updateProjectLinkedBranch failed: ${error.message}`);
 }
 
@@ -388,14 +395,14 @@ export async function updateProjectLinkedBranch(id: string, ownerId: string, bra
  * available again.
  */
 export async function clearGithubRepo(id: string, ownerId: string): Promise<void> {
+  await assertProjectRole(id, ownerId, "admin");
   const { error } = await db()
     .from("projects")
     .update({
       github_repo_url: null,
       github_repo_full_name: null,
     })
-    .eq("id", id)
-    .eq("owner_id", ownerId);
+    .eq("id", id);
   if (error) throw new Error(`clearGithubRepo failed: ${error.message}`);
 }
 
@@ -410,14 +417,14 @@ export async function setVercelProject(
   vercelProjectId: string,
   vercelProjectName: string,
 ): Promise<void> {
+  await assertProjectRole(id, ownerId, "editor");
   const { error } = await db()
     .from("projects")
     .update({
       vercel_project_id: vercelProjectId,
       vercel_project_name: vercelProjectName,
     })
-    .eq("id", id)
-    .eq("owner_id", ownerId);
+    .eq("id", id);
   if (error) throw new Error(`setVercelProject failed: ${error.message}`);
 }
 
@@ -432,6 +439,7 @@ export async function setSupabaseProject(
   ownerId: string,
   link: { ref: string; name: string; orgId: string | null },
 ): Promise<void> {
+  await assertProjectRole(id, ownerId, "editor");
   const { error } = await db()
     .from("projects")
     .update({
@@ -439,8 +447,7 @@ export async function setSupabaseProject(
       supabase_project_name: link.name,
       supabase_org_id: link.orgId,
     })
-    .eq("id", id)
-    .eq("owner_id", ownerId);
+    .eq("id", id);
   if (error) throw new Error(`setSupabaseProject failed: ${error.message}`);
 }
 
@@ -458,7 +465,33 @@ export async function reassignProjectsOwner(
     .from("projects")
     .update({ owner_id: toOwnerId })
     .eq("owner_id", fromOwnerId)
+    .is("org_id", null)
     .select("id");
   if (error) throw new Error(`reassignProjectsOwner failed: ${error.message}`);
   return (data ?? []).length;
+}
+
+/** Internal rollback primitive for a project created by the same request. */
+export async function deleteProjectByIdForRollback(id: string): Promise<void> {
+  const { error } = await db().from("projects").delete().eq("id", id);
+  if (error) throw new Error(`deleteProjectByIdForRollback failed: ${error.message}`);
+}
+
+/** Transfer a personal project to another existing account. */
+export async function transferPersonalProjectOwnership(
+  id: string,
+  currentOwnerId: string,
+  nextOwnerId: string,
+): Promise<void> {
+  const { data, error } = await db()
+    .from("projects")
+    .update({ owner_id: nextOwnerId })
+    .eq("id", id)
+    .eq("owner_id", currentOwnerId)
+    .is("org_id", null)
+    .select("id")
+    .maybeSingle();
+  if (error) throw new Error(`transferPersonalProjectOwnership failed: ${error.message}`);
+  if (!data) throw new Error("personal project owner access required");
+  await db().from("project_members").delete().eq("project_id", id).eq("user_id", nextOwnerId);
 }

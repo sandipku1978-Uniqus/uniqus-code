@@ -48,7 +48,8 @@ describe("progressive system prompt", () => {
   it("keeps the complete detailed visual craft playbook for explicit frontend work", () => {
     const prompt = promptFor("Restyle the responsive dashboard in App.tsx");
     expect(prompt).toContain("Visual craft — distinctive by default");
-    expect(prompt).toContain("Commit to an art direction BEFORE writing code");
+    expect(prompt).toContain("Before writing code, write a five-line UX brief");
+    expect(prompt).toContain("Then commit to an art direction");
     expect(prompt).toContain("Preview and browser verification");
   });
 
@@ -74,7 +75,14 @@ describe("progressive system prompt", () => {
       true,
       { fullName: "example/repo", url: "https://example.invalid/repo" },
       null,
-      [{ name: "library", body: "LIBRARY_SKILL_SENTINEL" }],
+      [
+        {
+          id: "skill-1",
+          name: "library",
+          description: "Use for library audits",
+          body: "LIBRARY_SKILL_SENTINEL",
+        },
+      ],
       [],
       false,
       false,
@@ -84,7 +92,8 @@ describe("progressive system prompt", () => {
       profile.guidance,
     );
     expect(prompt).toContain("ACCOUNT_RULE_SENTINEL");
-    expect(prompt).toContain("LIBRARY_SKILL_SENTINEL");
+    expect(prompt).toContain("Use for library audits");
+    expect(prompt).not.toContain("LIBRARY_SKILL_SENTINEL");
     expect(prompt).toContain("PROJECT_SKILL_SENTINEL");
     expect(prompt).toContain("SUBAGENT_PERSONA_SENTINEL");
     expect(prompt).toContain("example/repo");

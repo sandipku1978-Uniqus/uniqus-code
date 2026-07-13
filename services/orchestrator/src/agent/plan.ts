@@ -12,6 +12,7 @@ import {
   formatDesignSystemForPrompt,
   formatLibrarySkillsForPrompt,
   formatSkillsForPrompt,
+  type AttachedLibrarySkill,
 } from "./skills.js";
 import { resolveModel } from "./router.js";
 import {
@@ -48,6 +49,8 @@ import {
 } from "./compact.js";
 import type { RunMetricsCollector } from "../telemetry/runMetrics.js";
 import { recordUsageEvent } from "../db/usage.js";
+import { getProjectSecretPlaintexts } from "../db/secrets.js";
+import { createSecretRedactor } from "./secretRedaction.js";
 
 const PLAN_SYSTEM_PROMPT_BASE = `You are an AI software engineer in plan mode. The user has described what they want built; your job is to INSPECT the project as needed and then produce a structured plan, NOT to execute it.
 
@@ -114,7 +117,7 @@ export interface PlanOptions {
   history?: Anthropic.MessageParam[];
   skills?: string | null;
   accountPrompt?: string | null;
-  librarySkills?: { name: string; body: string }[];
+  librarySkills?: AttachedLibrarySkill[];
   designSystem?: DesignTokens | null;
   knowledgeDocs?: { id: string; title: string; description: string | null }[];
   repo?: { fullName: string; url: string } | null;
@@ -409,11 +412,34 @@ function formatPlanLiveState(
  * COPY of history, so the (transient) investigation isn't persisted.
  */
 export async function proposePlan(userMessage: string, opts: PlanOptions): Promise<Plan> {
+  // Plan mode has its own provider/tool loop, so it needs the same last-mile
+  // secret boundary as the execution loop. This catches legacy/plaintext
+  // copies in otherwise ordinary files and Knowledge excerpts before either a
+  // planner model or the live activity UI receives them.
+  const secretRedactor = createSecretRedactor(
+    opts.projectId ? await getProjectSecretPlaintexts(opts.projectId) : [],
+  );
+  userMessage = secretRedactor.text(userMessage);
+  const safeHistory = secretRedactor.clone(opts.history ?? []);
+  const safeAccountPrompt = secretRedactor.clone(opts.accountPrompt ?? null);
+  const safeDesignSystem = secretRedactor.clone(opts.designSystem ?? null);
+  const safeLibrarySkills = secretRedactor.clone(opts.librarySkills ?? []);
+  const safeSkills = secretRedactor.clone(opts.skills ?? null);
+  const safeKnowledgeDocs = secretRedactor.clone(opts.knowledgeDocs ?? []);
+  const safeRepo = secretRedactor.clone(opts.repo ?? null);
+  const safeRunningServers = secretRedactor.clone(opts.runningServers ?? []);
+  const safeActiveConnectors = secretRedactor.clone(opts.activeConnectors ?? []);
   const system = `${PLAN_SYSTEM_PROMPT_BASE}${formatAccountPromptForPrompt(
-    opts.accountPrompt ?? null,
-  )}${formatDesignSystemForPrompt(opts.designSystem ?? null)}${formatLibrarySkillsForPrompt(
-    opts.librarySkills ?? [],
-  )}${formatSkillsForPrompt(opts.skills ?? null)}${formatPlanProjectContext(opts)}`;
+    safeAccountPrompt,
+  )}${formatDesignSystemForPrompt(safeDesignSystem)}${formatLibrarySkillsForPrompt(
+    safeLibrarySkills,
+  )}${formatSkillsForPrompt(safeSkills)}${formatPlanProjectContext({
+    ...opts,
+    knowledgeDocs: safeKnowledgeDocs,
+    repo: safeRepo,
+    runningServers: safeRunningServers,
+    activeConnectors: safeActiveConnectors,
+  })}`;
 
   // Plan mode honors the same per-turn model choice as the agent loop.
   const keys: ProviderKeys = opts.providerKeys ?? {
@@ -431,8 +457,8 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
         "plan",
         {
           userMessage,
-          previousUserMessage: lastUserMessageText(opts.history),
-          hasImages: turnReferencesImage(userMessage, opts.history),
+          previousUserMessage: lastUserMessageText(safeHistory),
+          hasImages: turnReferencesImage(userMessage, safeHistory),
           availableProviders: availableProvidersFromKeys(keys),
         },
         {
@@ -489,13 +515,13 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
     ...TOOLS.filter(
       (t) =>
         PLAN_READONLY_TOOL_NAMES.has(t.name) &&
-        (t.name !== "knowledge_search" || (!!opts.userId && (opts.knowledgeDocs?.length ?? 0) > 0)),
+        (t.name !== "knowledge_search" || (!!opts.userId && safeKnowledgeDocs.length > 0)),
     ),
     SUBMIT_PLAN_TOOL,
   ];
 
   const messages: Anthropic.MessageParam[] = normalizeMessageHistory([
-    ...(opts.history ?? []),
+    ...safeHistory,
     { role: "user", content: userMessage },
   ]);
   const planToolSchemaChars = JSON.stringify(planTools).length;
@@ -654,12 +680,12 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
     bankUsage(turn.usage);
     reportUsage(turn.usage);
 
-    messages.push({ role: "assistant", content: turn.content });
+    messages.push({ role: "assistant", content: secretRedactor.clone(turn.content) });
 
     // The model submitted its plan — done.
     const submitted = turn.toolCalls.find((c) => c.name === "submit_plan");
     if (submitted) {
-      return normalizePlan(submitted.input);
+      return secretRedactor.clone(normalizePlan(submitted.input));
     }
 
     // No tools and no plan: it just talked. Force a plan to finish.
@@ -699,7 +725,8 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
             (result as { __multimodal?: boolean }).__multimodal
           ) {
             const mm = result as { content: Array<{ type: string; [k: string]: unknown }> };
-            const textSummary = mm.content.find((b) => b.type === "text") as
+            const safeContent = secretRedactor.clone(mm.content);
+            const textSummary = safeContent.find((b) => b.type === "text") as
               | { text: string }
               | undefined;
             hooks.onToolResult?.(
@@ -713,15 +740,16 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
             return {
               type: "tool_result",
               tool_use_id: call.id,
-              content: mm.content as unknown as Anthropic.ToolResultBlockParam["content"],
+              content: safeContent as unknown as Anthropic.ToolResultBlockParam["content"],
             };
           }
 
           const sandboxText = isSandboxTextResult(result) ? result : null;
-          const raw =
+          const raw = secretRedactor.text(
             (sandboxText?.text ??
               (typeof result === "string" ? result : JSON.stringify(result))) ||
-            "(no output)";
+            "(no output)",
+          );
           const text = truncateToolResultText(raw);
           hooks.onToolResult?.(call.id, call.name, call.input, text, false);
           opts.metrics?.recordToolCall({
@@ -731,7 +759,7 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
           });
           return { type: "tool_result", tool_use_id: call.id, content: text };
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = secretRedactor.text(err instanceof Error ? err.message : String(err));
           hooks.onToolResult?.(call.id, call.name, call.input, msg, true);
           opts.metrics?.recordToolCall({ error: true });
           return {
@@ -793,7 +821,7 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
     throw err;
   }
   stopForcedModelPhase?.();
-  return normalizePlan(forced);
+  return secretRedactor.clone(normalizePlan(forced));
 }
 
 export function formatPlanForExecution(plan: Plan): string {

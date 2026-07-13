@@ -401,6 +401,15 @@ fn handle(
                         &json!({ "content": base64_encode(&bytes), "encoding": "base64" }),
                     ))
                 } else {
+                    if query.get("allow_sensitive").map(String::as_str) != Some("1") {
+                        let root = sandbox_dir().canonicalize().unwrap_or_else(|_| sandbox_dir());
+                        let rel = full.strip_prefix(&root).unwrap_or(&full);
+                        if is_sensitive_project_path(rel) {
+                            return Err(AgentError::Bad(
+                                "access to secret-bearing project paths is blocked".into(),
+                            ));
+                        }
+                    }
                     let response_cap = query
                         .get("max_bytes")
                         .and_then(|s| s.parse::<i64>().ok())
@@ -755,13 +764,11 @@ fn resolve_sandbox(rel: &str) -> Result<PathBuf, AgentError> {
         }
     }
     let root_canon = root.canonicalize().unwrap_or(root.clone());
-    if normalized != root_canon && !normalized.starts_with(&root_canon) {
-        // Allow paths under the original (uncanonicalized) root too.
-        if normalized != root && !normalized.starts_with(&root) {
-            return Err(AgentError::Bad(format!("path escapes sandbox: {}", rel)));
-        }
+    let resolved = normalized.canonicalize().unwrap_or(normalized);
+    if resolved != root_canon && !resolved.starts_with(&root_canon) {
+        return Err(AgentError::Bad(format!("path escapes sandbox: {}", rel)));
     }
-    Ok(normalized)
+    Ok(resolved)
 }
 
 /// Largest char boundary <= `i` (i clamped to s.len()). Walks down at most 3
@@ -1450,6 +1457,9 @@ fn grep_with_ripgrep(
             break;
         };
         let rel = rel.strip_prefix("./").unwrap_or(rel);
+        if is_sensitive_project_path(Path::new(rel)) {
+            continue;
+        }
         bounded.push(format!("{}:{}: {}", rel, line_no, source.trim()));
     }
     if parse_failed {
@@ -1493,7 +1503,19 @@ fn walk(dir: &Path, root: &Path, re: &Matcher, out: &mut BoundedMatches) {
 }
 
 fn scan_grep_file(full: &Path, root: &Path, re: &Matcher, out: &mut BoundedMatches) {
-    let file = match File::open(full) {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let resolved = match full.canonicalize() {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+    if resolved != root && !resolved.starts_with(&root) {
+        return;
+    }
+    let rel = resolved.strip_prefix(&root).unwrap_or(&resolved);
+    if is_sensitive_project_path(rel) {
+        return;
+    }
+    let file = match File::open(&resolved) {
         Ok(file) => file,
         Err(_) => return, // binary or unreadable
     };
@@ -1502,7 +1524,6 @@ fn scan_grep_file(full: &Path, root: &Path, re: &Matcher, out: &mut BoundedMatch
             break; // invalid UTF-8 or unreadable: preserve old skip behavior
         };
         if re.is_match(&line) {
-            let rel = full.strip_prefix(root).unwrap_or(full);
             out.push(format!(
                 "{}:{}: {}",
                 rel.display(),
@@ -1511,6 +1532,40 @@ fn scan_grep_file(full: &Path, root: &Path, re: &Matcher, out: &mut BoundedMatch
             ));
         }
     }
+}
+
+fn is_sensitive_project_path(path: &Path) -> bool {
+    let parts: Vec<String> = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_lowercase()),
+            _ => None,
+        })
+        .collect();
+    let base = parts.last().map(String::as_str).unwrap_or("");
+    if parts.iter().any(|part| part == ".ssh") {
+        return true;
+    }
+    if parts.iter().any(|part| part == ".aws") && base == "credentials" {
+        return true;
+    }
+    if parts.iter().any(|part| part == ".config")
+        && parts.iter().any(|part| part == "gcloud")
+    {
+        return true;
+    }
+    if base == ".env" || base.starts_with(".env.") {
+        return true;
+    }
+    if [".npmrc", ".pypirc", ".netrc", ".git-credentials"].contains(&base) {
+        return true;
+    }
+    if ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa.pub", "id_dsa.pub", "id_ecdsa.pub", "id_ed25519.pub"].contains(&base) {
+        return true;
+    }
+    ["key", "pem", "p12", "pfx", "crt", "cer"]
+        .iter()
+        .any(|extension| base.ends_with(&format!(".{extension}")))
 }
 
 /// Per-stream byte cap for /exec/run. We keep draining the pipe past this so

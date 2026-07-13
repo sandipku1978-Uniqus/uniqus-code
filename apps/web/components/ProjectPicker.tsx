@@ -1967,11 +1967,140 @@ function StatCard({
   );
 }
 
+type UsageCalendarLevel = 0 | 1 | 2 | 3 | 4;
+
+function usageCalendarDayKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function UsageCalendar({ stats }: { stats: AccountUsageStats | null }) {
+  const today = new Date();
+  today.setHours(12, 0, 0, 0);
+
+  const currentWeekStart = new Date(today);
+  currentWeekStart.setDate(today.getDate() - today.getDay());
+
+  const calendarStart = new Date(currentWeekStart);
+  calendarStart.setDate(currentWeekStart.getDate() - 52 * 7);
+
+  const byDate = new Map((stats?.daily ?? []).map((day) => [day.date, day]));
+  const rawDays = Array.from({ length: 53 * 7 }, (_, index) => {
+    const date = new Date(calendarStart);
+    date.setDate(calendarStart.getDate() + index);
+    const key = usageCalendarDayKey(date);
+    const usage = byDate.get(key);
+    return {
+      date,
+      key,
+      tokens: usage?.tokens ?? 0,
+      costUsd: usage?.cost_usd ?? 0,
+      isFuture: date > today,
+    };
+  });
+
+  const visibleDays = rawDays.filter((day) => !day.isFuture);
+  const positiveTokens = visibleDays
+    .map((day) => day.tokens)
+    .filter((tokens) => tokens > 0)
+    .sort((a, b) => a - b);
+  const thresholdAt = (percentile: number): number =>
+    positiveTokens[Math.floor((positiveTokens.length - 1) * percentile)] ?? 0;
+  const thresholds = [thresholdAt(0.25), thresholdAt(0.5), thresholdAt(0.75)];
+  const levelFor = (tokens: number): UsageCalendarLevel => {
+    if (tokens <= 0 || positiveTokens.length === 0) return 0;
+    if (positiveTokens[0] === positiveTokens[positiveTokens.length - 1]) return 4;
+    if (tokens <= thresholds[0]) return 1;
+    if (tokens <= thresholds[1]) return 2;
+    if (tokens <= thresholds[2]) return 3;
+    return 4;
+  };
+  const totalTokens = visibleDays.reduce((sum, day) => sum + day.tokens, 0);
+  const activeDays = visibleDays.filter((day) => day.tokens > 0).length;
+  const weeks = Array.from({ length: 53 }, (_, week) =>
+    rawDays.slice(week * 7, week * 7 + 7),
+  );
+  const monthLabels = weeks.flatMap((week, weekIndex) => {
+    const firstOfMonth = week.find((day) => day.date.getDate() === 1 && !day.isFuture);
+    if (weekIndex !== 0 && !firstOfMonth) return [];
+    const labelDate = firstOfMonth?.date ?? week[0].date;
+    return [{
+      week: weekIndex + 1,
+      label: labelDate.toLocaleDateString(undefined, { month: "short" }),
+    }];
+  });
+  const summary = stats === null
+    ? "Loading usage activity"
+    : activeDays === 0
+      ? "No recorded usage in the last 12 months"
+      : `${formatTokens(totalTokens)} tokens across ${activeDays} active day${activeDays === 1 ? "" : "s"} in the last 12 months`;
+
+  return (
+    <div className="usage-calendar-card">
+      <div className="usage-calendar-head">
+        <div>
+          <span className="usage-calendar-title">Usage activity</span>
+          <span className="usage-calendar-summary">{summary}</span>
+        </div>
+        <span className="usage-calendar-range">Last 12 months</span>
+      </div>
+
+      <div className="usage-calendar-scroll">
+        <div className="usage-calendar-layout">
+          <div className="usage-calendar-months" aria-hidden="true">
+            {monthLabels.map((month) => (
+              <span key={`${month.week}:${month.label}`} style={{ gridColumn: month.week }}>
+                {month.label}
+              </span>
+            ))}
+          </div>
+          <div className="usage-calendar-weekdays" aria-hidden="true">
+            <span style={{ gridRow: 2 }}>Mon</span>
+            <span style={{ gridRow: 4 }}>Wed</span>
+            <span style={{ gridRow: 6 }}>Fri</span>
+          </div>
+          <div className="usage-calendar-grid" role="img" aria-label={summary}>
+            {rawDays.map((day) => {
+              const level = levelFor(day.tokens);
+              const dateLabel = day.date.toLocaleDateString(undefined, {
+                day: "numeric",
+                month: "long",
+                year: "numeric",
+              });
+              const title = day.tokens > 0
+                ? `${formatTokens(day.tokens)} tokens on ${dateLabel} · ${formatUsd(day.costUsd)} estimated`
+                : `No usage on ${dateLabel}`;
+              return (
+                <span
+                  key={day.key}
+                  className={`usage-calendar-cell level-${level}${day.isFuture ? " future" : ""}`}
+                  title={day.isFuture ? undefined : title}
+                  aria-hidden="true"
+                />
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div className="usage-calendar-legend" aria-hidden="true">
+        <span>Less</span>
+        {[0, 1, 2, 3, 4].map((level) => (
+          <span key={level} className={`usage-calendar-cell level-${level}`} />
+        ))}
+        <span>More</span>
+      </div>
+    </div>
+  );
+}
+
 /**
  * The dashboard's "Your usage" block: headline stat cards (tokens, est. cost,
- * agent time, turns) plus a "Top models" breakdown. Powered by the account-wide
- * usage rollup; renders zeros gracefully while the stats load or before any
- * agent turns have been recorded.
+ * agent time, turns), a contribution-style activity calendar, and a "Top
+ * models" breakdown. Powered by the account-wide usage rollup; renders zeros
+ * gracefully while the stats load or before any agent turns have been recorded.
  */
 function DashboardWidgets({
   stats,
@@ -2006,6 +2135,7 @@ function DashboardWidgets({
           across {projectCount} project{projectCount === 1 ? "" : "s"} · cost is an estimate
         </span>
       </div>
+      <UsageCalendar stats={stats} />
       <div className="usage-stat-grid">
         <StatCard
           label="Tokens"

@@ -218,6 +218,7 @@ export const supabaseConnector: ConnectorDefinition = {
   methods: [
     {
       name: "list_organizations",
+      risk: "read",
       description: "List the Supabase organizations the connected account can create projects in.",
       args_schema: { type: "object", properties: {} },
       invoke: async (ctx) => {
@@ -227,6 +228,7 @@ export const supabaseConnector: ConnectorDefinition = {
     },
     {
       name: "list_projects",
+      risk: "read",
       description: "List the connected account's existing Supabase projects (ref, name, region, status).",
       args_schema: { type: "object", properties: {} },
       invoke: async (ctx) => {
@@ -236,6 +238,7 @@ export const supabaseConnector: ConnectorDefinition = {
     },
     {
       name: "provision_database",
+      risk: "write",
       description:
         "Create a new Supabase Postgres project, wait until it's healthy, and store its URL + anon/service_role keys + DATABASE_URL as project secrets. Returns the PUBLIC url + anon key to wire into the app (write SUPABASE_URL + SUPABASE_ANON_KEY into .env). Creating a project provisions real infra and counts against the org's free-project quota (2 free per org).",
       args_schema: {
@@ -316,6 +319,7 @@ export const supabaseConnector: ConnectorDefinition = {
     },
     {
       name: "get_database",
+      risk: "write",
       description:
         "Check the linked Supabase project's status and, once ACTIVE_HEALTHY, ensure its keys are stored as project secrets. Returns the public url + anon key.",
       args_schema: {
@@ -345,6 +349,7 @@ export const supabaseConnector: ConnectorDefinition = {
     },
     {
       name: "run_sql",
+      risk: "write",
       description:
         "Run a SQL statement against the linked Supabase project's database (create tables, apply a migration, query). Uses the Management API query endpoint. DESTRUCTIVE statements (DROP, TRUNCATE, DELETE, ALTER ... DROP, REVOKE) are NOT executed unless you pass confirm:true — the first call returns an impact preview (e.g. row count affected) so you can confirm with the user in plain language what will be lost, then re-run with confirm:true.",
       args_schema: {
@@ -410,6 +415,7 @@ export const supabaseConnector: ConnectorDefinition = {
     },
     {
       name: "get_schema",
+      risk: "read",
       description:
         "Inspect the linked Supabase database: returns every public-schema table with its columns (name, type, nullable, default, primary-key flag). Call this before writing migrations or the add-login recipe so you build on the real schema instead of guessing.",
       args_schema: {

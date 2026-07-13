@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import treeKill from "tree-kill";
 import { safeChildEnv } from "../safeEnv.js";
+import { assertHostSandboxAllowed } from "../sandboxMode.js";
 import * as fcAgent from "../firecracker/agentRpc.js";
 import type { Sandbox } from "./sandbox.js";
 
@@ -90,6 +91,7 @@ export function startBackgroundJob(
   projectId: string | null = null,
 ): BackgroundJobInfo {
   evictFinishedJobs();
+  if (!sandbox.vm) assertHostSandboxAllowed();
   const id = `job_${randomUUID().slice(0, 8)}`;
   const log = { value: "" };
   const job: ManagedJob = {

@@ -34,6 +34,10 @@ The one-sentence direction: **a precision instrument in warm near-black — calm
 tinted dark surfaces and disciplined type, lit by a single purple→magenta brand
 gradient used as a scalpel, never a paint roller.**
 
+Before choosing composition, write the five-line UX brief that the shared craft
+guidance requires: **USER, JOB, HIERARCHY, FLOW, RISK**. The house look serves
+that brief. If a signature move makes the primary task less clear, remove it.
+
 ---
 
 ## 1. Foundations
@@ -190,24 +194,29 @@ purpose per surface — never mix ad-hoc gaps.
 
 ## 2. Composition — the backbone
 
-Asymmetry is the default; uniform symmetry is the structural tell of machine
-output. Equal-size repetition is **opt-in**, justified only by true collections
-(the project grid, the model-card grid) — never the reflex.
+Hierarchy is mandatory; asymmetry is the expressive default, not a quota.
+Equal-size repetition is **opt-in**, never the reflex, but is correct for true
+collections, direct comparisons, stable operational rows, settings/forms, and
+narrow mobile layouts where predictability or scanning matters more.
 
-- Build on a 12-column grid, then place content **unevenly**. Splits are
-  `0.74 / 1`, `0.78 / 1`, `0.9 / 0.85` — **never `6/6`.** One side carries a
-  product visual, the other the section head.
-- **No two adjacent sections share width + alignment + structure.** The page
-  alternates: full-bleed gradient hero → contained asymmetric bands →
-  full-bleed marquee → contained bands → full-bleed gradient CTA.
-- **One breakout per screen** — exactly one element escapes its container. One
-  is a decision; three is noise.
+- Build on a 12-column grid, then place content **unevenly when hierarchy calls
+  for it**. Prefer `0.74 / 1`, `0.78 / 1`, or `0.9 / 0.85` over a reflexive
+  `6/6`; use `6/6` for a genuine equal comparison.
+- On narrative pages, avoid giving adjacent sections the same width + alignment
+  + structure. Product workflows, documentation, repeated records, and settings
+  may keep a stable shell so users do not relearn the layout.
+- **Breakout budget: zero or one per screen.** Use one when it reinforces the
+  hierarchy/signature; use none on dense operational, form, checkout, or auth
+  surfaces. Multiple breakouts require an explicit reason and a quiet result.
 - Asymmetry is placed *on* the grid (a ratio you can name), not sloppy gaps.
 - In the dashboard, asymmetry = hierarchy, not decoration: a centered hero
   composer given real estate, then a calm aligned grid below. Alignment stays
   perfect; rows stay calm (tabular numerals).
 - Prefer **hairline-divided editorial rows/cells** over yet another card grid
   for steps/features (see §3.7).
+- Plan responsive transformations at narrow/mobile, intermediate/tablet, and
+  wide/desktop widths: name what stacks, collapses, scrolls, pins, hides, or
+  changes order. Use bounded `clamp()`, never unbounded viewport-only sizing.
 
 ---
 
@@ -388,8 +397,8 @@ magenta.
   display type.
 - The template hero: centered heading + one paragraph + two buttons + a row of
   three identical icon-title-text cards.
-- Any row of 3+ identical cards, or `6/6` splits repeated, outside true
-  collections.
+- Any row of 3+ identical cards, or repeated `6/6` splits, used without a true
+  collection, equal comparison, or stable operational reason.
 - `border` AND `shadow` AND tinted background stacked on one element;
   `rounded-2xl + shadow-md` on everything.
 - Gradient text on *every* heading; glow everywhere; effect stacking (grain +
@@ -406,10 +415,11 @@ magenta.
 
 Interrogate the screenshot **structurally first**, then stylistically:
 
-1. **Silhouette** — squint. Is it a column of same-width boxes? Do any two
-   adjacent sections share the same skeleton? Is every card in a grid the same
-   size? Does anything break its container (the one intended breakout)? Structural
-   failures need **recomposition** (change the section map), not re-skinning.
+1. **Silhouette** — squint. Is it a column of same-width boxes without a content
+   reason? Do narrative sections repeat the same skeleton without helping
+   orientation? Are equal cards hiding unequal importance? Does each breakout
+   serve the UX brief? Structural failures need **recomposition** (change the
+   section map), not re-skinning.
 2. **Brand** — is there exactly **one** brand-gradient moment carrying the eye
    (or a deliberate hero+CTA pair), or has magenta leaked into every section?
 3. **Type** — does the display type commit (large, ~500–650 weight, tight

@@ -7,8 +7,10 @@ import { EventEmitter } from "node:events";
 import { createInterface } from "node:readline";
 import treeKill from "tree-kill";
 import { safeChildEnv } from "../safeEnv.js";
+import { assertHostSandboxAllowed } from "../sandboxMode.js";
 import type { VmHandle } from "../firecracker/types.js";
 import * as fcAgent from "../firecracker/agentRpc.js";
+import { isSensitiveProjectPath } from "../security/sensitivePaths.js";
 
 export const sandboxEvents = new EventEmitter();
 
@@ -424,10 +426,17 @@ async function readFileResultUnlocked(
       ...opts,
       maxBytes: responseCap,
       headTail: opts !== undefined,
+      allowSensitive: opts === undefined,
     });
     return sandboxTextResult(result.text, result.truncated);
   }
   const full = resolvePath(sandbox, p);
+  if (opts !== undefined) {
+    const resolved = await fs.realpath(full).catch(() => full);
+    if (isSensitiveProjectPath(path.relative(path.resolve(sandbox.rootDir), resolved))) {
+      throw new Error("access to secret-bearing project paths is blocked");
+    }
+  }
 
   // Range read: return just the requested line window (cheap for huge files).
   if (opts && (opts.offset !== undefined || opts.limit !== undefined)) {
@@ -735,14 +744,18 @@ async function grepResultUnlocked(
     : (line: string) => (ci ? line.toLowerCase() : line).includes(needle);
 
   const bounded = createBoundedMatches();
-  const root = path.resolve(sandbox.rootDir);
+  const root = await fs.realpath(path.resolve(sandbox.rootDir)).catch(() => path.resolve(sandbox.rootDir));
   // Stream each file and retain a bounded head+tail window. Continuing the scan
   // gives the model useful late matches without retaining the omitted middle.
 
   async function scanFile(full: string): Promise<void> {
     try {
+      const resolved = await fs.realpath(full);
+      if (resolved !== root && !resolved.startsWith(root + path.sep)) return;
+      const rel = path.relative(root, resolved);
+      if (isSensitiveProjectPath(rel)) return;
       const lines = createInterface({
-        input: createReadStream(full),
+        input: createReadStream(resolved),
         crlfDelay: Infinity,
       });
       let lineNo = 0;
@@ -751,7 +764,7 @@ async function grepResultUnlocked(
         if (test(line)) {
           pushBoundedMatch(
             bounded,
-            `${path.relative(root, full)}:${lineNo}: ${line.trim()}`,
+            `${rel}:${lineNo}: ${line.trim()}`,
           );
         }
       }
@@ -840,6 +853,7 @@ export async function runCommand(
         COMMAND_TRUNCATION_MARKER.test(result.stderr),
     };
   }
+  assertHostSandboxAllowed();
   return new Promise((resolve) => {
     const choice = pickShell();
     const child = spawn(choice.shell, [...choice.prefix, command], {
@@ -1104,6 +1118,7 @@ export async function startServer(
       started_at: server.started_at,
     };
   }
+  assertHostSandboxAllowed();
   // Pre-clear the port. Fast path: if it's already free, this is two
   // ~10ms TCP probes. Slow path: a zombie (often `npm run dev` ran via
   // run_command which holds the port for the full timeout) gets killed

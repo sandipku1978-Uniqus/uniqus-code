@@ -10,10 +10,11 @@ import Popover from "./Popover";
  * user's Personal space (null) or one of their organizations; switching it scopes
  * the whole dashboard (project list, new-project target, the org nav group).
  *
- * House design language: a hairline-bordered trigger with a square monogram tile,
+ * House design language: a hairline-bordered trigger with a compact identity tile,
  * a mono micro-label for the workspace kind, and magenta as the only accent (the
- * active row's check + left rail). Self-contained: it owns only its open state;
- * the selected id and the org list are lifted to the ProjectPicker.
+ * active row's check + left rail). Organizations use a neutral placeholder until
+ * custom logos are supported. Self-contained: it owns only its open state; the
+ * selected id and the org list are lifted to the ProjectPicker.
  */
 
 const mono: React.CSSProperties = {
@@ -26,6 +27,27 @@ const mono: React.CSSProperties = {
 
 function monogram(label: string): string {
   return (label.trim()[0] ?? "?").toUpperCase();
+}
+
+function OrganizationPlaceholder() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M5 20h14" />
+      <path d="M7 20V7l5-3 5 3v13" />
+      <path d="M10 9h.01M14 9h.01M10 13h.01M14 13h.01" />
+      <path d="M10 20v-3h4v3" />
+    </svg>
+  );
 }
 
 function Tile({ label, personal }: { label: string; personal?: boolean }) {
@@ -41,13 +63,12 @@ function Tile({ label, personal }: { label: string; personal?: boolean }) {
         placeItems: "center",
         fontFamily: "var(--font-mono)",
         fontSize: "var(--fs-sm)",
-        color: personal ? "var(--text-muted)" : "#fff",
-        background: personal
-          ? "var(--bg-surface-active)"
-          : "linear-gradient(135deg, var(--brand-magenta), color-mix(in srgb, var(--brand-magenta) 55%, #6d28d9))",
+        color: "var(--text-muted)",
+        background: "var(--bg-surface-active)",
+        border: personal ? "none" : "1px solid var(--border-default)",
       }}
     >
-      {monogram(label)}
+      {personal ? monogram(label) : <OrganizationPlaceholder />}
     </span>
   );
 }

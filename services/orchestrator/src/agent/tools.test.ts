@@ -67,7 +67,6 @@ describe("createCapabilityToolState", () => {
         "list_connectors",
         "call_connector",
         "list_secrets",
-        "get_secret",
         "predeploy_check",
       ]),
     );
@@ -75,7 +74,7 @@ describe("createCapabilityToolState", () => {
     const payments = createCapabilityToolState(researchProfile, false);
     payments.load(["payments"]);
     expect(payments.tools().map((tool) => tool.name)).toEqual(
-      expect.arrayContaining(["interact_preview", "call_connector", "get_secret", "predeploy_check"]),
+      expect.arrayContaining(["interact_preview", "call_connector", "list_secrets", "predeploy_check"]),
     );
   });
 });

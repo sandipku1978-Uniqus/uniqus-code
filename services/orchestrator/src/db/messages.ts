@@ -211,6 +211,24 @@ export async function loadModelHistory(
   return mergeCompactedHistory(snapshot, tail);
 }
 
+/** Greatest persisted raw-message id for a session, used as a compaction cursor. */
+export async function latestMessageId(
+  projectId: string,
+  sessionId: string,
+): Promise<number | null> {
+  const { data, error } = await db()
+    .from("messages")
+    .select("id")
+    .eq("project_id", projectId)
+    .eq("session_id", sessionId)
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`latestMessageId failed: ${error.message}`);
+  const id = Number((data as { id?: unknown } | null)?.id);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
 export async function appendMessage(
   projectId: string,
   sessionId: string,

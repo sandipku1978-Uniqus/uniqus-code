@@ -17,6 +17,7 @@ export const slackConnector: ConnectorDefinition = {
   methods: [
     {
       name: "post_webhook",
+      risk: "write",
       description: "Post a message to a Slack channel via an incoming-webhook URL. Provide webhook_secret as the name of the secret holding the webhook URL.",
       args_schema: {
         type: "object",
@@ -51,6 +52,7 @@ export const slackConnector: ConnectorDefinition = {
     },
     {
       name: "post_message",
+      risk: "write",
       description: "Post a message via chat.postMessage. Requires SLACK_BOT_TOKEN secret with chat:write scope (or the secret name in token_secret).",
       args_schema: {
         type: "object",
