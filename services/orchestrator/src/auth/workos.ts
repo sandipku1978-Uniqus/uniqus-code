@@ -27,7 +27,6 @@ export type WorkosCookieFailureReason =
   | "missing_cookie_header"
   | "missing_session_cookie"
   | "invalid_session_cookie"
-  | "claims_mismatch"
   | "session_inactive"
   | "validation_error";
 
@@ -136,44 +135,14 @@ export class WorkosSessionActivityCache {
 
 const workosSessionActivity = new WorkosSessionActivityCache();
 
-/** Validate application/issuer claims after the SDK has verified the signature. */
-export function hasExpectedWorkosClaims(
-  accessToken: string,
-  expected: { clientId: string; issuer: string; userId: string; sessionId: string },
-  now = Date.now(),
-): boolean {
-  try {
-    const parts = accessToken.split(".");
-    if (parts.length !== 3) return false;
-    const claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as Record<string, unknown>;
-    const normalizeIssuer = (value: string): string => value.replace(/\/+$/, "");
-    if (typeof claims.iss !== "string" || normalizeIssuer(claims.iss) !== normalizeIssuer(expected.issuer)) return false;
-    if (claims.sub !== expected.userId || claims.sid !== expected.sessionId) return false;
-    if (typeof claims.exp !== "number" || claims.exp * 1000 <= now) return false;
-    // AuthKit documentation currently shows both token variants: the Sessions
-    // guide omits client_id while the token API reference includes it. Enforce
-    // either application-binding claim when present without rejecting a token
-    // solely because one optional variant is absent. The SDK has already
-    // verified the signature against this client's JWKS before this check.
-    if (claims.client_id !== undefined && claims.client_id !== expected.clientId) return false;
-    if (claims.aud !== undefined) {
-      const audience = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
-      if (!audience.includes(expected.clientId)) return false;
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Authenticate the sealed AuthKit cookie through the WorkOS SDK. The SDK
  * verifies the access JWT signature and standard time claims via this client's
- * WorkOS JWKS; hasExpectedWorkosClaims then binds issuer/user/session and any
- * application claim the token carries. Finally, a short positive cache fronts
- * the server-side session record so revocations take effect shortly without a
- * WorkOS API call on every request. Any SDK/network failure on a cache miss is
- * a fail-closed unauthenticated result.
+ * WorkOS JWKS. A short positive cache then fronts WorkOS's server-side session
+ * record; matching both the signed session id and the sealed cookie's user id
+ * binds the session to the user while allowing WorkOS-supported custom claims,
+ * auth domains, and multi-application issuers. Any SDK/network failure on a
+ * cache miss is a fail-closed unauthenticated result.
  */
 export async function validateWorkosSessionCookieHeader(
   cookieHeader: string | undefined,
@@ -195,12 +164,6 @@ export async function validateWorkosSessionCookieHeader(
     if (!result.authenticated) {
       return { session: null, failure: "invalid_session_cookie" };
     }
-    if (!hasExpectedWorkosClaims(result.accessToken, {
-      clientId: process.env.WORKOS_CLIENT_ID!,
-      issuer: process.env.WORKOS_AUTHKIT_ISSUER ?? "https://api.workos.com",
-      userId: result.user.id,
-      sessionId: result.sessionId,
-    })) return { session: null, failure: "claims_mismatch" };
     const active = await workosSessionActivity.hasActive(
       result.sessionId,
       result.user.id,

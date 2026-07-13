@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   hasActiveWorkosSession,
-  hasExpectedWorkosClaims,
   validateWorkosSessionCookieHeader,
   WorkosSessionActivityCache,
 } from "./workos.js";
@@ -65,58 +64,6 @@ describe("WorkOS active-session validation", () => {
     await expect(cache.hasActive("missing", "user_1", missingLoader)).resolves.toBe(false);
     await expect(cache.hasActive("missing", "user_1", missingLoader)).resolves.toBe(false);
     expect(missingLoader).toHaveBeenCalledTimes(2);
-  });
-});
-
-describe("WorkOS access-token claims", () => {
-  const token = (claims: Record<string, unknown>): string =>
-    `${Buffer.from("{}").toString("base64url")}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
-  const expected = {
-    clientId: "client_1",
-    issuer: "https://api.workos.com",
-    userId: "user_1",
-    sessionId: "session_1",
-  };
-
-  it("accepts the documented audience variant when client_id is absent", () => {
-    expect(hasExpectedWorkosClaims(token({
-      iss: "https://api.workos.com/",
-      aud: "client_1",
-      sub: "user_1",
-      sid: "session_1",
-      exp: now / 1000 + 60,
-    }), expected, now)).toBe(true);
-  });
-
-  it("binds present application claims plus issuer, user, session, and expiry", () => {
-    expect(hasExpectedWorkosClaims(token({
-      iss: "https://api.workos.com/",
-      client_id: "client_1",
-      sub: "user_1",
-      sid: "session_1",
-      exp: now / 1000 + 60,
-    }), expected, now)).toBe(true);
-    expect(hasExpectedWorkosClaims(token({
-      iss: "https://attacker.example",
-      client_id: "client_1",
-      sub: "user_1",
-      sid: "session_1",
-      exp: now / 1000 + 60,
-    }), expected, now)).toBe(false);
-    expect(hasExpectedWorkosClaims(token({
-      iss: "https://api.workos.com",
-      client_id: "client_other",
-      sub: "user_1",
-      sid: "session_1",
-      exp: now / 1000 + 60,
-    }), expected, now)).toBe(false);
-    expect(hasExpectedWorkosClaims(token({
-      iss: "https://api.workos.com",
-      aud: ["client_other"],
-      sub: "user_1",
-      sid: "session_1",
-      exp: now / 1000 + 60,
-    }), expected, now)).toBe(false);
   });
 });
 
