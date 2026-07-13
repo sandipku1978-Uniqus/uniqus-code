@@ -839,6 +839,34 @@ const ENTRIES: Entry[] = [
       },
     ],
   },
+  {
+    id: "v0-7-1",
+    date: "Jul 13, 2026",
+    ver: "v0.7.1",
+    title: "A new front door and a smoother verify loop",
+    changes: [
+      {
+        tag: "new",
+        commit: "d17c287",
+        text: "Redesigned the landing page around an editorial hero and a live workspace stage, with a brighter, more legible take on the brand palette across the editor and preview screens.",
+      },
+      {
+        tag: "new",
+        commit: "d17c287",
+        text: "Made the usage calendar show which models produced each day's usage in a hover breakdown.",
+      },
+      {
+        tag: "improved",
+        commit: "d17c287",
+        text: "Let the agent interact with the live preview during verification without pausing for permission.",
+      },
+      {
+        tag: "fixed",
+        commit: "d17c287",
+        text: "Fixed connector requests that could fail before connecting, and kept shared previews working under both current and legacy preview cookies.",
+      },
+    ],
+  },
 ];
 
 const DISPLAY_ENTRIES = [...ENTRIES].reverse();
