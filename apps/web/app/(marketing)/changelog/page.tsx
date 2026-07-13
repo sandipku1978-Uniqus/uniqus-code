@@ -3,9 +3,9 @@ import ChangelogNav, { type ChangelogNavEntry } from "@/components/ChangelogNav"
 type Tag = "new" | "improved" | "fixed";
 
 export const metadata = {
-  title: "Changelog — Uniqus Code",
+  title: "Changelog - Uniqus Code",
   description:
-    "Product updates, big and small. See what's new in Uniqus Code — from multi-provider models and built-in web search to refresh-proof builds, plain-English plans, per-run costs, and bring-your-own model keys.",
+    "Product updates, big and small. Follow every substantive Uniqus Code change from the first browser workspace through the latest pre-launch build.",
 };
 
 interface Entry {
@@ -13,568 +13,825 @@ interface Entry {
   date: string;
   ver: string;
   title: string;
-  changes: { tag: Tag; text: string }[];
+  changes: { tag: Tag; commit: string; text: string }[];
 }
 
+const COMMIT_URL = "https://github.com/sandipku1978-Uniqus/uniqus-code/commit/";
+
 /**
- * Pre-v1: the product isn't in production yet, so every entry stays below
- * v1.0. Versions and dates are ordered oldest (v0.1) to newest, then
- * reversed for display so the newest entry renders first.
+ * Complete substantive history through d329b29. Minor versions mark product
+ * generations; patch versions collect the work that completed or hardened
+ * that generation. Pure diagnostics (5e17bb2 and de59091) are excluded.
  */
 const ENTRIES: Entry[] = [
   {
-    id: "v0-1",
-    date: "Apr 2026",
-    ver: "v0.1",
-    title: "A browser workspace that runs your code",
+    id: "v0-1-0",
+    date: "Apr 26, 2026",
+    ver: "v0.1.0",
+    title: "The first working foundation",
     changes: [
       {
         tag: "new",
-        text: "A full in-browser workspace: an editor, a live file tree, and a chat panel where the agent writes and edits real files.",
-      },
-      {
-        tag: "new",
-        text: "One-click Run — start your dev server without typing a command, with a live preview right inside the workspace.",
-      },
-      {
-        tag: "new",
-        text: "Import an existing codebase by uploading a .zip or cloning straight from GitHub.",
-      },
-      {
-        tag: "improved",
-        text: "Agent responses stream in as they're written instead of appearing all at once, and completed turns collapse to keep the chat readable.",
-      },
-      {
-        tag: "new",
-        text: "A Stop button cancels a running agent turn — and any command it kicked off — instantly.",
+        commit: "827d09a",
+        text: "Created the initial Uniqus Code monorepo and the first working browser workspace, agent, API, and project runtime.",
       },
       {
         tag: "fixed",
-        text: "Early reliability fixes: preview links reach the running app in production, dependencies auto-install after a redeploy, and the editor no longer freezes on certain files.",
+        commit: "cc23bea",
+        text: "Moved the Tailwind build toolchain into production dependencies so Vercel could build the web app reliably.",
+      },
+      {
+        tag: "fixed",
+        commit: "2af7780",
+        text: "Made the orchestrator start the server entrypoint on Railway and honor the platform-provided port.",
       },
     ],
   },
   {
-    id: "v0-2",
-    date: "May 2026",
-    ver: "v0.2",
-    title: "Locking the front door",
+    id: "v0-1-1",
+    date: "Apr 26, 2026",
+    ver: "v0.1.1",
+    title: "Import, preview, and direct control",
     changes: [
       {
-        tag: "improved",
-        text: "Hardened request handling — cross-origin access is now allowlisted, and file paths and imported repos are validated so a project can't reach outside its own sandbox.",
-      },
-      {
-        tag: "fixed",
-        text: "Fixed a bug that could permanently break a project's chat if you clicked Stop at the wrong moment, with an automatic one-time repair for anyone already affected.",
-      },
-      {
-        tag: "fixed",
-        text: "Previews of multi-page apps no longer 404 or lose live-reload when you click through internal links.",
+        tag: "new",
+        commit: "91da677",
+        text: "Added production preview proxying plus ZIP upload and GitHub clone imports, with imported projects persisted for later sessions.",
       },
       {
         tag: "new",
-        text: "Connect GitHub with one click — pick a repo from a dropdown instead of pasting a URL and access token — and deploy straight to Vercel from the workspace toolbar.",
+        commit: "6ddb4d6",
+        text: "Added reliable Stop, editable files with autosave, streamed tool work, collapsible completed turns, one-click Run, and storage sync feedback.",
       },
     ],
   },
   {
-    id: "v0-3",
-    date: "May 2026",
-    ver: "v0.3",
+    id: "v0-1-2",
+    date: "Apr 26, 2026",
+    ver: "v0.1.2",
+    title: "Making the early workspace dependable",
+    changes: [
+      {
+        tag: "fixed",
+        commit: "bcd0330",
+        text: "Stopped an infinite React render loop that could freeze the editor when opening a file.",
+      },
+      {
+        tag: "new",
+        commit: "66cd57d",
+        text: "Turned Run into a true one-click action, added explicit save state on tabs, and made preview tabs closable.",
+      },
+      {
+        tag: "fixed",
+        commit: "049b8bd",
+        text: "Prevented failed preview-server spawns from crashing the orchestrator and tightened preview-tab and Monaco behavior.",
+      },
+      {
+        tag: "fixed",
+        commit: "8cf227d",
+        text: "Made Stop reliable across provider abort shapes and cleared occupied ports before starting a preview server.",
+      },
+      {
+        tag: "fixed",
+        commit: "45c57ab",
+        text: "Automatically reinstalled project dependencies after Railway redeploys instead of leaving Run with missing binaries.",
+      },
+      {
+        tag: "fixed",
+        commit: "9d701bc",
+        text: "Added Git and port-management utilities to the Railway image so imports and server recovery work in production.",
+      },
+      {
+        tag: "fixed",
+        commit: "41c44f1",
+        text: "Switched those Railway packages to the correct Nix runtime mechanism so they are actually present after deploy.",
+      },
+    ],
+  },
+  {
+    id: "v0-1-3",
+    date: "May 3, 2026",
+    ver: "v0.1.3",
+    title: "Security and session recovery",
+    changes: [
+      {
+        tag: "improved",
+        commit: "e2df401",
+        text: "Closed cross-origin, path-containment, and import-safety gaps while improving autosave, disconnect, Stop, and preview-server recovery.",
+      },
+      {
+        tag: "fixed",
+        commit: "cba0e70",
+        text: "Pinned preview routing with a secure cookie so client-side navigation and hot reload survive path changes.",
+      },
+      {
+        tag: "fixed",
+        commit: "6a1f5f5",
+        text: "Repaired malformed tool histories after interrupted turns so affected project chats recover automatically.",
+      },
+    ],
+  },
+  {
+    id: "v0-1-4",
+    date: "May 4, 2026",
+    ver: "v0.1.4",
+    title: "GitHub and Vercel, end to end",
+    changes: [
+      {
+        tag: "new",
+        commit: "920857c",
+        text: "Added GitHub OAuth repo selection and one-click Vercel deployment with encrypted tokens and live deployment status.",
+      },
+      {
+        tag: "fixed",
+        commit: "2956c89",
+        text: "Forced the native GitHub repository picker to render legibly in the dark interface.",
+      },
+      {
+        tag: "fixed",
+        commit: "2afff43",
+        text: "Removed a duplicate certificate package that was breaking Railway image builds.",
+      },
+    ],
+  },
+  {
+    id: "v0-1-5",
+    date: "May 4, 2026",
+    ver: "v0.1.5",
+    title: "A workspace that survives real projects",
+    changes: [
+      {
+        tag: "new",
+        commit: "0fe4a95",
+        text: "Added long-session compaction, safer history replay, Python and Go support, structured questions, @file context, uploads, project management, quick open, and durable run/deploy state.",
+      },
+    ],
+  },
+  {
+    id: "v0-2-0",
+    date: "May 10, 2026",
+    ver: "v0.2.0",
     title: "Every project gets its own machine",
     changes: [
       {
         tag: "new",
-        text: "Each project now runs in its own fully isolated machine instead of a shared process — stronger isolation, and the groundwork for supporting more than just Node.",
-      },
-      {
-        tag: "new",
-        text: "Encrypted per-project secrets, starter connectors (Slack, HTTP, Postgres, GitHub), and automatic checkpoints before every change, with a Rewind view to step back.",
-      },
-      {
-        tag: "new",
-        text: "Skills and slash commands (/review, /deploy, /explain, /test) teach the agent your project's conventions.",
-      },
-      {
-        tag: "new",
-        text: "Free guest accounts — start building with no Google or email sign-in required, with a recovery code to restore your work on another device later.",
-      },
-      {
-        tag: "improved",
-        text: "Long-running installs and commands no longer freeze the workspace or let an idle project drop mid-task.",
-      },
-    ],
-  },
-  {
-    id: "v0-4",
-    date: "May 2026",
-    ver: "v0.4",
-    title: "A workspace that feels considered",
-    changes: [
-      {
-        tag: "improved",
-        text: "Renamed the agent from Codex to Uniqus across the whole product.",
-      },
-      {
-        tag: "new",
-        text: "Drag-and-drop and paste-to-upload for files, @file autocomplete in chat, and an image viewer plus Markdown preview in the editor.",
-      },
-      {
-        tag: "new",
-        text: "The agent can now see screenshots and images you give it, not just describe them blind.",
-      },
-      {
-        tag: "improved",
-        text: "File and folder icons match familiar editor styling, and preview error pages are styled instead of raw browser errors.",
-      },
-    ],
-  },
-  {
-    id: "v0-5",
-    date: "May 2026",
-    ver: "v0.5",
-    title: "Make it yours",
-    changes: [
-      {
-        tag: "new",
-        text: "Settings gained real teeth — light/dark theme, comfortable/compact density, and account-wide custom instructions and default skills that apply to every new project.",
-      },
-      {
-        tag: "new",
-        text: "A proper Guide and Settings page, a bigger dashboard with example prompts and starter templates, and one-sentence project creation — just describe it.",
-      },
-      {
-        tag: "improved",
-        text: "A broad visual cleanup — undefined color tokens, inconsistent modals, mismatched type sizes, and low-contrast focus states, all fixed.",
+        commit: "42bf1a9",
+        text: "Introduced the Firecracker fleet, isolated project machines, encrypted secrets, connectors, checkpoints, skills, and the Phase 2 storage substrate.",
       },
       {
         tag: "fixed",
-        text: "Verified every model's reasoning controls against current provider docs and corrected several that were silently failing; added a live \"thinking\" trace you can expand while the agent reasons.",
+        commit: "0969993",
+        text: "Made the rootfs builder resolve an available supported Firecracker kernel automatically.",
+      },
+      {
+        tag: "fixed",
+        commit: "9842cdf",
+        text: "Mounted proc, sys, dev, and DNS configuration into the rootfs build chroot so packages and services configure correctly.",
+      },
+      {
+        tag: "improved",
+        commit: "14da6d0",
+        text: "Added a complete bare-metal Hetzner bring-up checklist for operating the new sandbox fleet.",
       },
     ],
   },
   {
-    id: "v0-6",
-    date: "May 2026",
-    ver: "v0.6",
+    id: "v0-2-1",
+    date: "May 10, 2026",
+    ver: "v0.2.1",
+    title: "Hardening isolated project machines",
+    changes: [
+      {
+        tag: "fixed",
+        commit: "63a1647",
+        text: "Routed orchestrator-to-guest RPC over the Firecracker TAP network instead of an unreachable address.",
+      },
+      {
+        tag: "fixed",
+        commit: "0a6f055",
+        text: "Moved guest network configuration into the in-VM agent, removing a fragile dependency on kernel IP autoconfiguration.",
+      },
+      {
+        tag: "fixed",
+        commit: "1fe7b32",
+        text: "Raised the VM boot deadline to match real OpenRC cold-start behavior.",
+      },
+      {
+        tag: "fixed",
+        commit: "6e2814d",
+        text: "Prevented idle pausing during active turns and fixed storage-key, checkpoint, race, and signal-listener bugs.",
+      },
+      {
+        tag: "fixed",
+        commit: "df687ff",
+        text: "Allowed PUT and PATCH through CORS and made screenshot capture dial the VM rather than localhost.",
+      },
+      {
+        tag: "improved",
+        commit: "9622b1f",
+        text: "Kept a VM warm while its preview iframe is actively in use.",
+      },
+    ],
+  },
+  {
+    id: "v0-2-2",
+    date: "May 12, 2026",
+    ver: "v0.2.2",
+    title: "A stronger sandbox agent and multi-session chat",
+    changes: [
+      {
+        tag: "new",
+        commit: "d67de4e",
+        text: "Shipped the Rust sandbox agent, multiple chat sessions per project, environment-scoped secrets, and a broad round of runtime hardening.",
+      },
+    ],
+  },
+  {
+    id: "v0-2-3",
+    date: "May 13, 2026",
+    ver: "v0.2.3",
+    title: "Build first, sign up later",
+    changes: [
+      {
+        tag: "new",
+        commit: "af1f66a",
+        text: "Added free guest and education accounts with recovery codes, so building can start without Google or email sign-in.",
+      },
+      {
+        tag: "fixed",
+        commit: "6e914bd",
+        text: "Made sign-out clear the domain-scoped WorkOS session cookie correctly.",
+      },
+      {
+        tag: "fixed",
+        commit: "b30fb0e",
+        text: "Corrected guest-cookie scope so the web app can see the session created by the orchestrator.",
+      },
+      {
+        tag: "fixed",
+        commit: "193cb5f",
+        text: "Exempted guest API routes from middleware redirects to WorkOS sign-in.",
+      },
+      {
+        tag: "fixed",
+        commit: "077a282",
+        text: "Made one-click Run install missing VM dependencies before starting the app.",
+      },
+    ],
+  },
+  {
+    id: "v0-2-4",
+    date: "May 24, 2026",
+    ver: "v0.2.4",
+    title: "A workspace that feels considered",
+    changes: [
+      {
+        tag: "new",
+        commit: "d3f6ff5",
+        text: "Renamed Codex to Uniqus and added image viewing, drag-and-drop uploads, @file autocomplete, VM sync fixes, and a wide workspace UX overhaul.",
+      },
+      {
+        tag: "improved",
+        commit: "08aac95",
+        text: "Added Seti-style icons, visible chat history, styled preview errors, zoom controls, screenshot limits, and live file-tree updates.",
+      },
+    ],
+  },
+  {
+    id: "v0-2-5",
+    date: "May 28, 2026",
+    ver: "v0.2.5",
+    title: "A cleaner product and clearer operations",
+    changes: [
+      {
+        tag: "improved",
+        commit: "b435968",
+        text: "Defined missing design tokens, unified modal styling, and cleaned up the product type scale.",
+      },
+      {
+        tag: "improved",
+        commit: "42882e4",
+        text: "Documented branch, Vercel, Hetzner, and sandbox deployment responsibilities for contributors.",
+      },
+      {
+        tag: "fixed",
+        commit: "0a71d27",
+        text: "Made the new-project card full width and the entire project list card clickable.",
+      },
+    ],
+  },
+  {
+    id: "v0-2-6",
+    date: "May 29, 2026",
+    ver: "v0.2.6",
+    title: "Planning, preferences, and provider controls",
+    changes: [
+      {
+        tag: "new",
+        commit: "96442f1",
+        text: "Added VM-aware dependency installs, explicit web-search guidance, plan-mode defaults, an Enter Plan Mode tool, Guide and Settings pages, and a redesigned dashboard hero.",
+      },
+      {
+        tag: "new",
+        commit: "fa7896c",
+        text: "Expanded the dashboard hero, made the dashboard mobile responsive, and made linking imported repos opt-in.",
+      },
+      {
+        tag: "new",
+        commit: "8422ec6",
+        text: "Added light and dark appearance, density controls, account-wide custom prompts, and default skills.",
+      },
+      {
+        tag: "fixed",
+        commit: "6694ac1",
+        text: "Corrected reasoning and web-search parameters against provider documentation, added thinking controls, and upgraded the Anthropic SDK.",
+      },
+      {
+        tag: "fixed",
+        commit: "d533bfe",
+        text: "Moved OpenAI reasoning-plus-tools traffic to the Responses API and stopped Gemini thought signatures from leaking into Anthropic requests.",
+      },
+    ],
+  },
+  {
+    id: "v0-2-7",
+    date: "May 29, 2026",
+    ver: "v0.2.7",
     title: "The agent can read the live web",
     changes: [
       {
         tag: "new",
-        text: "Built-in web search across every model provider, so the agent can pull current docs instead of relying on stale training data.",
-      },
-      {
-        tag: "new",
-        text: "Plan mode now investigates your actual codebase with read-only tools before proposing a plan, streaming its progress as it works.",
-      },
-      {
-        tag: "improved",
-        text: "Faster reopening of a recently-used project — the environment underneath stays warm for a day instead of rebuilding cold every time.",
-      },
-      {
-        tag: "new",
-        text: "A live token counter in the composer, and a usage dashboard — tokens, estimated cost, agent time, top models — right on your home screen.",
-      },
-    ],
-  },
-  {
-    id: "v0-7",
-    date: "May 2026",
-    ver: "v0.7",
-    title: "A workspace that holds up",
-    changes: [
-      {
-        tag: "new",
-        text: "Preview annotator: click anywhere in the live preview to mark what you mean, then describe the change — no more hunting for the right words.",
-      },
-      {
-        tag: "new",
-        text: "Error boundaries across the workspace catch a failing panel before it takes the whole session down.",
-      },
-      {
-        tag: "improved",
-        text: "The workspace is now usable on a phone.",
+        commit: "301efa8",
+        text: "Added built-in web search across providers, streaming plan mode, faster VM reopen, token fixes, and a broad UX and motion pass.",
       },
       {
         tag: "fixed",
-        text: "Preview 502s caused by dev servers binding only to localhost are resolved.",
+        commit: "e6e1e68",
+        text: "Kept the model flyout on-screen, animated editor tabs, and made deploys reinstall dependencies when lockfiles change.",
       },
       {
         tag: "new",
-        text: "A landing-page composer with voice input — describe your idea out loud from the marketing site, and it carries straight through sign-in into a new workspace.",
+        commit: "f57775e",
+        text: "Portaled the model picker, fixed chat replay, added Git-repo awareness, a live token counter, and dashboard usage widgets.",
       },
     ],
   },
   {
-    id: "v0-8",
-    date: "Jun 2026",
-    ver: "v0.8",
-    title: "A hardening pass",
+    id: "v0-2-8",
+    date: "Jun 1, 2026",
+    ver: "v0.2.8",
+    title: "Faster starts and safer failures",
     changes: [
       {
         tag: "improved",
-        text: "A full security and UX audit: closed several data-exposure gaps (including a subtle cross-network request bypass), added baseline rate limiting and security headers for guest accounts, and rebuilt toasts and modals on one shared, accessible primitive.",
-      },
-    ],
-  },
-  {
-    id: "v0-9",
-    date: "Jun 2026",
-    ver: "v0.9",
-    title: "Bring your own data, bring your own design",
-    changes: [
-      {
-        tag: "new",
-        text: "Connect a Supabase project in a couple of clicks — Uniqus provisions the database and stores the keys for you.",
+        commit: "2c08a47",
+        text: "Cut new-project cold start from about 18 seconds with boot fixes and an optional golden base snapshot.",
       },
       {
         tag: "new",
-        text: "Design Systems: generate a full token set — colors, type, components — from a brief, an existing project, a live URL, a Figma file, or an upload, with a live preview styled in your own tokens.",
+        commit: "48cdd31",
+        text: "Added web error boundaries, a mobile-responsive workspace, and operational notes for Hetzner deployment.",
       },
       {
         tag: "new",
-        text: "A Databases tab — browse tables, run SQL, and manage your connected database without leaving the workspace.",
+        commit: "9a569b5",
+        text: "Added the preview annotator, provider tests, usage accounting, security documentation, and broader error containment.",
       },
       {
         tag: "new",
-        text: "A Skills library — save reusable skills at the account level, generate new ones with AI, and reuse them across projects.",
+        commit: "a97b15c",
+        text: "Added a marketing-site project composer with voice input and preserved the idea through sign-in.",
       },
       {
         tag: "improved",
-        text: "A 46-finding security and correctness audit closed a symlink-based file-read bug, several cross-network request gaps, and a handful of workspace race conditions.",
+        commit: "cf018fc",
+        text: "Completed a security-hardening and UX-audit pass covering exposure risks, shared accessible UI primitives, and pre-push verification.",
       },
     ],
   },
   {
-    id: "v0-10",
-    date: "Jun 2026",
-    ver: "v0.10",
+    id: "v0-3-0",
+    date: "Jun 7, 2026",
+    ver: "v0.3.0",
+    title: "Bring your data, bring your design",
+    changes: [
+      {
+        tag: "new",
+        commit: "5e0dec2",
+        text: "Added Supabase OAuth and database provisioning, Design Systems, a Databases workspace, and the first full marketing site.",
+      },
+    ],
+  },
+  {
+    id: "v0-3-1",
+    date: "Jun 7, 2026",
+    ver: "v0.3.1",
+    title: "Design systems become a real workflow",
+    changes: [
+      {
+        tag: "improved",
+        commit: "c04eaa3",
+        text: "Restyled the Databases and Design Systems tabs to match the main application.",
+      },
+      {
+        tag: "improved",
+        commit: "2dd2182",
+        text: "Reworked Design Systems around an empty-state brief, repository picker, and live preview.",
+      },
+      {
+        tag: "new",
+        commit: "ed22bc3",
+        text: "Made design-system creation agent-driven with source analysis, findings review, Figma input, and multimodal context.",
+      },
+      {
+        tag: "new",
+        commit: "c16adf4",
+        text: "Added a full-width collapsible design editor, live activity stream, component catalog, and logo support.",
+      },
+      {
+        tag: "fixed",
+        commit: "9d3f77c",
+        text: "Raised analysis output limits so large design-system findings no longer truncate into invalid JSON.",
+      },
+      {
+        tag: "fixed",
+        commit: "e478175",
+        text: "Stopped the lightweight project-naming model from accidentally answering the user's full brief.",
+      },
+    ],
+  },
+  {
+    id: "v0-3-2",
+    date: "Jun 10, 2026",
+    ver: "v0.3.2",
     title: "Bring your keys, take your code",
     changes: [
       {
         tag: "new",
-        text: "Bring your own model keys — connect your Anthropic, OpenAI, or Google account in Settings and route your builds through it, so usage (including planning) bills to you. Leave it blank and we use ours.",
-      },
-      {
-        tag: "new",
-        text: "Take your code anywhere: download your whole project as a zip, or drop your live app into any page with a ready-made embed snippet.",
-      },
-      {
-        tag: "new",
-        text: "Share a live preview with a teammate over a link that expires and that you can revoke at any time — no sign-in required to view.",
-      },
-      {
-        tag: "improved",
-        text: "A clearer Security page: a new request-flow diagram, plus straight answers on sub-processors, encryption, data handling, and exactly where we stand on certifications.",
+        commit: "1c63d7f",
+        text: "Added bring-your-own provider keys, first-run onboarding, project export, revocable preview sharing, embeds, and clearer marketing and compliance documentation.",
       },
     ],
   },
   {
-    id: "v0-11",
-    date: "Jun 2026",
-    ver: "v0.11",
-    title: "Built for teams",
+    id: "v0-3-3",
+    date: "Jun 11, 2026",
+    ver: "v0.3.3",
+    title: "A deeper product and agent audit",
     changes: [
       {
         tag: "new",
-        text: "Real collaboration — invite teammates to a project as owner, admin, editor, or viewer, leave comments, and share an organization workspace.",
-      },
-      {
-        tag: "new",
-        text: "Attach knowledge documents — PDFs, spreadsheets, Word docs — for the agent to read as project context.",
-      },
-      {
-        tag: "new",
-        text: "A templates library to start a new project from a working example instead of a blank page.",
-      },
-      {
-        tag: "new",
-        text: "A new agent tool lets it drive your running preview itself and report back what it saw — console errors, failed requests, accessibility issues — as concrete evidence instead of a guess.",
+        commit: "0796e25",
+        text: "Added a design-excellence agent prompt, redesigned the dashboard, and fixed VM secrets and editor behavior.",
       },
       {
         tag: "improved",
-        text: "Verified and hardened the whole collaboration feature set before shipping, including a cross-network request bypass in the new preview-driving tool.",
-      },
-    ],
-  },
-  {
-    id: "v0-12",
-    date: "Jun 2026",
-    ver: "v0.12",
-    title: "Generate images, watch the agent drive the preview",
-    changes: [
-      {
-        tag: "new",
-        text: "The agent can now generate and edit images directly and use the result immediately, with the cost metered per image.",
-      },
-      {
-        tag: "new",
-        text: "A live \"Preview (Agent)\" view streams a screenshot for every step while the agent drives your running app; save a sequence of steps as a reusable flow to run again later.",
+        commit: "6729cc4",
+        text: "Remediated roughly 46 security and correctness findings and added the Skills library tab.",
       },
       {
         tag: "improved",
-        text: "Team features — Teams/Organizations, Comments, Tasks — are now visible in the UI.",
-      },
-      {
-        tag: "improved",
-        text: "File icons now use VS Code's real Seti icon set for a more familiar look.",
+        commit: "54cf2a1",
+        text: "Overhauled Skills and Databases, strengthened composition-first design guidance, and fixed mobile workspace behavior.",
       },
       {
         tag: "fixed",
-        text: "A thinking-effort bug on one Gemini model that occasionally produced blank, one-word answers is resolved.",
+        commit: "24bed27",
+        text: "Fixed VM-to-host file pulling so files created by commands are not lost before synchronization.",
+      },
+      {
+        tag: "improved",
+        commit: "29d9a76",
+        text: "Taught the design agent to prefer restrained, refined output over one-shot maximalism.",
       },
     ],
   },
   {
-    id: "v0-13",
-    date: "Jun 2026",
-    ver: "v0.13",
-    title: "GLM joins the lineup",
+    id: "v0-3-4",
+    date: "Jun 16, 2026",
+    ver: "v0.3.4",
+    title: "Built for shared work",
     changes: [
       {
         tag: "new",
-        text: "Z.ai's GLM-5.2 is now a first-class model — near-Opus coding quality at a fraction of the cost, with a 1M-token context. Auto reaches for it on routine features, and you can pin it per turn from the composer's model picker.",
+        commit: "a5fe7a0",
+        text: "Added project collaboration, roles, comments, knowledge, tasks, templates, and an agent tool that can inspect and drive the running preview.",
       },
       {
-        tag: "new",
-        text: "Because GLM can't see images natively, a vision bridge quietly hands screenshots to a companion model, so the agent never loses the ability to check its own visual work.",
-      },
-      {
-        tag: "new",
-        text: "Built-in web search now covers GLM too, so all four providers — Claude, GLM, GPT, and Gemini — can pull current docs mid-build.",
-      },
-      {
-        tag: "new",
-        text: "Bring your own Z.ai key in Settings alongside Anthropic, OpenAI, and Google, and route your GLM builds through your own account.",
+        tag: "fixed",
+        commit: "0c70ee1",
+        text: "Fixed a clipped project-card icon and an unreadable Design Systems dropdown.",
       },
     ],
   },
   {
-    id: "v0-14",
-    date: "Jun 2026",
-    ver: "v0.14",
-    title: "Guardrails you control",
+    id: "v0-3-5",
+    date: "Jun 17, 2026",
+    ver: "v0.3.5",
+    title: "Generate images and watch the agent test",
     changes: [
       {
         tag: "new",
-        text: "Four permission modes — Plan, Ask before edits, Auto-accept, and Full autonomy — let you decide how much the agent can do without checking in, switchable mid-conversation.",
-      },
-      {
-        tag: "new",
-        text: "Task-aware Auto routing sends each step of a turn to whichever model fits it best — quick edits to the fastest model, hard problems to the strongest reasoner — instead of one fixed choice.",
-      },
-      {
-        tag: "new",
-        text: "A build-readiness check the agent can run before calling a project deployable, catching production build failures and unsafe serverless patterns first.",
-      },
-      {
-        tag: "new",
-        text: "The agent can now split work across sub-agents that each take a piece of a larger task.",
+        commit: "258ab84",
+        text: "Added image generation, a live Preview Agent with reusable flows, collaboration UI, and multiple UX and reasoning fixes.",
       },
       {
         tag: "improved",
-        text: "Reading large files and searching code got smarter — the agent can request just the lines it needs and recovers gracefully from a bad search pattern instead of failing outright.",
+        commit: "a730acf",
+        text: "Adopted the real VS Code Seti icon set and corrected composer height behavior.",
       },
       {
         tag: "fixed",
-        text: "GLM's web search was silently returning stale, un-searched answers — it now actually searches every time.",
+        commit: "458f3a1",
+        text: "Applied Gemini 3.x thinking levels correctly and preserved text thought signatures across turns.",
+      },
+      {
+        tag: "new",
+        commit: "c781e97",
+        text: "Added a working indicator and model-button picker, surfaced organization-workspace groundwork, and removed GPT-5.5 Pro.",
       },
     ],
   },
   {
-    id: "v0-15",
-    date: "Jun 2026",
-    ver: "v0.15",
-    title: "Watch the agent work",
+    id: "v0-3-6",
+    date: "Jun 18, 2026",
+    ver: "v0.3.6",
+    title: "GLM joins the model lineup",
     changes: [
       {
         tag: "new",
-        text: "A live Activity Monitor shows token and cost stats, sub-agent progress, and your task list updating in real time as a turn runs.",
+        commit: "dfeb14f",
+        text: "Added Z.ai GLM-5.2 as a first-class provider with web search, thinking controls, and a vision bridge for screenshots.",
       },
       {
-        tag: "new",
-        text: "Sub-agents now run concurrently in the background instead of one at a time, so multi-part builds finish faster.",
+        tag: "fixed",
+        commit: "2fe2fa9",
+        text: "Threaded each user's Z.ai key through provider resolution so bring-your-own GLM usage works.",
       },
       {
-        tag: "new",
-        text: "Thinking effort is now a full draggable slider (low through max, scoped to what each model actually supports), with a one-click on/off toggle.",
-      },
-      {
-        tag: "new",
-        text: "When Auto picks a model for you, a chip shows which one it chose before the response starts streaming.",
-      },
-      {
-        tag: "new",
-        text: "Send a follow-up message while the agent is still working — it's picked up as steering instructions instead of being rejected as \"already running\".",
-      },
-      {
-        tag: "new",
-        text: "Set default skills that apply automatically to every new project you create.",
+        tag: "fixed",
+        commit: "9aa1dcc",
+        text: "Disabled compressed GLM streaming responses so tool calls and answer deltas arrive live.",
       },
     ],
   },
   {
-    id: "v0-16",
-    date: "Jul 2026",
-    ver: "v0.16",
-    title: "Plans, changes, and costs you can read",
+    id: "v0-4-0",
+    date: "Jun 22, 2026",
+    ver: "v0.4.0",
+    title: "The agent can divide and verify its work",
     changes: [
       {
         tag: "new",
-        text: "Plan review rebuilt for a non-technical reader: a plain-English headline, a \"What you'll get\" list, and a wireframe up front, with every technical detail one click away behind a \"Technical details\" toggle.",
+        commit: "e4ebd65",
+        text: "Added pre-deploy checks, sub-agents, connector detection, deployment secret sync, and OCR through the vision bridge.",
       },
       {
         tag: "improved",
-        text: "Tool activity in chat now updates live instead of freezing on \"Running…\" — file writes and edits show a live line-diff estimate as they stream, then flip to past tense (\"Wrote\", \"Ran\") on completion.",
-      },
-      {
-        tag: "improved",
-        text: "The model picker is now a compact, traditional menu instead of a large panel.",
-      },
-      {
-        tag: "fixed",
-        text: "Reopening a project whose app lives in a subdirectory no longer gets stuck in a flashing \"compiling\" loop before erroring out.",
-      },
-      {
-        tag: "improved",
-        text: "A broad prompt-quality pass and a full rewrite of every design skill pack — 17 refreshed, 8 new, including dark/gaming, luxury, and terminal aesthetics — for sharper, more differentiated output.",
+        commit: "2feb1d8",
+        text: "Added inline screenshot thumbnails, bounded screenshot storage, and smoother GLM thinking and tool-call streaming.",
       },
     ],
   },
   {
-    id: "v0-17",
-    date: "Jul 2026",
-    ver: "v0.17",
-    title: "Numbers that move in real time",
+    id: "v0-4-1",
+    date: "Jun 27, 2026",
+    ver: "v0.4.1",
+    title: "Guardrails and task-aware routing",
     changes: [
       {
         tag: "new",
-        text: "Live output-token and cost counters now tick up as the agent writes, instead of jumping only when a turn finishes.",
-      },
-      {
-        tag: "improved",
-        text: "Reopening a project you've built recently is now consistently under a second — we found and closed two separate causes of a roughly one-second stall in the environment underneath.",
+        commit: "56cca67",
+        text: "Added permission modes, task-aware Auto routing, ranged file reads, safer searches, and persistent Firecracker networking.",
       },
       {
         tag: "fixed",
-        text: "Fixed a bug where switching models mid-conversation could quietly corrupt Gemini's reasoning state; also surfaced Gemini 3.5 Flash's web searches as visible activity instead of hiding them.",
+        commit: "6f79995",
+        text: "Fixed GLM web search configuration, guarded golden snapshots against staleness, and expanded project disks from 1 GB to 8 GB.",
       },
       {
-        tag: "improved",
-        text: "The live +/− line-diff estimate on a file edit now counts up smoothly toward the real number instead of overshooting and snapping back.",
+        tag: "fixed",
+        commit: "82b5af3",
+        text: "Normalized malformed model plans so an invalid steps shape cannot crash the UI.",
       },
     ],
   },
   {
-    id: "v0-18",
-    date: "Jul 2026",
-    ver: "v0.18",
-    title: "The numbers add up",
-    changes: [
-      {
-        tag: "fixed",
-        text: "Per-run cost estimates are more accurate: generating images, reading images, and reading documents now count toward the cost shown for a turn instead of being invisible, and several model prices were corrected against each provider's current published rates.",
-      },
-      {
-        tag: "fixed",
-        text: "After you rewind to an earlier checkpoint, the agent now re-reads your files before editing instead of acting on changes that were rolled back.",
-      },
-      {
-        tag: "improved",
-        text: "Deleting a large project now shows a spinner and keeps the dialog open until it finishes, so it no longer looks like nothing happened.",
-      },
-      {
-        tag: "improved",
-        text: "The \"Reconnected — your build kept running\" banner can now be dismissed and clears itself automatically.",
-      },
-    ],
-  },
-  {
-    id: "v0-19",
-    date: "Jul 2026",
-    ver: "v0.19",
-    title: "Sources you can follow",
+    id: "v0-4-2",
+    date: "Jun 29, 2026",
+    ver: "v0.4.2",
+    title: "Auto explains itself, and users can steer",
     changes: [
       {
         tag: "new",
-        text: "Answers grounded in web search now show clickable citations in the text and a clean source list underneath, including after you reopen a conversation.",
-      },
-      {
-        tag: "new",
-        text: "The all-projects view can now filter by deploy status and sort by name, recent activity, or creation date.",
-      },
-      {
-        tag: "improved",
-        text: "Workspace members, usage, and settings pages have been refreshed with clearer summaries, controls, and budget status.",
-      },
-      {
-        tag: "improved",
-        text: "Plan mode now sees the same up-to-date project context as the building agent, including attached design systems, knowledge, connectors, and running apps.",
-      },
-      {
-        tag: "fixed",
-        text: "Skill instructions arriving inside an imported ZIP or GitHub project are held for review until you explicitly save them in Uniqus.",
+        commit: "c590659",
+        text: "Showed Auto's per-turn model choice before streaming and allowed follow-up messages to steer a turn already in progress.",
       },
     ],
   },
   {
-    id: "v0-20",
-    date: "Jul 2026",
-    ver: "v0.20",
-    title: "A faster, steadier agent",
+    id: "v0-4-3",
+    date: "Jul 1, 2026",
+    ver: "v0.4.3",
+    title: "Watch parallel agents work",
     changes: [
       {
         tag: "new",
-        text: "GPT-5.6 Sol and GPT-5.6 Terra are now available in the model picker, with the full reasoning range on both models.",
+        commit: "83ae241",
+        text: "Added concurrent background sub-agents, a live Activity Monitor, adaptive thinking controls, live cost, and default project skills.",
       },
       {
         tag: "improved",
-        text: "The agent now starts eligible tasks with a smaller, task-matched toolkit and loads specialized capabilities only when needed, cutting prompt overhead while keeping the full toolset within reach.",
-      },
-      {
-        tag: "improved",
-        text: "Independent code reads can run in parallel, while large files, searches, and command output are trimmed intelligently so one oversized result cannot crowd out the rest of the work.",
-      },
-      {
-        tag: "improved",
-        text: "Long conversations compact around each model's real context window and reuse that compacted history after reconnecting, reducing repeated work on later turns.",
-      },
-      {
-        tag: "fixed",
-        text: "File changes and chat history are saved more reliably at the end of every turn, including interrupted runs and background tasks that hit a provider or persistence error.",
+        commit: "b425e11",
+        text: "Refined preview labels, Activity access, plan and sub-agent accounting, Claude thinking traces, tool labels, skill auto-apply, and reduced-motion-aware animation.",
       },
     ],
   },
   {
-    id: "v0-21",
-    date: "Jul 2026",
-    ver: "v0.21",
-    title: "Cleaner workspaces, more reliable previews",
+    id: "v0-4-4",
+    date: "Jul 2, 2026",
+    ver: "v0.4.4",
+    title: "Golden clones that stay writable and fast",
+    changes: [
+      {
+        tag: "fixed",
+        commit: "177e107",
+        text: "Made /root writable on read-only golden clones, moved package-manager caches to project disks, guarded stale snapshots, and cut restore latency.",
+      },
+    ],
+  },
+  {
+    id: "v0-5-0",
+    date: "Jul 2, 2026",
+    ver: "v0.5.0",
+    title: "A sharper agent and a real skill catalog",
     changes: [
       {
         tag: "improved",
-        text: "The website and project dashboard now use cleaner, flatter surfaces, while organization members, usage, and settings have been rebuilt as proper workspace tools instead of generic admin cards.",
-      },
-      {
-        tag: "fixed",
-        text: "Preview dependencies now stay in sync with package.json and lockfile changes, including apps inside subdirectories, so stale or partially installed modules no longer masquerade as a ready project.",
-      },
-      {
-        tag: "fixed",
-        text: "New projects use a current Node.js runtime and reject incompatible packages during installation instead of accepting them and failing later when the preview starts.",
+        commit: "cf707f0",
+        text: "Reworked prompt caching, compaction, routing, tool guidance, and structured plans, then rewrote 17 design skills and added 8 focused skill packs.",
       },
     ],
   },
   {
-    id: "v0-22",
-    date: "Jul 2026",
-    ver: "v0.22",
+    id: "v0-5-1",
+    date: "Jul 2, 2026",
+    ver: "v0.5.1",
+    title: "Live work that stays live",
+    changes: [
+      {
+        tag: "fixed",
+        commit: "cf124d9",
+        text: "Fixed memoization that froze streamed tool labels and added live file-diff estimates across execution, plan mode, and Gemini calls.",
+      },
+      {
+        tag: "fixed",
+        commit: "b9360be",
+        text: "Made dependency installation understand subdirectory apps and replaced the flashing preview reload loop with an in-place readiness probe.",
+      },
+      {
+        tag: "improved",
+        commit: "30946cf",
+        text: "Removed a fixed one-second golden-restore stall by retrying lost initial connections before the kernel retransmission timeout.",
+      },
+    ],
+  },
+  {
+    id: "v0-5-2",
+    date: "Jul 2, 2026",
+    ver: "v0.5.2",
+    title: "Plans become reviewable documents",
+    changes: [
+      {
+        tag: "new",
+        commit: "ffe0a1c",
+        text: "Rebuilt plan review as a plain-English stage document with deliverables and optional technical detail, and reduced the model picker to a compact menu.",
+      },
+    ],
+  },
+  {
+    id: "v0-5-3",
+    date: "Jul 5, 2026",
+    ver: "v0.5.3",
+    title: "Numbers and reasoning that move correctly",
+    changes: [
+      {
+        tag: "new",
+        commit: "d526855",
+        text: "Added low-biased live output-token and cost estimates throughout streaming, including across the plan-to-execute handoff.",
+      },
+      {
+        tag: "improved",
+        commit: "e82192b",
+        text: "Pre-seeded Firecracker neighbor entries to remove another roughly one-second ARP delay from golden restores.",
+      },
+      {
+        tag: "fixed",
+        commit: "78966fc",
+        text: "Made Gemini thought signatures model-specific and surfaced Gemini 3.5 Flash server-side searches as visible activity.",
+      },
+      {
+        tag: "improved",
+        commit: "1e9e49d",
+        text: "Made streamed edit badges use a real line diff with smoothly rolling, reduced-motion-aware counters.",
+      },
+    ],
+  },
+  {
+    id: "v0-5-4",
+    date: "Jul 7, 2026",
+    ver: "v0.5.4",
+    title: "A public record, stronger signup protection, and honest cost",
+    changes: [
+      {
+        tag: "new",
+        commit: "9c43c01",
+        text: "Added the pre-v1 changelog timeline and refreshed marketing pages, product documentation, and Firecracker documentation.",
+      },
+      {
+        tag: "fixed",
+        commit: "fc14d91",
+        text: "Protected Gemini 3.x reasoning after switching from a non-Gemini model by replaying the documented dummy signature.",
+      },
+      {
+        tag: "new",
+        commit: "889a88e",
+        text: "Added Cloudflare Turnstile protection to guest signup and restore, verified at the orchestrator trust boundary.",
+      },
+      {
+        tag: "improved",
+        commit: "25fba8c",
+        text: "Excluded Vercel's local link metadata from version control.",
+      },
+      {
+        tag: "fixed",
+        commit: "8cd44fd",
+        text: "Included image, vision, OCR, and planning spend in per-turn cost, repriced models, hardened checkpoint rewind, and polished deletion and reconnect states.",
+      },
+    ],
+  },
+  {
+    id: "v0-6-0",
+    date: "Jul 11, 2026",
+    ver: "v0.6.0",
+    title: "Sources you can follow and context you can trust",
+    changes: [
+      {
+        tag: "new",
+        commit: "f0955fe",
+        text: "Added durable web citations, richer plan context, safer imported skills, project filtering and sorting, redesigned organization views, and repo-native Codex guidance.",
+      },
+    ],
+  },
+  {
+    id: "v0-6-1",
+    date: "Jul 11, 2026",
+    ver: "v0.6.1",
+    title: "A faster, more durable agent core",
+    changes: [
+      {
+        tag: "improved",
+        commit: "c6c5fc1",
+        text: "Added task-matched prompt profiles, parallel tool scheduling, smarter compaction and output trimming, durable message and metric persistence, expanded model support, and hardened sandbox I/O.",
+      },
+    ],
+  },
+  {
+    id: "v0-6-2",
+    date: "Jul 12, 2026",
+    ver: "v0.6.2",
+    title: "Cleaner dashboards and production-ready sandbox tooling",
+    changes: [
+      {
+        tag: "improved",
+        commit: "05ea793",
+        text: "Rebuilt organization dashboard surfaces, strengthened dependency and run-config detection, upgraded rootfs and host setup, and added a reproducible Rust toolchain installer.",
+      },
+    ],
+  },
+  {
+    id: "v0-6-3",
+    date: "Jul 12, 2026",
+    ver: "v0.6.3",
     title: "A more consistent finish",
     changes: [
       {
+        tag: "fixed",
+        commit: "d329b29",
+        text: "Aligned the dashboard composer with the workspace chat surface and restored the intended translucent marketing footer treatment.",
+      },
+    ],
+  },
+  {
+    id: "v0-7-0",
+    date: "Jul 13, 2026",
+    ver: "v0.7.0",
+    title: "Safer autonomy, clearer control, and new production domains",
+    changes: [
+      {
         tag: "improved",
-        text: "The new-project composer now matches the workspace chat surface, and marketing footers once again use a softly translucent gray panel.",
+        commit: "1c359b2",
+        text: "Added live multi-agent activity, stronger run and secret controls, safer organization access, isolated previews, and moved production to gate15.dev with cookieless previews on gate15.app.",
       },
     ],
   },
@@ -600,7 +857,7 @@ export default function ChangelogPage() {
             What&rsquo;s <span className="grad">new</span>.
           </h1>
           <p className="mk-lede">
-            Product updates, big and small — pre-v1 and building fast.
+            Every substantive change on the road to v1.
           </p>
         </div>
       </section>
@@ -621,11 +878,29 @@ export default function ChangelogPage() {
                   <h3>{entry.title}</h3>
                   <ul>
                     {entry.changes.map((change) => (
-                      <li key={change.text}>
+                      <li key={change.commit}>
                         <span className={`change-tag tag-${change.tag}`}>
                           {change.tag}
                         </span>
-                        <span>{change.text}</span>
+                        <span>
+                          {change.text}{" "}
+                          <a
+                            href={`${COMMIT_URL}${change.commit}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            title={`View commit ${change.commit}`}
+                            style={{
+                              color: "inherit",
+                              fontFamily: "var(--font-mono)",
+                              fontSize: 11,
+                              opacity: 0.62,
+                              textDecoration: "none",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {change.commit}
+                          </a>
+                        </span>
                       </li>
                     ))}
                   </ul>
