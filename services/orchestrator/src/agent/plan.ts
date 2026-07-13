@@ -5,7 +5,7 @@ import {
   type ModelChoice,
   type Plan,
   type PlanStep,
-} from "@uniqus/api-types";
+} from "@gate15/api-types";
 import { normalizeMessageHistory } from "./messageHistory.js";
 import {
   formatAccountPromptForPrompt,

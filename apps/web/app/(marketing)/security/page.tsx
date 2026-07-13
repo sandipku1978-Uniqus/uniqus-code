@@ -2,9 +2,9 @@ import Link from "next/link";
 import ArchitectureDiagram from "./ArchitectureDiagram";
 
 export const metadata = {
-  title: "Security — Uniqus Code",
+  title: "Security — Gate 15",
   description:
-    "How Uniqus Code keeps your code, keys, and data safe: per-project isolation, encrypted secrets, guardrails on risky actions, and a clear audit trail.",
+    "How Gate 15 keeps your code, keys, and data safe: per-project isolation, encrypted secrets, guardrails on risky actions, and a clear audit trail.",
 };
 
 type Icon = "lock" | "shield" | "vm" | "eye" | "key" | "history";
@@ -168,7 +168,7 @@ export default function SecurityPage() {
             Fast doesn&rsquo;t have to mean <span className="grad">reckless</span>.
           </h1>
           <p className="mk-lede">
-            Uniqus Code keeps the AI out in the open. It shows its plan before
+            Gate 15 keeps the AI out in the open. It shows its plan before
             making changes, keeps your keys encrypted, isolates every project,
             and only publishes when you say so.
           </p>
@@ -241,7 +241,7 @@ export default function SecurityPage() {
           <h3>Responsible disclosure</h3>
           <p>
             Found a vulnerability? We want to hear about it. Email{" "}
-            <a href="mailto:security@uniqus.com">security@uniqus.com</a> with the
+            <a href="mailto:security@gate15.dev">security@gate15.dev</a> with the
             details and steps to reproduce, and we&rsquo;ll get back to you. We
             ask that you give us reasonable time to investigate and remediate
             before any public disclosure.

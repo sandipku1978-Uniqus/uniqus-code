@@ -59,7 +59,7 @@ export default function NavExploreMenu({
         onRequestClose={() => setOpen(false)}
         className="nav-explore-panel"
         role="menu"
-        ariaLabel="Explore Uniqus Code"
+        ariaLabel="Explore Gate 15"
       >
         {columns.map((column) => (
           <div className="nav-explore-col" key={column.title}>

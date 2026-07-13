@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
-import { DM_Sans, JetBrains_Mono } from "next/font/google";
+import { Archivo, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import Toaster from "@/components/Toaster";
 
-const dmSans = DM_Sans({
+// Archivo — an industrial grotesque from the signage lineage. It carries the
+// uppercase, wide-tracked labels the brand leans on.
+const archivo = Archivo({
   subsets: ["latin"],
   weight: ["400", "500", "600", "700"],
   variable: "--font-sans",
@@ -18,11 +20,11 @@ const jetBrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Uniqus Code — Build real apps with AI.",
+  title: "Gate 15 — Build real apps with AI.",
   description:
-    "Describe what you want to build, pick the AI you trust, and watch your app come to life — from Uniqus.",
+    "Describe what you want to build, pick the AI you trust, and watch your app come to life.",
   icons: {
-    icon: "/brand/uniqus-small-logo-color.png",
+    icon: "/brand/gate15-mark.svg",
   },
 };
 
@@ -30,17 +32,17 @@ export const metadata: Metadata = {
  * Apply the persisted Appearance prefs (Settings → Appearance) to <html>
  * before first paint, so a light-theme / compact user never sees a flash of
  * the dark/comfortable defaults. Reads the same localStorage keys the store
- * writes (`uniqus.theme` / `uniqus.density`). Defaults to dark/comfortable
+ * writes (`gate15.theme` / `gate15.density`). Defaults to dark/comfortable
  * when unset or unreadable. Kept inline + tiny so it runs synchronously in
  * <head> ahead of the stylesheet applying token overrides.
  */
-const APPEARANCE_BOOTSTRAP = `(function(){try{var d=document.documentElement;var t=localStorage.getItem("uniqus.theme");d.dataset.theme=t==="light"?"light":"dark";var s=localStorage.getItem("uniqus.density");d.dataset.density=s==="compact"?"compact":"comfortable";}catch(e){document.documentElement.dataset.theme="dark";document.documentElement.dataset.density="comfortable";}})();`;
+const APPEARANCE_BOOTSTRAP = `(function(){try{var d=document.documentElement;var t=localStorage.getItem("gate15.theme");d.dataset.theme=t==="light"?"light":"dark";var s=localStorage.getItem("gate15.density");d.dataset.density=s==="compact"?"compact":"comfortable";}catch(e){document.documentElement.dataset.theme="dark";document.documentElement.dataset.density="comfortable";}})();`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html
       lang="en"
-      className={`${dmSans.variable} ${jetBrainsMono.variable}`}
+      className={`${archivo.variable} ${jetBrainsMono.variable}`}
       suppressHydrationWarning
     >
       <head>

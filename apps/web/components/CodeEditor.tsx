@@ -1,8 +1,8 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useRef } from "react";
-import { useStore, flushSave, type SaveStatus } from "@/lib/store";
+import { useEffect, useRef, useState } from "react";
+import { useStore, flushSave, type SaveStatus, type ThemeChoice } from "@/lib/store";
 
 const Monaco = dynamic(() => import("@monaco-editor/react"), { ssr: false });
 
@@ -38,49 +38,156 @@ function languageFor(path: string): string {
   );
 }
 
-function defineUniqusTheme(monaco: typeof import("monaco-editor")): void {
-  monaco.editor.defineTheme("uniqus-dark", {
+const DARK_THEME = "gate15-dark";
+const LIGHT_THEME = "gate15-light";
+
+/**
+ * Gate 15's editor themes: one warm signal colour on cold industrial steel.
+ *
+ * Monaco cannot read CSS custom properties, so the palette has to be restated
+ * as literal hex — which means BOTH themes have to exist, or the editor stays a
+ * dark plate on a concrete-white page. The two mirror each other token for
+ * token and are picked off `<html data-theme>` (see `useDocumentTheme`), so the
+ * editor ground always equals `--bg-code` for the active theme.
+ *
+ * The chrome is deliberately COLD (graphite/concrete surfaces, steel selection)
+ * — that's what makes the warm signal read as hi-vis. The brand orange is
+ * reserved for the live-state marks the eye tracks: the caret, the matched
+ * bracket, the dragged scrollbar. On light it drops from ember (#FF6A00, only
+ * 2.9:1 on concrete) to the deep oxide --brand-rust (#B23F0A), exactly as the
+ * spec requires of every orange mark on a light ground.
+ *
+ * Syntax keeps six well-separated hues, because an editor is a functional
+ * surface before it is a brand one. Warm (ember → signal, and rust → ochre on
+ * light) marks the structural spine — keywords and literals; cold (olive →
+ * teal → cyan → steel blue) marks everything nominal — strings, types, tags,
+ * functions. Every token clears 4.5:1 on its own ground; the two closest pairs
+ * (keyword/number, type/function) also separate on lightness, not hue alone.
+ * Ratios below are against that theme's --bg-code (#08090A / #EDECEA).
+ */
+function defineGate15Themes(monaco: typeof import("monaco-editor")): void {
+  monaco.editor.defineTheme(DARK_THEME, {
     base: "vs-dark",
     inherit: true,
     rules: [
-      { token: "", foreground: "e4e2dc" },
-      { token: "comment", foreground: "5a5850", fontStyle: "italic" },
-      { token: "keyword", foreground: "c084fc" },
-      { token: "string", foreground: "fbbf24" },
-      { token: "number", foreground: "34d399" },
-      { token: "type", foreground: "5eead4" },
-      { token: "type.identifier", foreground: "5eead4" },
-      { token: "identifier", foreground: "e4e2dc" },
-      { token: "function", foreground: "60a5fa" },
-      { token: "tag", foreground: "f472b6" },
-      { token: "attribute.name", foreground: "60a5fa" },
-      { token: "attribute.value", foreground: "fbbf24" },
-      { token: "delimiter", foreground: "8a8880" },
-      { token: "operator", foreground: "8a8880" },
+      { token: "", foreground: "edebe7" }, // --text-primary
+      { token: "comment", foreground: "7c7a76", fontStyle: "italic" }, // --text-dim, 4.6:1
+      { token: "keyword", foreground: "ff8124" }, // ember-hi — the structural spine, 8.0:1
+      { token: "number", foreground: "ffc53d" }, // brand signal — numerals, 12.6:1
+      { token: "string", foreground: "a8cf7e" }, // lichen, 11.3:1
+      { token: "type", foreground: "5ec9b0" }, // patina, 9.9:1
+      { token: "type.identifier", foreground: "5ec9b0" },
+      { token: "identifier", foreground: "edebe7" },
+      { token: "function", foreground: "79b8ff" }, // steel blue, 9.6:1
+      { token: "tag", foreground: "4fb8d8" }, // cold cyan, 8.7:1
+      { token: "attribute.name", foreground: "79b8ff" },
+      { token: "attribute.value", foreground: "a8cf7e" }, // an attribute value IS a string
+      { token: "delimiter", foreground: "8a8880" }, // recedes, still 5.6:1
+      { token: "operator", foreground: "9a9793" }, // --text-muted
     ],
     colors: {
-      "editor.background": "#0c0c11",
-      "editor.foreground": "#e4e2dc",
-      "editorLineNumber.foreground": "#3a3830",
-      "editorLineNumber.activeForeground": "#8a8880",
-      "editor.lineHighlightBackground": "#16161e",
-      "editor.lineHighlightBorder": "#16161e",
-      "editor.selectionBackground": "#3a2055",
-      "editor.inactiveSelectionBackground": "#252530",
-      "editorCursor.foreground": "#B21E7D",
-      "editorWidget.background": "#16161e",
-      "editorWidget.border": "#2a2a35",
-      "editorIndentGuide.background": "#1e1e28",
-      "editorIndentGuide.activeBackground": "#3a3830",
-      "editorBracketMatch.background": "#3a2055",
-      "editorBracketMatch.border": "#B21E7D",
-      "editorGutter.background": "#0c0c11",
-      "scrollbarSlider.background": "#2a2a3580",
-      "scrollbarSlider.hoverBackground": "#3a3830",
-      "scrollbarSlider.activeBackground": "#48287980",
-      "minimap.background": "#0c0c11",
+      "editor.background": "#08090A", // --bg-code, the deepest surface
+      "editor.foreground": "#EDEBE7",
+      "editorLineNumber.foreground": "#3C3A37", // --text-xdim (decoration)
+      "editorLineNumber.activeForeground": "#9A9793",
+      "editor.lineHighlightBackground": "#0F1113", // --bg-pane, one step up
+      "editor.lineHighlightBorder": "#0F1113",
+      // Selection stays cold steel on purpose: a warm selection block would go
+      // muddy under the warm tokens sitting on it (and brown is the one thing
+      // this palette must never become).
+      "editor.selectionBackground": "#28323A",
+      "editor.inactiveSelectionBackground": "#1E2429",
+      "editorCursor.foreground": "#FF6A00", // ember
+      "editorWidget.background": "#16181B", // --bg-surface
+      "editorWidget.border": "#2A2E33", // --border-default
+      "editorIndentGuide.background": "#1E2125", // --border-light
+      "editorIndentGuide.activeBackground": "#3C3A37",
+      "editorBracketMatch.background": "#28323A",
+      "editorBracketMatch.border": "#FF6A00", // ember
+      "editorGutter.background": "#08090A",
+      "scrollbarSlider.background": "#2A2E3380",
+      "scrollbarSlider.hoverBackground": "#3C3A37",
+      "scrollbarSlider.activeBackground": "#FF6A0080", // ember while dragging
+      "minimap.background": "#08090A",
     },
   });
+
+  // The same ladder inverted onto concrete. Every hue is the dark theme's hue
+  // driven down in lightness until it clears AA on #EDECEA — the warm spine
+  // stays warm, the cold nominals stay cold, and the ordering of the three
+  // recessive greys (comment < delimiter < operator) is preserved.
+  monaco.editor.defineTheme(LIGHT_THEME, {
+    base: "vs",
+    inherit: true,
+    rules: [
+      { token: "", foreground: "17181a" }, // --text-primary, 15.0:1
+      { token: "comment", foreground: "64676c", fontStyle: "italic" }, // 4.8:1
+      { token: "keyword", foreground: "b23f0a" }, // --brand-rust — the spine, 4.9:1
+      { token: "number", foreground: "6b4600" }, // deep ochre — numerals, 7.1:1
+      { token: "string", foreground: "4a6b1e" }, // moss (lichen, darkened), 5.2:1
+      { token: "type", foreground: "0f6b5c" }, // patina, 5.4:1
+      { token: "type.identifier", foreground: "0f6b5c" },
+      { token: "identifier", foreground: "17181a" },
+      { token: "function", foreground: "14487f" }, // steel blue, 7.9:1
+      { token: "tag", foreground: "0e6a85" }, // cold cyan, 5.2:1
+      { token: "attribute.name", foreground: "14487f" },
+      { token: "attribute.value", foreground: "4a6b1e" }, // an attribute value IS a string
+      { token: "delimiter", foreground: "595c61" }, // recedes, still 5.7:1
+      { token: "operator", foreground: "52555a" }, // --text-muted, 6.3:1
+    ],
+    colors: {
+      "editor.background": "#EDECEA", // --bg-code (light)
+      "editor.foreground": "#17181A",
+      "editorLineNumber.foreground": "#B5B7BA", // --text-xdim (decoration)
+      "editorLineNumber.activeForeground": "#52555A",
+      "editor.lineHighlightBackground": "#FFFFFF", // --bg-pane, one step up
+      "editor.lineHighlightBorder": "#FFFFFF",
+      // Cold steel tint, kept light enough that even the lowest-contrast token
+      // (keyword/rust) still clears 4.5:1 sitting on a selected run.
+      "editor.selectionBackground": "#E1E8ED",
+      "editor.inactiveSelectionBackground": "#EAEEF1",
+      "editorCursor.foreground": "#B23F0A", // rust — ember is only 2.9:1 here
+      "editorWidget.background": "#FFFFFF", // --bg-surface
+      "editorWidget.border": "#DDDCDA", // --border-default
+      "editorIndentGuide.background": "#E8E7E5", // --border-light
+      "editorIndentGuide.activeBackground": "#B5B7BA",
+      "editorBracketMatch.background": "#E1E8ED",
+      "editorBracketMatch.border": "#B23F0A", // rust
+      "editorGutter.background": "#EDECEA",
+      "scrollbarSlider.background": "#DDDCDA80",
+      "scrollbarSlider.hoverBackground": "#B5B7BA",
+      "scrollbarSlider.activeBackground": "#B23F0A80", // rust while dragging
+      "minimap.background": "#EDECEA",
+    },
+  });
+}
+
+/**
+ * The live theme, read from `<html data-theme>`.
+ *
+ * NOT from `useStore(s => s.theme)`: that field initializes to "dark" for SSR
+ * safety and is only reconciled with localStorage by
+ * `hydrateAppearanceFromStorage()`, which today is called from the Appearance
+ * settings card alone — so in the workspace it reads "dark" even when the user
+ * is actually on light, and the editor would have been the one surface that
+ * didn't flip. The `data-theme` attribute is the real source of truth: the
+ * layout bootstrap script stamps it before first paint and `setTheme` keeps it
+ * in sync, and it is the same signal globals.css keys its token overrides off,
+ * so the Monaco ground can never disagree with --bg-code.
+ */
+function useDocumentTheme(): ThemeChoice {
+  const [theme, setTheme] = useState<ThemeChoice>("dark");
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const read = () => setTheme(root.dataset.theme === "light" ? "light" : "dark");
+    read();
+    const obs = new MutationObserver(read);
+    obs.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => obs.disconnect();
+  }, []);
+
+  return theme;
 }
 
 export default function CodeEditor() {
@@ -91,6 +198,7 @@ export default function CodeEditor() {
   const saveStatus: SaveStatus = rawSaveStatus ?? IDLE_STATUS;
   const setSaveStatus = useStore((s) => s.setSaveStatus);
   const setPendingEdit = useStore((s) => s.setPendingEdit);
+  const theme = useDocumentTheme();
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -155,14 +263,14 @@ export default function CodeEditor() {
         minHeight: 0,
         display: "flex",
         flexDirection: "column",
-        background: "#0c0c11",
+        background: "var(--bg-code)",
       }}
     >
       <Monaco
-        theme="uniqus-dark"
+        theme={theme === "light" ? LIGHT_THEME : DARK_THEME}
         language={languageFor(path)}
         value={content}
-        beforeMount={(monaco) => defineUniqusTheme(monaco)}
+        beforeMount={(monaco) => defineGate15Themes(monaco)}
         onMount={(editor, monaco) => {
           // Lock down VSCode-flavored features that aren't appropriate inside
           // an embedded sandbox editor — the Quick Command palette would
@@ -214,7 +322,11 @@ export default function CodeEditor() {
           fontSize: 11,
           color: "var(--text-muted)",
           borderTop: "1px solid var(--border-default)",
-          background: "#0c0c11",
+          // Must be the token, not a literal: --text-muted above flips with the
+          // theme, so a pinned #08090A ground drops the path text to 2.7:1 on
+          // light. Tracking --bg-code keeps it ≥6:1 in both themes and keeps the
+          // strip flush with the editor ground it sits under.
+          background: "var(--bg-code)",
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
@@ -233,7 +345,10 @@ export default function CodeEditor() {
                 width: 7,
                 height: 7,
                 borderRadius: "50%",
-                background: busy ? "#f0b429" : "var(--accent)",
+                // Deferred-save is a STATUS, so it takes semantic amber — not
+                // brand signal yellow, which must never sit beside ember (it
+                // does here: the plain-dirty dot next door is --accent).
+                background: busy ? "var(--conf-medium)" : "var(--accent)",
               }}
             />
           )}

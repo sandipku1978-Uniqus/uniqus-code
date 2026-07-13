@@ -4,7 +4,9 @@
  *
  * Shared contract: the element-picker script injected into the preview iframe
  * (see proxy.ts) postMessages the parent with
- *   { type:"uniqus:element", selector, tag, classes, id, rect, text }
+ *   { type:"gate15:element", selector, tag, classes, id, rect, text }
+ * (the pre-rebrand `uniqus:element` name is still accepted by the parent, so a
+ * preview page injected by an older deploy keeps working during a rollout)
  * The web app attaches the latest such pick to the next `user_message` as a
  * `selected_element` field. This module defines the canonical shape, validates
  * the (untrusted) client payload, and renders it as an actionable text block

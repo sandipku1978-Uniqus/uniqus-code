@@ -7,7 +7,7 @@ import {
   estimateCostUsd,
   estimateTurnCostUsd,
   thinkingEffortsForModel,
-} from "@uniqus/api-types";
+} from "@gate15/api-types";
 
 // Guards the per-run / per-account cost estimate (C5). A catalogued model that
 // is missing from MODEL_PRICING would silently fall back to DEFAULT_PRICE,

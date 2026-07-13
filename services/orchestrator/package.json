@@ -1,5 +1,5 @@
 {
-  "name": "@uniqus/orchestrator",
+  "name": "@gate15/orchestrator",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -15,7 +15,7 @@
     "@anthropic-ai/sdk": "^0.100.1",
     "@google/genai": "^2.7.0",
     "@supabase/supabase-js": "^2.47.10",
-    "@uniqus/api-types": "*",
+    "@gate15/api-types": "*",
     "@workos-inc/node": "^9.2.0",
     "adm-zip": "^0.5.17",
     "busboy": "^1.6.0",

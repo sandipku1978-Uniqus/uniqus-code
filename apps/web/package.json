@@ -1,5 +1,5 @@
 {
-  "name": "@uniqus/web",
+  "name": "@gate15/web",
   "private": true,
   "version": "0.0.0",
   "scripts": {
@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.6.0",
-    "@uniqus/api-types": "*",
+    "@gate15/api-types": "*",
     "@workos-inc/authkit-nextjs": "^2.0.0",
     "autoprefixer": "^10.4.20",
     "iron-session": "^8.0.4",

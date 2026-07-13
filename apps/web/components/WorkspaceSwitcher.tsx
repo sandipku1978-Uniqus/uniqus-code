@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import type { Organization } from "@uniqus/api-types";
+import type { Organization } from "@gate15/api-types";
 import Popover from "./Popover";
 
 /**
@@ -133,7 +133,7 @@ export default function WorkspaceSwitcher({
         onClick={() => pick(id)}
         style={{
           ...rowBase,
-          borderLeft: active ? "2px solid var(--brand-magenta)" : "2px solid transparent",
+          borderLeft: active ? "2px solid var(--brand-ember)" : "2px solid transparent",
           background: active ? "var(--bg-surface-active)" : "transparent",
         }}
       >
@@ -153,7 +153,7 @@ export default function WorkspaceSwitcher({
           <span style={{ ...mono, display: "block" }}>{sub}</span>
         </span>
         {active && (
-          <span aria-hidden style={{ color: "var(--brand-magenta)", fontSize: "var(--fs-sm)" }}>
+          <span aria-hidden style={{ color: "var(--accent-text)", fontSize: "var(--fs-sm)" }}>
             ✓
           </span>
         )}
@@ -253,7 +253,7 @@ export default function WorkspaceSwitcher({
             ...rowBase,
             borderTop: "1px solid var(--border-light)",
             marginTop: 4,
-            color: "var(--brand-magenta)",
+            color: "var(--accent-text)",
           }}
         >
           <span
@@ -265,7 +265,7 @@ export default function WorkspaceSwitcher({
               borderRadius: "var(--radius-md)",
               display: "grid",
               placeItems: "center",
-              border: "1px dashed color-mix(in srgb, var(--brand-magenta) 45%, transparent)",
+              border: "1px dashed color-mix(in srgb, var(--brand-ember) 45%, transparent)",
               fontSize: "var(--fs-md)",
             }}
           >

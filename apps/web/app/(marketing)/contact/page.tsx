@@ -2,9 +2,9 @@ import Link from "next/link";
 import ContactForm from "@/components/ContactForm";
 
 export const metadata = {
-  title: "Contact — Uniqus Code",
+  title: "Contact — Gate 15",
   description:
-    "Talk to the Uniqus Code team about sales, support, security, or partnerships. Send us a message and we'll get back to you.",
+    "Talk to the Gate 15 team about sales, support, security, or partnerships. Send us a message and we'll get back to you.",
 };
 
 type MethodIcon = "sales" | "support" | "security" | "careers";
@@ -64,7 +64,7 @@ const METHODS: {
     icon: "sales",
     iconClass: "grad",
     title: "Sales & Enterprise",
-    body: "Rolling out Uniqus Code to a team or organization? We'll walk you through SSO, dedicated capacity, security reviews, and pricing.",
+    body: "Rolling out Gate 15 to a team or organization? We'll walk you through SSO, dedicated capacity, security reviews, and pricing.",
     cta: { label: "See Enterprise", href: "/enterprise" },
   },
   {
@@ -79,7 +79,7 @@ const METHODS: {
     iconClass: "green",
     title: "Security & disclosure",
     body: "Found a vulnerability or need a DPA? Email our security team directly with the details and we'll respond quickly.",
-    cta: { label: "security@uniqus.com", href: "mailto:security@uniqus.com" },
+    cta: { label: "security@gate15.dev", href: "mailto:security@gate15.dev" },
   },
   {
     icon: "careers",
@@ -102,9 +102,9 @@ export default function ContactPage() {
             Let&rsquo;s <span className="grad">talk</span>.
           </h1>
           <p className="mk-lede">
-            Whether you&rsquo;re sizing up Uniqus Code for a team, stuck on a
-            build, or just have a question — send us a note and a real person
-            will get back to you.
+            Whether you&rsquo;re sizing up Gate 15 for a team, stuck on a build,
+            or just have a question — send us a note and a real person will get
+            back to you.
           </p>
         </div>
       </section>
@@ -137,7 +137,7 @@ export default function ContactPage() {
                   ) : (
                     <Link
                       href={m.cta.href}
-                      style={{ color: "var(--brand-magenta)" }}
+                      style={{ color: "var(--accent-text)" }}
                     >
                       {m.cta.label} &rarr;
                     </Link>

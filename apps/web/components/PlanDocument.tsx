@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { Plan } from "@uniqus/api-types";
+import type { Plan } from "@gate15/api-types";
 import { send } from "@/lib/ws-client";
 import { toast } from "@/lib/toast";
 import { useStore, type ChatItem } from "@/lib/store";
@@ -10,7 +10,7 @@ export type PlanItem = Extract<ChatItem, { kind: "plan_proposal" }>;
 
 // One-time "why did a plan appear?" explainer (B1). Set once, globally, after
 // the first plan the user sees.
-const SEEN_PLAN_INTRO_KEY = "uniqus.seenPlanIntro";
+const SEEN_PLAN_INTRO_KEY = "gate15.seenPlanIntro";
 
 /**
  * The full plan document: a non-technical simple view (plain headline, "What
@@ -131,7 +131,7 @@ export default function PlanDocument({
 
   const label = isPending ? "— review" : isRejected ? "— rejected" : "— approved";
   const labelColor = isPending
-    ? "var(--brand-magenta)"
+    ? "var(--accent-text)"
     : isRejected
     ? "var(--conf-low)"
     : "var(--text-dim)";
@@ -211,7 +211,7 @@ export default function PlanDocument({
         {showIntro && (
           <div className="plan-intro" role="note">
             <span style={{ flex: 1 }}>
-              Uniqus drafted a <strong>plan</strong> first. Nothing runs until you click
+              Gate 15 drafted a <strong>plan</strong> first. Nothing runs until you click
               <strong> Approve &amp; run</strong>. You can turn this off anytime with the Plan
               toggle in the composer.
             </span>
@@ -293,7 +293,7 @@ export default function PlanDocument({
             {!!draft.open_questions?.length && (
               <>
                 <p className="plan-section-label">
-                  Before we start — answer in chat, or approve and Uniqus picks the default
+                  Before we start — answer in chat, or approve and Gate 15 picks the default
                 </p>
                 <ul className="plan-questions" aria-label="Open questions">
                   {draft.open_questions.map((q, i) => (
@@ -355,7 +355,7 @@ export default function PlanDocument({
                 onClick={requestChanges}
                 className="btn-ghost"
                 style={{ fontSize: 12, padding: "6px 12px" }}
-                title="Discard this plan and tell Uniqus what to do differently"
+                title="Discard this plan and tell Gate 15 what to do differently"
               >
                 Request changes
               </button>

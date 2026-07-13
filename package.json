@@ -1,5 +1,5 @@
 {
-  "name": "uniqus-code",
+  "name": "gate15",
   "private": true,
   "version": "0.0.0",
   "workspaces": [
@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "dev": "turbo run dev --parallel",
-    "agent": "npm --workspace=@uniqus/orchestrator run cli --",
+    "agent": "npm --workspace=@gate15/orchestrator run cli --",
     "typecheck": "turbo run typecheck"
   },
   "devDependencies": {

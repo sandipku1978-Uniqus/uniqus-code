@@ -6,7 +6,7 @@ import BrandLockup from "@/components/BrandLockup";
  * information architecture. Rendered both at the foot of the landing page
  * (inside `.bottom-build`) and on every marketing sub-page (via the
  * `(marketing)` layout). Links to the scaffolded pages under app/(marketing);
- * legal links point to uniqus.com (handled by the company site).
+ * legal links point to gate15.dev (handled by the company site).
  */
 
 type FooterLink = { label: string; href: string };
@@ -46,9 +46,9 @@ export const FOOTER_COLUMNS: FooterColumn[] = [
   {
     title: "Legal",
     links: [
-      { label: "Privacy", href: "https://uniqus.com" },
-      { label: "Terms", href: "https://uniqus.com" },
-      { label: "Report abuse", href: "https://uniqus.com" },
+      { label: "Privacy", href: "https://gate15.dev" },
+      { label: "Terms", href: "https://gate15.dev" },
+      { label: "Report abuse", href: "https://gate15.dev" },
     ],
   },
 ];
@@ -56,7 +56,7 @@ export const FOOTER_COLUMNS: FooterColumn[] = [
 const SOCIALS: { label: string; href: string; icon: "x" | "github" | "linkedin" }[] = [
   { label: "X / Twitter", href: "https://x.com", icon: "x" },
   { label: "GitHub", href: "https://github.com", icon: "github" },
-  { label: "LinkedIn", href: "https://www.linkedin.com/company/uniqus", icon: "linkedin" },
+  { label: "LinkedIn", href: "https://www.linkedin.com", icon: "linkedin" },
 ];
 
 function isExternal(href: string) {
@@ -115,7 +115,7 @@ export default function SiteFooter() {
                 </a>
               ))}
             </div>
-            <span>&copy; 2026 Uniqus Consultech</span>
+            <span>&copy; 2026 Gate 15</span>
           </div>
         </div>
 

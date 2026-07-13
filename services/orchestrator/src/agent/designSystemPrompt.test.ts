@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_DESIGN_TOKENS, type DesignTokens } from "@uniqus/api-types";
+import { DEFAULT_DESIGN_TOKENS, type DesignTokens } from "@gate15/api-types";
 import { formatDesignSystemForPrompt } from "./skills.js";
 
 describe("formatDesignSystemForPrompt", () => {

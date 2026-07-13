@@ -7,7 +7,7 @@ import {
   clampThinkingEffort,
   type ModelProvider,
   type ThinkingEffort,
-} from "@uniqus/api-types";
+} from "@gate15/api-types";
 import { useStore } from "@/lib/store";
 import Popover from "./Popover";
 import Tooltip from "./Tooltip";

@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import type { PermissionMode } from "@uniqus/api-types";
+import type { PermissionMode } from "@gate15/api-types";
 import { useStore } from "@/lib/store";
 import { send } from "@/lib/ws-client";
 import Popover from "./Popover";

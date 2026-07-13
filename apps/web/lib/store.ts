@@ -16,8 +16,8 @@ import type {
   TodoItem,
   TreeEntry,
   UploadedFileSummary,
-} from "@uniqus/api-types";
-import { MODEL_CATALOG, runModeForPermission } from "@uniqus/api-types";
+} from "@gate15/api-types";
+import { MODEL_CATALOG, runModeForPermission } from "@gate15/api-types";
 
 /** The mode a brand-new turn falls back to once the first (Plan) turn is past. */
 const DEFAULT_PERMISSION_MODE: PermissionMode = "acceptEdits";
@@ -27,7 +27,7 @@ const DEFAULT_PERMISSION_MODE: PermissionMode = "acceptEdits";
  * model" card and the composer picker both edit it), so we persist it to
  * localStorage rather than resetting it per project. "auto" is the default.
  */
-const MODEL_STORAGE_KEY = "uniqus.model";
+const MODEL_STORAGE_KEY = "gate15.model";
 
 function readStoredModel(): ModelChoice {
   if (typeof window === "undefined") return "auto";
@@ -57,8 +57,8 @@ function persistModel(model: ModelChoice): void {
  * persisted to localStorage rather than reset per project. "medium" is the
  * default — a balance of quality and latency/cost.
  */
-const THINKING_STORAGE_KEY = "uniqus.thinking";
-const THINKING_ENABLED_STORAGE_KEY = "uniqus.thinkingEnabled";
+const THINKING_STORAGE_KEY = "gate15.thinking";
+const THINKING_ENABLED_STORAGE_KEY = "gate15.thinkingEnabled";
 const THINKING_LEVELS: ThinkingEffort[] = ["low", "medium", "high", "xhigh", "max"];
 
 function readStoredThinking(): ThinkingEffort {
@@ -111,7 +111,7 @@ function persistThinkingEnabled(enabled: boolean): void {
  * id is reconciled against the user's actual org list on load (a stale id from a
  * left/deleted org falls back to Personal).
  */
-const WORKSPACE_STORAGE_KEY = "uniqus.workspace";
+const WORKSPACE_STORAGE_KEY = "gate15.workspace";
 
 function readStoredWorkspace(): string | null {
   if (typeof window === "undefined") return null;
@@ -144,8 +144,8 @@ function persistWorkspace(id: string | null): void {
 export type ThemeChoice = "dark" | "light";
 export type DensityChoice = "comfortable" | "compact";
 
-const THEME_STORAGE_KEY = "uniqus.theme";
-const DENSITY_STORAGE_KEY = "uniqus.density";
+const THEME_STORAGE_KEY = "gate15.theme";
+const DENSITY_STORAGE_KEY = "gate15.density";
 
 function readStoredTheme(): ThemeChoice {
   if (typeof window === "undefined") return "dark";
@@ -206,7 +206,7 @@ export interface DeploymentLive {
 
 /**
  * A DOM element the user picked out of the live preview via the element
- * picker. The shape mirrors the `uniqus:element` postMessage the proxy-injected
+ * picker. The shape mirrors the `gate15:element` postMessage the proxy-injected
  * script emits (see PreviewPanel) — selector + light metadata, no pixels.
  *
  * It's set from PreviewPanel and consumed in ChatPanel, which attaches it to
@@ -422,7 +422,7 @@ export interface PanelVisibility {
  * user who closes Files/Logs expects them to stay closed across reloads and
  * project switches. Persisted to localStorage like the model/thinking prefs.
  */
-const PANELS_STORAGE_KEY = "uniqus.panels";
+const PANELS_STORAGE_KEY = "gate15.panels";
 const DEFAULT_PANELS: PanelVisibility = { files: true, terminal: false };
 
 function readStoredPanels(): PanelVisibility {
@@ -456,7 +456,7 @@ function persistPanels(panels: PanelVisibility): void {
  * localStorage (mirrors panels/view) so a coachmark fires once and never again.
  * A hint id is set true when the user dismisses or auto-sees it.
  */
-const HINTS_STORAGE_KEY = "uniqus.hints";
+const HINTS_STORAGE_KEY = "gate15.hints";
 function readStoredHints(): Record<string, boolean> {
   if (typeof window === "undefined") return {};
   try {
@@ -483,7 +483,7 @@ function persistHints(hints: Record<string, boolean>): void {
  * Builder/Code choice survives reloads and project switches.
  */
 export type WorkspaceView = "builder" | "code";
-const VIEW_STORAGE_KEY = "uniqus.view";
+const VIEW_STORAGE_KEY = "gate15.view";
 const DEFAULT_VIEW: WorkspaceView = "builder";
 
 function readStoredView(): WorkspaceView {
@@ -1699,7 +1699,7 @@ export const useStore = create<State>((set, get) => ({
       // Clear run state on a project/session switch (C-28/C-30). The old project's
       // run streamed against its own socket; carrying busy=true into a fresh,
       // empty session (which replays no `complete` and emits no `run_active`)
-      // left the composer disabled with "Uniqus is running…" forever, recoverable
+      // left the composer disabled with "Gate 15 is running…" forever, recoverable
       // only via the obscure force-stop. installInProgress/runReattaching are the
       // same kind of stale run state.
       busy: false,

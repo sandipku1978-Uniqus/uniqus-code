@@ -1,5 +1,5 @@
 import { db } from "./client.js";
-import type { FlowStep, FlowRunStatus, ProjectFlow } from "@uniqus/api-types";
+import type { FlowStep, FlowRunStatus, ProjectFlow } from "@gate15/api-types";
 
 /**
  * Saved smoke-flows (P2.4). A flow is a named, replayable list of FlowSteps (the

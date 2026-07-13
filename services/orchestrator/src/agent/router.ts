@@ -13,7 +13,7 @@
  *   3. The "auto" default for that role.
  *
  * "auto" deliberately resolves to a frontier model — never a low/cheap tier.
- * The selectable set lives in `MODEL_CATALOG` (@uniqus/api-types) so the web
+ * The selectable set lives in `MODEL_CATALOG` (@gate15/api-types) so the web
  * picker and this router share one source of truth.
  */
 
@@ -21,7 +21,7 @@ import {
   MODEL_CATALOG,
   type ModelChoice,
   type ModelProvider,
-} from "@uniqus/api-types";
+} from "@gate15/api-types";
 
 export type ModelRole =
   | "agent" // long tool-use loop

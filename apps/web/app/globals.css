@@ -3,58 +3,75 @@
 @tailwind utilities;
 
 /* ==========================================================================
-   Uniqus Code — Design Tokens (single source of truth)
+   Gate 15 - Design Tokens (single source of truth)
    ========================================================================== */
 :root {
-  /* Brand */
-  --brand-purple:        #482879;
-  --brand-magenta:       #B21E7D;
-  --brand-purple-hi:     #5a32a0;
-  --brand-gradient:      linear-gradient(135deg, #482879, #B21E7D);
+  /* Brand - one warm signal colour on cold grey infrastructure. */
+  --brand-ember:         #FF6A00;   /* primary. safety orange */
+  --brand-ember-hi:      #FF8124;   /* hover / lifted ember */
+  --brand-signal:        #FFC53D;   /* hazard yellow. highlights, gradient stop */
+  --brand-rust:          #B23F0A;   /* deep oxide. shadow under ember, pressed */
+  --brand-gradient:      linear-gradient(135deg, #FF5A1F, #FFC53D);
 
-  /* Accent — single source of truth. Magenta reads far better than the dark
-     brand purple as an active/selected cue on a near-black surface. */
-  --accent:              #B21E7D;
-  --accent-primary:      #B21E7D;
+  /* Accent - single source of truth for the active/selected cue. */
+  --accent:              #FF6A00;
+  --accent-primary:      #FF6A00;
+  /* Orange TEXT sitting on a page/surface background. Ember on white is only
+     ~2.9:1, so the light theme flips this to the deep oxide (~5.2:1). Ember
+     FILLS are unaffected - they carry near-black ink (#140d07), which is both
+     AA and the correct hazard-signage look. */
+  --accent-text:         #FF8124;
 
-  /* Surfaces (dark only) — bridged toward the marketing ramp (--mk-*): a
-     slightly deeper page with a faint blue-violet cast, so the app and the
-     public site read as one product. Keep the ladder's relative steps. */
-  --bg-dark:             #0a0b10;
-  --bg-pane:             #0d0e14;   /* IDE panes / topbar / status bar */
-  --bg-surface:          #15161f;
-  --bg-surface-hover:    #1d1e29;
-  --bg-surface-active:   #242532;
-  --bg-elev:             #1d1e29;   /* raised fields (inputs, textareas) */
-  --bg-base:             #0a0b10;   /* alias used by modal/guest surfaces */
-  --bg-canvas:           #0d0e14;   /* markdown/document canvas */
-  --bg-code:             #07080d;   /* deepest surface: code / tool-output blocks */
-  --bg-chat:             #12131c;   /* marketing IDE chat column */
+  /* Hazard stripe - the signature motif. A thin 3-4px rule, used sparingly. */
+  --hazard: repeating-linear-gradient(45deg, #FF6A00 0 8px, transparent 8px 16px);
 
-  /* Text — warm ramp, not cool gray. Primary brightened toward the marketing
-     pages' #f4f2ee so app surfaces don't read duller than the public site. */
-  --text-primary:        #efede7;
-  --text-muted:          #93908a;
-  /* Lifted from #5a5850 (~3.0:1, below WCAG AA) to ~4.6:1 on the dark surfaces
-     so genuine small informational text (chips, hints, step criteria) is
-     legible (UI/UX audit §E). --text-xdim stays for non-text decoration only. */
-  --text-dim:            #7c7a72;
-  --text-xdim:           #3a3830;
+  /* Surfaces (dark only) - cold industrial neutrals: asphalt, gunmetal,
+     graphite. The grey ladder stays deliberately COOL; a warm base under an
+     orange signal goes muddy and monochrome. */
+  --bg-dark:             #0A0B0C;
+  --bg-pane:             #0F1113;   /* IDE panes / topbar / status bar */
+  --bg-surface:          #16181B;
+  --bg-surface-hover:    #1E2125;
+  --bg-surface-active:   #262A2F;
+  --bg-elev:             #1E2125;   /* raised fields (inputs, textareas) */
+  --bg-base:             #0A0B0C;   /* alias used by modal/guest surfaces */
+  --bg-canvas:           #0F1113;   /* markdown/document canvas */
+  --bg-code:             #08090A;   /* deepest surface: code / tool-output blocks */
+  --bg-chat:             #121417;   /* marketing IDE chat column */
 
-  /* Borders. --border-strong mirrors the marketing --mk-line-strong: the
+  /* Text - painted-steel off-white. Neutral, not cream. */
+  --text-primary:        #EDEBE7;
+  --text-muted:          #9A9793;
+  /* --text-dim carries genuine small informational text (chips, hints, step
+     criteria, placeholders), so it must clear 4.5:1 on EVERY surface it lands
+     on - not just the page ground. The raised step --bg-elev / --bg-surface-hover
+     (#1E2125) is the lightest of those, and the old #7C7A76 only reached 3.77:1
+     there. #8C8A86 holds: 5.78 on --bg-code, 5.72 on --bg-dark, 5.49 on
+     --bg-pane, 5.35 on --bg-chat, 5.16 on --bg-surface, 4.69 on --bg-elev.
+     (--bg-surface-active #262A2F is NOT in that list on purpose: it is the kbd /
+     pill / inline-code / meter-track fill, and every one of those sets
+     --text-muted or --text-primary. Chasing 4.5:1 there would need ~#95928E,
+     which collapses into --text-muted and destroys the ramp.)
+     --text-xdim stays for non-text decoration only. */
+  --text-dim:            #8C8A86;
+  --text-xdim:           #3C3A37;
+
+  /* Borders do the work; shadows stay restrained. --border-strong is the
      emphasis step for hover/focused cards, so lift reads as a border change
      instead of piling on shadows. */
-  --border-default:      #2a2b37;
-  --border-light:        #1d1e29;
+  --border-default:      #2A2E33;
+  --border-light:        #1E2125;
   --border-strong:       rgba(255, 255, 255, 0.17);
-  --border-active:       #482879;
+  --border-active:       #FF6A00;
 
-  /* Semantic */
-  --conf-high:           #34d399;
+  /* Semantic - status only. --conf-medium is amber and --brand-signal is
+     yellow: brand yellow is decoration, semantic amber is status. They never
+     sit adjacent, and --brand-signal is never used as a warning colour. */
+  --conf-high:           #34D399;
   --conf-high-bg:        rgba(16, 185, 129, 0.10);
-  --conf-medium:         #fbbf24;
+  --conf-medium:         #FBBF24;
   --conf-medium-bg:      rgba(245, 158, 11, 0.10);
-  --conf-low:            #f87171;
+  --conf-low:            #F87171;
   --conf-low-bg:         rgba(239, 68, 68, 0.10);
 
   /* Type */
@@ -62,7 +79,7 @@
   --font-mono-stack: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
   --mono: var(--font-mono-stack);   /* legacy alias referenced by some components */
 
-  /* Type scale — a real ramp, not a smear. Snap every size to one of these;
+  /* Type scale - a real ramp, not a smear. Snap every size to one of these;
      no half-pixel values (they render fuzzy and signal ad-hoc sizing). */
   --fs-2xs: 10px;
   --fs-xs:  11px;
@@ -74,18 +91,18 @@
   --fs-2xl: 24px;
   --fs-3xl: 32px;
 
-  /* Radii */
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
+  /* Radii - machined, not pillowy. */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
   --radius-full: 9999px;
 
   /* Motion */
   --dur-fast: 120ms;
   --dur-base: 200ms;
   --dur-slow: 300ms;
-  /* Easings — `out` for entrances/most UI (smooth deceleration), `spring` for
+  /* Easings - `out` for entrances/most UI (smooth deceleration), `spring` for
      a gentle overshoot on pops (menus, toggles), `in-out` for moves. */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --ease-spring: cubic-bezier(0.34, 1.4, 0.5, 1);
@@ -101,36 +118,58 @@
    the bootstrap script in layout.tsx, so there is no dark→light flash.
    ========================================================================== */
 :root[data-theme="light"] {
-  /* Surfaces — warm near-white ramp mirroring the dark ladder */
-  --bg-dark:           #f4f3f0;
-  --bg-pane:           #ffffff;
-  --bg-surface:        #ffffff;
-  --bg-surface-hover:  #f1eff2;
-  --bg-surface-active: #e7e4ea;
-  --bg-elev:           #ffffff;
-  --bg-base:           #f4f3f0;
-  --bg-canvas:         #ffffff;
-  --bg-code:           #f3f1ee;   /* code / tool-output blocks */
-  --bg-chat:           #faf9f7;   /* marketing IDE chat column */
+  /* Surfaces - concrete, not paper. Cool grey-white with a faint aggregate
+     warmth, mirroring the dark ladder. */
+  --bg-dark:           #EFEEEC;
+  --bg-pane:           #FFFFFF;
+  --bg-surface:        #FFFFFF;
+  --bg-surface-hover:  #E9E8E6;
+  --bg-surface-active: #DEDCD9;
+  --bg-elev:           #FFFFFF;
+  --bg-base:           #EFEEEC;
+  --bg-canvas:         #FFFFFF;
+  --bg-code:           #EDECEA;   /* code / tool-output blocks */
+  --bg-chat:           #F7F6F4;   /* marketing IDE chat column */
 
-  /* Text — dark warm ramp on light */
-  --text-primary:      #1c1b22;
-  --text-muted:        #57555e;
-  /* Darkened from #84818b (~3.8:1) to ~4.6:1 on the light surfaces (WCAG AA). */
-  --text-dim:          #6c6975;
-  --text-xdim:         #b4b1ba;
+  /* Text - cold graphite ramp on concrete */
+  --text-primary:      #17181A;
+  --text-muted:        #52555A;
+  /* Same rule as the dark ramp: --text-dim must clear 4.5:1 on every light
+     surface it lands on, and here that includes the page ground itself. The old
+     #6B6E73 cleared only #FFFFFF (5.12) and failed everywhere else - 4.41 on
+     --bg-dark, 4.34 on --bg-code, 4.18 on --bg-surface-hover. #5C5F63 clears the
+     whole ladder: 6.42 / 5.94 / 5.54 / 5.44 / 5.24 / 4.69 (white → chat → dark →
+     code → hover → active). */
+  --text-dim:          #5C5F63;
+  --text-xdim:         #B5B7BA;
 
   /* Borders */
-  --border-default:    #e3e0e6;
-  --border-light:      #eeecf0;
-  --border-strong:     rgba(28, 27, 34, 0.22);
-  --border-active:     #482879;
+  --border-default:    #DDDCDA;
+  --border-light:      #E8E7E5;
+  --border-strong:     rgba(23, 24, 26, 0.22);
+  /* Active/selected boundary. Ember is only 2.87:1 on white, under the 3:1
+     WCAG 1.4.11 non-text minimum for a UI-component boundary, so on light this
+     takes the same deep-oxide step the accent TEXT does (5.82:1 on white,
+     4.25:1 on --bg-surface-active - both clear 3:1). Stays ember in dark. */
+  --border-active:     var(--brand-rust);
 
-  /* Semantic — slightly deeper foregrounds for AA contrast on white;
-     translucent backgrounds read fine over a light surface as-is. */
-  --conf-high:         #0f9d6b;
-  --conf-medium:       #b27400;
-  --conf-low:          #d23f3f;
+  /* Ember holds on white at only ~2.9:1, so orange TEXT drops to the deep
+     oxide. #B23F0A cleared white (5.82) but only reached 4.25:1 on
+     --bg-surface-active #DEDCD9 - the darkest light surface, which carries the
+     pressed rows/chips this colour actually sits on. #A03809 clears the whole
+     ladder (6.85 white → 5.01 on --bg-surface-active) and lifts the focus ring,
+     which reads this same token, along with it. Ember FILLS are unchanged -
+     they carry near-black ink. */
+  --accent-text:       #A03809;
+
+  /* Semantic - the dark ramp darkened until it clears 4.5:1 on EVERY light
+     surface (down to --bg-surface-active #DEDCD9) AND on its own translucent
+     --conf-*-bg chip fill composited over white / the page ground / hover. The
+     previous values did not reach AA even on plain white (#0f9d6b 3.47:1,
+     #b27400 3.90:1) and these carry status text that has to be read. */
+  --conf-high:         #0A6F4D;   /* 6.19 on #FFFFFF, 4.52 on #DEDCD9 */
+  --conf-medium:       #875706;   /* 6.18 on #FFFFFF, 4.52 on #DEDCD9 */
+  --conf-low:          #B13232;   /* 6.23 on #FFFFFF, 4.55 on #DEDCD9 */
 }
 
 /* ==========================================================================
@@ -191,19 +230,23 @@ code, pre, .mono {
 }
 
 *:focus-visible {
-  /* Magenta, not the dark brand purple — #482879 is nearly invisible as a ring
-     on a near-black surface. */
-  outline: 2px solid var(--brand-magenta);
+  /* Theme-aware orange: ember on the near-black surfaces, deep oxide on light,
+     so the ring stays visible (and >=3:1) in both themes. */
+  outline: 2px solid var(--accent-text);
   outline-offset: 2px;
 }
 /* Dense rows/tabs clip an offset outline (overflow:hidden parents); inset it
-   so keyboard focus stays visible. */
+   so keyboard focus stays visible. Only the OFFSET changes here — the colour
+   must stay the theme-flipping --accent-text, exactly as above. The raw
+   --brand-ember is 2.87:1 on white / 2.10:1 on --bg-surface-active, i.e. below
+   the 3:1 WCAG 1.4.11 minimum, and these are the file tree, editor tabs and
+   quick-open: the heaviest keyboard-navigation surfaces in the product. */
 .tree-row:focus-visible,
 .tree-row-wrap:focus-within,
 .quick-open-row:focus-visible,
 .tab:focus-visible,
 .proj-icon-grid button:focus-visible {
-  outline: 2px solid var(--brand-magenta);
+  outline: 2px solid var(--accent-text);
   outline-offset: -2px;
 }
 
@@ -244,7 +287,7 @@ code, pre, .mono {
 
 .btn-primary {
   background: var(--brand-gradient);
-  color: #fff;
+  color: #140d07;
   padding: 8px 16px;
   border-radius: var(--radius-md);
   font-weight: 600;
@@ -387,7 +430,7 @@ code, pre, .mono {
 .md h3, .md h4 { font-size: 13px; }
 .md ul, .md ol { margin: 0.4em 0 0.6em 1.2em; padding: 0; }
 .md li { margin: 0.15em 0; }
-.md a { color: var(--brand-magenta); text-decoration: underline; }
+.md a { color: var(--accent-text); text-decoration: underline; }
 .md code {
   font-family: var(--font-mono-stack);
   font-size: 12px;
@@ -525,7 +568,7 @@ code, pre, .mono {
 .resize-handle-h:hover,
 .resize-handle-h:focus-visible,
 .resize-handle-h[data-resize-handle-active] {
-  background: var(--brand-purple);
+  background: var(--brand-rust);
   outline: none;
 }
 .resize-handle-v {
@@ -547,7 +590,7 @@ code, pre, .mono {
 .resize-handle-v:hover,
 .resize-handle-v:focus-visible,
 .resize-handle-v[data-resize-handle-active] {
-  background: var(--brand-purple);
+  background: var(--brand-rust);
   outline: none;
 }
 @media (hover: none) {
@@ -567,7 +610,7 @@ code, pre, .mono {
    ========================================================================== */
 .marketing-shell { width: 100%; }
 .hero { padding: 140px 32px 96px; overflow: hidden; position: relative; isolation: isolate; }
-/* Brand radial glow behind the hero copy — same purple→magenta language as the
+/* Brand radial glow behind the hero copy -- same ember/signal language as the
    dashboard hero, for consistency across surfaces. */
 .hero::before {
   content: "";
@@ -579,8 +622,8 @@ code, pre, .mono {
   width: min(1100px, 100%);
   height: 640px;
   background:
-    radial-gradient(60% 60% at 50% 40%, rgba(178, 30, 125, 0.22), transparent 70%),
-    radial-gradient(70% 70% at 35% 55%, rgba(72, 40, 121, 0.22), transparent 72%);
+    radial-gradient(60% 60% at 50% 40%, rgba(255, 106, 0, 0.16), transparent 70%),
+    radial-gradient(70% 70% at 35% 55%, rgba(255, 197, 61, 0.13), transparent 72%);
   filter: blur(44px);
   pointer-events: none;
 }
@@ -610,7 +653,8 @@ code, pre, .mono {
   font-size: 11px;
   color: var(--text-muted);
 }
-.hero .eyebrow .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--conf-high); }
+/* Brand chrome, not a status light — see the .marketing-shell override below. */
+.hero .eyebrow .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--brand-ember); }
 .hero-cta { display: inline-flex; gap: 10px; }
 
 .ide-preview { max-width: 1100px; margin: 0 auto 96px; padding: 0 32px; }
@@ -659,7 +703,7 @@ code, pre, .mono {
   display: flex; align-items: center; justify-content: center;
   font-size: 11px;
 }
-.chat-msg .who .av.agent { background: var(--brand-purple); color: #fff; }
+.chat-msg .who .av.agent { background: var(--brand-rust); color: #fff; }
 .chat-msg .body { font-size: 12px; color: var(--text-primary); line-height: 1.5; }
 .chat-msg .body code {
   background: var(--bg-surface-active);
@@ -846,28 +890,36 @@ section.band .sub {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all var(--dur-base) ease;
+  /* Enumerated, NOT `transition: all`. `.active` adds a 1px border, so with
+     `all` + `border: 0` the browser animated border-WIDTH 0 → 1px — a layout
+     property. That reflowed the sidebar on every frame of the transition and
+     made the active item jump 2px. The base now reserves the border as
+     transparent, so activating only changes colours (compositable). */
+  transition:
+    background-color var(--dur-base) ease,
+    border-color var(--dur-base) ease,
+    color var(--dur-base) ease;
   margin-bottom: 2px;
   text-decoration: none;
   /* nav-item is used on <button> and <a> alike; normalize the link styling */
   width: 100%;
   text-align: left;
   background: none;
-  border: 0;
+  border: 1px solid transparent;
   font-family: inherit;
 }
 .dash-side .nav-item:hover { background: var(--bg-surface-hover); color: var(--text-primary); }
 .dash-side .nav-item.active {
-  background: color-mix(in srgb, var(--brand-magenta) 9%, var(--bg-surface));
+  background: color-mix(in srgb, var(--brand-ember) 9%, var(--bg-surface));
   color: var(--text-primary);
-  border: 1px solid color-mix(in srgb, var(--brand-magenta) 28%, var(--border-default));
+  border: 1px solid color-mix(in srgb, var(--brand-ember) 28%, var(--border-default));
 }
 .dash-side .nav-item .ic {
   width: 16px; height: 16px;
   color: var(--text-dim);
   display: flex; align-items: center; justify-content: center;
 }
-.dash-side .nav-item.active .ic { color: var(--brand-magenta); }
+.dash-side .nav-item.active .ic { color: var(--accent-text); }
 .dash-side .nav-item .count {
   margin-left: auto;
   font-size: 11px;
@@ -942,7 +994,7 @@ section.band .sub {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  color: color-mix(in srgb, var(--brand-magenta) 72%, var(--text-muted));
+  color: color-mix(in srgb, var(--brand-ember) 72%, var(--text-muted));
 }
 .section-title h2 {
   font-size: 19px;
@@ -1055,8 +1107,8 @@ section.band .sub {
 .coll-search input::placeholder { color: var(--text-muted); }
 .coll-search input:focus {
   outline: none;
-  border-color: var(--brand-magenta);
-  box-shadow: 0 0 0 3px rgba(178, 30, 125, 0.2);
+  border-color: var(--brand-ember);
+  box-shadow: 0 0 0 3px rgba(255, 106, 0, 0.2);
 }
 .coll-count {
   font-family: var(--font-mono-stack);
@@ -1084,8 +1136,8 @@ select.sort-select { width: auto; flex: none; }
 .status-filter:hover { color: var(--text-primary); border-color: var(--text-dim); }
 .status-filter[aria-pressed="true"] {
   color: var(--text-primary);
-  border-color: var(--brand-magenta);
-  background: rgba(178, 30, 125, 0.14);
+  border-color: var(--brand-ember);
+  background: rgba(255, 106, 0, 0.12);
 }
 .status-filter .d { width: 6px; height: 6px; border-radius: 50%; flex: none; }
 .status-filter .d.live { background: var(--conf-high); }
@@ -1128,7 +1180,7 @@ select.sort-select { width: auto; flex: none; }
 }
 .timeline-row:first-child { border-top: 0; }
 .timeline-row:hover { background: var(--bg-code); }
-.timeline-row:focus-visible { outline: 2px solid var(--brand-magenta); outline-offset: -2px; }
+.timeline-row:focus-visible { outline: 2px solid var(--accent-text); outline-offset: -2px; }
 .timeline-time {
   font-family: var(--font-mono-stack);
   font-size: 11px;
@@ -1166,7 +1218,7 @@ select.sort-select { width: auto; flex: none; }
   color: var(--text-primary); text-decoration: none;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.timeline-name:hover { color: var(--brand-magenta); }
+.timeline-name:hover { color: var(--accent-text); }
 .timeline-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding-left: 36px; }
 .timeline-desc {
   font-size: 12px; color: var(--text-muted);
@@ -1271,15 +1323,15 @@ select.sort-select { width: auto; flex: none; }
   border-radius: 2px;
 }
 .usage-calendar-cell.level-1 {
-  background: color-mix(in srgb, var(--brand-purple) 58%, var(--bg-surface-active));
+  background: color-mix(in srgb, var(--brand-rust) 58%, var(--bg-surface-active));
 }
 .usage-calendar-cell.level-2 {
-  background: color-mix(in srgb, var(--brand-magenta) 42%, var(--brand-purple));
+  background: color-mix(in srgb, var(--brand-ember) 42%, var(--brand-rust));
 }
 .usage-calendar-cell.level-3 {
-  background: color-mix(in srgb, var(--brand-magenta) 72%, var(--brand-purple));
+  background: color-mix(in srgb, var(--brand-ember) 72%, var(--brand-rust));
 }
-.usage-calendar-cell.level-4 { background: var(--brand-magenta); }
+.usage-calendar-cell.level-4 { background: var(--brand-ember); }
 .usage-calendar-cell.future { visibility: hidden; }
 .usage-calendar-legend {
   display: flex;
@@ -1472,9 +1524,9 @@ select.sort-select { width: auto; flex: none; }
   display: block;
   background: var(--bg-elev);
   border-radius: 6px;
-  animation: uniqus-skeleton-pulse 1.4s ease-in-out infinite;
+  animation: gate15-skeleton-pulse 1.4s ease-in-out infinite;
 }
-@keyframes uniqus-skeleton-pulse {
+@keyframes gate15-skeleton-pulse {
   0%, 100% { opacity: 0.45; }
   50% { opacity: 0.9; }
 }
@@ -1584,17 +1636,19 @@ select.sort-select { width: auto; flex: none; }
 }
 .repo-unlink-btn:disabled { cursor: default; opacity: 0.6; }
 .toggle-btn[data-on="true"] {
-  background: rgba(72, 40, 121, 0.18);
-  border-color: var(--brand-purple);
+  background: rgba(255, 106, 0, 0.14);
+  border-color: var(--brand-rust);
   color: var(--text-primary);
 }
 .toggle-btn[data-suggested="true"] {
-  border-color: rgba(178, 30, 125, 0.9);
-  color: #fff;
+  border-color: rgba(255, 106, 0, 0.9);
+  /* The fill is --bg-surface (the gradient is on the border-box only), and
+     --bg-surface is #FFFFFF in light — #fff here rendered white-on-white. */
+  color: var(--text-primary);
   background:
     linear-gradient(var(--bg-surface), var(--bg-surface)) padding-box,
     var(--brand-gradient) border-box;
-  box-shadow: 0 0 0 1px rgba(178, 30, 125, 0.18), 0 0 18px rgba(178, 30, 125, 0.22);
+  box-shadow: 0 0 0 1px rgba(255, 106, 0, 0.18), 0 0 18px rgba(255, 106, 0, 0.18);
 }
 
 /* Builder ⇄ Code segmented toggle (workspace topbar). Mirrors the Appearance
@@ -1625,8 +1679,8 @@ select.sort-select { width: auto; flex: none; }
 }
 .view-seg:hover { color: var(--text-primary); }
 .view-seg[data-on="true"] {
-  background: rgba(72, 40, 121, 0.18);
-  border-color: var(--brand-purple);
+  background: rgba(255, 106, 0, 0.14);
+  border-color: var(--brand-rust);
   color: var(--text-primary);
 }
 
@@ -1668,8 +1722,8 @@ select.sort-select { width: auto; flex: none; }
    effect without this. */
 .icon-btn[data-on="true"],
 .icon-btn-sm[data-on="true"] {
-  background: rgba(178, 30, 125, 0.14);
-  color: var(--brand-magenta);
+  background: rgba(255, 106, 0, 0.12);
+  color: var(--accent-text);
 }
 
 .ide-grid {
@@ -1726,7 +1780,7 @@ select.sort-select { width: auto; flex: none; }
 }
 .msg .head .av.agent {
   background: var(--brand-gradient);
-  color: #fff;
+  color: #140d07;
 }
 .msg .head .name { font-size: 12px; font-weight: 600; }
 .msg .head .frame {
@@ -1848,8 +1902,8 @@ select.sort-select { width: auto; flex: none; }
   font-size: 12.5px;
   line-height: 1.4;
   color: var(--text-primary);
-  background: color-mix(in srgb, var(--brand-purple, #7c3aed) 10%, transparent);
-  border: 1px solid color-mix(in srgb, var(--brand-purple, #7c3aed) 45%, transparent);
+  background: color-mix(in srgb, var(--brand-rust, #B23F0A) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--brand-rust, #B23F0A) 45%, transparent);
   border-radius: 8px;
 }
 /* Prominent plain-English plan summary + safety line (B2). */
@@ -1903,8 +1957,8 @@ select.sort-select { width: auto; flex: none; }
   background: var(--bg-surface);
 }
 .plan-card.pending {
-  border-color: var(--brand-purple);
-  background: rgba(72, 40, 121, 0.08);
+  border-color: var(--brand-rust);
+  background: rgba(255, 106, 0, 0.07);
 }
 .plan-card .label-micro { margin-bottom: 8px; color: var(--text-muted); }
 .plan-card .summary {
@@ -1963,7 +2017,7 @@ select.sort-select { width: auto; flex: none; }
   content: "✓";
   position: absolute;
   left: 2px;
-  color: var(--brand-purple);
+  color: var(--brand-rust);
   font-weight: 700;
 }
 .plan-questions {
@@ -1979,10 +2033,10 @@ select.sort-select { width: auto; flex: none; }
    stage (desktop Builder view) — an anchor in history, not a second editor. */
 .plan-stub {
   margin: 6px 0;
-  border: 1px solid var(--brand-purple);
+  border: 1px solid var(--brand-rust);
   border-radius: var(--radius-md);
   padding: 10px 14px;
-  background: rgba(72, 40, 121, 0.08);
+  background: rgba(255, 106, 0, 0.07);
 }
 .plan-stub .plan-plain { margin-bottom: 4px; }
 .plan-stub-hint {
@@ -2174,7 +2228,7 @@ select.sort-select { width: auto; flex: none; }
   width: 240px;
   background: var(--bg-elev, #1a1a1a);
   color: var(--text-primary);
-  border: 1px solid var(--brand-purple, #7c3aed);
+  border: 1px solid var(--brand-rust, #B23F0A);
   border-radius: 8px;
   padding: 10px 12px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
@@ -2195,7 +2249,7 @@ select.sort-select { width: auto; flex: none; }
   padding: 4px 12px;
   border-radius: 6px;
   border: none;
-  background: var(--brand-purple, #7c3aed);
+  background: var(--brand-rust, #B23F0A);
   color: #fff;
   cursor: pointer;
 }
@@ -2203,7 +2257,7 @@ select.sort-select { width: auto; flex: none; }
 /* Inline tasks bar (above composer) */
 .tasks-inline {
   border-top: 1px solid var(--border-default);
-  background: rgba(167, 139, 250, 0.03);
+  background: rgba(255, 106, 0, 0.03);
 }
 .tasks-inline-toggle {
   width: 100%;
@@ -2275,7 +2329,7 @@ select.sort-select { width: auto; flex: none; }
   background: var(--bg-pane);
 }
 /* Match the landing-page composer card: rounded, a faint top-light gradient
-   over the surface, a soft lift shadow, and a magenta focus ring.
+   over the surface, a soft lift shadow, and an ember focus ring.
    NB: this wrapper is `.composer-field`, NOT `.field` — the marketing form's
    `.field textarea { min-height: 130px; resize: vertical }` (declared later at
    equal specificity) would otherwise win and blow the empty composer up to
@@ -2296,16 +2350,16 @@ select.sort-select { width: auto; flex: none; }
   transition: border-color var(--dur-base) ease, box-shadow var(--dur-base) ease;
 }
 .composer .composer-field:focus-within {
-  border-color: color-mix(in srgb, var(--brand-magenta) 55%, var(--border-default));
+  border-color: color-mix(in srgb, var(--brand-ember) 55%, var(--border-default));
   box-shadow:
     0 12px 34px rgba(0, 0, 0, 0.32),
     inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    0 0 0 1px color-mix(in srgb, var(--brand-magenta) 30%, transparent);
+    0 0 0 1px color-mix(in srgb, var(--brand-ember) 30%, transparent);
 }
 .composer.dragging .composer-field {
-  border-color: var(--brand-purple);
-  background: rgba(167, 139, 250, 0.06);
-  box-shadow: inset 0 0 0 1px var(--brand-purple);
+  border-color: var(--brand-rust);
+  background: rgba(255, 106, 0, 0.06);
+  box-shadow: inset 0 0 0 1px var(--brand-rust);
 }
 .composer textarea {
   display: block;
@@ -2395,7 +2449,7 @@ select.sort-select { width: auto; flex: none; }
   cursor: pointer;
 }
 .composer-ghost-key:hover {
-  border-color: color-mix(in srgb, var(--brand-magenta) 45%, var(--border-default));
+  border-color: color-mix(in srgb, var(--brand-ember) 45%, var(--border-default));
   color: var(--text-primary);
 }
 .composer-ghost-off {
@@ -2478,7 +2532,7 @@ select.sort-select { width: auto; flex: none; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--brand-magenta);
+  color: var(--accent-text);
   font-family: var(--font-mono-stack);
   font-size: 11px;
 }
@@ -2494,9 +2548,9 @@ select.sort-select { width: auto; flex: none; }
   color: var(--text-dim);
 }
 .message-file-ref {
-  color: var(--brand-magenta);
-  background: rgba(178, 30, 125, 0.08);
-  border: 1px solid rgba(178, 30, 125, 0.25);
+  color: var(--accent-text);
+  background: rgba(255, 106, 0, 0.08);
+  border: 1px solid rgba(255, 106, 0, 0.25);
   padding: 1px 6px;
   border-radius: var(--radius-sm);
   font-family: var(--font-mono-stack);
@@ -2532,13 +2586,13 @@ select.sort-select { width: auto; flex: none; }
   cursor: not-allowed;
 }
 .composer .plan-toggle.on {
-  background: rgba(178, 30, 125, 0.1);
-  border-color: var(--brand-magenta);
-  color: var(--brand-magenta);
+  background: rgba(255, 106, 0, 0.1);
+  border-color: var(--brand-ember);
+  color: var(--accent-text);
 }
 .ask-user-card {
-  border: 1px solid var(--brand-magenta);
-  background: rgba(178, 30, 125, 0.06);
+  border: 1px solid var(--brand-ember);
+  background: rgba(255, 106, 0, 0.06);
   border-radius: var(--radius-sm);
   padding: 10px 12px;
   display: flex;
@@ -2568,7 +2622,7 @@ select.sort-select { width: auto; flex: none; }
 }
 .ask-user-option:hover {
   background: var(--bg-surface-hover);
-  border-color: var(--brand-magenta);
+  border-color: var(--brand-ember);
 }
 .ask-user-free {
   display: flex;
@@ -2586,11 +2640,11 @@ select.sort-select { width: auto; flex: none; }
 }
 .ask-user-free input:focus {
   outline: none;
-  border-color: var(--brand-magenta);
+  border-color: var(--brand-ember);
 }
 .ask-user-free button {
   background: var(--brand-gradient);
-  color: white;
+  color: #140d07;
   border: 0;
   padding: 6px 12px;
   border-radius: var(--radius-sm);
@@ -2849,11 +2903,11 @@ select.sort-select { width: auto; flex: none; }
   line-height: 1;
 }
 .proj-icon-choice:hover {
-  border-color: var(--brand-magenta);
+  border-color: var(--brand-ember);
 }
 .proj-icon-choice.selected {
-  border-color: var(--brand-magenta);
-  background: rgba(178, 30, 125, 0.1);
+  border-color: var(--brand-ember);
+  background: rgba(255, 106, 0, 0.1);
 }
 /* Mic (voice dictation) — outlined circle; pushes itself + send to the right. */
 .composer .mic-btn {
@@ -2879,7 +2933,7 @@ select.sort-select { width: auto; flex: none; }
   background: var(--bg-surface-hover);
 }
 .composer .mic-btn[data-on="true"] {
-  color: #fff;
+  color: #140d07;
   border-color: transparent;
   background: var(--brand-gradient);
 }
@@ -2897,7 +2951,7 @@ select.sort-select { width: auto; flex: none; }
   border: 0;
   border-radius: var(--radius-full);
   background: transparent;
-  color: var(--brand-magenta);
+  color: var(--accent-text);
   cursor: pointer;
   transition: background var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out);
 }
@@ -2906,7 +2960,7 @@ select.sort-select { width: auto; flex: none; }
   transform: translateY(-1px);
 }
 .composer .context-gauge:focus-visible {
-  outline: 2px solid var(--brand-magenta);
+  outline: 2px solid var(--accent-text);
   outline-offset: 2px;
 }
 .composer .context-gauge:disabled { cursor: default; }
@@ -2969,18 +3023,18 @@ select.sort-select { width: auto; flex: none; }
   border: 0;
   border-radius: var(--radius-full);
   background: var(--brand-gradient);
-  color: #fff;
+  color: #140d07;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 6px 18px color-mix(in srgb, var(--brand-magenta) 40%, transparent);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--brand-ember) 40%, transparent);
   transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-base) var(--ease-out), opacity var(--dur-fast) ease;
 }
 .composer .send-btn svg { width: 16px; height: 16px; }
 .composer .send-btn:hover:not(:disabled) {
   transform: translateY(-1px);
-  box-shadow: 0 8px 22px color-mix(in srgb, var(--brand-magenta) 52%, transparent);
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--brand-ember) 52%, transparent);
 }
 .composer .send-btn:disabled {
   background: var(--bg-surface-active);
@@ -3039,8 +3093,8 @@ select.sort-select { width: auto; flex: none; }
   font-weight: 600;
   padding: 1px 5px;
   border-radius: 999px;
-  background: rgba(178, 30, 125, 0.12);
-  color: var(--accent, #b21e7d);
+  background: rgba(255, 106, 0, 0.12);
+  color: var(--accent-text);
   text-transform: none;
   letter-spacing: 0;
 }
@@ -3101,7 +3155,7 @@ select.sort-select { width: auto; flex: none; }
 .model-picker-option:hover { background: var(--bg-surface-hover); }
 .model-picker-option[data-active="true"] {
   border-color: var(--accent);
-  background: rgba(178, 30, 125, 0.08);
+  background: rgba(255, 106, 0, 0.08);
 }
 
 /* Settings inline wrapper — tighter than the old .settings-card padding. */
@@ -3130,7 +3184,7 @@ select.sort-select { width: auto; flex: none; }
 .model-picker-current:hover,
 .model-picker-current[data-open="true"] {
   border-color: var(--accent);
-  background: rgba(178, 30, 125, 0.06);
+  background: rgba(255, 106, 0, 0.06);
 }
 
 /* Section divider inside the picker. */
@@ -3162,7 +3216,7 @@ select.sort-select { width: auto; flex: none; }
   transition: background var(--dur-fast, 0.12s) ease, border-color var(--dur-fast, 0.12s) ease;
 }
 .model-picker-toggle[data-on="true"] {
-  background: var(--brand-gradient, var(--accent, #b21e7d));
+  background: var(--brand-gradient, var(--accent, #FF6A00));
   border-color: transparent;
 }
 .model-picker-toggle-knob {
@@ -3215,7 +3269,7 @@ select.sort-select { width: auto; flex: none; }
   border: 1px solid var(--border-default);
 }
 .effort-slider-track:focus-visible {
-  outline: 2px solid var(--accent, #b21e7d);
+  outline: 2px solid var(--accent-text);
   outline-offset: 4px;
   border-radius: 999px;
 }
@@ -3226,7 +3280,7 @@ select.sort-select { width: auto; flex: none; }
   height: 6px;
   transform: translateY(-50%);
   border-radius: 999px;
-  background: var(--brand-gradient, var(--accent, #b21e7d));
+  background: var(--brand-gradient, var(--accent, #FF6A00));
   transition: width var(--dur-fast, 0.12s) ease;
   pointer-events: none;
 }
@@ -3250,14 +3304,14 @@ select.sort-select { width: auto; flex: none; }
   height: 15px;
   border-radius: 50%;
   background: #fff;
-  border: 2px solid var(--accent, #b21e7d);
+  border: 2px solid var(--accent, #FF6A00);
   transform: translate(-50%, -50%);
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
   transition: left var(--dur-fast, 0.12s) ease, box-shadow var(--dur-fast, 0.12s) ease;
   pointer-events: none;
 }
 .effort-slider-track:active .effort-slider-knob {
-  box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent, #b21e7d) 22%, transparent), 0 1px 4px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent, #FF6A00) 22%, transparent), 0 1px 4px rgba(0, 0, 0, 0.45);
   transition: box-shadow var(--dur-fast, 0.12s) ease; /* knob follows the finger without lag */
 }
 .effort-slider-track:active .effort-slider-fill { transition: none; }
@@ -3269,7 +3323,7 @@ select.sort-select { width: auto; flex: none; }
 .reasoning-card {
   margin: 4px 0 6px 30px;
   border-left: 2px solid var(--border-active);
-  background: rgba(72, 40, 121, 0.06);
+  background: rgba(255, 106, 0, 0.05);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   overflow: hidden;
 }
@@ -3331,9 +3385,9 @@ select.sort-select { width: auto; flex: none; }
   color: var(--text-primary);
 }
 .tree-row.active {
-  background: rgba(72, 40, 121, 0.18);
+  background: rgba(255, 106, 0, 0.14);
   color: var(--text-primary);
-  border-left-color: var(--brand-magenta);
+  border-left-color: var(--brand-ember);
 }
 .tree-row .chev {
   width: 10px;
@@ -3365,10 +3419,10 @@ select.sort-select { width: auto; flex: none; }
 }
 .tree-search input:focus {
   outline: none;
-  border-color: var(--brand-magenta);
+  border-color: var(--brand-ember);
 }
 .tree-row mark {
-  background: rgba(178, 30, 125, 0.4);
+  background: rgba(255, 106, 0, 0.3);
   color: var(--text-primary);
   padding: 0;
 }
@@ -3378,8 +3432,8 @@ select.sort-select { width: auto; flex: none; }
   border-left: 2px solid transparent;
 }
 .tree-row-wrap.active {
-  background: rgba(72, 40, 121, 0.18);
-  border-left-color: var(--brand-magenta);
+  background: rgba(255, 106, 0, 0.12);
+  border-left-color: var(--brand-ember);
 }
 .tree-row-wrap.active .tree-row {
   background: transparent;
@@ -3390,8 +3444,8 @@ select.sort-select { width: auto; flex: none; }
   border-left: 0;
 }
 .tree-row-wrap.drop-target {
-  background: rgba(72, 40, 121, 0.28);
-  outline: 1px dashed var(--brand-magenta);
+  background: rgba(255, 106, 0, 0.18);
+  outline: 1px dashed var(--accent-text);
   outline-offset: -1px;
 }
 .tree-row-actions {
@@ -3433,7 +3487,7 @@ select.sort-select { width: auto; flex: none; }
 .tree-inline-input {
   flex: 1;
   background: var(--bg-elev);
-  border: 1px solid var(--brand-magenta);
+  border: 1px solid var(--brand-ember);
   border-radius: 3px;
   padding: 1px 4px;
   font-family: inherit;
@@ -3531,7 +3585,7 @@ select.sort-select { width: auto; flex: none; }
   color: var(--text-primary);
 }
 .quick-open-row.active {
-  background: rgba(72, 40, 121, 0.22);
+  background: rgba(255, 106, 0, 0.16);
 }
 .quick-open-row-name {
   color: var(--text-primary);
@@ -3605,7 +3659,7 @@ select.sort-select { width: auto; flex: none; }
   left: 0;
   right: 0;
   height: 2px;
-  background: var(--brand-magenta);
+  background: var(--brand-ember);
 }
 .tab .x {
   width: 16px;
@@ -3740,7 +3794,7 @@ select.sort-select { width: auto; flex: none; }
 }
 .preview-toolbar input.url:focus {
   outline: none;
-  border-color: var(--brand-magenta);
+  border-color: var(--brand-ember);
   color: var(--text-primary);
 }
 .preview-iframe {
@@ -3818,8 +3872,8 @@ select.sort-select { width: auto; flex: none; }
   position: absolute;
   pointer-events: none;
   z-index: 2;
-  border: 2px solid var(--brand-magenta);
-  background: color-mix(in srgb, var(--brand-magenta) 14%, transparent);
+  border: 2px solid var(--brand-ember);
+  background: color-mix(in srgb, var(--brand-ember) 14%, transparent);
   border-radius: 3px;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
 }
@@ -3835,8 +3889,8 @@ select.sort-select { width: auto; flex: none; }
   font-family: var(--font-mono-stack);
   font-size: 10px;
   line-height: 16px;
-  color: #fff;
-  background: var(--brand-magenta);
+  color: #140d07;
+  background: var(--brand-ember);
   border-radius: 3px 3px 3px 0;
 }
 /* Floating hint while pick-mode is armed. */
@@ -3854,7 +3908,7 @@ select.sort-select { width: auto; flex: none; }
   font-size: 12px;
   color: var(--text-primary);
   background: var(--bg-elev, #1a1a22);
-  border: 1px solid var(--brand-magenta);
+  border: 1px solid var(--brand-ember);
   border-radius: 999px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
@@ -3862,7 +3916,7 @@ select.sort-select { width: auto; flex: none; }
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--brand-magenta);
+  background: var(--brand-ember);
   animation: pulse-dim 1.5s ease-in-out infinite;
 }
 .picker-hint-esc {
@@ -3885,7 +3939,7 @@ select.sort-select { width: auto; flex: none; }
   width: min(360px, calc(100% - 24px));
   padding: 10px 12px;
   background: var(--bg-elev, #1a1a22);
-  border: 1px solid var(--brand-magenta);
+  border: 1px solid var(--brand-ember);
   border-radius: var(--radius-md);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
 }
@@ -3898,7 +3952,7 @@ select.sort-select { width: auto; flex: none; }
 .picker-confirm-sel {
   font-family: var(--font-mono-stack);
   font-size: 12px;
-  color: var(--brand-magenta);
+  color: var(--accent-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3929,9 +3983,9 @@ select.sort-select { width: auto; flex: none; }
   background: var(--bg-surface-hover);
 }
 .picker-btn.primary {
-  background: var(--brand-magenta);
-  border-color: var(--brand-magenta);
-  color: #fff;
+  background: var(--brand-ember);
+  border-color: var(--brand-ember);
+  color: #140d07;
 }
 .picker-btn.primary:hover {
   filter: brightness(1.08);
@@ -3992,7 +4046,7 @@ select.sort-select { width: auto; flex: none; }
   background: var(--bg-surface-hover);
 }
 .device-menu-item.active {
-  color: var(--brand-magenta);
+  color: var(--accent-text);
 }
 .device-menu-dim {
   font-family: var(--font-mono-stack);
@@ -4009,9 +4063,9 @@ select.sort-select { width: auto; flex: none; }
   padding: 4px 4px 4px 8px;
   font-size: 11px;
   line-height: 1.2;
-  color: var(--brand-magenta);
-  background: color-mix(in srgb, var(--brand-magenta) 9%, transparent);
-  border: 1px solid color-mix(in srgb, var(--brand-magenta) 35%, transparent);
+  color: var(--accent-text);
+  background: color-mix(in srgb, var(--brand-ember) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--brand-ember) 35%, transparent);
   border-radius: var(--radius-sm);
 }
 .selected-el-chip-label {
@@ -4025,7 +4079,7 @@ select.sort-select { width: auto; flex: none; }
 .selected-el-chip button {
   border: 0;
   background: transparent;
-  color: var(--brand-magenta);
+  color: var(--accent-text);
   width: 18px;
   height: 18px;
   border-radius: 4px;
@@ -4033,7 +4087,7 @@ select.sort-select { width: auto; flex: none; }
   font: inherit;
 }
 .selected-el-chip button:hover {
-  background: color-mix(in srgb, var(--brand-magenta) 18%, transparent);
+  background: color-mix(in srgb, var(--brand-ember) 18%, transparent);
 }
 
 /* ── Screenshot annotator ───────────────────────────────────────────────────*/
@@ -4073,9 +4127,9 @@ select.sort-select { width: auto; flex: none; }
   background: var(--bg-surface-hover);
 }
 .annotator-tool.active {
-  color: #fff;
-  background: var(--brand-magenta);
-  border-color: var(--brand-magenta);
+  color: #140d07;
+  background: var(--brand-ember);
+  border-color: var(--brand-ember);
 }
 .annotator-tool:disabled,
 .annotator-action:disabled {
@@ -4111,8 +4165,8 @@ select.sort-select { width: auto; flex: none; }
   cursor: pointer;
 }
 .annotator-width.active {
-  color: var(--brand-magenta);
-  border-color: var(--brand-magenta);
+  color: var(--accent-text);
+  border-color: var(--brand-ember);
 }
 .annotator-width:disabled {
   opacity: 0.4;
@@ -4396,7 +4450,7 @@ select.sort-select { width: auto; flex: none; }
   display: inline-block;
   width: 100%;
   background: var(--brand-gradient);
-  color: #fff;
+  color: #140d07;
   padding: 11px 16px;
   border-radius: var(--radius-md);
   font-weight: 600;
@@ -4422,7 +4476,7 @@ select.sort-select { width: auto; flex: none; }
   text-align: center;
   margin-bottom: 8px;
 }
-/* Brand radial glow behind the composer — purple→magenta, soft and low. */
+/* Brand radial glow behind the composer -- ember to signal, soft and low. */
 .dash-hero::before {
   content: "";
   position: absolute;
@@ -4433,8 +4487,8 @@ select.sort-select { width: auto; flex: none; }
   width: min(1100px, 98%);
   height: 660px;
   background:
-    radial-gradient(60% 60% at 50% 45%, rgba(178, 30, 125, 0.30), transparent 70%),
-    radial-gradient(70% 70% at 38% 60%, rgba(72, 40, 121, 0.28), transparent 72%);
+    radial-gradient(60% 60% at 50% 45%, rgba(255, 106, 0, 0.20), transparent 70%),
+    radial-gradient(70% 70% at 38% 60%, rgba(255, 197, 61, 0.16), transparent 72%);
   filter: blur(40px);
   pointer-events: none;
   opacity: 0.9;
@@ -4488,12 +4542,12 @@ select.sort-select { width: auto; flex: none; }
 }
 .dash-tabs button[aria-selected="true"] {
   background: var(--brand-gradient);
-  color: #fff;
+  color: #140d07;
 }
 .dash-tabs button:hover:not([aria-selected="true"]) { color: var(--text-primary); }
 
 /* The composer gets a prominent, elevated treatment inside the hero, with a
-   magenta focus ring that picks up the brand gradient. */
+   ember focus ring that picks up the brand gradient. */
 .dash-hero .newproj-form {
   border-radius: 16px;
   background: var(--bg-surface);
@@ -4502,8 +4556,8 @@ select.sort-select { width: auto; flex: none; }
   text-align: left;
 }
 .dash-hero .newproj-form:focus-within {
-  border-color: var(--brand-magenta);
-  box-shadow: 0 10px 44px rgba(0, 0, 0, 0.45), 0 0 0 3px rgba(178, 30, 125, 0.20);
+  border-color: var(--brand-ember);
+  box-shadow: 0 10px 44px rgba(0, 0, 0, 0.45), 0 0 0 3px rgba(255, 106, 0, 0.20);
 }
 .dash-hero .newproj-extra { text-align: left; max-width: 720px; margin-left: auto; margin-right: auto; }
 
@@ -4532,7 +4586,7 @@ select.sort-select { width: auto; flex: none; }
 }
 .dash-chip:hover {
   color: var(--text-primary);
-  border-color: var(--brand-magenta);
+  border-color: var(--brand-ember);
   background: var(--bg-code);
 }
 
@@ -4555,7 +4609,7 @@ select.sort-select { width: auto; flex: none; }
   transition: all var(--dur-base) ease;
   font-family: inherit;
 }
-.starter-card:hover { border-color: var(--brand-magenta); background: var(--bg-code); transform: translateY(-1px); }
+.starter-card:hover { border-color: var(--brand-ember); background: var(--bg-code); transform: translateY(-1px); }
 .starter-card .ic {
   font-size: 18px;
   width: 36px;
@@ -4564,8 +4618,8 @@ select.sort-select { width: auto; flex: none; }
   align-items: center;
   justify-content: center;
   border-radius: 10px;
-  background: color-mix(in srgb, var(--brand-magenta) 12%, var(--bg-elev));
-  border: 1px solid color-mix(in srgb, var(--brand-magenta) 22%, var(--border-default));
+  background: color-mix(in srgb, var(--brand-ember) 12%, var(--bg-elev));
+  border: 1px solid color-mix(in srgb, var(--brand-ember) 22%, var(--border-default));
   margin-bottom: 2px;
 }
 .starter-card .t { font-size: 13px; font-weight: 600; color: var(--text-primary); }
@@ -4742,7 +4796,7 @@ select.sort-select { width: auto; flex: none; }
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
   }
-  .mobile-tab[data-active="true"] { color: var(--brand-magenta); }
+  .mobile-tab[data-active="true"] { color: var(--accent-text); }
   .mobile-tab:disabled {
     opacity: 0.4;
     cursor: default;
@@ -4755,7 +4809,7 @@ select.sort-select { width: auto; flex: none; }
     right: 22%;
     height: 2px;
     border-radius: 0 0 3px 3px;
-    background: var(--brand-magenta);
+    background: var(--brand-ember);
   }
   .mobile-tab-icon { position: relative; display: flex; }
   .mobile-tab-label { line-height: 1; letter-spacing: 0.01em; }
@@ -4865,7 +4919,7 @@ select.sort-select { width: auto; flex: none; }
   margin-left: -12px;
   transition: color var(--dur-base) ease, border-color var(--dur-base) ease;
 }
-.doc-toc a:hover { color: var(--text-primary); border-color: var(--brand-magenta); }
+.doc-toc a:hover { color: var(--text-primary); border-color: var(--brand-ember); }
 @media (max-width: 900px) {
   .doc-toc { display: none; }
 }
@@ -4929,7 +4983,7 @@ select.sort-select { width: auto; flex: none; }
   border-radius: 4px;
   padding: 1px 5px;
 }
-.doc a { color: var(--brand-magenta); text-decoration: none; }
+.doc a { color: var(--accent-text); text-decoration: none; }
 .doc a:hover { text-decoration: underline; }
 
 .doc-guide { display: grid; gap: 34px; }
@@ -4945,7 +4999,7 @@ select.sort-select { width: auto; flex: none; }
 .doc-kicker,
 .doc-card-label {
   margin: 0 0 10px;
-  color: var(--brand-magenta);
+  color: var(--accent-text);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -5007,7 +5061,7 @@ select.sort-select { width: auto; flex: none; }
 }
 .doc-card-accent {
   background:
-    linear-gradient(180deg, color-mix(in srgb, var(--brand-magenta) 10%, transparent), transparent 65%),
+    linear-gradient(180deg, color-mix(in srgb, var(--brand-ember) 10%, transparent), transparent 65%),
     var(--bg-surface);
 }
 .doc-card.compact { padding: 16px; }
@@ -5031,7 +5085,7 @@ select.sort-select { width: auto; flex: none; }
 }
 .doc-section-head p:last-child { margin-bottom: 0; }
 .doc-callout {
-  border-left: 3px solid var(--brand-magenta);
+  border-left: 3px solid var(--brand-ember);
   background: var(--bg-surface);
   border-radius: 0 var(--radius-md) var(--radius-md) 0;
   padding: 12px 16px;
@@ -5092,7 +5146,7 @@ select.sort-select { width: auto; flex: none; }
   place-items: center;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
-  color: var(--brand-magenta);
+  color: var(--accent-text);
   font-family: var(--font-mono-stack);
   font-size: 12px;
 }
@@ -5133,10 +5187,10 @@ select.sort-select { width: auto; flex: none; }
     var(--bg-surface);
 }
 .doc-template {
-  border-color: var(--brand-magenta); /* fallback for engines without color-mix */
-  border-color: color-mix(in srgb, var(--brand-magenta) 45%, var(--border-default));
+  border-color: var(--brand-ember); /* fallback for engines without color-mix */
+  border-color: color-mix(in srgb, var(--brand-ember) 45%, var(--border-default));
   background:
-    linear-gradient(180deg, color-mix(in srgb, var(--brand-magenta) 8%, transparent), transparent 75%),
+    linear-gradient(180deg, color-mix(in srgb, var(--brand-ember) 8%, transparent), transparent 75%),
     var(--bg-surface);
 }
 .doc-template .label-micro {
@@ -5230,7 +5284,7 @@ select.sort-select { width: auto; flex: none; }
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  color: color-mix(in srgb, var(--brand-magenta) 72%, var(--text-muted));
+  color: color-mix(in srgb, var(--brand-ember) 72%, var(--text-muted));
   margin-bottom: 8px;
 }
 .dash-page > h1 { font-size: 26px; font-weight: 650; letter-spacing: -0.02em; margin: 0 0 8px; }
@@ -5281,7 +5335,7 @@ select.sort-select { width: auto; flex: none; }
   transition: background var(--dur-base) ease, border-color var(--dur-base) ease;
 }
 .dash-listrow:hover { background: var(--bg-surface-hover); }
-.dash-listrow.active { background: var(--bg-dark); border-color: var(--brand-magenta); }
+.dash-listrow.active { background: var(--bg-dark); border-color: var(--brand-ember); }
 
 /* ==========================================================================
    Organization workspace — Members · Usage · Settings
@@ -5531,7 +5585,7 @@ select.sort-select { width: auto; flex: none; }
 }
 .member-remove svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; }
 .member-remove:hover { color: var(--conf-low); border-color: color-mix(in srgb, var(--conf-low) 28%, var(--border-default)); background: var(--conf-low-bg); }
-.member-remove:focus-visible { outline: 2px solid var(--brand-magenta); outline-offset: 2px; }
+.member-remove:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
 .role-pill {
   flex: none;
   font-family: var(--font-mono-stack);
@@ -5539,9 +5593,9 @@ select.sort-select { width: auto; flex: none; }
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--brand-magenta);
-  background: color-mix(in srgb, var(--brand-magenta) 10%, transparent);
-  border: 1px solid color-mix(in srgb, var(--brand-magenta) 28%, transparent);
+  color: var(--accent-text);
+  background: color-mix(in srgb, var(--brand-ember) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--brand-ember) 28%, transparent);
   border-radius: var(--radius-full);
   padding: 4px 10px;
 }
@@ -5567,7 +5621,7 @@ select.sort-select { width: auto; flex: none; }
   height: 8px;
   border-radius: var(--radius-full);
   background: var(--bg-surface-active);
-  animation: uniqus-skeleton-pulse 1.4s ease-in-out infinite;
+  animation: gate15-skeleton-pulse 1.4s ease-in-out infinite;
 }
 .org-state-lines span:nth-child(2) { width: 76%; }
 .org-state-lines span:nth-child(3) { width: 48%; }
@@ -5599,10 +5653,10 @@ select.sort-select { width: auto; flex: none; }
 .usage-meter > span {
   display: block;
   height: 100%;
-  background: var(--brand-magenta);
+  background: var(--brand-ember);
   transition: width var(--dur-base) var(--ease-out);
 }
-.usage-meter > span.live { background: var(--brand-magenta); }
+.usage-meter > span.live { background: var(--brand-ember); }
 .usage-meter > span.warn { background: var(--conf-medium); }
 .usage-meter > span.danger { background: var(--conf-low); }
 .org-budget-scale {
@@ -5798,8 +5852,8 @@ select.sort-select { width: auto; flex: none; }
 .ds-empty .ds-plus {
   width: 56px; height: 56px; border-radius: 50%;
   display: grid; place-items: center;
-  color: #fff; background: var(--brand-gradient);
-  box-shadow: 0 8px 30px rgba(178, 30, 125, 0.35);
+  color: #140d07; background: var(--brand-gradient);
+  box-shadow: 0 8px 30px rgba(255, 106, 0, 0.28);
   margin-bottom: 10px;
 }
 .ds-empty h2 { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; margin: 0; }
@@ -5833,7 +5887,7 @@ select.sort-select { width: auto; flex: none; }
   font-size: 13.5px;
   font-family: inherit;
 }
-.ds-name:focus { outline: none; border-color: var(--brand-magenta); }
+.ds-name:focus { outline: none; border-color: var(--accent-text); }
 .ds-hint { margin: 0; font-size: 11.5px; color: var(--text-dim, var(--text-muted)); line-height: 1.5; }
 .ds-connect {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -5873,7 +5927,7 @@ select.sort-select { width: auto; flex: none; }
 .ds-finding:hover { border-color: var(--text-muted); }
 .ds-finding.denied { opacity: 0.5; }
 .ds-finding-top { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.ds-finding-top input { accent-color: var(--brand-magenta); }
+.ds-finding-top input { accent-color: var(--brand-ember); }
 .ds-finding-label { font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; color: var(--text-primary); }
 .ds-finding ul { margin: 0; padding-left: 16px; display: flex; flex-direction: column; gap: 3px; }
 .ds-finding li { font-size: 11.5px; color: var(--text-muted); line-height: 1.45; }
@@ -5883,7 +5937,7 @@ select.sort-select { width: auto; flex: none; }
 .ds-activity { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); padding: 8px 2px 2px; }
 .ds-spinner {
   width: 12px; height: 12px; flex-shrink: 0; border-radius: 50%;
-  border: 2px solid var(--border-default); border-top-color: var(--brand-magenta);
+  border: 2px solid var(--border-default); border-top-color: var(--brand-ember);
   animation: ds-spin 0.7s linear infinite;
 }
 @keyframes ds-spin { to { transform: rotate(360deg); } }
@@ -5900,7 +5954,7 @@ select.sort-select { width: auto; flex: none; }
 }
 .ds-catalog-chip:hover { border-color: var(--text-muted); }
 .ds-catalog-chip.denied { opacity: 0.45; }
-.ds-catalog-chip input { accent-color: var(--brand-magenta); }
+.ds-catalog-chip input { accent-color: var(--brand-ember); }
 .ds-catalog-chip-type { font-size: 10px; color: var(--text-dim); font-family: var(--font-mono-stack); }
 
 /* Agent-driven "describe" brief box. */
@@ -5917,7 +5971,7 @@ select.sort-select { width: auto; flex: none; }
   resize: vertical;
   min-height: 104px;
 }
-.ds-brief:focus { outline: none; border-color: var(--brand-magenta); }
+.ds-brief:focus { outline: none; border-color: var(--accent-text); }
 .ds-brief::placeholder { color: var(--text-muted); }
 .ds-cancel { align-self: center; font-size: 12px; margin-bottom: 2px; }
 
@@ -5964,7 +6018,7 @@ select.sort-select { width: auto; flex: none; }
     transform var(--dur-fast) ease;
 }
 .ds-sys-row:hover { background: var(--bg-surface-hover); transform: translateY(-1px); }
-.ds-sys-row.active { border-color: var(--brand-magenta); background: var(--bg-surface); }
+.ds-sys-row.active { border-color: var(--brand-ember); background: var(--bg-surface); }
 .ds-sys-ribbon {
   display: flex;
   height: 18px;
@@ -6006,7 +6060,7 @@ select.sort-select { width: auto; flex: none; }
   padding: 12px 2px; color: var(--text-primary);
   font-size: 11px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase;
 }
-.ds-collapse-head:hover { color: var(--brand-magenta); }
+.ds-collapse-head:hover { color: var(--accent-text); }
 .ds-collapse-chev { color: var(--text-muted); transition: transform var(--dur-base) ease; }
 .ds-collapse-head[aria-expanded="false"] .ds-collapse-chev { transform: rotate(-90deg); }
 /* Smooth height animation via the grid-template-rows 0fr↔1fr trick — animates
@@ -6081,11 +6135,11 @@ select.sort-select { width: auto; flex: none; }
   white-space: nowrap;
 }
 .skill-default-star:hover {
-  color: var(--brand-magenta, #b21e7d);
-  background: color-mix(in srgb, var(--brand-magenta, #b21e7d) 10%, transparent);
-  border-color: color-mix(in srgb, var(--brand-magenta, #b21e7d) 30%, transparent);
+  color: var(--accent-text);
+  background: color-mix(in srgb, var(--brand-ember, #FF6A00) 10%, transparent);
+  border-color: color-mix(in srgb, var(--brand-ember, #FF6A00) 30%, transparent);
 }
-.skill-default-star[data-on="true"] { color: var(--brand-magenta, #b21e7d); }
+.skill-default-star[data-on="true"] { color: var(--accent-text); }
 .skill-default-star:disabled { opacity: 0.5; cursor: default; }
 
 /* Dashed "create" tile at the end of the grid. */
@@ -6103,7 +6157,7 @@ select.sort-select { width: auto; flex: none; }
   color: var(--text-muted);
   text-align: center;
 }
-.skill-new-tile:hover { border-color: var(--brand-magenta); color: var(--text-primary); background: var(--bg-surface); }
+.skill-new-tile:hover { border-color: var(--brand-ember); color: var(--text-primary); background: var(--bg-surface); }
 .skill-new-plus {
   width: 34px; height: 34px; border-radius: 50%;
   display: grid; place-items: center;
@@ -6111,7 +6165,7 @@ select.sort-select { width: auto; flex: none; }
   background: var(--bg-surface-active);
   color: var(--text-primary);
 }
-.skill-new-tile:hover .skill-new-plus { background: var(--brand-gradient); color: #fff; }
+.skill-new-tile:hover .skill-new-plus { background: var(--brand-gradient); color: #140d07; }
 .skill-new-label { font-size: 13px; font-weight: 600; color: var(--text-primary); }
 .skill-new-sub { font-size: 11.5px; color: var(--text-muted); max-width: 24ch; line-height: 1.45; }
 
@@ -6123,9 +6177,9 @@ select.sort-select { width: auto; flex: none; }
 .skills-empty-plus {
   width: 48px; height: 48px; border-radius: 50%;
   display: grid; place-items: center;
-  color: #fff; font-size: 20px;
+  color: #140d07; font-size: 20px;
   background: var(--brand-gradient);
-  box-shadow: 0 8px 30px rgba(178, 30, 125, 0.35);
+  box-shadow: 0 8px 30px rgba(255, 106, 0, 0.28);
   margin-bottom: 6px;
 }
 .skills-empty h2 { font-size: 18px; font-weight: 600; margin: 0; }
@@ -6174,7 +6228,7 @@ select.sort-select { width: auto; flex: none; }
   resize: vertical;
   min-height: 280px;
 }
-.skill-body-input:focus { outline: none; border-color: var(--brand-magenta); }
+.skill-body-input:focus { outline: none; border-color: var(--accent-text); }
 .skill-body-input::placeholder { color: var(--text-muted); }
 .skill-invocation-hint {
   display: flex;
@@ -6216,7 +6270,7 @@ select.sort-select { width: auto; flex: none; }
   margin-top: 2px;
 }
 .db-ext-link { color: var(--text-muted); text-decoration: none; font-size: 12px; }
-.db-ext-link:hover { color: var(--brand-magenta); }
+.db-ext-link:hover { color: var(--accent-text); }
 
 /* Table list: full-width rows, name left / size+rows right. */
 .db-table-list { display: flex; flex-direction: column; gap: 6px; }
@@ -6232,7 +6286,7 @@ select.sort-select { width: auto; flex: none; }
   text-align: left;
   transition: border-color var(--dur-base) ease;
 }
-.db-table-row:hover { border-color: var(--brand-magenta); }
+.db-table-row:hover { border-color: var(--brand-ember); }
 .db-table-name { font-family: var(--font-mono-stack); font-size: 12.5px; font-weight: 600; }
 .db-table-meta { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
 
@@ -6280,7 +6334,7 @@ select.sort-select { width: auto; flex: none; }
   line-height: 1.55;
   resize: vertical;
 }
-.db-sql-input:focus { outline: none; border-color: var(--brand-magenta); }
+.db-sql-input:focus { outline: none; border-color: var(--accent-text); }
 .db-sql-input::placeholder { color: var(--text-muted); }
 .db-sql-error {
   margin: 0;
@@ -6375,7 +6429,7 @@ select.sort-select { width: auto; flex: none; }
   place-items: center;
   background: color-mix(in srgb, var(--bg-dark) 78%, transparent);
   backdrop-filter: blur(2px);
-  border: 2px dashed var(--brand-magenta);
+  border: 2px dashed var(--brand-ember);
   border-radius: var(--radius-lg);
   pointer-events: none;
 }
@@ -6389,7 +6443,7 @@ select.sort-select { width: auto; flex: none; }
   font-weight: 600;
 }
 .kb-dropzone-inner svg {
-  color: var(--brand-magenta);
+  color: var(--accent-text);
 }
 
 /* ==========================================================================
@@ -6640,8 +6694,8 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 .ui-select:focus,
 .ui-select:focus-visible {
   outline: none;
-  border-color: var(--brand-magenta);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand-magenta) 35%, transparent);
+  border-color: var(--brand-ember);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand-ember) 35%, transparent);
 }
 .ui-select:disabled { opacity: 0.55; cursor: not-allowed; }
 /* The opened popup is OS-rendered. `color-scheme: dark` alone fails to darken it
@@ -6697,40 +6751,51 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
    Marketing page refresh (landing page overrides)
    ========================================================================== */
 .marketing-shell {
-  --mk-bg: #07080d;
-  --mk-panel: rgba(17, 18, 27, 0.88);
-  --mk-panel-solid: #12131c;
-  --mk-panel-2: #191a25;
-  --mk-line: rgba(255, 255, 255, 0.11);
+  --mk-bg: #08090A;
+  --mk-panel: rgba(18, 20, 23, 0.88);
+  --mk-panel-solid: #121417;
+  --mk-panel-2: #191C20;
+  --mk-line: rgba(255, 255, 255, 0.10);
   --mk-line-strong: rgba(255, 255, 255, 0.18);
-  --mk-text: #f4f2ee;
-  --mk-muted: #a8a39b;
-  --mk-dim: #716d66;
-  --mk-cyan: #38bdf8;
-  --mk-teal: #2dd4bf;
-  --mk-amber: #f6c86d;
-  --mk-green: #64d29b;
+  --mk-text: #F2F0EC;
+  --mk-muted: #A5A29C;
+  /* --mk-dim is NOT decoration-weight: it carries real informational text on
+     the marketing pages (pricing `/mo` suffixes and struck features, the
+     compare table's "no" cells, input placeholders, column heads). The old
+     #6F6D68 failed AA on every marketing surface (3.86 on --mk-bg, 3.31 on
+     --mk-panel-2). #8A8882 clears them all: 5.62 / 5.21 / 4.82 on
+     --mk-bg / --mk-panel-solid / --mk-panel-2. */
+  --mk-dim: #8A8882;
+  /* Decorative accents. --mk-cyan is cold steel (the one cool accent, used
+     sparingly), --mk-teal is patina, --mk-amber is the hazard yellow, and
+     --mk-green is status-OK only. */
+  --mk-cyan: #7FA6C4;
+  --mk-teal: #4E9E86;
+  --mk-amber: #FFC53D;
+  --mk-green: #64D29B;
   width: 100%;
   min-height: 100vh;
   background:
-    linear-gradient(180deg, rgba(178, 30, 125, 0.10), transparent 420px),
-    linear-gradient(135deg, #07080d 0%, #111017 48%, #08090d 100%);
+    linear-gradient(180deg, rgba(255, 106, 0, 0.08), transparent 420px),
+    linear-gradient(135deg, #08090A 0%, #14171A 48%, #0A0C0D 100%);
   color: var(--mk-text);
   overflow-x: clip;
 }
 :root[data-theme="light"] .marketing-shell {
-  --mk-bg: #f5f3ef;
+  --mk-bg: #EFEEEC;
   --mk-panel: rgba(255, 255, 255, 0.88);
-  --mk-panel-solid: #ffffff;
-  --mk-panel-2: #f1efea;
-  --mk-line: rgba(26, 24, 32, 0.13);
-  --mk-line-strong: rgba(26, 24, 32, 0.21);
-  --mk-text: #191820;
-  --mk-muted: #625f68;
-  --mk-dim: #8b8790;
+  --mk-panel-solid: #FFFFFF;
+  --mk-panel-2: #F1F0EE;
+  --mk-line: rgba(23, 24, 26, 0.13);
+  --mk-line-strong: rgba(23, 24, 26, 0.21);
+  --mk-text: #17181A;
+  --mk-muted: #52555A;
+  /* Matches the app's light --text-dim: clears 4.5:1 on every marketing surface
+     (5.54 on --mk-bg, 6.42 on --mk-panel-solid, 5.64 on --mk-panel-2). */
+  --mk-dim: #5C5F63;
   background:
-    linear-gradient(180deg, rgba(178, 30, 125, 0.10), transparent 420px),
-    linear-gradient(135deg, #f5f3ef 0%, #fff 48%, #edeaf1 100%);
+    linear-gradient(180deg, rgba(255, 106, 0, 0.07), transparent 420px),
+    linear-gradient(135deg, #EFEEEC 0%, #fff 48%, #E7E6E4 100%);
 }
 .marketing-shell .brand-link { text-decoration: none; }
 .marketing-shell .marketing-nav {
@@ -6772,11 +6837,11 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
    wherever it lands in the DOM. :root[data-theme="light"] still matches, since
    that attribute lives on <html>, an ancestor of the portal target either way. */
 .nav-explore-panel {
-  --mk-panel-solid: #12131c;
-  --mk-line: rgba(255, 255, 255, 0.11);
-  --mk-text: #f4f2ee;
-  --mk-muted: #a8a39b;
-  --mk-dim: #716d66;
+  --mk-panel-solid: #121417;
+  --mk-line: rgba(255, 255, 255, 0.10);
+  --mk-text: #F2F0EC;
+  --mk-muted: #A5A29C;
+  --mk-dim: #8A8882;
   z-index: 60;
   display: grid;
   grid-auto-flow: column;
@@ -6788,11 +6853,11 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   box-shadow: 0 20px 48px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.18);
 }
 :root[data-theme="light"] .nav-explore-panel {
-  --mk-panel-solid: #ffffff;
-  --mk-line: rgba(26, 24, 32, 0.13);
-  --mk-text: #191820;
-  --mk-muted: #625f68;
-  --mk-dim: #8b8790;
+  --mk-panel-solid: #FFFFFF;
+  --mk-line: rgba(23, 24, 26, 0.13);
+  --mk-text: #17181A;
+  --mk-muted: #52555A;
+  --mk-dim: #5C5F63;
 }
 .nav-explore-col { display: flex; flex-direction: column; gap: 2px; min-width: 128px; }
 .nav-explore-heading {
@@ -6821,10 +6886,10 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   isolation: isolate;
   overflow: hidden;
 }
-/* No bottom fade on the hero. The hero now resolves to brand magenta (see the
-   `.marketing-shell .hero` background override below), so the old fade-to-bg
-   overlay just muddied the magenta near the fold. The hero ends on a clean
-   color block — same treatment as `.bottom-build` at the foot of the page. */
+/* No bottom fade on the hero. The hero now resolves to the deep-oxide end of
+   the brand ramp (see the `.marketing-shell .hero` background override below),
+   so the old fade-to-bg overlay just muddied it near the fold. The hero ends
+   on a clean colour block -- same treatment as `.bottom-build` at the foot. */
 .hero-scene {
   position: absolute;
   inset: 0;
@@ -6926,7 +6991,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .workspace-files .file-active {
   color: var(--mk-text);
-  background: color-mix(in srgb, var(--brand-magenta) 22%, transparent);
+  background: color-mix(in srgb, var(--brand-ember) 22%, transparent);
 }
 .workspace-code {
   padding: 18px 0;
@@ -7002,7 +7067,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   background: linear-gradient(90deg, var(--mk-cyan), var(--mk-teal));
 }
 .preview-bars i:nth-child(2) { width: 72%; background: var(--mk-amber); }
-.preview-bars i:nth-child(3) { width: 52%; background: var(--brand-magenta); }
+.preview-bars i:nth-child(3) { width: 52%; background: var(--brand-ember); }
 .deploy-strip {
   display: grid;
   gap: 3px;
@@ -7072,7 +7137,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   white-space: nowrap;
 }
 .model-pill-row span:first-child {
-  color: #fff;
+  color: #140d07;
   border-color: transparent;
   background: var(--brand-gradient);
 }
@@ -7106,7 +7171,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   text-wrap: balance;
 }
 .marketing-shell .hero h1 .grad {
-  background: linear-gradient(100deg, #ff4d97 0%, #b96bff 48%, #5b8bff 100%);
+  background: linear-gradient(100deg, #ff8124 0%, #ffb03a 48%, #ffc53d 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -7132,12 +7197,15 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   font-family: var(--font-mono-stack);
   font-size: 11px;
 }
+/* Ember, not --mk-green. This dot is BRAND chrome on the hero pill, not a
+   status light; green is reserved for actual "OK" state (spec §2). A green dot
+   next to an orange wordmark also just reads as a leftover from the old skin. */
 .marketing-shell .hero .eyebrow .dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--mk-green);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--mk-green) 22%, transparent);
+  background: var(--brand-ember);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-ember) 22%, transparent);
 }
 
 /* ── Hero prompt composer — the centerpiece "try it" affordance ─────────── */
@@ -7163,10 +7231,10 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
     transform var(--dur-base) var(--ease-out);
 }
 .hero-prompt:hover {
-  border-color: color-mix(in srgb, var(--brand-magenta) 55%, var(--mk-line-strong));
+  border-color: color-mix(in srgb, var(--brand-ember) 55%, var(--mk-line-strong));
   box-shadow:
     0 36px 92px rgba(0, 0, 0, 0.5),
-    0 0 0 1px color-mix(in srgb, var(--brand-magenta) 30%, transparent);
+    0 0 0 1px color-mix(in srgb, var(--brand-ember) 30%, transparent);
   transform: translateY(-2px);
 }
 .hp-input {
@@ -7215,7 +7283,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   background: color-mix(in srgb, var(--mk-panel-solid) 62%, transparent);
 }
 .hp-icon-btn[data-on="true"] {
-  color: #fff;
+  color: #140d07;
   border-color: transparent;
   background: var(--brand-gradient);
 }
@@ -7240,7 +7308,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .hp-plan:hover { color: var(--mk-text); border-color: var(--mk-line-strong); }
 .hp-plan.on {
-  color: #fff;
+  color: #140d07;
   border-color: transparent;
   background: var(--brand-gradient);
 }
@@ -7271,14 +7339,14 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   border: 0;
   border-radius: var(--radius-full);
   background: var(--brand-gradient);
-  color: #fff;
+  color: #140d07;
   cursor: pointer;
-  box-shadow: 0 6px 18px color-mix(in srgb, var(--brand-magenta) 40%, transparent);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--brand-ember) 40%, transparent);
   transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-base) var(--ease-out), opacity var(--dur-fast) ease;
 }
 .hp-send:hover:not(:disabled) {
   transform: translateY(-1px);
-  box-shadow: 0 8px 22px color-mix(in srgb, var(--brand-magenta) 52%, transparent);
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--brand-ember) 52%, transparent);
 }
 .hp-send:active:not(:disabled) { transform: scale(0.95); }
 .hp-send:disabled { opacity: 0.5; cursor: default; box-shadow: none; }
@@ -7455,9 +7523,9 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   background: color-mix(in srgb, var(--mk-bg) 38%, transparent);
 }
 .model-card.active {
-  border-color: color-mix(in srgb, var(--brand-magenta) 68%, var(--mk-line));
+  border-color: color-mix(in srgb, var(--brand-ember) 68%, var(--mk-line));
   background:
-    linear-gradient(135deg, color-mix(in srgb, var(--brand-magenta) 24%, transparent), transparent 70%),
+    linear-gradient(135deg, color-mix(in srgb, var(--brand-ember) 24%, transparent), transparent 70%),
     color-mix(in srgb, var(--mk-panel-solid) 86%, transparent);
 }
 .model-provider,
@@ -7635,7 +7703,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   margin: 28px auto 96px;
   padding: 58px;
   background:
-    linear-gradient(135deg, color-mix(in srgb, var(--brand-magenta) 18%, transparent), transparent 62%),
+    linear-gradient(135deg, color-mix(in srgb, var(--brand-ember) 18%, transparent), transparent 62%),
     linear-gradient(90deg, color-mix(in srgb, var(--mk-cyan) 10%, transparent), transparent 70%),
     color-mix(in srgb, var(--mk-panel-solid) 88%, transparent);
 }
@@ -7759,7 +7827,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   place-items: center;
   padding: 88px 24px 112px;
   text-align: center;
-  background: linear-gradient(180deg, var(--bg-dark) 0%, var(--brand-purple) 48%, var(--brand-magenta) 100%);
+  background: linear-gradient(180deg, var(--bg-dark) 0%, #2b1c12 48%, var(--brand-rust) 100%);
 }
 
 .marketing-shell .hero-copy {
@@ -7778,11 +7846,11 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .marketing-shell .hero h1 .grad {
-  /* High-luminance brand-family gradient. The previous magenta→purple→purple
-     stops went DARKER than the purple/magenta background gradient, so the right
-     half of the phrase nearly disappeared. Light pink → orchid → lavender keeps
-     it on-brand but reads with strong contrast over the deep hero gradient. */
-  background: linear-gradient(100deg, #ff9ad0 0%, #e7b4ff 50%, #bcb3ff 100%);
+  /* High-luminance brand-family gradient. Stops darker than the background
+     gradient make the right half of the phrase disappear, so this runs ember
+     -> hazard signal -> pale signal: on-brand, and it reads with strong
+     contrast over the deep hero gradient. */
+  background: linear-gradient(100deg, #ff8124 0%, #ffb03a 50%, #ffdd8f 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -7797,7 +7865,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   border-top: 1px solid var(--mk-line);
   border-bottom: 1px solid var(--mk-line);
   background:
-    linear-gradient(90deg, color-mix(in srgb, var(--brand-magenta) 12%, transparent), transparent 34%, color-mix(in srgb, var(--brand-purple-hi) 14%, transparent)),
+    linear-gradient(90deg, color-mix(in srgb, var(--brand-ember) 12%, transparent), transparent 34%, color-mix(in srgb, var(--brand-signal) 14%, transparent)),
     var(--bg-surface);
 }
 .marquee-band span {
@@ -7811,7 +7879,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   letter-spacing: 0;
 }
 .marquee-band span:nth-child(2n) { color: rgba(244, 242, 238, 0.76); }
-.marquee-band span:nth-child(3n) { color: color-mix(in srgb, var(--brand-magenta) 72%, var(--mk-text)); }
+.marquee-band span:nth-child(3n) { color: color-mix(in srgb, var(--brand-ember) 72%, var(--mk-text)); }
 
 .marketing-shell section.band:not(.workflow-band) {
   width: min(100% - 40px, 1220px);
@@ -7844,7 +7912,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   box-shadow: none;
 }
 .model-console .console-head { color: var(--mk-muted); }
-.model-console .console-head strong { color: var(--brand-magenta); }
+.model-console .console-head strong { color: var(--accent-text); }
 .model-card-grid { gap: 14px; }
 .model-card {
   min-height: 204px;
@@ -7855,8 +7923,8 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   box-shadow: none;
 }
 .model-card.active {
-  border-color: color-mix(in srgb, var(--brand-magenta) 70%, var(--mk-line));
-  background: color-mix(in srgb, var(--brand-magenta) 12%, var(--mk-bg));
+  border-color: color-mix(in srgb, var(--brand-ember) 70%, var(--mk-line));
+  background: color-mix(in srgb, var(--brand-ember) 12%, var(--mk-bg));
   color: var(--mk-text);
 }
 .model-card p,
@@ -7874,8 +7942,8 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   min-height: 500px;
   border-radius: 32px;
   background:
-    radial-gradient(74% 86% at 50% 92%, color-mix(in srgb, var(--brand-magenta) 28%, transparent), transparent 62%),
-    radial-gradient(70% 80% at 50% 0%, color-mix(in srgb, var(--brand-purple-hi) 22%, transparent), transparent 64%),
+    radial-gradient(74% 86% at 50% 92%, color-mix(in srgb, var(--brand-ember) 28%, transparent), transparent 62%),
+    radial-gradient(70% 80% at 50% 0%, color-mix(in srgb, var(--brand-signal) 22%, transparent), transparent 64%),
     linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px),
     linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
     var(--mk-bg);
@@ -7891,9 +7959,9 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   background: transparent;
 }
 .rack-row.active {
-  border-color: color-mix(in srgb, var(--brand-magenta) 68%, var(--mk-line));
+  border-color: color-mix(in srgb, var(--brand-ember) 68%, var(--mk-line));
   background:
-    linear-gradient(90deg, color-mix(in srgb, var(--brand-magenta) 20%, transparent), transparent 52%),
+    linear-gradient(90deg, color-mix(in srgb, var(--brand-ember) 20%, transparent), transparent 52%),
     color-mix(in srgb, var(--mk-bg) 36%, transparent);
 }
 
@@ -7954,9 +8022,9 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 .feature-art .fa-line { fill: color-mix(in srgb, var(--mk-text) 24%, transparent); }
 .feature-art .fa-line-soft { fill: color-mix(in srgb, var(--mk-text) 13%, transparent); }
 .feature-art .fa-ink { fill: var(--mk-text); }
-.feature-art .fa-magenta { fill: var(--brand-magenta); }
-.feature-art .fa-purple { fill: var(--brand-purple); }
-.feature-art .fa-purple-hi { fill: var(--brand-purple-hi); }
+.feature-art .fa-ember { fill: var(--brand-ember); }
+.feature-art .fa-rust { fill: var(--brand-rust); }
+.feature-art .fa-signal { fill: var(--brand-signal); }
 .feature-art .fa-green { fill: var(--mk-green); }
 .feature-art .fa-icon {
   fill: none;
@@ -7973,9 +8041,9 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.feature-art .fa-on-grad { fill: rgba(255, 255, 255, 0.92); }
-.feature-art .fa-grad-a { stop-color: var(--brand-purple); }
-.feature-art .fa-grad-b { stop-color: var(--brand-magenta); }
+.feature-art .fa-on-grad { fill: rgba(20, 13, 7, 0.92); }
+.feature-art .fa-grad-a { stop-color: var(--brand-rust); }
+.feature-art .fa-grad-b { stop-color: var(--brand-ember); }
 
 .marketing-shell section.band.workflow-band {
   width: 100%;
@@ -7983,7 +8051,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   margin: 24px 0 0;
   padding: 104px max(24px, calc((100% - 1180px) / 2));
   border: 0;
-  background: linear-gradient(135deg, var(--brand-purple) 0%, var(--brand-magenta) 52%, var(--brand-purple-hi) 100%);
+  background: linear-gradient(135deg, #17191c 0%, #2f1e11 52%, var(--brand-rust) 100%);
   color: var(--mk-text);
 }
 .workflow-band .section-head {
@@ -8089,9 +8157,21 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   overflow: hidden;
   margin-top: 70px;
   padding: 92px max(24px, calc((100% - 1220px) / 2)) 84px;
-  background: linear-gradient(180deg, var(--bg-dark) 0%, var(--brand-purple) 48%, var(--brand-magenta) 100%);
+  background: linear-gradient(180deg, var(--bg-dark) 0%, #2b1c12 48%, var(--brand-rust) 100%);
 }
-.bottom-build::before,
+/* Hazard rule along the top edge of the final CTA band -- the signature motif,
+   used sparingly (this is one of the two or three places it appears). */
+.bottom-build::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: var(--hazard);
+  opacity: 0.85;
+  pointer-events: none;
+}
 .bottom-build::after {
   display: none;
 }
@@ -8132,10 +8212,10 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
     transform var(--dur-base) var(--ease-out);
 }
 .bottom-prompt:hover {
-  border-color: color-mix(in srgb, var(--brand-magenta) 64%, var(--mk-line-strong));
+  border-color: color-mix(in srgb, var(--brand-ember) 64%, var(--mk-line-strong));
   box-shadow:
     0 34px 92px rgba(0, 0, 0, 0.44),
-    0 0 0 1px color-mix(in srgb, var(--brand-magenta) 26%, transparent);
+    0 0 0 1px color-mix(in srgb, var(--brand-ember) 26%, transparent);
   transform: translateY(-2px);
 }
 .bp-input {
@@ -8348,7 +8428,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .toast-success { border-left-color: var(--conf-high, #34d399); }
 .toast-error { border-left-color: var(--conf-low, #f87171); }
-.toast-info { border-left-color: var(--accent, #B21E7D); }
+.toast-info { border-left-color: var(--accent, #FF6A00); }
 .toast-icon {
   flex: 0 0 auto;
   width: 18px;
@@ -8363,7 +8443,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .toast-success .toast-icon { background: var(--conf-high, #34d399); }
 .toast-error .toast-icon { background: var(--conf-low, #f87171); }
-.toast-info .toast-icon { background: var(--accent, #B21E7D); }
+.toast-info .toast-icon { background: var(--accent, #FF6A00); color: #140d07; }
 .toast-msg {
   flex: 1 1 auto;
   min-width: 0;
@@ -8458,13 +8538,13 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   height: 28px;
   border-radius: 6px;
   background: var(--bg-elev);
-  animation: uniqus-skeleton-pulse 1.4s ease-in-out infinite;
+  animation: gate15-skeleton-pulse 1.4s ease-in-out infinite;
 }
 .ide-skeleton-row {
   height: 16px;
   border-radius: 5px;
   background: var(--bg-elev);
-  animation: uniqus-skeleton-pulse 1.4s ease-in-out infinite;
+  animation: gate15-skeleton-pulse 1.4s ease-in-out infinite;
 }
 @keyframes fadeIn {
   from { opacity: 0; }
@@ -8627,8 +8707,8 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   transition: border-color var(--dur-fast, 0.12s) ease, background var(--dur-fast, 0.12s) ease;
 }
 .tool-fix-btn:hover {
-  border-color: color-mix(in srgb, var(--brand-magenta) 50%, var(--border-default));
-  background: color-mix(in srgb, var(--brand-magenta) 8%, transparent);
+  border-color: color-mix(in srgb, var(--brand-ember) 50%, var(--border-default));
+  background: color-mix(in srgb, var(--brand-ember) 8%, transparent);
 }
 /* Inline screenshot thumbnails under a screenshot_preview / analyze_image tool
    row — a small rounded preview of what the agent captured or inspected. Indented
@@ -8651,7 +8731,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   transition: border-color var(--dur-fast, 0.12s) ease, transform var(--dur-fast, 0.12s) ease;
 }
 .tool-shot:hover {
-  border-color: color-mix(in srgb, var(--brand-magenta) 50%, var(--border-default));
+  border-color: color-mix(in srgb, var(--brand-ember) 50%, var(--border-default));
   transform: translateY(-1px);
 }
 .tool-shot img {
@@ -8796,8 +8876,8 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   width: min(900px, 90%);
   height: 460px;
   background:
-    radial-gradient(55% 60% at 50% 40%, color-mix(in srgb, var(--brand-magenta) 24%, transparent), transparent 70%),
-    radial-gradient(60% 60% at 32% 60%, color-mix(in srgb, var(--brand-purple) 22%, transparent), transparent 72%);
+    radial-gradient(55% 60% at 50% 40%, color-mix(in srgb, var(--brand-ember) 24%, transparent), transparent 70%),
+    radial-gradient(60% 60% at 32% 60%, color-mix(in srgb, var(--brand-rust) 22%, transparent), transparent 72%);
   filter: blur(46px);
   pointer-events: none;
 }
@@ -8814,7 +8894,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   text-wrap: balance;
 }
 .mk-hero h1 .grad {
-  background: linear-gradient(100deg, #ff4d97 0%, #b96bff 48%, #5b8bff 100%);
+  background: linear-gradient(100deg, #ff8124 0%, #ffb03a 48%, #ffc53d 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -8852,10 +8932,13 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 11px;
   letter-spacing: 0.04em;
 }
+/* Ember — brand chrome, not a status light. Green stays reserved for real "OK"
+   state (the feature ticks below, deploy status), so it must not sit in an
+   eyebrow pill next to the wordmark. Matches .hero .eyebrow .dot. */
 .mk-eyebrow .dot {
   width: 6px; height: 6px; border-radius: 50%;
-  background: var(--mk-green);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--mk-green) 22%, transparent);
+  background: var(--brand-ember);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-ember) 22%, transparent);
 }
 
 /* Section heading used between bands on sub-pages. */
@@ -8895,7 +8978,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   transition: border-color var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
 }
 .mk-card.hover:hover {
-  border-color: color-mix(in srgb, var(--brand-magenta) 42%, var(--mk-line-strong));
+  border-color: color-mix(in srgb, var(--brand-ember) 42%, var(--mk-line-strong));
   transform: translateY(-3px);
 }
 .mk-card h3 { margin: 0 0 8px; font-size: 17px; font-weight: 650; color: var(--mk-text); line-height: 1.25; }
@@ -8919,16 +9002,16 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   width: 40px; height: 40px;
   margin-bottom: 16px;
   border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--brand-magenta) 16%, transparent);
+  background: color-mix(in srgb, var(--brand-ember) 16%, transparent);
   color: var(--mk-text);
   border: 1px solid var(--mk-line);
 }
 .mk-ic svg { width: 20px; height: 20px; }
-.mk-ic.purple { background: color-mix(in srgb, var(--brand-purple) 22%, transparent); }
+.mk-ic.ember { background: color-mix(in srgb, var(--brand-ember) 18%, transparent); }
 .mk-ic.cyan { background: color-mix(in srgb, var(--mk-cyan) 16%, transparent); }
 .mk-ic.green { background: color-mix(in srgb, var(--mk-green) 18%, transparent); }
 .mk-ic.amber { background: color-mix(in srgb, var(--mk-amber) 18%, transparent); }
-.mk-ic.grad { background: var(--brand-gradient); color: #fff; border-color: transparent; }
+.mk-ic.grad { background: var(--brand-gradient); color: #140d07; border-color: transparent; }
 
 /* ── Alternating feature rows (deep-dive pages: models, workspaces) ─────── */
 .mk-rows { display: grid; gap: 28px; }
@@ -8975,7 +9058,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   width: 16px; height: 16px;
   border-radius: 50%;
   background:
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7'/%3E%3C/svg%3E") center / 11px no-repeat,
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23140d07' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7'/%3E%3C/svg%3E") center / 11px no-repeat,
     var(--brand-gradient);
 }
 
@@ -8990,7 +9073,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   font-weight: 650;
   letter-spacing: -0.02em;
   line-height: 1;
-  background: linear-gradient(100deg, #ff4d97, #b96bff 60%, #5b8bff);
+  background: linear-gradient(100deg, #ff8124, #ffb03a 60%, #ffc53d);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -9080,10 +9163,10 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .mk-docs-toc a.active {
   color: var(--mk-text);
-  border-left-color: var(--brand-magenta);
-  background: color-mix(in srgb, var(--brand-magenta) 9%, transparent);
+  border-left-color: var(--brand-ember);
+  background: color-mix(in srgb, var(--brand-ember) 9%, transparent);
 }
-.mk-docs-toc a.active .n { color: var(--brand-magenta); }
+.mk-docs-toc a.active .n { color: var(--accent-text); }
 
 .mk-docs-body { min-width: 0; display: flex; flex-direction: column; gap: 64px; }
 .docs-sec { scroll-margin-top: 96px; }
@@ -9093,7 +9176,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--brand-magenta);
+  color: var(--accent-text);
 }
 .docs-sec-head h2 {
   margin: 10px 0 0;
@@ -9132,7 +9215,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 .docs-loop .step .n {
   font-family: var(--font-mono-stack);
   font-size: 11px;
-  color: var(--brand-magenta);
+  color: var(--accent-text);
   font-variant-numeric: tabular-nums;
 }
 
@@ -9161,8 +9244,8 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   font-family: var(--font-mono-stack);
   font-size: 12px;
   color: var(--mk-text);
-  background: color-mix(in srgb, var(--brand-magenta) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--brand-magenta) 26%, transparent);
+  background: color-mix(in srgb, var(--brand-ember) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--brand-ember) 26%, transparent);
   border-radius: var(--radius-sm);
   padding: 3px 9px;
 }
@@ -9191,9 +9274,9 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 /* Callout / note. */
 .docs-callout {
   border: 1px solid var(--mk-line);
-  border-left: 2px solid var(--brand-magenta);
+  border-left: 2px solid var(--brand-ember);
   border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--brand-magenta) 6%, transparent);
+  background: color-mix(in srgb, var(--brand-ember) 6%, transparent);
   padding: 16px 20px;
   color: var(--mk-muted);
   font-size: 14px;
@@ -9221,8 +9304,8 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--mk-text);
 }
 
-/* Prompt example cards — reuse mk-card; .is-good gets a magenta rail. */
-.mk-card.is-good { border-left: 2px solid var(--brand-magenta); }
+/* Prompt example cards -- reuse mk-card; .is-good gets an ember rail. */
+.mk-card.is-good { border-left: 2px solid var(--brand-ember); }
 .mk-card .docs-quote { color: var(--mk-text); font-size: 14px; line-height: 1.6; }
 
 /* Inline action link. */
@@ -9230,7 +9313,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--brand-magenta);
+  color: var(--accent-text);
   font-size: 14px;
   font-weight: 600;
   text-decoration: none;
@@ -9248,7 +9331,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   }
   .mk-docs-toc .label-eyebrow { width: 100%; margin-bottom: 4px; }
   .mk-docs-toc a { border-left: none; border: 1px solid var(--mk-line); border-radius: var(--radius-full); }
-  .mk-docs-toc a.active { border-color: color-mix(in srgb, var(--brand-magenta) 50%, var(--mk-line)); }
+  .mk-docs-toc a.active { border-color: color-mix(in srgb, var(--brand-ember) 50%, var(--mk-line)); }
 }
 @media (max-width: 620px) {
   .docs-kv-row { grid-template-columns: 1fr; gap: 8px; }
@@ -9271,9 +9354,9 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   background: var(--mk-bg);
 }
 .price-card.featured {
-  border-color: color-mix(in srgb, var(--brand-magenta) 60%, var(--mk-line));
+  border-color: color-mix(in srgb, var(--brand-ember) 60%, var(--mk-line));
   background:
-    linear-gradient(160deg, color-mix(in srgb, var(--brand-magenta) 16%, transparent), transparent 55%),
+    linear-gradient(160deg, color-mix(in srgb, var(--brand-ember) 16%, transparent), transparent 55%),
     var(--mk-bg);
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
 }
@@ -9283,7 +9366,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   padding: 4px 10px;
   border-radius: var(--radius-full);
   background: var(--brand-gradient);
-  color: #fff;
+  color: #140d07;
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -9354,7 +9437,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 .filter-chip[data-on="true"] {
   background: var(--brand-gradient);
   border-color: transparent;
-  color: #fff;
+  color: #140d07;
 }
 .template-grid {
   display: grid;
@@ -9371,7 +9454,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   transition: border-color var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
 }
 .template-card:hover {
-  border-color: color-mix(in srgb, var(--brand-magenta) 42%, var(--mk-line-strong));
+  border-color: color-mix(in srgb, var(--brand-ember) 42%, var(--mk-line-strong));
   transform: translateY(-3px);
 }
 .template-thumb {
@@ -9380,17 +9463,17 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   display: grid;
   place-items: center;
   color: #fff;
-  background: linear-gradient(135deg, var(--brand-purple), var(--brand-magenta));
+  background: linear-gradient(135deg, var(--brand-rust), var(--brand-ember));
   border-bottom: 1px solid var(--mk-line);
 }
 /* The thumb now holds a generated app-window "screenshot" (UiPreview) that
    floats on the gradient and fills the thumb edge-to-edge. */
 .template-thumb svg.ui-preview { width: 100%; height: 100%; display: block; opacity: 1; }
-.template-thumb.t1 { background: linear-gradient(135deg, #5b8bff, #b96bff); }
-.template-thumb.t2 { background: linear-gradient(135deg, #2dd4bf, #38bdf8); }
-.template-thumb.t3 { background: linear-gradient(135deg, #f6c86d, #ff4d97); }
-.template-thumb.t4 { background: linear-gradient(135deg, #482879, #b21e7d); }
-.template-thumb.t5 { background: linear-gradient(135deg, #64d29b, #2dd4bf); }
+.template-thumb.t1 { background: linear-gradient(135deg, #4e6c82, #7fa6c4); }
+.template-thumb.t2 { background: linear-gradient(135deg, #4e9e86, #7fa6c4); }
+.template-thumb.t3 { background: linear-gradient(135deg, #ffc53d, #ff6a00); }
+.template-thumb.t4 { background: linear-gradient(135deg, #b23f0a, #ff6a00); }
+.template-thumb.t5 { background: linear-gradient(135deg, #64d29b, #4e9e86); }
 .template-body { padding: 18px 20px 22px; display: flex; flex-direction: column; flex: 1; }
 .template-body h3 { margin: 0 0 6px; font-size: 16px; font-weight: 650; }
 .template-body p { margin: 0 0 16px; color: var(--mk-muted); font-size: 13.5px; line-height: 1.55; }
@@ -9409,7 +9492,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   margin-top: 34px;
 }
 /* "Use this template" — the card's single action. Quiet ghost CTA pinned to the
-   card's bottom edge; hover is a neutral lift, magenta is reserved for focus and
+   card's bottom edge; hover is a neutral lift, ember is reserved for focus and
    the active "Creating…" state so the accent stays a scalpel, not a paint roller. */
 .tmpl-use {
   appearance: none;
@@ -9438,7 +9521,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   background: color-mix(in srgb, #fff 4%, transparent);
 }
 .tmpl-use:focus-visible {
-  outline: 2px solid var(--brand-magenta);
+  outline: 2px solid var(--accent-text);
   outline-offset: 2px;
 }
 .tmpl-use:disabled {
@@ -9446,11 +9529,11 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   opacity: 0.55;
 }
 /* The creating button stays full-strength (it carries the spinner) and goes
-   magenta — the one active cue while its project is being built. */
+   ember -- the one active cue while its project is being built. */
 .tmpl-use[aria-busy="true"] {
   opacity: 1;
-  color: var(--brand-magenta);
-  border-color: color-mix(in srgb, var(--brand-magenta) 40%, var(--mk-line));
+  color: var(--accent-text);
+  border-color: color-mix(in srgb, var(--brand-ember) 40%, var(--mk-line));
 }
 
 /* ── Changelog ─────────────────────────────────────────────────────────────
@@ -9496,7 +9579,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   letter-spacing: 0.03em;
 }
 .changelog-nav a:hover { background: color-mix(in srgb, var(--mk-text) 5%, transparent); }
-.changelog-nav a.active { border-left-color: var(--brand-magenta); background: color-mix(in srgb, var(--brand-magenta) 8%, transparent); }
+.changelog-nav a.active { border-left-color: var(--brand-ember); background: color-mix(in srgb, var(--brand-ember) 8%, transparent); }
 .changelog-nav a.active .ver { color: var(--mk-text); }
 
 .changelog { display: grid; gap: 20px; }
@@ -9513,7 +9596,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .changelog-entry:hover,
 .changelog-entry:target {
-  border-color: color-mix(in srgb, var(--brand-magenta) 36%, var(--mk-line-strong));
+  border-color: color-mix(in srgb, var(--brand-ember) 36%, var(--mk-line-strong));
 }
 .changelog-date {
   font-family: var(--font-mono-stack);
@@ -9558,7 +9641,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   }
   .changelog-nav .label-eyebrow { width: 100%; margin-bottom: 4px; }
   .changelog-nav a { flex-direction: row; align-items: baseline; gap: 6px; border-left: none; border: 1px solid var(--mk-line); border-radius: var(--radius-full); }
-  .changelog-nav a.active { border-color: color-mix(in srgb, var(--brand-magenta) 50%, var(--mk-line)); }
+  .changelog-nav a.active { border-color: color-mix(in srgb, var(--brand-ember) 50%, var(--mk-line)); }
 }
 
 /* ── Blog ──────────────────────────────────────────────────────────────── */
@@ -9577,19 +9660,19 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   transition: border-color var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
 }
 .post-card:hover {
-  border-color: color-mix(in srgb, var(--brand-magenta) 42%, var(--mk-line-strong));
+  border-color: color-mix(in srgb, var(--brand-ember) 42%, var(--mk-line-strong));
   transform: translateY(-3px);
 }
 .post-card.lead { grid-column: 1 / -1; }
 .post-card.lead .post-thumb { aspect-ratio: 21 / 7; }
 .post-thumb {
   aspect-ratio: 16 / 9;
-  background: linear-gradient(135deg, var(--brand-purple), var(--brand-magenta));
+  background: linear-gradient(135deg, var(--brand-rust), var(--brand-ember));
 }
-.post-thumb.p1 { background: linear-gradient(135deg, #5b8bff, #b96bff); }
-.post-thumb.p2 { background: linear-gradient(135deg, #2dd4bf, #38bdf8); }
-.post-thumb.p3 { background: linear-gradient(135deg, #f6c86d, #ff4d97); }
-.post-thumb.p4 { background: linear-gradient(135deg, #64d29b, #2dd4bf); }
+.post-thumb.p1 { background: linear-gradient(135deg, #4e6c82, #7fa6c4); }
+.post-thumb.p2 { background: linear-gradient(135deg, #4e9e86, #7fa6c4); }
+.post-thumb.p3 { background: linear-gradient(135deg, #ffc53d, #ff6a00); }
+.post-thumb.p4 { background: linear-gradient(135deg, #64d29b, #4e9e86); }
 .post-body { padding: 20px 22px 24px; display: flex; flex-direction: column; flex: 1; }
 .post-meta {
   display: flex; gap: 10px; align-items: center;
@@ -9613,12 +9696,12 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 .mk-prose strong { color: var(--mk-text); font-weight: 650; }
 .mk-prose ul, .mk-prose ol { margin: 0 0 18px; padding-left: 22px; }
 .mk-prose li { margin: 8px 0; color: var(--mk-muted); }
-.mk-prose a { color: var(--brand-magenta); text-decoration: none; }
+.mk-prose a { color: var(--accent-text); text-decoration: none; }
 .mk-prose a:hover { text-decoration: underline; }
 .mk-prose blockquote {
   margin: 22px 0;
   padding: 4px 0 4px 20px;
-  border-left: 3px solid color-mix(in srgb, var(--brand-magenta) 60%, var(--mk-line));
+  border-left: 3px solid color-mix(in srgb, var(--brand-ember) 60%, var(--mk-line));
   color: var(--mk-text);
   font-size: 18px;
   font-style: italic;
@@ -9649,7 +9732,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 13px;
   transition: color var(--dur-fast) ease, border-color var(--dur-fast) ease;
 }
-.mk-toc a:hover { color: var(--mk-text); border-color: var(--brand-magenta); }
+.mk-toc a:hover { color: var(--mk-text); border-color: var(--brand-ember); }
 
 /* ── Article header (blog post / single content page) ──────────────────── */
 .mk-article-head { width: min(100% - 40px, 760px); margin: 0 auto; padding: 96px 0 8px; text-align: center; }
@@ -9705,7 +9788,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 .contact-form { display: grid; gap: 16px; }
 .field { display: grid; gap: 7px; }
 .field label { font-size: 13px; font-weight: 600; color: var(--mk-text); }
-.field .req { color: var(--brand-magenta); }
+.field .req { color: var(--accent-text); }
 .field input, .field textarea, .field select {
   width: 100%;
   padding: 11px 13px;
@@ -9734,7 +9817,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 .field input::placeholder, .field textarea::placeholder { color: var(--mk-dim); }
 .field input:focus, .field textarea:focus, .field select:focus {
   outline: none;
-  border-color: color-mix(in srgb, var(--brand-magenta) 65%, var(--mk-line-strong));
+  border-color: color-mix(in srgb, var(--brand-ember) 65%, var(--mk-line-strong));
 }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .contact-info { display: grid; gap: 18px; align-content: start; }
@@ -9746,7 +9829,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .contact-method strong { display: block; font-size: 14px; margin-bottom: 4px; }
 .contact-method p { margin: 0; color: var(--mk-muted); font-size: 13.5px; line-height: 1.5; }
-.contact-method a { color: var(--brand-magenta); }
+.contact-method a { color: var(--accent-text); }
 .form-note { font-size: 12px; color: var(--mk-dim); }
 .form-ok {
   padding: 14px 16px;
@@ -9886,7 +9969,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   flex-shrink: 0;
 }
 .am-live-dot.pulse {
-  background: var(--accent, #b21e7d);
+  background: var(--accent, #FF6A00);
   animation: pulse-dot 1.4s ease-in-out infinite;
 }
 .am-title {
@@ -9966,7 +10049,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .am-turn-picker:hover { border-color: var(--border-strong); }
 .am-turn-picker:focus-visible {
-  outline: 2px solid var(--brand-magenta);
+  outline: 2px solid var(--accent-text);
   outline-offset: 2px;
 }
 .am-diff-feed {
@@ -10028,7 +10111,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .am-diff-running {
   font-size: 10px;
-  color: var(--accent, #b21e7d);
+  color: var(--accent-text);
 }
 .am-diff-body {
   margin: 0;
@@ -10142,7 +10225,7 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 /* Compact variant pinned above the mobile composer. */
 .subagents-compact {
   border-top: 1px solid var(--border-default);
-  background: rgba(178, 30, 125, 0.04);
+  background: rgba(255, 106, 0, 0.04);
   padding: 6px 10px;
   gap: 3px;
 }
@@ -10250,12 +10333,12 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
 /* The Activity Monitor live dot already uses .pulse; make the header dot glow a
    touch stronger while working so "live" reads at a glance. */
 .am-live-dot.pulse {
-  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, #b21e7d) 55%, transparent);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, #FF6A00) 55%, transparent);
   animation: amDotPulse 1.6s ease-in-out infinite;
 }
 @keyframes amDotPulse {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, #b21e7d) 45%, transparent); }
-  50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent, #b21e7d) 0%, transparent); }
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent, #FF6A00) 45%, transparent); }
+  50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent, #FF6A00) 0%, transparent); }
 }
 
 /* ── Web-search attribution ────────────────────────────────────────────────
@@ -10320,3 +10403,412 @@ input[type="radio"]:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 11px;
   opacity: 0.45;
 }
+
+/* ==========================================================================
+   Light-theme guard for gradient TEXT. The brand gradient (ember -> signal) is
+   tuned for the near-black surfaces; clipped to text on concrete it drops well
+   under 3:1. On light, the clipped headline runs the deep-oxide end of the ramp
+   instead, which holds large-text contrast. Fills are untouched.
+   ========================================================================== */
+:root[data-theme="light"] .coll-head .grad,
+:root[data-theme="light"] .dash-hero h1 .grad,
+:root[data-theme="light"] .org-hero-copy .grad,
+:root[data-theme="light"] .marketing-shell .hero h1 .grad,
+:root[data-theme="light"] .mk-hero h1 .grad,
+:root[data-theme="light"] .stat .num {
+  background: linear-gradient(100deg, #8a3208 0%, #b23f0a 55%, #d2500c 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* ==========================================================================
+   GATE 15 — FORM LANGUAGE
+   The tokens above carry the palette. This block carries the *shape* of the
+   brand: uppercase signage, the hazard rule, machined edges, and the
+   photographic atmosphere backdrops. It sits last on purpose — every rule
+   here is a deliberate override of an earlier one at equal specificity.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. Uppercase signage (spec §3)
+
+   The single most brand-carrying move. LABELS ONLY — eyebrows, kickers, stat
+   keys, nav chips, column heads, console heads. Never body copy, never a
+   headline, never long-form prose.
+   -------------------------------------------------------------------------- */
+
+/* Section eyebrows. `.marketing-shell .label-eyebrow` had walked the tracking
+   back to 0.04em; signage needs it out at 0.10em with a 600 stem.
+
+   Colour: --mk-dim (#6F6D68) is a DECORATION-weight grey — it only reaches
+   ~3.6:1 on a marketing panel, and these are real 11px labels. Every signage
+   label below therefore takes --mk-muted (~7:1). --mk-dim keeps its job on
+   non-text decoration. */
+.label-eyebrow,
+.marketing-shell .label-eyebrow {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.marketing-shell .label-eyebrow { color: var(--mk-muted); }
+
+/* The status pill in the hero (landing) and on every sub-page hero. */
+.marketing-shell .hero .eyebrow,
+.mk-eyebrow {
+  font-size: var(--fs-2xs);
+  font-weight: 600;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+/* Card / console / feature kickers. Same --mk-dim → --mk-muted lift as above. */
+.console-head,
+.feature-kicker,
+.model-provider,
+.mk-card-num,
+.logo-cloud-label,
+.workspace-status,
+.float-label {
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.console-head,
+.feature-kicker,
+.model-provider,
+.mk-card-num,
+.logo-cloud-label { color: var(--mk-muted); }
+.nav-explore-heading { letter-spacing: 0.1em; }
+
+/* Hero proof row: `strong` is the key ("4 AI providers"), `span` the detail.
+   The key becomes the signage line; the detail stays sentence-case so the row
+   is still readable prose, not two shouting lines. */
+.hero-proof strong {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  line-height: 1.3;
+  text-transform: uppercase;
+  color: var(--mk-text);
+}
+.hero-proof span { font-size: var(--fs-sm); }
+
+/* The capability marquee. This was a display band at up to 28px/750; as a
+   tracked-out uppercase strip it reads as signage rather than a headline —
+   which is the whole point of the band. */
+.marquee-band span {
+  font-size: clamp(13px, 1.35vw, 17px);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* Kicker above the closing CTA headline. */
+.bottom-kicker {
+  font-family: var(--font-mono-stack);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* Footer column heads. --mk-muted, not --mk-dim: at 11px these are real
+   headings and --mk-dim only reaches ~3.5:1 on the footer panel. */
+.footer-column h3 {
+  color: var(--mk-muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* Nav chips: the marketing nav links and its two CTA buttons. Signage, not
+   sentence case. `position: relative` sets up the hazard indicator below. */
+.marketing-shell .topnav .links a,
+.nav-explore-trigger {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.marketing-shell .topnav .links a { position: relative; }
+.marketing-shell .topnav .btn-primary,
+.marketing-shell .topnav .btn-ghost {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* --------------------------------------------------------------------------
+   2. Hazard rule (spec §4)
+
+   The signature motif, used in exactly THREE places site-wide. Never tiled as
+   a background.
+     (a) the top edge of the closing CTA band  — see `.bottom-build::before`,
+         declared with the band itself further up this file;
+     (b) the hover / current indicator under a marketing nav item;
+     (c) the bottom edge of the landing hero panel.
+   -------------------------------------------------------------------------- */
+
+/* (b) nav indicator */
+.marketing-shell .topnav .links a::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: -9px;
+  left: 0;
+  height: 3px;
+  background: var(--hazard);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+  pointer-events: none;
+}
+.marketing-shell .topnav .links a:hover::after,
+.marketing-shell .topnav .links a:focus-visible::after,
+.marketing-shell .topnav .links a[aria-current="page"]::after { opacity: 1; }
+
+/* (c) hero bottom edge */
+.marketing-shell .hero::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 1;
+  height: 3px;
+  background: var(--hazard);
+  pointer-events: none;
+}
+
+/* --------------------------------------------------------------------------
+   3. Machined edges (spec §4)
+
+   Raised panels get the 1px inner top highlight — the sheen on brushed steel.
+   The big soft drop shadows come down hard: this brand is edges, not clouds.
+   Hover lifts the BORDER, it does not grow the shadow.
+   -------------------------------------------------------------------------- */
+.model-console,
+.trust-band,
+.mk-row,
+.marketing-shell .workflow-band .step,
+.stat-card,
+.proj,
+.login-card {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+.workspace-window {
+  box-shadow:
+    0 16px 40px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.footer-panel {
+  box-shadow:
+    0 10px 28px rgba(0, 0, 0, 0.20),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+.nav-explore-panel {
+  box-shadow:
+    0 12px 28px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* The two landing composers. Hover was growing an 80–92px shadow *and* adding
+   an ember ring; now the border does the work. */
+.hero-prompt {
+  box-shadow:
+    0 12px 30px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.hero-prompt:hover {
+  border-color: var(--brand-ember);
+  box-shadow:
+    0 12px 30px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transform: translateY(-1px);
+}
+.bottom-prompt {
+  box-shadow:
+    0 12px 30px rgba(0, 0, 0, 0.30),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.bottom-prompt:hover {
+  border-color: var(--brand-ember);
+  box-shadow:
+    0 12px 30px rgba(0, 0, 0, 0.30),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transform: translateY(-1px);
+}
+
+/* --------------------------------------------------------------------------
+   4. Atmosphere (spec §6)
+
+   Four generated backdrops — volumetric haze + a single warm sodium glow, the
+   one thing CSS genuinely cannot fake. Each sits UNDER its content behind a
+   scrim tuned so the copy column stays near-black (body copy holds ≥4.5:1,
+   headlines far more). The scrim is weakest at the frame edges, which is where
+   the sodium glow actually lives in every one of these images.
+
+   LIGHT THEME: the photographic backdrops are gated OFF. They are dark plates
+   and would fight a concrete-white page; light falls back to a clean tinted
+   gradient in each case.
+   -------------------------------------------------------------------------- */
+
+/* -- Landing hero -------------------------------------------------------- */
+/* The hero used to ramp asphalt → oxide → saturated rust in pure CSS. The
+   photograph now does that job, so the CSS ramp is gone (stacking a glow on a
+   glow image goes muddy) and the base is flat asphalt. `.hero-aurora` — the
+   empty aria-hidden layer already in the markup — carries the plate; its three
+   `.glow-*` spans stay unstyled, i.e. the old CSS aurora is switched off. */
+.marketing-shell .hero { background: var(--bg-dark); }
+.marketing-shell .hero-aurora {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  /* Anchored RIGHT, because that is where this plate's sodium glow lives — a
+     21:9 frame centred on a near-square hero crops both edges away and you get
+     a flat black box. The radial scrim is likewise centred left-of-middle: it
+     is heaviest over the copy column and releases toward the glow. */
+  background:
+    radial-gradient(
+      72% 70% at 42% 50%,
+      rgba(8, 9, 10, 0.9) 0%,
+      rgba(8, 9, 10, 0.7) 50%,
+      rgba(8, 9, 10, 0.26) 100%
+    ),
+    linear-gradient(
+      180deg,
+      rgba(8, 9, 10, 0.72) 0%,
+      rgba(8, 9, 10, 0.14) 34%,
+      rgba(8, 9, 10, 0.2) 58%,
+      rgba(46, 24, 10, 0.8) 100%
+    ),
+    url("/brand/atmos-hero.webp") right center / cover no-repeat;
+}
+
+/* -- Closing CTA band (every marketing page) ----------------------------- */
+/* The band runs ~1100px tall (CTA + the whole footer panel). Covering all of
+   it with a 16:9 plate crops the frame's two edge glows straight off, so the
+   plate rides the TOP of the band on `::after` — which the band declares and
+   then disables further up — at close to its native aspect, and fades out
+   before the footer. `::before` is the hazard rule and stays untouched. */
+.bottom-build { background: var(--bg-dark); }
+.bottom-build::after {
+  content: "";
+  display: block;
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: -1;
+  height: min(780px, 100%);
+  background:
+    linear-gradient(
+      180deg,
+      rgba(10, 11, 12, 0.82) 0%,
+      rgba(10, 11, 12, 0.44) 32%,
+      rgba(10, 11, 12, 0.72) 72%,
+      var(--bg-dark) 100%
+    ),
+    url("/brand/atmos-cta.webp") center / cover no-repeat;
+  pointer-events: none;
+}
+/* --mk-dim now clears AA on every flat marketing surface, but this line sits on
+   the CTA band's photographic backdrop, whose luminance varies across the
+   image — so it keeps the muted step, which holds against the light patches of
+   the plate too. (Not a contrast patch for --mk-dim any more; that is fixed at
+   the token.) */
+.bottom-note { color: var(--mk-muted); }
+
+/* -- Login ---------------------------------------------------------------- */
+/* NOTE: /login is a single centred card, not a split layout — there is no side
+   panel to hang the 3:4 plate on, so it becomes the page backdrop instead. The
+   card itself is an opaque --bg-surface panel, so nothing inside it is sitting
+   on the photograph. */
+.login-shell {
+  background:
+    linear-gradient(
+      180deg,
+      rgba(8, 9, 10, 0.92) 0%,
+      rgba(8, 9, 10, 0.78) 42%,
+      rgba(8, 9, 10, 0.52) 100%
+    ),
+    url("/brand/atmos-auth.webp") center bottom / cover no-repeat,
+    var(--bg-dark);
+}
+/* (The .login-card .footer override that used to live here bumped the
+   terms/privacy line to --text-muted because --text-dim only reached ~4.15:1 on
+   a raised --bg-surface card. --text-dim is now AA on --bg-surface in both
+   themes (5.16 dark / 6.42 light), so the patch is gone and the line reads the
+   token like every other hint in the app.) */
+
+/* -- Dashboard hero ------------------------------------------------------- */
+/* `.dash-hero::before` was the CSS ember/signal radial. It becomes the plate:
+   masked to a soft ellipse so the band has no hard card edge against the
+   dashboard page, and the blur is dropped (it would smear the photograph). */
+.dash-hero::before {
+  width: min(1240px, 100%);
+  height: 620px;
+  background:
+    radial-gradient(
+      66% 68% at 46% 50%,
+      rgba(10, 11, 12, 0.88) 0%,
+      rgba(10, 11, 12, 0.7) 52%,
+      rgba(10, 11, 12, 0.34) 100%
+    ),
+    url("/brand/atmos-dash.webp") right center / cover no-repeat;
+  border-radius: var(--radius-xl);
+  filter: none;
+  opacity: 1;
+  -webkit-mask-image: radial-gradient(72% 72% at 50% 46%, #000 40%, transparent 78%);
+  mask-image: radial-gradient(72% 72% at 50% 46%, #000 40%, transparent 78%);
+}
+
+/* --------------------------------------------------------------------------
+   5. Light theme — no dark plates, and the dark marketing bands flip
+
+   Three marketing bands (hero, workflow, closing CTA) hardcode a dark→rust
+   gradient while their type reads from --mk-text/--mk-muted, which flip to
+   near-black on light. On a light page that was dark type on a dark band.
+   Each gets a concrete-and-ember gradient here so both themes stay legible.
+   -------------------------------------------------------------------------- */
+:root[data-theme="light"] .marketing-shell .hero-aurora { background: none; }
+:root[data-theme="light"] .marketing-shell .hero {
+  background:
+    radial-gradient(70% 55% at 50% 0%, rgba(255, 106, 0, 0.1), transparent 70%),
+    linear-gradient(180deg, #f7f6f4 0%, #efeeec 52%, #e4e1dd 100%);
+}
+:root[data-theme="light"] .marketing-shell section.band.workflow-band {
+  background:
+    radial-gradient(66% 70% at 78% 18%, rgba(255, 106, 0, 0.11), transparent 70%),
+    linear-gradient(135deg, #f4f3f1 0%, #edebe8 55%, #e5e2de 100%);
+}
+:root[data-theme="light"] .bottom-build {
+  background:
+    radial-gradient(78% 58% at 50% 100%, rgba(255, 106, 0, 0.12), transparent 72%),
+    linear-gradient(180deg, #efeeec 0%, #e7e5e1 100%);
+}
+:root[data-theme="light"] .bottom-build::after { display: none; }
+:root[data-theme="light"] .login-shell {
+  background:
+    radial-gradient(58% 48% at 50% 100%, rgba(255, 106, 0, 0.1), transparent 70%),
+    linear-gradient(180deg, #f5f4f2 0%, #efeeec 60%, #e6e3df 100%);
+}
+/* Back to a clean tinted glow — the dashboard plate is dark-theme only. */
+:root[data-theme="light"] .dash-hero::before {
+  background:
+    radial-gradient(60% 60% at 50% 45%, rgba(255, 106, 0, 0.16), transparent 70%),
+    radial-gradient(70% 70% at 38% 60%, rgba(255, 197, 61, 0.14), transparent 72%);
+  border-radius: 0;
+  filter: blur(40px);
+  opacity: 0.55;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+/* The marquee's span colours are hardcoded near-white — invisible on concrete. */
+:root[data-theme="light"] .marquee-band span { color: color-mix(in srgb, var(--mk-text) 66%, transparent); }
+:root[data-theme="light"] .marquee-band span:nth-child(2n) { color: color-mix(in srgb, var(--mk-text) 84%, transparent); }
+/* Ember accents inside the marquee use --accent-text, which already flips to
+   the deep oxide (#B23F0A ≈ 5.2:1 on concrete) rather than raw ember. */
+:root[data-theme="light"] .marquee-band span:nth-child(3n) { color: var(--accent-text); }

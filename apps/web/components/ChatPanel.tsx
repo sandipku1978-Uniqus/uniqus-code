@@ -4,8 +4,8 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode
 import { useSearchParams } from "next/navigation";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ClientEvent, UploadedFileSummary } from "@uniqus/api-types";
-import { MODEL_CATALOG } from "@uniqus/api-types";
+import type { ClientEvent, UploadedFileSummary } from "@gate15/api-types";
+import { MODEL_CATALOG } from "@gate15/api-types";
 import {
   fetchSlashCommandsApi,
   getApiBase,
@@ -19,6 +19,7 @@ import { useIsMobile } from "@/lib/use-is-mobile";
 import { errorCopyFor } from "@/lib/errorCopy";
 import { lineDiffStats } from "@/lib/lineDiff";
 import { connect, send } from "@/lib/ws-client";
+import { draftKeyFor } from "./LandingPrompt";
 import PlanReview from "./PlanReview";
 import ChatSessionDropdown from "./ChatSessionDropdown";
 import ModelPicker from "./ModelPicker";
@@ -177,8 +178,11 @@ export default function ChatPanel() {
   const sessionParam = searchParams?.get("session") ?? null;
   const [input, setInput] = useState("");
   // Persist the composer draft per-project so a reload or a client-side crash
-  // doesn't lose typed-but-unsent text. Cleared on successful send.
-  const draftKey = project ? `uniqus.draft.${project.id}` : null;
+  // doesn't lose typed-but-unsent text. Cleared on successful send. The key
+  // comes from the shared `draftKeyFor` helper (the same one LandingPrompt and
+  // ProjectPicker write with) — re-deriving the string here would let the two
+  // sides drift apart and silently orphan every handed-off draft.
+  const draftKey = project ? draftKeyFor(project.id) : null;
   // The key the current `input` value belongs to. Set synchronously when we
   // (re)hydrate for a new key so the persist effect can never write one
   // project's text under another project's key during a switch.
@@ -845,8 +849,8 @@ export default function ChatPanel() {
             <div style={{ fontStyle: "italic" }}>
               Describe what you want to build.{" "}
               {mode === "plan-then-execute"
-                ? "Uniqus will propose a plan first."
-                : "Uniqus will start working immediately."}
+                ? "Gate 15 will propose a plan first."
+                : "Gate 15 will start working immediately."}
             </div>
             <div style={{ marginTop: 6, fontStyle: "normal" }}>
               New here?{" "}
@@ -1269,7 +1273,7 @@ export default function ChatPanel() {
               ghostSuggestion
                 ? ""
                 : busy
-                ? "Add a message — Uniqus reads it as it works…"
+                ? "Add a message — Gate 15 reads it as it works…"
                 : !connected
                 ? "Reconnecting…"
                 : project
@@ -1958,8 +1962,8 @@ const ChatItemView = memo(function ChatItemView({
     return (
       <div className="msg">
         <div className="head">
-          <span className="av agent">U</span>
-          <span className="name">Uniqus</span>
+          <span className="av agent">G</span>
+          <span className="name">Gate 15</span>
           <span className="frame">Engineering agent</span>
           <span className="msg-actions">
             <CopyButton text={item.content} label="Copy" className="msg-action-btn" />
@@ -2035,7 +2039,7 @@ function RoutingChip({ item }: { item: Extract<ChatItem, { kind: "routing" }> })
       }}
       title={`Auto routed this turn to ${label}${item.tier ? ` (${item.tier} task)` : ""}`}
     >
-      <span aria-hidden style={{ color: "var(--brand-magenta, #d4439a)" }}>⚡</span>
+      <span aria-hidden style={{ color: "var(--accent-text)" }}>⚡</span>
       <span>
         Auto → <strong style={{ color: "var(--text-muted)", fontWeight: 600 }}>{label}</strong>
       </span>
@@ -2140,7 +2144,7 @@ function UserQuestionCard({
     <div className="msg">
       <div className="head">
         <span className="av agent">?</span>
-        <span className="name">Uniqus is asking</span>
+        <span className="name">Gate 15 is asking</span>
         <span className="frame">needs your input</span>
       </div>
       <div className="msg-body" style={{ paddingLeft: 30 }}>

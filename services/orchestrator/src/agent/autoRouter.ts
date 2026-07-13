@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { MODEL_CATALOG } from "@uniqus/api-types";
+import { MODEL_CATALOG } from "@gate15/api-types";
 import type { ProviderKeys, ProviderName } from "./providers/types.js";
 import { ensureAnthropic, type ResolvedModel } from "./router.js";
 

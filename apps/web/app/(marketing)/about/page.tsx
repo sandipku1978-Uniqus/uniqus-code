@@ -1,9 +1,9 @@
 import Link from "next/link";
 
 export const metadata = {
-  title: "About — Uniqus Code",
+  title: "About — Gate 15",
   description:
-    "Uniqus Code exists to make building real software accessible — with an AI that shows its plan, cites its work, and runs every project on a real machine you control.",
+    "Gate 15 exists to make building real software accessible — with an AI that shows its plan, cites its work, and runs every project on a real machine you control.",
 };
 
 type Icon = "eye" | "shield" | "open" | "craft" | "models" | "ship";
@@ -127,10 +127,10 @@ export default function AboutPage() {
             <span className="grad">anyone with an idea</span>.
           </h1>
           <p className="mk-lede">
-            Uniqus Code is an AI workspace for building real apps. Describe what
-            you want, pick the AI you trust, and watch it come to life in a
-            private, isolated space with a live preview — with the AI working
-            out in the open the whole way.
+            Gate 15 is an AI workspace for building real apps. Describe what you
+            want, pick the AI you trust, and watch it come to life in a private,
+            isolated space with a live preview — with the AI working out in the
+            open the whole way.
           </p>
         </div>
       </section>
@@ -144,8 +144,8 @@ export default function AboutPage() {
             to set up a machine, learn a stack, wire up a dozen services, and
             keep it all running. AI changed what&rsquo;s possible — but a chat
             box that hands back a wall of code you can&rsquo;t run, can&rsquo;t
-            see, and can&rsquo;t trust isn&rsquo;t the answer. We built Uniqus
-            Code to close that gap properly.
+            see, and can&rsquo;t trust isn&rsquo;t the answer. We built Gate 15
+            to close that gap properly.
           </p>
           <p>
             So we gave every project a real machine. Not a shared container or a
@@ -164,10 +164,13 @@ export default function AboutPage() {
             on faith.
           </p>
           <p>
-            Uniqus Code is built by{" "}
-            <strong>Uniqus Consultech</strong>, with a simple conviction: the
-            people closest to a problem should be able to build the tool that
-            solves it. We&rsquo;re here to make that real.
+            Gate 15 is an <strong>independent product</strong>, built by a small
+            team and answerable to the people who use it. That independence is
+            why we don&rsquo;t tie you to one AI vendor: the model that&rsquo;s
+            best today may not be best next quarter, so switching is a click, not
+            a migration. The conviction underneath is simple — the people closest
+            to a problem should be able to build the tool that solves it.
+            We&rsquo;re here to make that real.
           </p>
         </div>
       </section>
@@ -227,9 +230,9 @@ export default function AboutPage() {
           <article className="mk-card hover">
             <h3>Want to talk?</h3>
             <p style={{ marginBottom: 18 }}>
-              Questions about the product, a partnership, or how Uniqus Code
-              could work for your team? We read every message and would love to
-              hear from you.
+              Questions about the product, a partnership, or how Gate 15 could
+              work for your team? We read every message and would love to hear
+              from you.
             </p>
             <div className="mk-card-foot">
               <Link href="/contact" className="btn-secondary">

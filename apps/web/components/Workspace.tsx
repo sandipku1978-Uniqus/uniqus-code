@@ -8,7 +8,7 @@ import {
   PanelGroup,
   PanelResizeHandle,
 } from "react-resizable-panels";
-import { type PermissionMode, runModeForPermission } from "@uniqus/api-types";
+import { type PermissionMode, runModeForPermission } from "@gate15/api-types";
 import { connect, disconnect, send } from "@/lib/ws-client";
 import { useStore, previewTabId, fileTabId, AGENT_PREVIEW_TAB, ACTIVITY_TAB } from "@/lib/store";
 import { useIsMobile } from "@/lib/use-is-mobile";
@@ -100,7 +100,7 @@ export default function Workspace({
   const resetLayout = () => {
     try {
       for (const k of Object.keys(window.localStorage)) {
-        if (k.includes("uniqus-h-") || k.includes("uniqus-v-")) {
+        if (k.includes("gate15-h-") || k.includes("gate15-v-")) {
           window.localStorage.removeItem(k);
         }
       }
@@ -689,7 +689,7 @@ export default function Workspace({
           <PanelGroup
             key={`code-${layoutKey}`}
             direction="horizontal"
-            autoSaveId={`uniqus-h-${panels.files ? "f" : "nf"}`}
+            autoSaveId={`gate15-h-${panels.files ? "f" : "nf"}`}
           >
             <Panel id="chat" defaultSize={panels.files ? 35 : 45} minSize={25} order={1}>
               <ErrorBoundary label="chat">
@@ -721,7 +721,7 @@ export default function Workspace({
             <Panel id="main" defaultSize={panels.files ? 45 : 55} minSize={30} order={3}>
               <PanelGroup
                 direction="vertical"
-                autoSaveId={`uniqus-v-${panels.terminal ? "t" : "nt"}`}
+                autoSaveId={`gate15-v-${panels.terminal ? "t" : "nt"}`}
               >
                 <Panel id="editor" defaultSize={panels.terminal ? 60 : 100} minSize={20} order={1}>
                   <ErrorBoundary label="editor">
@@ -748,12 +748,12 @@ export default function Workspace({
         ) : (
           /* Builder view (default): Chat + a big live Preview. Its own
              autoSaveId keeps the split from colliding with the IDE's saved
-             sizes, while still being swept by reset-layout's "uniqus-h-"
+             sizes, while still being swept by reset-layout's "gate15-h-"
              filter. */
           <PanelGroup
             key={`builder-${layoutKey}`}
             direction="horizontal"
-            autoSaveId="uniqus-h-builder"
+            autoSaveId="gate15-h-builder"
           >
             <Panel id="chat" defaultSize={42} minSize={28} order={1}>
               <ErrorBoundary label="chat">

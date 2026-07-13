@@ -15,13 +15,17 @@ import MicButton from "./MicButton";
  * to /projects, so we can't carry it as a query param). sessionStorage is
  * origin-scoped and survives the OAuth redirect within the same tab.
  */
-export const PENDING_BRIEF_KEY = "uniqus.pendingBrief";
+export const PENDING_BRIEF_KEY = "gate15.pendingBrief";
 
 /** ChatPanel hydrates its composer from this localStorage key per project.
  * Shared with the dashboard composer (ProjectPicker) so a brief started there
- * with attachments lands as a ready-to-send draft in the workspace. */
+ * with attachments lands as a ready-to-send draft in the workspace.
+ *
+ * This helper is the single source of truth for the key — every reader/writer
+ * must call it rather than re-deriving the string, or the two sides silently
+ * drift apart and drafts vanish. */
 export function draftKeyFor(projectId: string): string {
-  return `uniqus.draft.${projectId}`;
+  return `gate15.draft.${projectId}`;
 }
 
 function formatFileSize(bytes: number): string {
@@ -236,7 +240,7 @@ export default function LandingPrompt({
                 setModeManual(planOn ? "execute-only" : "plan-then-execute")
               }
               aria-pressed={planOn}
-              title="Plan mode — Uniqus proposes a plan you can edit before it builds"
+              title="Plan mode — Gate 15 proposes a plan you can edit before it builds"
             >
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <polyline points="20 6 9 17 4 12" />

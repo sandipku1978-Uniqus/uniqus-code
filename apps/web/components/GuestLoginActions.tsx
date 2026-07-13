@@ -53,7 +53,7 @@ export default function GuestLoginActions({
     if (!newCode) return;
     const blob = new Blob(
       [
-        `Uniqus Code — guest recovery code\n\n${newCode}\n\n` +
+        `Gate 15 — guest recovery code\n\n${newCode}\n\n` +
           `Keep this safe: it is the only way back into your guest account on ` +
           `another device or after clearing browser data. We cannot recover it for you.\n`,
       ],
@@ -62,7 +62,7 @@ export default function GuestLoginActions({
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "uniqus-recovery-code.txt";
+    a.download = "gate15-recovery-code.txt";
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -100,8 +100,14 @@ export default function GuestLoginActions({
       // network blip doesn't read as "your valid code is wrong" (§A).
       const status = err instanceof RestoreError ? err.status : -1;
       if (status === 401 || status === 404) {
+        // Deliberately says nothing about the code's SHAPE. Codes issued before
+        // the rebrand carry a different prefix and still restore fine (the
+        // orchestrator hashes a normalized form and never parses the prefix —
+        // auth/guest.ts), so naming one expected prefix here would tell a
+        // returning guest holding a valid older code that it's malformed, and
+        // they may conclude the account is dead. Keep this shape-neutral.
         setError(
-          "That recovery code isn't recognised. Check for typos — it looks like UNIQUS-GUEST-XXXX-…",
+          "That recovery code isn't recognised. Check for typos, and make sure you entered the whole code.",
         );
       } else if (status === 403) {
         setError("Couldn't verify you're human. Please try again.");
@@ -210,7 +216,7 @@ export default function GuestLoginActions({
               <input
                 value={restoreCode}
                 onChange={(e) => setRestoreCode(e.target.value)}
-                placeholder="UNIQUS-GUEST-XXXX-XXXX-XXXX-XXXX"
+                placeholder="GATE15-XXXX-XXXX-XXXX-XXXX"
                 disabled={busy}
                 autoComplete="off"
                 spellCheck={false}

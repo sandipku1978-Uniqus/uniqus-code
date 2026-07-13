@@ -2,9 +2,9 @@ import Link from "next/link";
 import DocsToc, { type DocsTocEntry } from "@/components/DocsToc";
 
 export const metadata = {
-  title: "Documentation - Uniqus Code",
+  title: "Documentation - Gate 15",
   description:
-    "Learn how to build, inspect, run, and ship real apps with Uniqus Code — creating projects, working with the agent, previewing, prompting well, and troubleshooting.",
+    "Learn how to build, inspect, run, and ship real apps with Gate 15 — creating projects, working with the agent, previewing, prompting well, and troubleshooting.",
 };
 
 /**
@@ -39,7 +39,7 @@ const TOC: DocsTocEntry[] = [
 const LOOP = [
   "Describe the goal",
   "Review the plan",
-  "Let Uniqus edit files",
+  "Let Gate 15 edit files",
   "Run and preview",
   "Ask for the next change",
 ];
@@ -48,7 +48,7 @@ const QUICK_PATHS = [
   {
     label: "Start from an idea",
     title: "Describe it",
-    body: "Write the project in plain English. Uniqus names it, sharpens the first prompt, opens the workspace, and starts new projects with a plan you can review.",
+    body: "Write the project in plain English. Gate 15 names it, sharpens the first prompt, opens the workspace, and starts new projects with a plan you can review.",
   },
   {
     label: "Bring code with you",
@@ -67,7 +67,7 @@ const PROJECT_MODES = [
     title: "Describe your idea",
     bestFor: "Best for a new app, website, tool, automation, or prototype.",
     detail:
-      "Write the project in plain English. Uniqus names it in about 200ms and the workspace opens with your brief forwarded to the agent verbatim — new projects start with a plan first. The fastest path when you can describe the shape.",
+      "Write the project in plain English. Gate 15 names it in about 200ms and the workspace opens with your brief forwarded to the agent verbatim — new projects start with a plan first. The fastest path when you can describe the shape.",
   },
   {
     title: "Upload .zip",
@@ -90,7 +90,7 @@ const DASHBOARD_TOOLS = [
   },
   {
     title: "Databases",
-    body: "Connect a Supabase project in a couple of clicks — Uniqus provisions the database and stores the keys — then browse tables, preview data, and run SQL without leaving the dashboard.",
+    body: "Connect a Supabase project in a couple of clicks — Gate 15 provisions the database and stores the keys — then browse tables, preview data, and run SQL without leaving the dashboard.",
   },
   {
     title: "Design Systems",
@@ -138,7 +138,7 @@ const WORKSPACE_AREAS = [
 ] as const;
 
 const AGENT_CONTROLS: ReadonlyArray<readonly [string, string]> = [
-  ["Plan", "Ask Uniqus to inspect the project with read-only tools and propose editable steps before it changes files — you watch it investigate in real time. New projects start this way by default."],
+  ["Plan", "Ask Gate 15 to inspect the project with read-only tools and propose editable steps before it changes files — you watch it investigate in real time. New projects start this way by default."],
   ["Ask before edits", "Pause for your approval before each edit, command, or risky operation."],
   ["Auto-accept edits", "Edits and routine commands run right away; the agent still pauses for anything dangerous or expensive."],
   ["Full autonomy", "Run everything without asking, with no safety prompts. Switch between any of the four modes at any time, even mid-turn, from the composer."],
@@ -152,7 +152,7 @@ const AGENT_CONTROLS: ReadonlyArray<readonly [string, string]> = [
 const RUN_STEPS: ReadonlyArray<readonly [string, string]> = [
   ["Start the server.", "Run stops any existing project server, starts the app again, and streams the command result into chat and Logs."],
   ["Inspect the preview.", "Use preview tabs to check the live app. Markdown files can also switch between source and rendered preview in the editor."],
-  ["Ask for verification.", "For UI work, ask Uniqus to verify desktop and mobile states and drive the real flow. For backend work, ask it to run focused tests or exercise the relevant endpoint."],
+  ["Ask for verification.", "For UI work, ask Gate 15 to verify desktop and mobile states and drive the real flow. For backend work, ask it to run focused tests or exercise the relevant endpoint."],
 ];
 
 const CONFIG_ITEMS = [
@@ -190,14 +190,14 @@ const RECOVER = [
 const PROMPTING_PRINCIPLES = [
   {
     title: "The agent verifies UI by interacting with it",
-    body: "After meaningful frontend work, Uniqus starts a preview and drives it — clicking through real flows, filling forms, submitting, navigating — then checks desktop and mobile, console errors, and accessibility before reporting done. You can ask for this explicitly: “run the signup flow and confirm it lands on the dashboard.” You'll watch each step live in a Preview (Agent) tab.",
+    body: "After meaningful frontend work, Gate 15 starts a preview and drives it — clicking through real flows, filling forms, submitting, navigating — then checks desktop and mobile, console errors, and accessibility before reporting done. You can ask for this explicitly: “run the signup flow and confirm it lands on the dashboard.” You'll watch each step live in a Preview (Agent) tab.",
   },
   {
     title: "Secrets stay server-side",
     body: "Add API keys and tokens in the Secrets pane. They remain encrypted outside the coding sandbox and resolve only inside trusted connectors or the deployment backend. Don't paste live credentials into a normal message.",
   },
   {
-    title: "Let Uniqus run things for you",
+    title: "Let Gate 15 run things for you",
     body: "You don't have a terminal in the sandbox, and the agent knows that — it won't tell you to run npm run dev, installs, builds, or deploys yourself. If a command is needed, it runs with the agent's tools and the output streams into Logs. When a web app is ready, the agent shares the real public preview URL, never a localhost link.",
   },
   {
@@ -226,15 +226,15 @@ const PROMPT_TEMPLATE =
 const TROUBLESHOOTING = [
   {
     title: "Preview shows a 502 with an empty log",
-    body: "Almost always a dev server bound to localhost instead of 0.0.0.0 — the preview proxy can't reach it across the sandbox boundary. The agent binds correctly by default; if you supplied a custom command, tell Uniqus the preview is 502 and to rebind the server to 0.0.0.0 and restart. An empty server log with a 502 is the tell.",
+    body: "Almost always a dev server bound to localhost instead of 0.0.0.0 — the preview proxy can't reach it across the sandbox boundary. The agent binds correctly by default; if you supplied a custom command, tell Gate 15 the preview is 502 and to rebind the server to 0.0.0.0 and restart. An empty server log with a 502 is the tell.",
   },
   {
     title: "The preview won't start at all",
-    body: "Open Logs and ask Uniqus to read the failing command output, fix the root cause, and rerun the app. Common culprits are a wrong port, a project in a subdirectory, or a syntax error surfaced in the log. Paste the exact error if you see one.",
+    body: "Open Logs and ask Gate 15 to read the failing command output, fix the root cause, and rerun the app. Common culprits are a wrong port, a project in a subdirectory, or a syntax error surfaced in the log. Paste the exact error if you see one.",
   },
   {
     title: "Dependencies look corrupted or modules disappear",
-    body: "This is a dependency-install race — two installs running in the same folder at once. Let the agent handle installs; it reconciles package.json and the lockfile at the sandbox root or the subdirectory being started. If you see missing-module errors after a manual install, ask Uniqus to reinstall cleanly and restart the server.",
+    body: "This is a dependency-install race — two installs running in the same folder at once. Let the agent handle installs; it reconciles package.json and the lockfile at the sandbox root or the subdirectory being started. If you see missing-module errors after a manual install, ask Gate 15 to reinstall cleanly and restart the server.",
   },
   {
     title: "A long chat slows down or loses the thread",
@@ -242,7 +242,7 @@ const TROUBLESHOOTING = [
   },
   {
     title: "The connection drops or the workspace looks stale",
-    body: "Uniqus reconnects on its own; the status bar shows connection state and how recently files synced. If a turn looks stuck after a reconnect, refresh the workspace — your sandbox files and chat history are persisted, so nothing is lost. Then ask the agent to confirm the current state with git status or by re-reading the file.",
+    body: "Gate 15 reconnects on its own; the status bar shows connection state and how recently files synced. If a turn looks stuck after a reconnect, refresh the workspace — your sandbox files and chat history are persisted, so nothing is lost. Then ask the agent to confirm the current state with git status or by re-reading the file.",
   },
   {
     title: "The agent changed the wrong thing",
@@ -254,7 +254,7 @@ const TROUBLESHOOTING = [
   },
   {
     title: "The design is close but not right",
-    body: "Attach screenshots, name the target screen size, and ask Uniqus to verify with the preview. Concrete, specific visual feedback lands far better than asking it to make it nicer.",
+    body: "Attach screenshots, name the target screen size, and ask Gate 15 to verify with the preview. Concrete, specific visual feedback lands far better than asking it to make it nicer.",
   },
 ] as const;
 
@@ -271,7 +271,7 @@ export default function DocsPage() {
             <span className="grad">one workspace</span>.
           </h1>
           <p className="mk-lede">
-            Uniqus Code is an AI engineering workbench. You describe the outcome; the
+            Gate 15 is an AI engineering workbench. You describe the outcome; the
             agent edits real files in an isolated sandbox, runs commands, starts
             previews, and reports back in chat. This guide walks the loop end to end —
             from a first prompt to a deployed app.
@@ -341,7 +341,7 @@ export default function DocsPage() {
               </div>
               <div className="docs-callout">
                 <strong>Describe vs. import:</strong> <em>Describe your idea</em> is the
-                fastest start for something new — Uniqus names it and forwards your brief
+                fastest start for something new — Gate 15 names it and forwards your brief
                 straight to the agent. Use <em>Upload .zip</em> or <em>Clone GitHub</em>{" "}
                 when you already have code to edit, run, and (for GitHub) push back.
               </div>
@@ -389,7 +389,7 @@ export default function DocsPage() {
               <span className="docs-index">03 · Agent</span>
               <h2 id="chat-title">Work with the agent</h2>
               <p>
-                Chat is where intent becomes code. The best turns tell Uniqus what outcome
+                Chat is where intent becomes code. The best turns tell Gate 15 what outcome
                 matters, what evidence to inspect, and how to verify the result.
               </p>
             </div>
@@ -421,7 +421,7 @@ export default function DocsPage() {
                 <article className="mk-card">
                   <h3>Sub-agents &amp; Activity</h3>
                   <p>
-                    For multi-part builds, Uniqus can spawn sub-agents that work
+                    For multi-part builds, Gate 15 can spawn sub-agents that work
                     concurrently on different pieces. The Activity tab shows live
                     token/cost stats, sub-agent progress, and your task list as a turn
                     runs.
@@ -430,7 +430,7 @@ export default function DocsPage() {
                 <article className="mk-card">
                   <h3>Generate images</h3>
                   <p>
-                    Ask for an image and Uniqus generates or edits one directly, then
+                    Ask for an image and Gate 15 generates or edits one directly, then
                     uses the result immediately in your project.
                   </p>
                 </article>
@@ -479,7 +479,7 @@ export default function DocsPage() {
               <article className="mk-card">
                 <h3>When to point the agent</h3>
                 <p>
-                  Use <code>@</code>-mentions when you want Uniqus to follow an existing
+                  Use <code>@</code>-mentions when you want Gate 15 to follow an existing
                   pattern, patch a specific file, or explain why a piece of code behaves a
                   certain way.
                 </p>
@@ -491,7 +491,7 @@ export default function DocsPage() {
           <section className="docs-sec" id="configure" aria-labelledby="configure-title">
             <div className="docs-sec-head">
               <span className="docs-index">06 · Configure</span>
-              <h2 id="configure-title">Configure how Uniqus works</h2>
+              <h2 id="configure-title">Configure how Gate 15 works</h2>
               <p>
                 Some settings belong to a project, and others apply account-wide. Use
                 project tools for instructions and secrets; use Settings for defaults and
@@ -616,7 +616,7 @@ export default function DocsPage() {
               <div className="docs-subhead">
                 <h3>How the agent works — so you can prompt for it</h3>
                 <p>
-                  These are the working principles the Uniqus agent already follows.
+                  These are the working principles the Gate 15 agent already follows.
                   Knowing them tells you what to ask for and what you can trust it to do on
                   its own.
                 </p>

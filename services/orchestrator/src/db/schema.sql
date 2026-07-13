@@ -113,7 +113,7 @@ create index if not exists projects_owner_idx on projects (owner_id, updated_at 
 -- Trust state for the per-project `.uniqus/skills.md` prompt extension.
 -- Normal user-created/edited skills are trusted. If a GitHub/ZIP import contains
 -- `.uniqus/skills.md`, the orchestrator marks it `untrusted_import` and excludes
--- it from the agent system prompt until the user explicitly saves it in Uniqus.
+-- it from the agent system prompt until the user explicitly saves it in Gate 15.
 alter table projects add column if not exists skills_trust text not null default 'trusted'
   check (skills_trust in ('trusted', 'untrusted_import'));
 
@@ -837,7 +837,7 @@ $$;
 -- Reusable token sets (color/typography/spacing/...) attached to a project (or
 -- none) and injected into the agent's system prompt so generation stays
 -- on-system. `tokens` is the canonical JSON artifact — shape = DesignTokens in
--- @uniqus/api-types. Created once, used across many projects.
+-- @gate15/api-types. Created once, used across many projects.
 create table if not exists design_systems (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references users(id) on delete cascade,
@@ -867,7 +867,7 @@ alter table projects add column if not exists design_system_id uuid
 -- attached skills are advertised by name/description and their bodies are loaded
 -- on demand before the project's own .uniqus/skills.md (the override layer).
 -- `body` = SkillLibrary
--- in @uniqus/api-types. Distinct from the code-defined curated SKILL_PACKS.
+-- in @gate15/api-types. Distinct from the code-defined curated SKILL_PACKS.
 create table if not exists skill_libraries (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references users(id) on delete cascade,
@@ -893,7 +893,7 @@ alter table skill_libraries enable row level security;
 -- their projects via the `knowledge_search` tool. The raw file lives in object
 -- storage (storage_path); `content` holds the extracted plain text that powers
 -- search. `content` is intentionally a separate column so list queries can skip
--- it. Row = KnowledgeDocument in @uniqus/api-types.
+-- it. Row = KnowledgeDocument in @gate15/api-types.
 create table if not exists knowledge_documents (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references users(id) on delete cascade,
@@ -944,7 +944,7 @@ alter table projects add column if not exists skill_library_ids uuid[]
 -- with membership-scoped access, NOT many people prompting one tree. For an org
 -- project, org/project membership is the sole authority; projects.owner_id is
 -- historical/recovery metadata and grants no access. Roles are
--- owner|admin|editor|viewer (shared enum in @uniqus/api-types).
+-- owner|admin|editor|viewer (shared enum in @gate15/api-types).
 create table if not exists organizations (
   id uuid primary key default gen_random_uuid(),
   name text not null,

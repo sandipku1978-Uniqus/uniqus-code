@@ -22,7 +22,7 @@ import {
   type GithubRepoSummary,
   type FigmaStatus,
 } from "@/lib/api";
-import type { ProjectSummary } from "@uniqus/api-types";
+import type { ProjectSummary } from "@gate15/api-types";
 import {
   DEFAULT_DESIGN_TOKENS,
   type DesignComponentTokens,
@@ -30,7 +30,7 @@ import {
   type DesignPatternTokens,
   type DesignBehaviorTokens,
   type ButtonVariantSpec,
-} from "@uniqus/api-types";
+} from "@gate15/api-types";
 import { toast } from "@/lib/toast";
 import DesignSystemPreview from "./DesignSystemPreview";
 

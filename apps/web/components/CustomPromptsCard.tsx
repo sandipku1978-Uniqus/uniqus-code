@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { SKILL_PACKS } from "@uniqus/api-types";
+import { SKILL_PACKS } from "@gate15/api-types";
 import {
   fetchAccountSettingsApi,
   updateAccountSettingsApi,

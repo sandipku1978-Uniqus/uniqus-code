@@ -1,6 +1,6 @@
 import { db } from "./client.js";
 import type { DeploymentState } from "./deployments.js";
-import { roleAtLeast, type ProjectSkillsTrust, type Role } from "@uniqus/api-types";
+import { roleAtLeast, type ProjectSkillsTrust, type Role } from "@gate15/api-types";
 import { getOrgRole, getProjectRole, listSharedProjectIds } from "./members.js";
 
 export interface ProjectRecord {

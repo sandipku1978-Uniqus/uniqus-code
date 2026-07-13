@@ -179,9 +179,9 @@ export default function SecretsModal({
                 placeholder="env (default)"
                 title="Environment slot — default, development, staging, production, etc."
                 style={inputStyle}
-                list="uniqus-secret-env-options"
+                list="gate15-secret-env-options"
               />
-              <datalist id="uniqus-secret-env-options">
+              <datalist id="gate15-secret-env-options">
                 <option value="default" />
                 <option value="development" />
                 <option value="staging" />

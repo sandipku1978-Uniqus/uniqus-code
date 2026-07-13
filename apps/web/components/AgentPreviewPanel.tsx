@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
-import type { FlowStep } from "@uniqus/api-types";
+import type { FlowStep } from "@gate15/api-types";
 import { useStore } from "@/lib/store";
 import { toast } from "@/lib/toast";
 import {
@@ -45,9 +45,9 @@ const needsValue = (t: FlowStep["type"]): boolean =>
   ["type", "fill", "select", "press", "wait_for_text", "assert_text", "assert_url"].includes(t);
 
 function statusColor(status: string | null): string {
-  if (status === "pass") return "var(--conf-high, #3ea76a)";
-  if (status === "fail") return "var(--conf-medium, #d98a3d)";
-  if (status === "error") return "var(--danger, #d9534f)";
+  if (status === "pass") return "var(--conf-high)";
+  if (status === "fail") return "var(--conf-medium)";
+  if (status === "error") return "var(--conf-low)";
   return "var(--text-muted)";
 }
 
@@ -190,7 +190,7 @@ export default function AgentPreviewPanel() {
             <span style={stepBadge(shown.ok)}>{shown.ok ? "✓" : "✗"}</span>
             <span style={{ fontSize: 12, fontWeight: 500 }}>{shown.label}</span>
             {shown.detail && (
-              <span style={{ fontSize: 11, color: "var(--danger, #d9534f)" }}>— {shown.detail}</span>
+              <span style={{ fontSize: 11, color: "var(--conf-low)" }}>— {shown.detail}</span>
             )}
             <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-muted)" }}>
               step {(pinned ?? frames.length - 1) + 1} / {frames.length}
@@ -436,7 +436,7 @@ const wrap: CSSProperties = {
   flexDirection: "column",
   height: "100%",
   minHeight: 0,
-  background: "var(--bg-base, #0c0c0e)",
+  background: "var(--bg-base)",
 };
 const stage: CSSProperties = {
   display: "flex",
@@ -464,7 +464,7 @@ const jumpBtn: CSSProperties = {
   marginLeft: "auto",
   fontSize: 11,
   padding: "3px 9px",
-  color: "var(--danger, #d9534f)",
+  color: "var(--conf-low)",
 };
 const canvas: CSSProperties = {
   flex: 1,
@@ -473,14 +473,14 @@ const canvas: CSSProperties = {
   alignItems: "center",
   justifyContent: "center",
   overflow: "auto",
-  background: "var(--bg-deep, #08080a)",
+  background: "var(--bg-code)",
   padding: 10,
 };
 const frameImg: CSSProperties = {
   maxWidth: "100%",
   maxHeight: "100%",
   objectFit: "contain",
-  borderRadius: "var(--radius-sm, 6px)",
+  borderRadius: "var(--radius-sm)",
   border: "1px solid var(--border-default)",
   boxShadow: "0 8px 28px rgba(0,0,0,0.35)",
 };
@@ -504,14 +504,14 @@ const filmstrip: CSSProperties = {
   padding: "8px 12px",
   overflowX: "auto",
   borderTop: "1px solid var(--border-default)",
-  background: "var(--bg-surface, #131316)",
+  background: "var(--bg-surface)",
 };
 const flowsPanel: CSSProperties = {
   borderTop: "1px solid var(--border-default)",
   padding: "10px 12px",
   maxHeight: "38%",
   overflowY: "auto",
-  background: "var(--bg-surface, #131316)",
+  background: "var(--bg-surface)",
   flex: "none",
 };
 const flowsHeader: CSSProperties = {
@@ -526,8 +526,8 @@ const flowRow: CSSProperties = {
   gap: 8,
   padding: "7px 9px",
   border: "1px solid var(--border-default)",
-  borderRadius: "var(--radius-sm, 6px)",
-  background: "var(--bg-base, #0c0c0e)",
+  borderRadius: "var(--radius-sm)",
+  background: "var(--bg-base)",
 };
 const composer: CSSProperties = {
   display: "flex",
@@ -536,18 +536,18 @@ const composer: CSSProperties = {
   padding: 10,
   marginBottom: 10,
   border: "1px solid var(--border-default)",
-  borderRadius: "var(--radius-sm, 6px)",
-  background: "var(--bg-base, #0c0c0e)",
+  borderRadius: "var(--radius-sm)",
+  background: "var(--bg-base)",
 };
 const input: CSSProperties = {
   flex: 1,
   minWidth: 0,
   fontSize: 12,
   padding: "6px 8px",
-  borderRadius: "var(--radius-sm, 6px)",
+  borderRadius: "var(--radius-sm)",
   border: "1px solid var(--border-default)",
-  background: "var(--bg-surface, #131316)",
-  color: "var(--text-default, #e8e8ea)",
+  background: "var(--bg-elev)",
+  color: "var(--text-primary)",
 };
 
 const liveDot = (on: boolean): CSSProperties => ({
@@ -555,7 +555,7 @@ const liveDot = (on: boolean): CSSProperties => ({
   height: 8,
   borderRadius: "50%",
   flex: "none",
-  background: on ? "var(--danger, #d9534f)" : "var(--text-muted)",
+  background: on ? "var(--conf-low)" : "var(--text-muted)",
   animation: on ? "pulse-dot 1.4s ease-in-out infinite" : "none",
 });
 const stepBadge = (ok: boolean): CSSProperties => ({
@@ -568,18 +568,18 @@ const stepBadge = (ok: boolean): CSSProperties => ({
   fontSize: 10,
   flex: "none",
   color: "#fff",
-  background: ok ? "var(--conf-high, #3ea76a)" : "var(--danger, #d9534f)",
+  background: ok ? "var(--conf-high)" : "var(--conf-low)",
 });
 const thumbBtn = (active: boolean, ok: boolean): CSSProperties => ({
   flex: "none",
   width: 96,
   height: 60,
   padding: 0,
-  borderRadius: "var(--radius-sm, 6px)",
+  borderRadius: "var(--radius-sm)",
   overflow: "hidden",
   cursor: "pointer",
-  background: "var(--bg-deep, #08080a)",
-  border: `2px solid ${active ? "var(--accent-primary, #7c5cff)" : ok ? "var(--border-default)" : "var(--danger, #d9534f)"}`,
+  background: "var(--bg-code)",
+  border: `2px solid ${active ? "var(--accent-primary)" : ok ? "var(--border-default)" : "var(--conf-low)"}`,
 });
 const thumbImg: CSSProperties = {
   width: "100%",

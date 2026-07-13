@@ -8,7 +8,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import type { PreviewServer } from "@uniqus/api-types";
+import type { PreviewServer } from "@gate15/api-types";
 import { useIsMobile } from "@/lib/use-is-mobile";
 import { useStore, type SelectedElement } from "@/lib/store";
 import { toast } from "@/lib/toast";
@@ -29,8 +29,27 @@ if (process.env.NODE_ENV === "production" && !process.env.NEXT_PUBLIC_PREVIEW_UR
   throw new Error("NEXT_PUBLIC_PREVIEW_URL is required for the isolated production preview origin");
 }
 
+/**
+ * Inbound postMessage names.
+ *
+ * The scripts inside the preview iframe are injected by the ORCHESTRATOR, which
+ * deploys separately from this app (Hetzner vs Vercel). During a rollout an
+ * older injected script can therefore still be talking to a newer page (and a
+ * newer script to an older page). So every INBOUND check accepts the legacy
+ * `uniqus:*` name as an alias alongside the new `gate15:*` one, while we only
+ * ever EMIT the new name. The orchestrator's injected script does the mirror of
+ * this on its own inbound switch.
+ */
+const NAV_MESSAGE_TYPES = ["gate15:preview-nav", "uniqus:preview-nav"];
+const ELEMENT_MESSAGE_TYPES = ["gate15:element", "uniqus:element"];
+const RUNTIME_ERROR_TYPES = ["gate15:runtime-error", "uniqus:runtime-error"];
+
+function isMessageType(value: unknown, accepted: string[]): boolean {
+  return typeof value === "string" && accepted.includes(value);
+}
+
 interface PreviewNavMessage {
-  type: "uniqus:preview-nav";
+  type: string;
   server_id: string;
   path: string;
 }
@@ -39,7 +58,7 @@ function isPreviewNavMessage(data: unknown): data is PreviewNavMessage {
   return (
     typeof data === "object" &&
     data !== null &&
-    (data as { type?: unknown }).type === "uniqus:preview-nav" &&
+    isMessageType((data as { type?: unknown }).type, NAV_MESSAGE_TYPES) &&
     typeof (data as { server_id?: unknown }).server_id === "string" &&
     typeof (data as { path?: unknown }).path === "string"
   );
@@ -62,28 +81,43 @@ function stripPreviewPrefix(path: string, serverId: string): string {
 /**
  * Shared element-picker contract (C) — mirrored by the proxy-injected script.
  *
- *   parent → iframe : { type: "uniqus:picker", active: boolean }
+ *   parent → iframe : { type: "gate15:picker", active: boolean }
  *       We post this into the preview's window to turn pick-mode on/off. The
  *       injected script arms hover/click tracking while active and suppresses
  *       the page's own click handling so picking never navigates the app.
  *
- *   iframe → parent : { type: "uniqus:element", selector, tag, classes, id,
+ *   iframe → parent : { type: "gate15:element", selector, tag, classes, id,
  *                       rect, text }
  *       Posted when the user clicks an element in pick-mode. `rect` is the
- *       element's getBoundingClientRect() in the iframe's own CSS pixels.
+ *       element's getBoundingClientRect() in the iframe's own CSS pixels. We
+ *       accept the legacy `uniqus:element` name too (see ELEMENT_MESSAGE_TYPES).
  *
  * The control message direction isn't pinned by the prose contract (which only
- * documents the `uniqus:element` payload), so it's defined here and kept
- * deliberately symmetric/namespaced so the script half can match it 1:1.
+ * documents the element payload), so it's defined here and kept deliberately
+ * symmetric/namespaced so the script half can match it 1:1.
+ *
+ * OUTBOUND is the one hop where "emit new, accept old" is NOT enough. The
+ * script inside the iframe is injected by the ORCHESTRATOR (Hetzner, deployed
+ * by hand) while this page ships with the web app (Vercel, deployed by pushing
+ * `main`) — so the new page is GUARANTEED to go live against the old script,
+ * which only understands `uniqus:*`. An iframe already loaded in an open tab
+ * keeps running that old script until it reloads, so ordering the releases
+ * wouldn't close the window either. Emitting a `gate15:*`-only control message
+ * therefore fails silently: the button arms, the hint shows, nothing ever
+ * highlights. So we post BOTH spellings and let whichever the live script
+ * understands win. Double-posting is safe in both directions: the handler is an
+ * idempotent setter (`setActive(!!want)`, early-returns when already in that
+ * state), not a toggle, and each script ignores the namespace it doesn't know.
+ * Drop the legacy spelling once every orchestrator serving previews injects the
+ * dual-namespace script.
  */
-const PICKER_CONTROL_TYPE = "uniqus:picker";
-const ELEMENT_MESSAGE_TYPE = "uniqus:element";
+const PICKER_CONTROL_TYPES = ["gate15:picker", "uniqus:picker"];
 
 /** Coerce a (possibly slightly off-shape) inbound message into a SelectedElement. */
 function parseElementMessage(data: unknown): SelectedElement | null {
   if (!data || typeof data !== "object") return null;
   const d = data as Record<string, unknown>;
-  if (d.type !== ELEMENT_MESSAGE_TYPE) return null;
+  if (!isMessageType(d.type, ELEMENT_MESSAGE_TYPES)) return null;
   const selector = typeof d.selector === "string" ? d.selector.trim() : "";
   if (!selector) return null;
   const tag = typeof d.tag === "string" ? d.tag.toLowerCase() : "";
@@ -233,13 +267,14 @@ interface RuntimeError {
 }
 
 /**
- * Validate + clamp an inbound `uniqus:runtime-error` message, rejecting anything
- * not addressed to `serverId`. Returns null if off-shape or for another server.
+ * Validate + clamp an inbound `gate15:runtime-error` message (legacy
+ * `uniqus:runtime-error` still accepted), rejecting anything not addressed to
+ * `serverId`. Returns null if off-shape or for another server.
  */
 function parseRuntimeError(data: unknown, serverId: string): Omit<RuntimeError, "count"> | null {
   if (!data || typeof data !== "object") return null;
   const d = data as Record<string, unknown>;
-  if (d.type !== "uniqus:runtime-error") return null;
+  if (!isMessageType(d.type, RUNTIME_ERROR_TYPES)) return null;
   if (d.server_id !== serverId) return null;
   const str = (v: unknown, n: number) => (typeof v === "string" ? v.slice(0, n) : "");
   const numOrNull = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
@@ -305,7 +340,7 @@ const dotStyle: CSSProperties = {
   width: 8,
   height: 8,
   borderRadius: "50%",
-  background: "var(--brand-magenta)",
+  background: "var(--brand-ember, #FF6A00)",
   animation: "pulse-dim 1.5s ease-in-out infinite",
 };
 const reloadBtnStyle: CSSProperties = {
@@ -366,7 +401,7 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
 
   // Element picker. `picking` = pick-mode armed (we've told the iframe to
   // track); `candidate` = an element the iframe reported, awaiting the user's
-  // confirm. We assume `uniqus:element` represents a deliberate click (the
+  // confirm. We assume `gate15:element` represents a deliberate click (the
   // standard picker gesture), so one message pauses pick-mode into a confirm.
   const [picking, setPicking] = useState(false);
   const [candidate, setCandidate] = useState<SelectedElement | null>(null);
@@ -547,15 +582,20 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
     }
   }, [baseUrl]);
 
-  // Tell the iframe to arm/disarm pick-mode.
+  // Tell the iframe to arm/disarm pick-mode. Posted under BOTH the new and the
+  // legacy type names because the injected script on the other end may predate
+  // this deploy (see PICKER_CONTROL_TYPES) — the handler is idempotent, so the
+  // one it doesn't recognize is simply ignored.
   const postPickerControl = useCallback(
     (active: boolean) => {
       const win = iframeRef.current?.contentWindow;
       if (!win) return;
-      try {
-        win.postMessage({ type: PICKER_CONTROL_TYPE, active }, previewOrigin);
-      } catch {
-        // Cross-origin frame not ready yet — re-armed on the next onLoad.
+      for (const type of PICKER_CONTROL_TYPES) {
+        try {
+          win.postMessage({ type, active }, previewOrigin);
+        } catch {
+          // Cross-origin frame not ready yet — re-armed on the next onLoad.
+        }
       }
     },
     [previewOrigin],
@@ -1073,8 +1113,9 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
                 cursor: "pointer",
                 border: "none",
                 borderRadius: "var(--radius-sm)",
-                background: "var(--brand-gradient, var(--brand-magenta))",
-                color: "#fff",
+                background: "var(--brand-gradient, var(--brand-ember, #FF6A00))",
+                // Ink on ember is near-black, never white (white fails AA).
+                color: "#140D07",
                 fontWeight: 600,
               }}
             >

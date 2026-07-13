@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 export const metadata = {
-  title: "Pricing — Uniqus Code",
+  title: "Pricing — Gate 15",
   description:
     "Simple, transparent pricing. Start free for solo projects, scale with Team plans, and talk to us for Enterprise.",
 };

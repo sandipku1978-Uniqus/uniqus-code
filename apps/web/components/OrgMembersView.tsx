@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { OrgMember, Role } from "@uniqus/api-types";
-import { roleAtLeast } from "@uniqus/api-types";
+import type { OrgMember, Role } from "@gate15/api-types";
+import { roleAtLeast } from "@gate15/api-types";
 import {
   fetchOrgMembersApi,
   addOrgMemberApi,
@@ -129,7 +129,7 @@ export default function OrgMembersView({ orgId }: { orgId: string }) {
           <div className="org-section-head">
             <span className="org-section-index">Invite</span>
             <h2>Add a teammate</h2>
-            <p>Use the email attached to their existing Uniqus account.</p>
+            <p>Use the email attached to their existing Gate 15 account.</p>
           </div>
           <div className="org-invite-form">
             <label>

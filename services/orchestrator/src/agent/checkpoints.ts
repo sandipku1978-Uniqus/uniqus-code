@@ -25,6 +25,23 @@ import { safeChildEnv } from "../safeEnv.js";
 
 const KEEP_RECENT = 20;
 const KEEP_EVERY = 10;
+
+// Identity stamped on every checkpoint commit. This is user-visible: it shows
+// up as the author in the checkpoint list / `git log` of the shadow repo.
+const AGENT_EMAIL = "agent@gate15.local";
+const AGENT_NAME = "Gate 15 Agent";
+// Passed per-invocation (`git -c ...`) rather than relying solely on the
+// repo config written at init time: shadow repos created before this identity
+// changed still carry the old one in their config, and ensureShadow only
+// writes config when the repo doesn't exist yet. Committing with -c makes the
+// identity correct for pre-existing repos too, without an extra `git config`
+// spawn on every checkpoint.
+const IDENTITY_FLAGS = [
+  "-c",
+  `user.email=${AGENT_EMAIL}`,
+  "-c",
+  `user.name=${AGENT_NAME}`,
+];
 const CHECKPOINT_EXCLUDES = [
   "node_modules/",
   ".next/",
@@ -79,8 +96,8 @@ async function ensureShadow(sandboxDir: string, projectId: string): Promise<{ sh
       return null;
     }
     // Configure a stable identity so commits don't fail under no-config envs.
-    await exec("git", ["--git-dir", gitDir, "config", "user.email", "agent@uniqus.local"], shadow);
-    await exec("git", ["--git-dir", gitDir, "config", "user.name", "Uniqus Agent"], shadow);
+    await exec("git", ["--git-dir", gitDir, "config", "user.email", AGENT_EMAIL], shadow);
+    await exec("git", ["--git-dir", gitDir, "config", "user.name", AGENT_NAME], shadow);
     // Bypass any global pre-commit hooks the user happened to install.
     await exec("git", ["--git-dir", gitDir, "config", "core.hooksPath", "/dev/null"], shadow);
   }
@@ -167,9 +184,10 @@ async function doCommit(
     return null;
   }
   // Allow empty in case nothing actually changed (e.g. an edit_file no-op).
+  // IDENTITY_FLAGS go first: `git -c <k>=<v> --git-dir ... commit`.
   const commit = await exec(
     "git",
-    gitArgs("commit", "--allow-empty", "-m", message.slice(0, 200)),
+    [...IDENTITY_FLAGS, ...gitArgs("commit", "--allow-empty", "-m", message.slice(0, 200))],
     sandboxDir,
   );
   if (!commit.ok) {

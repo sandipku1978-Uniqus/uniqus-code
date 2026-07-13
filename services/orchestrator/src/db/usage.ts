@@ -1,4 +1,4 @@
-import { estimateTurnCostUsd } from "@uniqus/api-types";
+import { estimateTurnCostUsd } from "@gate15/api-types";
 import { db } from "./client.js";
 
 /**

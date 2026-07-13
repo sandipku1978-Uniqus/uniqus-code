@@ -2,9 +2,9 @@ import Link from "next/link";
 import { POSTS } from "./posts";
 
 export const metadata = {
-  title: "Blog — Uniqus Code",
+  title: "Blog — Gate 15",
   description:
-    "Notes from the workshop: how Uniqus Code thinks about building with AI — model choice, plan mode, private workspaces, web search, and shipping.",
+    "Notes from the workshop: how Gate 15 thinks about building with AI — model choice, plan mode, private workspaces, web search, and shipping.",
 };
 
 export default function BlogPage() {

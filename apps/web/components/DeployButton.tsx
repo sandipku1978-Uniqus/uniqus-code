@@ -14,7 +14,7 @@ import {
   type DeploymentSummary,
   type VercelStatus,
 } from "@/lib/api";
-import type { DeploymentState } from "@uniqus/api-types";
+import type { DeploymentState } from "@gate15/api-types";
 import Modal from "./Modal";
 import { toast } from "@/lib/toast";
 

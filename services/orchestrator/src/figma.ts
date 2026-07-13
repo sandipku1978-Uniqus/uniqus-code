@@ -23,7 +23,7 @@ import {
   type UserRecord,
 } from "./db/users.js";
 
-const STATE_COOKIE = "uniqus_figma_state";
+const STATE_COOKIE = "gate15_figma_state";
 const STATE_TTL_SECONDS = 600;
 // Read-only granular scopes (Figma deprecated the broad `files:read` in 2025):
 //   file_content:read    → GET /v1/files/:key/nodes (node contents)

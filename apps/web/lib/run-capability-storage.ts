@@ -9,10 +9,10 @@ interface DefaultRunCapability {
 }
 
 const exactKey = (projectId: string, sessionId: string): string =>
-  `uniqus:run-capability:${projectId}:${sessionId}`;
+  `gate15:run-capability:${projectId}:${sessionId}`;
 
 const defaultKey = (projectId: string): string =>
-  `uniqus:run-capability:${projectId}:default`;
+  `gate15:run-capability:${projectId}:default`;
 
 function readDefault(
   storage: RunCapabilityStorage,

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { ProjectMember, Role } from "@uniqus/api-types";
+import type { ProjectMember, Role } from "@gate15/api-types";
 import {
   fetchProjectMembersApi,
   addProjectMemberApi,
@@ -223,9 +223,9 @@ export default function MembersView({ projectId }: { projectId: string }) {
                     fontSize: "var(--fs-2xs)",
                     textTransform: "uppercase",
                     letterSpacing: "0.06em",
-                    color: "var(--brand-magenta)",
-                    background: "color-mix(in srgb, var(--brand-magenta) 12%, transparent)",
-                    border: "1px solid color-mix(in srgb, var(--brand-magenta) 30%, transparent)",
+                    color: "var(--accent-text)",
+                    background: "color-mix(in srgb, var(--brand-ember) 12%, transparent)",
+                    border: "1px solid color-mix(in srgb, var(--brand-ember) 30%, transparent)",
                     borderRadius: "var(--radius-full)",
                     padding: "3px 10px",
                   }}

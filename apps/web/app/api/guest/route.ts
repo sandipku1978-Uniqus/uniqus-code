@@ -4,7 +4,7 @@ import { orchestratorFetch } from "@/lib/orchestrator-server";
 
 /**
  * Guest signup. Proxies to the orchestrator (which creates the guest user and
- * returns the sealed cookie value), then sets `uniqus-guest` as a first-party
+ * returns the sealed cookie value), then sets `gate15-guest` as a first-party
  * cookie on the web app's own domain. The web app owns this cookie because it
  * — unlike the orchestrator — reliably has WORKOS_COOKIE_DOMAIN configured, so
  * the cookie spans app. + api. the way AuthKit's wos-session does.

@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 export const metadata = {
-  title: "Workspaces — Uniqus Code",
+  title: "Workspaces — Gate 15",
   description:
     "Every project runs on its own private virtual machine — a real, secure computer in the cloud. Install software, run real databases, see a live preview, and pick up exactly where you left off.",
 };
@@ -189,8 +189,8 @@ export default function WorkspacesPage() {
                 <circle cx="32" cy="31" r="2.4" fill="currentColor" stroke="none" />
                 <circle cx="42" cy="31" r="2.4" fill="currentColor" stroke="none" />
                 <circle cx="52" cy="31" r="2.4" fill="currentColor" stroke="none" />
-                <rect x="36" y="56" width="108" height="44" rx="6" stroke="var(--brand-magenta)" />
-                <path d="M58 78l8 8M122 78l-8 8M80 92l20-28" stroke="var(--brand-magenta)" />
+                <rect x="36" y="56" width="108" height="44" rx="6" stroke="var(--brand-ember)" />
+                <path d="M58 78l8 8M122 78l-8 8M80 92l20-28" stroke="var(--brand-ember)" />
                 <path d="M64 124h52M78 124v8M102 124v8" />
               </svg>
             </div>
@@ -245,11 +245,11 @@ export default function WorkspacesPage() {
             <div className="mk-row-art" aria-hidden="true">
               <svg width="186" height="150" viewBox="0 0 186 150" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" style={{ color: "var(--mk-muted)" }}>
                 <rect x="14" y="26" width="74" height="98" rx="8" />
-                <path d="M22 44h58M22 56h44M22 68h52M22 80h36" stroke="var(--brand-purple)" strokeLinecap="round" />
-                <rect x="98" y="26" width="74" height="98" rx="8" stroke="var(--brand-magenta)" />
-                <path d="M98 44h74" stroke="var(--brand-magenta)" />
-                <rect x="110" y="58" width="50" height="30" rx="4" stroke="var(--brand-magenta)" />
-                <path d="M110 102h50M110 112h32" stroke="var(--brand-magenta)" strokeLinecap="round" />
+                <path d="M22 44h58M22 56h44M22 68h52M22 80h36" stroke="var(--brand-signal)" strokeLinecap="round" />
+                <rect x="98" y="26" width="74" height="98" rx="8" stroke="var(--brand-ember)" />
+                <path d="M98 44h74" stroke="var(--brand-ember)" />
+                <rect x="110" y="58" width="50" height="30" rx="4" stroke="var(--brand-ember)" />
+                <path d="M110 102h50M110 112h32" stroke="var(--brand-ember)" strokeLinecap="round" />
               </svg>
             </div>
           </article>
@@ -338,7 +338,7 @@ export default function WorkspacesPage() {
           <h2>Why a whole machine?</h2>
           <p>
             Most AI tools run your code in a shared, stripped-down sandbox — fine
-            for a snippet, frustrating for a real app. Uniqus Code gives every
+            for a snippet, frustrating for a real app. Gate 15 gives every
             project a dedicated virtual machine instead, so the agent can build
             the way a developer would: install what it needs, run the real
             stack, and prove the result in a live preview.

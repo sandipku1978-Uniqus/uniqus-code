@@ -56,7 +56,7 @@ const workosMiddleware = authkitMiddleware({
  *     cookie yet), convert + signout read the guest cookie themselves. The
  *     WorkOS middleware must never intercept them, or it redirects the
  *     would-be guest to the WorkOS sign-in page.
- *  2. A request carrying a valid `uniqus-guest` cookie skips the
+ *  2. A request carrying a valid `gate15-guest` cookie skips the
  *     middlewareAuth sign-in redirect, but still runs AuthKit's session step
  *     (`authkit()`): withAuth() THROWS on any route the AuthKit middleware
  *     didn't stamp with the `x-workos-middleware` request header, and /,
@@ -92,5 +92,14 @@ export const config = {
   // throws unless the AuthKit middleware has stamped the request — so /docs
   // must run through middleware like every other marketing page. It stays
   // publicly reachable via PUBLIC_PATHS above.
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\\.png$).*)"],
+  //
+  // Static files under /public must be excluded: they carry no session, and an
+  // unauthenticated request for one would otherwise be 307'd to WorkOS sign-in
+  // and never served. This previously excluded ONLY `.png`, which quietly held
+  // because the sole asset was a .png logo — every other static type (the .webp
+  // backdrops, the .svg mark/favicon, the .woff icon font) redirected instead of
+  // loading. Exclude the asset directories and the extensions, not one format.
+  matcher: [
+    "/((?!_next/static|_next/image|favicon.ico|brand/|fonts/|.*\\.(?:png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|otf|txt|xml|webmanifest)$).*)",
+  ],
 };

@@ -16,8 +16,8 @@ import { getGuestSession } from "@/lib/guest-server";
  * `.mk-main`.
  *
  * The foot of every page reuses the landing page's `.bottom-build` block — the
- * same purple→magenta gradient AND the same LandingPrompt "describe an idea →
- * new project" composer — so the whole marketing surface is consistent. The
+ * same ember→signal brand gradient AND the same LandingPrompt "describe an idea
+ * → new project" composer — so the whole marketing surface is consistent. The
  * composer lives ONLY here and on the landing page; the dashboard and the
  * account-gated screens (/projects, /settings, …) are outside this route group
  * and never render it.
@@ -55,7 +55,7 @@ export default async function MarketingLayout({
             signedIn={signedIn}
             ctaHref={ctaHref}
             ctaLabel={ctaLabel}
-            placeholder="Ask Uniqus to build an app for…"
+            placeholder="Ask Gate 15 to build an app for…"
           />
           <p className="bottom-note">
             Free for solo projects. Team plans from $20/seat/month. Enterprise on

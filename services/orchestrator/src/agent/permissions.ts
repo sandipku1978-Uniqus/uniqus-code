@@ -1,4 +1,4 @@
-import type { PermissionMode, ToolRiskCategory } from "@uniqus/api-types";
+import type { PermissionMode, ToolRiskCategory } from "@gate15/api-types";
 import { connectorMethodRisk } from "../connectors/index.js";
 
 /**

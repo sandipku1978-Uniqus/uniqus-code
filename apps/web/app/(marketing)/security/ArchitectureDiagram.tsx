@@ -33,7 +33,7 @@ const LANE_CONTENT = [
   },
   {
     id: "orchestrator",
-    accent: "var(--brand-magenta)",
+    accent: "var(--brand-ember)",
     label: "Orchestrator",
     title: "Auth · routing · secret decrypt",
     lines: [
@@ -44,7 +44,7 @@ const LANE_CONTENT = [
   },
   {
     id: "fleet",
-    accent: "var(--brand-purple-hi)",
+    accent: "var(--brand-signal)",
     label: "Sandbox fleet",
     title: "One microVM per project",
     lines: [
@@ -116,7 +116,7 @@ export default function ArchitectureDiagram() {
         style={{ display: "block", maxWidth: "100%", height: "auto" }}
       >
         <title id="arch-title">
-          How a request flows through Uniqus Code
+          How a request flows through Gate 15
         </title>
         <desc id="arch-desc">
           A request travels from your browser over TLS 1.3 to the orchestrator,

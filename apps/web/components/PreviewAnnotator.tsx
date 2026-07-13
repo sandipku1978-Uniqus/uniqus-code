@@ -8,7 +8,7 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import type { PreviewServer } from "@uniqus/api-types";
+import type { PreviewServer } from "@gate15/api-types";
 import { useStore } from "@/lib/store";
 import Modal from "./Modal";
 
@@ -34,7 +34,7 @@ type Shape =
   | { kind: "pen"; color: string; width: number; pts: Pt[] }
   | { kind: "text"; color: string; x: number; y: number; text: string; size: number };
 
-const COLORS = ["#ff3b30", "#ffcc00", "#34c759", "#0a84ff", "#b21e7d", "#ffffff", "#111111"];
+const COLORS = ["#ff3b30", "#ffcc00", "#34c759", "#0a84ff", "#ff6a00", "#ffffff", "#111111"];
 const WIDTHS = [2, 4, 7];
 const MAX_CANVAS_W = 2200; // cap the backing store so huge captures stay sane
 

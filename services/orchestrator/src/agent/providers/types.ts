@@ -10,7 +10,7 @@
  */
 
 import type Anthropic from "@anthropic-ai/sdk";
-import type { Citation, ThinkingEffort } from "@uniqus/api-types";
+import type { Citation, ThinkingEffort } from "@gate15/api-types";
 
 /** API keys for whichever providers are configured. */
 export interface ProviderKeys {

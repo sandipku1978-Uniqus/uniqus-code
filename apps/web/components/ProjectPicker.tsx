@@ -1,15 +1,17 @@
 "use client";
 
 import {
+  memo,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type RefObject,
 } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import type { DeploymentState, ProjectSummary, Organization } from "@uniqus/api-types";
+import type { DeploymentState, ProjectSummary, Organization } from "@gate15/api-types";
 import BrandLockup from "./BrandLockup";
 import GuestBanner from "./GuestBanner";
 import DatabasesView from "./DatabasesView";
@@ -363,7 +365,7 @@ export default function ProjectPicker({
   // clicking elsewhere closes it; rename/icon dialogs are inline modals.
   const [menuFor, setMenuFor] = useState<string | null>(null);
 
-  // Sidebar view selector. Default is the home dashboard (Brief Uniqus +
+  // Sidebar view selector. Default is the home dashboard (Brief Gate 15 +
   // recent tiles). "all" shows every project as a richer card with URL +
   // repo + status; "recent" shows the same data sorted by activity with
   // more verbose timestamps.
@@ -1370,7 +1372,7 @@ export default function ProjectPicker({
                           )
                         }
                         aria-pressed={planMode === "plan-then-execute"}
-                        title="Plan mode — Uniqus proposes a plan you can edit before it builds"
+                        title="Plan mode — Gate 15 proposes a plan you can edit before it builds"
                       >
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                           <polyline points="20 6 9 17 4 12" />
@@ -1976,66 +1978,125 @@ function usageCalendarDayKey(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
-function UsageCalendar({ stats }: { stats: AccountUsageStats | null }) {
-  const today = new Date();
-  today.setHours(12, 0, 0, 0);
+/**
+ * `Date#toLocaleDateString` builds a fresh Intl.DateTimeFormat on every call,
+ * which is one of the most expensive things you can do in a hot loop. The grid
+ * has 371 cells, so formatting per cell meant 371 formatter constructions per
+ * render. Build the formatters once, at module scope, and reuse them.
+ */
+const USAGE_DAY_FORMAT = new Intl.DateTimeFormat(undefined, {
+  day: "numeric",
+  month: "long",
+  year: "numeric",
+});
+const USAGE_MONTH_FORMAT = new Intl.DateTimeFormat(undefined, { month: "short" });
 
-  const currentWeekStart = new Date(today);
-  currentWeekStart.setDate(today.getDate() - today.getDay());
+type UsageCalendarCell = {
+  key: string;
+  level: UsageCalendarLevel;
+  isFuture: boolean;
+  title?: string;
+};
 
-  const calendarStart = new Date(currentWeekStart);
-  calendarStart.setDate(currentWeekStart.getDate() - 52 * 7);
+/**
+ * Contribution-style activity grid — 53 weeks × 7 days = 371 cells.
+ *
+ * PERF: this lives on the dashboard's HOME view, inside a component holding ~30
+ * pieces of state, so it re-renders on every keystroke in the "describe your
+ * app" box and on every menu toggle. Building the day model in the render body
+ * therefore cost ~372 Date allocations, a Map rebuild, a sort, and 371 Intl
+ * formatter constructions *per keystroke* — which is what made the dashboard
+ * visibly laggy. So:
+ *   - the entire model is derived once per `stats` change, in a useMemo, with
+ *     each cell's level and tooltip precomputed (the JSX below stays trivial);
+ *   - the component is memo'd, so unrelated dashboard state changes don't
+ *     re-enter it at all. `stats` is a referentially stable piece of state
+ *     (set once from the usage fetch), so this bails out on every keystroke.
+ * Keep both. Doing this work inline again will regress the dashboard.
+ */
+const UsageCalendar = memo(function UsageCalendar({
+  stats,
+}: {
+  stats: AccountUsageStats | null;
+}) {
+  const { cells, monthLabels, summary } = useMemo(() => {
+    const today = new Date();
+    today.setHours(12, 0, 0, 0);
 
-  const byDate = new Map((stats?.daily ?? []).map((day) => [day.date, day]));
-  const rawDays = Array.from({ length: 53 * 7 }, (_, index) => {
-    const date = new Date(calendarStart);
-    date.setDate(calendarStart.getDate() + index);
-    const key = usageCalendarDayKey(date);
-    const usage = byDate.get(key);
-    return {
-      date,
-      key,
-      tokens: usage?.tokens ?? 0,
-      costUsd: usage?.cost_usd ?? 0,
-      isFuture: date > today,
+    const currentWeekStart = new Date(today);
+    currentWeekStart.setDate(today.getDate() - today.getDay());
+
+    const calendarStart = new Date(currentWeekStart);
+    calendarStart.setDate(currentWeekStart.getDate() - 52 * 7);
+
+    const byDate = new Map((stats?.daily ?? []).map((day) => [day.date, day]));
+    const rawDays = Array.from({ length: 53 * 7 }, (_, index) => {
+      const date = new Date(calendarStart);
+      date.setDate(calendarStart.getDate() + index);
+      const key = usageCalendarDayKey(date);
+      const usage = byDate.get(key);
+      return {
+        date,
+        key,
+        tokens: usage?.tokens ?? 0,
+        costUsd: usage?.cost_usd ?? 0,
+        isFuture: date > today,
+      };
+    });
+
+    const visibleDays = rawDays.filter((day) => !day.isFuture);
+    const positiveTokens = visibleDays
+      .map((day) => day.tokens)
+      .filter((tokens) => tokens > 0)
+      .sort((a, b) => a - b);
+    const thresholdAt = (percentile: number): number =>
+      positiveTokens[Math.floor((positiveTokens.length - 1) * percentile)] ?? 0;
+    const thresholds = [thresholdAt(0.25), thresholdAt(0.5), thresholdAt(0.75)];
+    const levelFor = (tokens: number): UsageCalendarLevel => {
+      if (tokens <= 0 || positiveTokens.length === 0) return 0;
+      if (positiveTokens[0] === positiveTokens[positiveTokens.length - 1]) return 4;
+      if (tokens <= thresholds[0]) return 1;
+      if (tokens <= thresholds[1]) return 2;
+      if (tokens <= thresholds[2]) return 3;
+      return 4;
     };
-  });
+    const totalTokens = visibleDays.reduce((sum, day) => sum + day.tokens, 0);
+    const activeDays = visibleDays.filter((day) => day.tokens > 0).length;
 
-  const visibleDays = rawDays.filter((day) => !day.isFuture);
-  const positiveTokens = visibleDays
-    .map((day) => day.tokens)
-    .filter((tokens) => tokens > 0)
-    .sort((a, b) => a - b);
-  const thresholdAt = (percentile: number): number =>
-    positiveTokens[Math.floor((positiveTokens.length - 1) * percentile)] ?? 0;
-  const thresholds = [thresholdAt(0.25), thresholdAt(0.5), thresholdAt(0.75)];
-  const levelFor = (tokens: number): UsageCalendarLevel => {
-    if (tokens <= 0 || positiveTokens.length === 0) return 0;
-    if (positiveTokens[0] === positiveTokens[positiveTokens.length - 1]) return 4;
-    if (tokens <= thresholds[0]) return 1;
-    if (tokens <= thresholds[1]) return 2;
-    if (tokens <= thresholds[2]) return 3;
-    return 4;
-  };
-  const totalTokens = visibleDays.reduce((sum, day) => sum + day.tokens, 0);
-  const activeDays = visibleDays.filter((day) => day.tokens > 0).length;
-  const weeks = Array.from({ length: 53 }, (_, week) =>
-    rawDays.slice(week * 7, week * 7 + 7),
-  );
-  const monthLabels = weeks.flatMap((week, weekIndex) => {
-    const firstOfMonth = week.find((day) => day.date.getDate() === 1 && !day.isFuture);
-    if (weekIndex !== 0 && !firstOfMonth) return [];
-    const labelDate = firstOfMonth?.date ?? week[0].date;
-    return [{
-      week: weekIndex + 1,
-      label: labelDate.toLocaleDateString(undefined, { month: "short" }),
-    }];
-  });
-  const summary = stats === null
-    ? "Loading usage activity"
-    : activeDays === 0
-      ? "No recorded usage in the last 12 months"
-      : `${formatTokens(totalTokens)} tokens across ${activeDays} active day${activeDays === 1 ? "" : "s"} in the last 12 months`;
+    // Precompute what each cell renders, so the JSX map is a plain projection.
+    // Future cells are inert (no tooltip), so they skip formatting entirely.
+    const cells: UsageCalendarCell[] = rawDays.map((day) => {
+      if (day.isFuture) return { key: day.key, level: 0, isFuture: true };
+      const dateLabel = USAGE_DAY_FORMAT.format(day.date);
+      return {
+        key: day.key,
+        level: levelFor(day.tokens),
+        isFuture: false,
+        title:
+          day.tokens > 0
+            ? `${formatTokens(day.tokens)} tokens on ${dateLabel} · ${formatUsd(day.costUsd)} estimated`
+            : `No usage on ${dateLabel}`,
+      };
+    });
+
+    const weeks = Array.from({ length: 53 }, (_, week) =>
+      rawDays.slice(week * 7, week * 7 + 7),
+    );
+    const monthLabels = weeks.flatMap((week, weekIndex) => {
+      const firstOfMonth = week.find((day) => day.date.getDate() === 1 && !day.isFuture);
+      if (weekIndex !== 0 && !firstOfMonth) return [];
+      const labelDate = firstOfMonth?.date ?? week[0].date;
+      return [{ week: weekIndex + 1, label: USAGE_MONTH_FORMAT.format(labelDate) }];
+    });
+
+    const summary = stats === null
+      ? "Loading usage activity"
+      : activeDays === 0
+        ? "No recorded usage in the last 12 months"
+        : `${formatTokens(totalTokens)} tokens across ${activeDays} active day${activeDays === 1 ? "" : "s"} in the last 12 months`;
+
+    return { cells, monthLabels, summary };
+  }, [stats]);
 
   return (
     <div className="usage-calendar-card">
@@ -2062,25 +2123,14 @@ function UsageCalendar({ stats }: { stats: AccountUsageStats | null }) {
             <span style={{ gridRow: 6 }}>Fri</span>
           </div>
           <div className="usage-calendar-grid" role="img" aria-label={summary}>
-            {rawDays.map((day) => {
-              const level = levelFor(day.tokens);
-              const dateLabel = day.date.toLocaleDateString(undefined, {
-                day: "numeric",
-                month: "long",
-                year: "numeric",
-              });
-              const title = day.tokens > 0
-                ? `${formatTokens(day.tokens)} tokens on ${dateLabel} · ${formatUsd(day.costUsd)} estimated`
-                : `No usage on ${dateLabel}`;
-              return (
-                <span
-                  key={day.key}
-                  className={`usage-calendar-cell level-${level}${day.isFuture ? " future" : ""}`}
-                  title={day.isFuture ? undefined : title}
-                  aria-hidden="true"
-                />
-              );
-            })}
+            {cells.map((cell) => (
+              <span
+                key={cell.key}
+                className={`usage-calendar-cell level-${cell.level}${cell.isFuture ? " future" : ""}`}
+                title={cell.title}
+                aria-hidden="true"
+              />
+            ))}
           </div>
         </div>
       </div>
@@ -2094,7 +2144,7 @@ function UsageCalendar({ stats }: { stats: AccountUsageStats | null }) {
       </div>
     </div>
   );
-}
+});
 
 /**
  * The dashboard's "Your usage" block: headline stat cards (tokens, est. cost,
@@ -2102,7 +2152,7 @@ function UsageCalendar({ stats }: { stats: AccountUsageStats | null }) {
  * models" breakdown. Powered by the account-wide usage rollup; renders zeros
  * gracefully while the stats load or before any agent turns have been recorded.
  */
-function DashboardWidgets({
+const DashboardWidgets = memo(function DashboardWidgets({
   stats,
   projectCount,
 }: {
@@ -2185,7 +2235,7 @@ function DashboardWidgets({
       )}
     </section>
   );
-}
+});
 
 /**
  * The ⋯ project-actions dropdown (Rename / Change icon / Delete). Shared by the
@@ -2666,7 +2716,7 @@ function DeleteDialog({
     >
       <p className="proj-dialog-warn">
         This permanently removes the project, its files, its chat history,
-        and any deployments tracked by Uniqus. The action cannot be undone.
+        and any deployments tracked by Gate 15. The action cannot be undone.
       </p>
       <input
         value={confirmName}

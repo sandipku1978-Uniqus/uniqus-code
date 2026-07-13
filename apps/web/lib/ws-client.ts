@@ -1,6 +1,6 @@
 "use client";
 
-import type { ClientEvent, ServerEvent } from "@uniqus/api-types";
+import type { ClientEvent, ServerEvent } from "@gate15/api-types";
 import { useStore, flushAllPendingEdits } from "./store";
 import {
   clearRunCapability as clearStoredRunCapability,

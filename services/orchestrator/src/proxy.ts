@@ -26,7 +26,7 @@ function normalizeInnerPath(rest: string | undefined): string {
   if (!rest) return "/";
   return rest.startsWith("/") ? rest : `/${rest}`;
 }
-const PREVIEW_SHARE_COOKIE = "uniqus_preview_share";
+const PREVIEW_SHARE_COOKIE = "gate15_preview_share";
 
 /**
  * Cookie name used to pin the iframe to its preview server. Set whenever we
@@ -36,7 +36,18 @@ const PREVIEW_SHARE_COOKIE = "uniqus_preview_share";
  * paths like `/about`, dropping the `/preview/{id}/` prefix from both the
  * URL and the Referer; the cookie keeps the routing sticky.
  */
-const PREVIEW_COOKIE = "uniqus_preview";
+const PREVIEW_COOKIE = "gate15_preview";
+
+/**
+ * Pre-rebrand cookie names. Still ACCEPTED on the way in (never written) for one
+ * deploy: a preview iframe that loaded before this ships is holding the old
+ * cookie with an hour of Max-Age left, and it soft-navigates to bare paths where
+ * the cookie is the ONLY thing that can resolve the server. Dropping the alias
+ * would dead-end every in-flight preview until the user hard-reloaded. They age
+ * out on their own (1h Max-Age) and can be deleted a deploy later.
+ */
+const LEGACY_PREVIEW_COOKIE = "uniqus_preview";
+const LEGACY_PREVIEW_SHARE_COOKIE = "uniqus_preview_share";
 
 // Browser credentials belong to the workspace/API origin and must never reach
 // user-controlled preview code. Preview-app cookies are namespaced by server
@@ -51,9 +62,24 @@ const NEVER_FORWARD_HEADERS = new Set([
   "x-real-ip",
 ]);
 
+/** Per-server namespace for cookies the sandboxed app itself sets. */
 function appCookiePrefix(serverId: string): string {
-  const scope = createHash("sha256").update(serverId).digest("hex").slice(0, 16);
-  return `__uniqus_app_${scope}_`;
+  return `__gate15_app_${cookieScope(serverId)}_`;
+}
+
+/**
+ * Pre-rebrand namespace. Read-only alias (we only ever WRITE the gate15 prefix):
+ * a preview app the user was logged into before this shipped has its session
+ * cookie stored under the old prefix, and refusing to unwrap it would silently
+ * log them out of their own preview. Same one-deploy window as the pin cookies.
+ */
+function legacyAppCookiePrefix(serverId: string): string {
+  return `__uniqus_app_${cookieScope(serverId)}_`;
+}
+
+/** Stable per-server scope hash shared by both prefixes. */
+function cookieScope(serverId: string): string {
+  return createHash("sha256").update(serverId).digest("hex").slice(0, 16);
 }
 
 /** Return only cookies previously set by this exact preview server. */
@@ -63,16 +89,29 @@ export function previewAppCookieHeader(
 ): string | undefined {
   if (!cookieHeader) return undefined;
   const prefix = appCookiePrefix(serverId);
-  const cookies: string[] = [];
+  const legacyPrefix = legacyAppCookiePrefix(serverId);
+  // Keyed by the UNWRAPPED name so a browser holding both the old and the new
+  // namespace for the same app cookie forwards it once, not twice — and the
+  // current (gate15) one wins.
+  const cookies = new Map<string, string>();
   for (const raw of cookieHeader.split(";")) {
     const part = raw.trim();
     const eq = part.indexOf("=");
-    if (eq <= prefix.length) continue;
+    if (eq < 0) continue;
     const name = part.slice(0, eq);
-    if (!name.startsWith(prefix)) continue;
-    cookies.push(`${name.slice(prefix.length)}=${part.slice(eq + 1)}`);
+    const value = part.slice(eq + 1);
+    if (name.length > prefix.length && name.startsWith(prefix)) {
+      cookies.set(name.slice(prefix.length), value);
+    } else if (
+      name.length > legacyPrefix.length &&
+      name.startsWith(legacyPrefix) &&
+      !cookies.has(name.slice(legacyPrefix.length))
+    ) {
+      cookies.set(name.slice(legacyPrefix.length), value);
+    }
   }
-  return cookies.length ? cookies.join("; ") : undefined;
+  if (!cookies.size) return undefined;
+  return [...cookies].map(([name, value]) => `${name}=${value}`).join("; ");
 }
 
 /** Scope an upstream app cookie to this preview server and never a parent domain. */
@@ -119,8 +158,21 @@ function readCookie(headers: IncomingHttpHeaders, cookieName: string): string | 
   return null;
 }
 
+/** First of `names` present in the Cookie header — current name wins over legacy. */
+function readCookieAny(headers: IncomingHttpHeaders, ...names: string[]): string | null {
+  for (const name of names) {
+    const value = readCookie(headers, name);
+    if (value) return value;
+  }
+  return null;
+}
+
 function readPreviewCookie(headers: IncomingHttpHeaders): string | null {
-  return readCookie(headers, PREVIEW_COOKIE);
+  return readCookieAny(headers, PREVIEW_COOKIE, LEGACY_PREVIEW_COOKIE);
+}
+
+function readPreviewShareCookie(headers: IncomingHttpHeaders): string | null {
+  return readCookieAny(headers, PREVIEW_SHARE_COOKIE, LEGACY_PREVIEW_SHARE_COOKIE);
 }
 
 function buildPreviewCookie(serverId: string): string {
@@ -149,7 +201,8 @@ function buildShareCookie(token: string): string {
  * 2. Otherwise, parse `Referer` for `/preview/{serverId}/`. Used for
  *    absolute-path asset requests like `/_next/static/main.js` that the
  *    iframe app emits while the URL bar still shows the preview path.
- * 3. Fall back to the `uniqus_preview` cookie. Catches the cases that 1 and 2
+ * 3. Fall back to the `gate15_preview` cookie (or its pre-rebrand alias, still
+ *    accepted for one deploy). Catches the cases that 1 and 2
  *    miss: client-side soft navigation (Next.js / Vite `pushState` strips
  *    the `/preview/{id}/` prefix from the URL AND the Referer), and
  *    WebSocket upgrades for HMR (browsers don't send Referer on WS).
@@ -224,7 +277,7 @@ export function resolveTarget(
 
   // Shared sessions are pinned to the TOKEN cookie, so revocation/expiry holds
   // even after client-side soft navigation strips the share path (C3).
-  const shareCookie = readCookie(headers, PREVIEW_SHARE_COOKIE);
+  const shareCookie = readPreviewShareCookie(headers);
   if (shareCookie) {
     const serverId = resolveShareToken(shareCookie);
     if (serverId) {
@@ -261,7 +314,15 @@ export function resolveTarget(
  */
 const PREVIEW_WARMUP_BUDGET_MS = 120_000;
 /** Internal query param carrying the warmup start time across reloads. */
-const WARM_PARAM = "__uniqus_warm";
+const WARM_PARAM = "__gate15_warm";
+/**
+ * Pre-rebrand name. Only ever READ (we write WARM_PARAM): a warming page served
+ * by the previous build is still polling a URL that carries the old param, and
+ * we must (a) keep honouring its start timestamp so the 2-minute budget isn't
+ * silently restarted, and (b) keep stripping it so the dev server never sees an
+ * internal param. Removable a deploy later.
+ */
+const LEGACY_WARM_PARAM = "__uniqus_warm";
 
 /** A GET for a top-level document (vs an asset / XHR / API call). */
 function isDocumentNavigation(req: IncomingMessage): boolean {
@@ -273,17 +334,23 @@ function isDocumentNavigation(req: IncomingMessage): boolean {
 export function readWarmStart(url: string): number | null {
   const qi = url.indexOf("?");
   if (qi < 0) return null;
-  const v = new URLSearchParams(url.slice(qi + 1)).get(WARM_PARAM);
+  const params = new URLSearchParams(url.slice(qi + 1));
+  const v = params.get(WARM_PARAM) ?? params.get(LEGACY_WARM_PARAM);
   if (!v) return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
 
-/** Same URL with WARM_PARAM set to `start` — the page reloads to this. */
+/**
+ * Same URL with WARM_PARAM set to `start` — the page reloads to this. Any
+ * pre-rebrand param riding in from an older warming page is dropped, so the URL
+ * never accumulates both.
+ */
 export function withWarmParam(url: string, start: number): string {
   const qi = url.indexOf("?");
   const path = qi < 0 ? url : url.slice(0, qi);
   const params = new URLSearchParams(qi < 0 ? "" : url.slice(qi + 1));
+  params.delete(LEGACY_WARM_PARAM);
   params.set(WARM_PARAM, String(start));
   return `${path}?${params.toString()}`;
 }
@@ -293,8 +360,9 @@ export function stripWarmParam(innerPath: string): string {
   const qi = innerPath.indexOf("?");
   if (qi < 0) return innerPath;
   const params = new URLSearchParams(innerPath.slice(qi + 1));
-  if (!params.has(WARM_PARAM)) return innerPath;
+  if (!params.has(WARM_PARAM) && !params.has(LEGACY_WARM_PARAM)) return innerPath;
   params.delete(WARM_PARAM);
+  params.delete(LEGACY_WARM_PARAM);
   const rest = params.toString();
   return rest ? `${innerPath.slice(0, qi)}?${rest}` : innerPath.slice(0, qi);
 }
@@ -415,7 +483,7 @@ export function proxyHttp(
         const original = Buffer.concat(chunks).toString("utf-8");
         // For a share-token request, inject the TOKEN (not the real serverId) as
         // the page's postMessage discriminator. The injected id is only used to
-        // tag uniqus:* messages to the parent window; embedding the real serverId
+        // tag gate15:* messages to the parent window; embedding the real serverId
         // let a recipient read it from page source and hit the unauthenticated
         // bare /preview/<serverId>/ tier, surviving share DELETE/expiry (C-14).
         const injected = injectPreviewScripts(
@@ -467,7 +535,7 @@ export function proxyHttp(
           // terminal error page — reload once to show it. This is what lets
           // the page poll invisibly instead of hard-reloading the iframe
           // every 2s (the "screen keeps flashing" complaint).
-          "X-Uniqus-Warming": "1",
+          "X-Gate15-Warming": "1",
         });
         res.end(previewWarmingPage(reloadUrl, start));
         return;
@@ -478,7 +546,7 @@ export function proxyHttp(
     // (C-102). Owners (no shareToken) still get the detailed message.
     const detail = target.shareToken
       ? "It may be offline. Please try again later."
-      : `Could not connect to the dev server: ${err.message}. It may have crashed or timed out. Ask the Uniqus agent to check the server logs and restart.`;
+      : `Could not connect to the dev server: ${err.message}. It may have crashed or timed out. Ask the Gate 15 agent to check the server logs and restart.`;
     const html = previewErrorPage(502, "Oh no! The server seems to be down", detail);
     res.writeHead(502, { "Content-Type": "text/html" });
     res.end(html);
@@ -662,8 +730,8 @@ export function injectPreviewScripts(
  */
 function apiRewriteScript(basePrefix: string): string {
   return `<script>(function(){
-  if (window.__uniqusApiRewriteInstalled) return;
-  window.__uniqusApiRewriteInstalled = true;
+  if (window.__gate15ApiRewriteInstalled) return;
+  window.__gate15ApiRewriteInstalled = true;
   var base = ${JSON.stringify(basePrefix).replace(/</g, "\\u003c")};
   function rw(u) {
     if (typeof u !== "string" || u.length === 0) return u;
@@ -701,12 +769,14 @@ function apiRewriteScript(basePrefix: string): string {
 /**
  * Wraps history.pushState/replaceState and listens for popstate, then posts the
  * current path to window.parent. The workspace's PreviewPanel listens for
- * `uniqus:preview-nav` messages and updates the URL bar.
+ * `gate15:preview-nav` messages and updates the URL bar. (PreviewPanel also
+ * still accepts the pre-rebrand `uniqus:preview-nav` name, so a page injected
+ * by an older orchestrator keeps driving the URL bar during a rollout.)
  */
 function navReporterScript(serverId: string): string {
   return `<script>(function(){
-  if (window.__uniqusNavReporterInstalled) return;
-  window.__uniqusNavReporterInstalled = true;
+  if (window.__gate15NavReporterInstalled) return;
+  window.__gate15NavReporterInstalled = true;
   var serverId = ${JSON.stringify(serverId)};
   // Report the path RELATIVE to the proxy base. The proxied app is served under
   // /preview/<serverId>/ (or /preview/share/<token>/ for a share recipient), so
@@ -723,7 +793,7 @@ function navReporterScript(serverId: string): string {
   function post() {
     try {
       window.parent.postMessage({
-        type: "uniqus:preview-nav",
+        type: "gate15:preview-nav",
         server_id: serverId,
         path: appPath(),
       }, "*");
@@ -748,13 +818,16 @@ function navReporterScript(serverId: string): string {
 
 /**
  * Element picker. When the parent turns pick-mode ON (by posting a
- * `uniqus:pick-mode` message into the iframe), it highlights whatever element
+ * `gate15:picker` message into the iframe), it highlights whatever element
  * the cursor is over and, on the next click, posts the element descriptor to
  * the parent as
- *   { type:"uniqus:element", server_id, selector, tag, classes, id, rect, text }
+ *   { type:"gate15:element", server_id, selector, tag, classes, id, rect, text }
  * then turns itself off. The shared contract is that outbound message shape; the
- * inbound control message is accepted liberally (any of a few `uniqus:` toggle
- * names) so it interoperates regardless of which name the host UI sends.
+ * inbound control message is accepted liberally (any of a few toggle names, in
+ * BOTH the `gate15:` and the pre-rebrand `uniqus:` namespace) so it interoperates
+ * regardless of which name the host UI sends — the web app deploys separately
+ * from this service, so during a rollout an older page may still be posting the
+ * legacy name at a freshly-injected script.
  *
  * While picking it swallows mousedown/up/click in the capture phase so the
  * preview app's own handlers don't fire on the selection click, and Escape
@@ -763,26 +836,27 @@ function navReporterScript(serverId: string): string {
  */
 function elementPickerScript(serverId: string): string {
   return `<script>(function(){
-  if (window.__uniqusElementPickerInstalled) return;
-  window.__uniqusElementPickerInstalled = true;
+  if (window.__gate15ElementPickerInstalled) return;
+  window.__gate15ElementPickerInstalled = true;
   var serverId = ${JSON.stringify(serverId)};
   var active = false, hovered = null, box = null, label = null;
 
   function ensureOverlay() {
     if (box) return;
     box = document.createElement("div");
-    box.setAttribute("data-uniqus-picker", "1");
+    box.setAttribute("data-gate15-picker", "1");
     var s = box.style;
     s.position = "fixed"; s.zIndex = "2147483646"; s.pointerEvents = "none";
-    s.border = "2px solid #d4439a"; s.background = "rgba(212,67,154,0.12)";
+    s.border = "2px solid #FF6A00"; s.background = "rgba(255,106,0,0.12)";
     s.borderRadius = "2px"; s.boxSizing = "border-box"; s.display = "none";
     s.transition = "left 40ms ease-out, top 40ms ease-out, width 40ms ease-out, height 40ms ease-out";
     label = document.createElement("div");
-    label.setAttribute("data-uniqus-picker", "1");
+    label.setAttribute("data-gate15-picker", "1");
     var ls = label.style;
     ls.position = "fixed"; ls.zIndex = "2147483647"; ls.pointerEvents = "none";
-    ls.background = "#d4439a"; ls.color = "#fff"; ls.display = "none";
-    ls.font = "11px/1.4 ui-monospace,Menlo,Consolas,monospace";
+    // Hazard-signage ink: near-black on ember (white on ember fails AA).
+    ls.background = "#FF6A00"; ls.color = "#140D07"; ls.display = "none";
+    ls.font = "600 11px/1.4 ui-monospace,Menlo,Consolas,monospace";
     ls.padding = "2px 6px"; ls.borderRadius = "3px"; ls.whiteSpace = "nowrap";
     ls.maxWidth = "90vw"; ls.overflow = "hidden"; ls.textOverflow = "ellipsis";
     var root = document.body || document.documentElement;
@@ -858,7 +932,7 @@ function elementPickerScript(serverId: string): string {
     var text = (el.innerText || el.textContent || "").replace(/\\s+/g, " ").trim();
     if (text.length > 300) text = text.slice(0, 300);
     return {
-      type: "uniqus:element", server_id: serverId,
+      type: "gate15:element", server_id: serverId,
       selector: selectorFor(el), tag: el.tagName.toLowerCase(),
       id: el.id || null, classes: classes,
       rect: { x: Math.round(r.left), y: Math.round(r.top),
@@ -901,7 +975,7 @@ function elementPickerScript(serverId: string): string {
   function onKey(e) {
     if (active && (e.key === "Escape" || e.keyCode === 27)) {
       setActive(false);
-      try { window.parent.postMessage({ type: "uniqus:pick-cancel", server_id: serverId }, "*"); } catch (err) {}
+      try { window.parent.postMessage({ type: "gate15:pick-cancel", server_id: serverId }, "*"); } catch (err) {}
     }
   }
   function setActive(on) {
@@ -910,17 +984,20 @@ function elementPickerScript(serverId: string): string {
     active = on;
     if (on) { ensureOverlay(); document.documentElement.style.cursor = "crosshair"; }
     else { removeOverlay(); hovered = null; document.documentElement.style.cursor = ""; }
-    try { window.parent.postMessage({ type: "uniqus:pick-state", server_id: serverId, active: active }, "*"); } catch (err) {}
+    try { window.parent.postMessage({ type: "gate15:pick-state", server_id: serverId, active: active }, "*"); } catch (err) {}
   }
   window.addEventListener("message", function(e) {
     var d = e.data;
     if (!d || typeof d !== "object") return;
     var t = d.type;
-    if (t === "uniqus:pick-mode" || t === "uniqus:select-mode" || t === "uniqus:picker") {
+    // Accept both namespaces: the web app (Vercel) and this service (Hetzner)
+    // deploy separately, so an older page can still be posting "uniqus:*".
+    if (t === "gate15:picker" || t === "gate15:pick-mode" || t === "gate15:select-mode" ||
+        t === "uniqus:picker" || t === "uniqus:pick-mode" || t === "uniqus:select-mode") {
       var want = (d.enabled != null ? d.enabled : (d.active != null ? d.active : d.value));
       setActive(!!want);
-    } else if (t === "uniqus:pick-start") { setActive(true); }
-    else if (t === "uniqus:pick-stop") { setActive(false); }
+    } else if (t === "gate15:pick-start" || t === "uniqus:pick-start") { setActive(true); }
+    else if (t === "gate15:pick-stop" || t === "uniqus:pick-stop") { setActive(false); }
   });
   document.addEventListener("mousemove", onMove, true);
   document.addEventListener("click", onClick, true);
@@ -934,7 +1011,7 @@ function elementPickerScript(serverId: string): string {
 /**
  * Runtime-error reporter. Hooks window.onerror, unhandledrejection, and
  * console.error inside the preview app and posts each one to window.parent as
- *   { type:"uniqus:runtime-error", server_id, kind, message, stack, source, line, col, path }
+ *   { type:"gate15:runtime-error", server_id, kind, message, stack, source, line, col, path }
  * so the workspace can surface errors the agent otherwise can NEVER see (they
  * happen in the user's browser, not the dev-server logs). Capped per page load
  * so a render loop that logs on every frame can't flood postMessage; wraps
@@ -943,8 +1020,8 @@ function elementPickerScript(serverId: string): string {
  */
 function errorReporterScript(serverId: string): string {
   return `<script>(function(){
-  if (window.__uniqusErrorReporterInstalled) return;
-  window.__uniqusErrorReporterInstalled = true;
+  if (window.__gate15ErrorReporterInstalled) return;
+  window.__gate15ErrorReporterInstalled = true;
   var serverId = ${JSON.stringify(serverId)};
   // Separate budgets so a chatty console.* logger (React dev warnings, a render
   // loop) can't starve out genuine uncaught errors / rejections, which are the
@@ -956,7 +1033,7 @@ function errorReporterScript(serverId: string): string {
     else { if (sent >= MAX) return; sent++; }
     try {
       window.parent.postMessage({
-        type: "uniqus:runtime-error",
+        type: "gate15:runtime-error",
         server_id: serverId,
         kind: kind,
         message: clip(message, 1000),
@@ -1028,7 +1105,7 @@ function escapeHtml(s: string): string {
  * binding/compiling (see PREVIEW_WARMUP_BUDGET_MS). Instead of hard-reloading
  * the iframe every ~2s (a full navigation = white flash + spinner reset each
  * time — the "screen keeps flashing" complaint), it POLLS `reloadUrl` with an
- * in-page fetch: a response carrying the X-Uniqus-Warming marker means "still
+ * in-page fetch: a response carrying the X-Gate15-Warming marker means "still
  * warming — update the progress bar in place and poll again"; a response
  * WITHOUT it is the real app (or, past the budget, the terminal error page) —
  * navigate exactly once to show it. The copy no longer claims "first compile":
@@ -1040,21 +1117,26 @@ function escapeHtml(s: string): string {
  */
 export function previewWarmingPage(reloadUrl: string, startMs: number): string {
   const safeUrl = JSON.stringify(reloadUrl).replace(/</g, "\\u003c");
+  // Emit the param NAME from the constant rather than hardcoding it in the
+  // inline script — the two drifted apart before, leaving the "Try again" button
+  // rewriting a param that no longer existed (so it re-served the same expired
+  // start time and gave up instantly). Both are safe regex/JS literals ([A-Za-z_]).
+  const warmParam = JSON.stringify(WARM_PARAM);
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Starting preview…</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,"Segoe UI",Roboto,sans-serif;background:#0e0e14;color:#e4e2dc;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
+body{font-family:Archivo,-apple-system,"Segoe UI",Roboto,sans-serif;background:#0A0B0C;color:#EDEBE7;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
 .card{text-align:center;max-width:360px}
-.spin{width:36px;height:36px;margin:0 auto 18px;border:3px solid #2a2a36;border-top-color:#a78bfa;border-radius:50%;animation:s .8s linear infinite}
+.spin{width:36px;height:36px;margin:0 auto 18px;border:3px solid #2A2E33;border-top-color:#FF6A00;border-radius:50%;animation:s .8s linear infinite}
 @keyframes s{to{transform:rotate(360deg)}}
-h1{font-size:16px;margin-bottom:8px;color:#e4e2dc}
-p{font-size:13px;color:#9ca3af;line-height:1.6}
-.track{height:4px;background:#1a1a24;border-radius:2px;margin-top:18px;overflow:hidden}
-.bar{height:100%;width:0;background:#a78bfa;transition:width .5s linear}
+h1{font-size:16px;margin-bottom:8px;color:#EDEBE7;letter-spacing:-0.02em}
+p{font-size:13px;color:#9A9793;line-height:1.6}
+.track{height:4px;background:#16181B;border-radius:2px;margin-top:18px;overflow:hidden}
+.bar{height:100%;width:0;background:linear-gradient(90deg,#FF5A1F,#FFC53D);transition:width .5s linear}
 #giveup{display:none}
-button{margin-top:14px;background:#a78bfa;color:#0e0e14;border:0;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer}
+button{margin-top:14px;background:#FF6A00;color:#140D07;border:0;border-radius:6px;padding:8px 16px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;cursor:pointer}
 </style></head><body>
 <div class="card">
 <div id="spin" class="spin"></div>
@@ -1067,7 +1149,7 @@ button{margin-top:14px;background:#a78bfa;color:#0e0e14;border:0;border-radius:6
 </div>
 </div>
 <script>(function(){
-  var url=${safeUrl}, start=${startMs}, BUDGET=${PREVIEW_WARMUP_BUDGET_MS};
+  var url=${safeUrl}, start=${startMs}, BUDGET=${PREVIEW_WARMUP_BUDGET_MS}, WP=${warmParam};
   var bar=document.getElementById('bar');
   function giveUp(){
     document.getElementById('spin').style.display='none';
@@ -1080,13 +1162,13 @@ button{margin-top:14px;background:#a78bfa;color:#0e0e14;border:0;border-radius:6
     if(bar) bar.style.width=Math.min(98,(elapsed/BUDGET)*100)+'%';
     if(elapsed>=BUDGET){ giveUp(); return; }
     fetch(url,{cache:'no-store',headers:{accept:'text/html'}}).then(function(r){
-      if(r.headers.get('x-uniqus-warming')){ setTimeout(tick,2000); return; }
+      if(r.headers.get('x-gate15-warming')||r.headers.get('x-uniqus-warming')){ setTimeout(tick,2000); return; }
       location.replace(url);
     }).catch(function(){ setTimeout(tick,2000); });
   }
   setTimeout(tick,1500);
   var b=document.getElementById('retry');
-  if(b) b.onclick=function(){ location.replace(url.replace(/__uniqus_warm=\\d+/, '__uniqus_warm='+Date.now())); };
+  if(b) b.onclick=function(){ location.replace(url.replace(new RegExp(WP+"=\\\\d+"), WP+"="+Date.now())); };
 })();</script>
 </body></html>`;
 }
@@ -1103,14 +1185,14 @@ export function previewErrorPage(status: number, title: string, detail: string):
 <title>${safeTitle}</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,"Segoe UI",Roboto,sans-serif;background:#0e0e14;color:#e4e2dc;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
+body{font-family:Archivo,-apple-system,"Segoe UI",Roboto,sans-serif;background:#0A0B0C;color:#EDEBE7;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
 .card{text-align:center;max-width:420px}
-.code{font-size:64px;font-weight:700;color:#a78bfa;opacity:0.3;line-height:1}
-h1{font-size:18px;margin:12px 0 8px;color:#e4e2dc}
-p{font-size:13px;color:#9ca3af;line-height:1.6;margin-bottom:16px}
-a{color:#a78bfa;text-decoration:none;font-size:13px}
+.code{font-size:64px;font-weight:700;color:#FF6A00;opacity:0.35;line-height:1;font-variant-numeric:tabular-nums}
+h1{font-size:18px;margin:12px 0 8px;color:#EDEBE7;letter-spacing:-0.02em}
+p{font-size:13px;color:#9A9793;line-height:1.6;margin-bottom:16px}
+a{color:#FF8124;text-decoration:none;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.1em}
 a:hover{text-decoration:underline}
-.detail{background:#16161e;border:1px solid #2a2a36;border-radius:6px;padding:10px 14px;font-family:monospace;font-size:11px;color:#9ca3af;margin-bottom:16px;text-align:left;word-break:break-all;max-height:120px;overflow:auto}
+.detail{background:#16181B;border:1px solid #2A2E33;border-radius:6px;padding:10px 14px;font-family:"JetBrains Mono",monospace;font-size:11px;color:#9A9793;margin-bottom:16px;text-align:left;word-break:break-all;max-height:120px;overflow:auto}
 </style></head><body>
 <div class="card">
 <div class="code">${status}</div>

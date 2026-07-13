@@ -5,7 +5,7 @@ import { useState } from "react";
 const TOPICS = ["Sales", "Support", "Security", "Partnerships", "Other"] as const;
 type Topic = (typeof TOPICS)[number];
 
-const CONTACT_EMAIL = "hello@uniqus.com";
+const CONTACT_EMAIL = "hello@gate15.dev";
 
 export default function ContactForm() {
   const [name, setName] = useState("");
@@ -135,7 +135,7 @@ export default function ContactForm() {
         is stored on our servers. Prefer to write directly? Email{" "}
         <a
           href={`mailto:${CONTACT_EMAIL}`}
-          style={{ color: "var(--brand-magenta)" }}
+          style={{ color: "var(--accent-text)" }}
         >
           {CONTACT_EMAIL}
         </a>

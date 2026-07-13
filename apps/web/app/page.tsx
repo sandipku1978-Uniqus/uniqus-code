@@ -73,7 +73,7 @@ export default async function MarketingPage() {
               signedIn={signedIn}
               ctaHref={ctaHref}
               ctaLabel={ctaHero}
-              placeholder="Ask Uniqus to build an internal tool that…"
+              placeholder="Ask Gate 15 to build an internal tool that…"
               suggestions={HERO_SUGGESTIONS}
             />
 
@@ -209,7 +209,7 @@ export default async function MarketingPage() {
             <span className="label-eyebrow">Trust and control</span>
             <h2>Fast does not have to mean reckless.</h2>
             <p className="sub">
-              Uniqus Code keeps the AI out in the open: it shows its plan before making
+              Gate 15 keeps the AI out in the open: it shows its plan before making
               changes, backs up its facts, keeps your private keys encrypted, saves
               restore points, and only publishes when you say so.
             </p>
@@ -233,7 +233,7 @@ export default async function MarketingPage() {
               signedIn={signedIn}
               ctaHref={ctaHref}
               ctaLabel={ctaHero}
-              placeholder="Ask Uniqus to create a production-ready workspace for my team..."
+              placeholder="Ask Gate 15 to create a production-ready workspace for my team..."
             />
             <p className="bottom-note">
               Free for solo projects. Team plans from $20/seat/month. Enterprise on request.
@@ -285,7 +285,7 @@ function FeatureArt({ kind }: { kind: string }) {
           <rect className="fa-panel-2" x="24" y="32" width="118" height="80" rx="16" />
           <path className="fa-panel-2" d="M44 108 L44 128 L66 110 Z" />
           <rect className="fa-line" x="42" y="54" width="82" height="8" rx="4" />
-          <rect className="fa-magenta" x="42" y="72" width="46" height="8" rx="4" />
+          <rect className="fa-ember" x="42" y="72" width="46" height="8" rx="4" />
           <rect className="fa-line-soft" x="94" y="72" width="30" height="8" rx="4" />
           <rect className="fa-panel" x="160" y="26" width="176" height="98" rx="14" />
           <rect className="fa-stroke" x="160" y="26" width="176" height="98" rx="14" />
@@ -293,12 +293,12 @@ function FeatureArt({ kind }: { kind: string }) {
           <circle className="fa-line" cx="174" cy="38" r="3" />
           <circle className="fa-line" cx="186" cy="38" r="3" />
           <circle className="fa-line" cx="198" cy="38" r="3" />
-          <rect className="fa-magenta" x="172" y="62" width="38" height="7" rx="3.5" />
+          <rect className="fa-ember" x="172" y="62" width="38" height="7" rx="3.5" />
           <rect className="fa-line" x="216" y="62" width="64" height="7" rx="3.5" />
-          <rect className="fa-purple-hi" x="184" y="78" width="50" height="7" rx="3.5" />
+          <rect className="fa-signal" x="184" y="78" width="50" height="7" rx="3.5" />
           <rect className="fa-line" x="240" y="78" width="40" height="7" rx="3.5" />
           <rect className="fa-line-soft" x="184" y="94" width="72" height="7" rx="3.5" />
-          <rect className="fa-magenta" x="172" y="110" width="30" height="7" rx="3.5" />
+          <rect className="fa-ember" x="172" y="110" width="30" height="7" rx="3.5" />
         </svg>
       );
 
@@ -325,7 +325,7 @@ function FeatureArt({ kind }: { kind: string }) {
           <rect className="fa-line-soft" x="188" y="98" width="74" height="9" rx="4.5" />
           <circle className="fa-panel-2" cx="300" cy="112" r="15" />
           <circle className="fa-stroke" cx="300" cy="112" r="15" />
-          <circle className="fa-magenta" cx="300" cy="112" r="6" />
+          <circle className="fa-ember" cx="300" cy="112" r="6" />
         </svg>
       );
 
@@ -338,11 +338,11 @@ function FeatureArt({ kind }: { kind: string }) {
           <circle className="fa-icon" cx="72" cy="48" r="8" />
           <line className="fa-icon" x1="78" y1="54" x2="86" y2="62" />
           <rect className="fa-line" x="98" y="44" width="130" height="8" rx="4" />
-          <rect className="fa-magenta" x="276" y="40" width="26" height="16" rx="8" />
+          <rect className="fa-ember" x="276" y="40" width="26" height="16" rx="8" />
           <circle className="fa-green" cx="64" cy="94" r="6" />
           <rect className="fa-line" x="80" y="90" width="150" height="8" rx="4" />
           <rect className="fa-line-soft" x="80" y="104" width="98" height="6" rx="3" />
-          <circle className="fa-purple-hi" cx="64" cy="124" r="6" />
+          <circle className="fa-signal" cx="64" cy="124" r="6" />
           <rect className="fa-line" x="80" y="120" width="126" height="8" rx="4" />
         </svg>
       );
@@ -351,13 +351,13 @@ function FeatureArt({ kind }: { kind: string }) {
     case "visual-customize":
       return (
         <svg {...svgProps}>
-          <rect className="fa-magenta" x="67" y="26" width="46" height="46" rx="13" />
-          <rect className="fa-purple-hi" x="127" y="26" width="46" height="46" rx="13" />
-          <rect className="fa-purple" x="187" y="26" width="46" height="46" rx="13" />
+          <rect className="fa-ember" x="67" y="26" width="46" height="46" rx="13" />
+          <rect className="fa-signal" x="127" y="26" width="46" height="46" rx="13" />
+          <rect className="fa-rust" x="187" y="26" width="46" height="46" rx="13" />
           <rect className="fa-green" x="247" y="26" width="46" height="46" rx="13" />
           <rect className="fa-panel-2" x="67" y="90" width="112" height="26" rx="13" />
           <rect className="fa-stroke" x="67" y="90" width="112" height="26" rx="13" />
-          <circle className="fa-magenta" cx="84" cy="103" r="4.5" />
+          <circle className="fa-ember" cx="84" cy="103" r="4.5" />
           <rect className="fa-line" x="96" y="99" width="68" height="8" rx="4" />
           <rect className="fa-panel-2" x="187" y="90" width="106" height="26" rx="13" />
           <rect className="fa-stroke" x="187" y="90" width="106" height="26" rx="13" />
@@ -377,14 +377,16 @@ function FeatureArt({ kind }: { kind: string }) {
             </linearGradient>
           </defs>
           <rect fill="url(#faGradShip)" x="98" y="26" width="164" height="36" rx="18" />
+          {/* Ink sitting ON the brand gradient is near-black, never white
+              (brand spec §2 — white on ember/signal fails AA). */}
           <path
             className="fa-icon"
-            style={{ stroke: "rgba(255,255,255,0.95)" }}
+            style={{ stroke: "rgba(20,13,7,0.95)" }}
             d="M122 52 L122 38 M115 45 L122 38 L129 45"
           />
           <rect className="fa-on-grad" x="142" y="40" width="96" height="8" rx="4" />
-          <path className="fa-purple-hi" d="M58 99 L46 106 L58 113 Z" />
-          <path className="fa-purple-hi" d="M46 99 L34 106 L46 113 Z" />
+          <path className="fa-signal" d="M58 99 L46 106 L58 113 Z" />
+          <path className="fa-signal" d="M46 99 L34 106 L46 113 Z" />
           <rect className="fa-line-soft" x="70" y="104" width="220" height="4" rx="2" />
           <circle className="fa-stroke" cx="92" cy="106" r="11" />
           <circle className="fa-green" cx="92" cy="106" r="7" />
@@ -428,7 +430,7 @@ const MODELS = [
   {
     provider: "Auto",
     name: "Best AI for each task",
-    body: "Let Uniqus automatically pick the best AI for planning and building.",
+    body: "Let Gate 15 automatically pick the best AI for planning and building.",
     active: true,
   },
   {

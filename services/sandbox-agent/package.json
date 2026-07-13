@@ -1,5 +1,5 @@
 {
-  "name": "@uniqus/sandbox-agent",
+  "name": "@gate15/sandbox-agent",
   "private": true,
   "version": "0.0.0",
   "type": "module",

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { skillInvocationName } from "@uniqus/api-types";
+import { skillInvocationName } from "@gate15/api-types";
 import Modal from "./Modal";
 import { toast } from "@/lib/toast";
 import {
@@ -424,7 +424,7 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
             color: "var(--text-primary)",
           }}
         >
-          <span aria-hidden="true" style={{ color: "var(--brand-magenta)" }}>↳</span>
+          <span aria-hidden="true" style={{ color: "var(--accent-text)" }}>↳</span>
           How modern skills apply
         </div>
         <p style={{ margin: 0, fontSize: "var(--fs-sm)", color: "var(--text-dim)", lineHeight: 1.55 }}>
@@ -628,7 +628,7 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
             <>
               <div className="modal-status" role="status" aria-live="polite">
                 {editor.fromAI && dirty === false ? (
-                  <span style={{ color: "var(--brand-magenta)" }}>AI draft — review and tweak, then save</span>
+                  <span style={{ color: "var(--accent-text)" }}>AI draft — review and tweak, then save</span>
                 ) : (
                   <>
                     {editor.body.length.toLocaleString()} chars · max 64 KB{dirty ? " · unsaved" : ""}

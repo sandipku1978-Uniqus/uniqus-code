@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 export const metadata = {
-  title: "Enterprise — Uniqus Code",
+  title: "Enterprise — Gate 15",
   description:
     "Give your teams a governed, secure way to build with AI. SSO, audit logs, dedicated capacity, SLAs, and a security review — on private, isolated workspaces.",
 };
@@ -240,7 +240,7 @@ export default function EnterprisePage() {
             <span className="grad">your roadmap</span>.
           </h1>
           <p className="mk-lede">
-            Give every team a governed, secure way to build with AI. Uniqus Code
+            Give every team a governed, secure way to build with AI. Gate 15
             pairs Claude, GLM, GPT, and Gemini with private workspaces, plan-first
             guardrails, and the controls your security and IT teams expect.
           </p>
@@ -269,7 +269,7 @@ export default function EnterprisePage() {
           <span className="label-eyebrow">Built for IT &amp; security</span>
           <h2>Controls your organization can stand behind.</h2>
           <p>
-            Everything teams love about Uniqus Code, wrapped in the governance,
+            Everything teams love about Gate 15, wrapped in the governance,
             provisioning, and accountability an enterprise rollout needs.
           </p>
         </div>
@@ -347,7 +347,7 @@ export default function EnterprisePage() {
               lineHeight: 1.1,
             }}
           >
-            See Uniqus Code on your toughest internal project.
+            See Gate 15 on your toughest internal project.
           </h2>
           <p
             style={{

@@ -1,5 +1,5 @@
 import { db } from "./client.js";
-import type { SkillLibrary } from "@uniqus/api-types";
+import type { SkillLibrary } from "@gate15/api-types";
 import type { AttachedLibrarySkill } from "../agent/skills.js";
 
 /**

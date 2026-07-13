@@ -4,7 +4,7 @@ import type { GroundingMetadata } from "@google/genai";
 import { DEFAULT_VISION_BRIDGE_SYSTEM } from "./types.js";
 import { endIndexOfSpan, normalizeCitations } from "../citations.js";
 import type Anthropic from "@anthropic-ai/sdk";
-import type { Citation, ThinkingEffort } from "@uniqus/api-types";
+import type { Citation, ThinkingEffort } from "@gate15/api-types";
 import type {
   BillableToolUsage,
   ForcedToolParams,

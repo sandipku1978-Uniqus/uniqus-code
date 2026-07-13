@@ -1,9 +1,9 @@
 import Link from "next/link";
 
 export const metadata = {
-  title: "AI models — Uniqus Code",
+  title: "AI models — Gate 15",
   description:
-    "Pick the AI you trust for each step — Claude, GLM, GPT, or Gemini — or stay on Auto and let Uniqus route planning and building to the best model for the job.",
+    "Pick the AI you trust for each step — Claude, GLM, GPT, or Gemini — or stay on Auto and let Gate 15 route planning and building to the best model for the job.",
 };
 
 type Icon = "auto" | "claude" | "glm" | "gpt" | "gemini" | "dial" | "search";
@@ -231,7 +231,7 @@ export default function ModelsPage() {
             Pick the AI you trust <span className="grad">for each step</span>.
           </h1>
           <p className="mk-lede">
-            Uniqus Code runs on four frontier model families — Anthropic Claude,
+            Gate 15 runs on four frontier model families — Anthropic Claude,
             Z.ai GLM, OpenAI GPT, and Google Gemini. Stay on Auto and let it route
             planning and building to the right model, or choose yourself for any turn.
           </p>
@@ -255,7 +255,7 @@ export default function ModelsPage() {
           <h3 style={{ fontSize: 22 }}>Auto mode picks the right AI for you</h3>
           <p style={{ fontSize: 15 }}>
             Don&rsquo;t want to think about which model to use? Auto is the default.
-            Uniqus reads what you&rsquo;re asking for and routes it to the model best
+            Gate 15 reads what you&rsquo;re asking for and routes it to the model best
             suited to the moment — a careful planner for mapping out a change, a
             strong coder for building it. You can always override per turn or set
             your own default model in Settings, and switch mid-project whenever the
@@ -420,7 +420,7 @@ export default function ModelsPage() {
                     fontSize: 13.5,
                   }}
                 >
-                  <span style={{ display: "inline-flex", color: "var(--brand-magenta)" }}>
+                  <span style={{ display: "inline-flex", color: "var(--brand-ember)" }}>
                     <ModelIcon name="search" />
                   </span>
                   latest framework release notes
@@ -519,7 +519,7 @@ export default function ModelsPage() {
           <h2>A curated list, not a menu of trade-offs</h2>
           <p>
             New models land constantly, and most of them aren&rsquo;t worth your
-            time. Uniqus keeps a hand-picked, single source of truth for the models
+            time. Gate 15 keeps a hand-picked, single source of truth for the models
             you can select, shared by the workspace and the router so the choice you
             see is always the choice that runs.
           </p>
@@ -529,7 +529,7 @@ export default function ModelsPage() {
             exactly the kind of careful, multi-step building this product is for. The
             models you can pick are the ones we&rsquo;d pick. If you&rsquo;d rather
             not think about it at all, leave it on{" "}
-            <Link href="/login">Auto</Link> and let Uniqus choose for you.
+            <Link href="/login">Auto</Link> and let Gate 15 choose for you.
           </p>
         </div>
       </section>

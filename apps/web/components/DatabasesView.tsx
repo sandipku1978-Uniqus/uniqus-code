@@ -851,7 +851,7 @@ export default function DatabasesView({ isGuest }: { isGuest: boolean }) {
           }
         >
           <p style={{ margin: 0, fontSize: 13, color: "var(--text-dim)", lineHeight: 1.6 }}>
-            Your databases and their data stay untouched on Supabase — this only removes uniqus&apos;s access.
+            Your databases and their data stay untouched on Supabase — this only removes Gate 15&apos;s access.
             The agent won&apos;t be able to provision or query databases until you reconnect.
           </p>
         </Modal>

@@ -6,7 +6,7 @@ import {
 
 /**
  * Guest signout — the mirror of /api/signout for WorkOS accounts. Clears the
- * uniqus-guest cookie and sends the visitor to /login, where they can start a
+ * gate15-guest cookie and sends the visitor to /login, where they can start a
  * fresh guest session or restore one with a recovery code.
  */
 export async function GET(req: Request) {

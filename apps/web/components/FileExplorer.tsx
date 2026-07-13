@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { TreeEntry } from "@uniqus/api-types";
+import type { TreeEntry } from "@gate15/api-types";
 import { useStore } from "@/lib/store";
 import { send } from "@/lib/ws-client";
 import { fileOpApi } from "@/lib/api";
@@ -312,10 +312,10 @@ export default function FileExplorer({
         onKeyDown={onTreeKeyDown}
         // Drop onto empty space = move to project root.
         onDragOver={(e) => {
-          if (e.dataTransfer.types.includes("text/uniqus-path")) e.preventDefault();
+          if (e.dataTransfer.types.includes("text/gate15-path")) e.preventDefault();
         }}
         onDrop={(e) => {
-          const from = e.dataTransfer.getData("text/uniqus-path");
+          const from = e.dataTransfer.getData("text/gate15-path");
           if (from) {
             e.preventDefault();
             void moveInto(from, "");
@@ -585,7 +585,7 @@ function Row({
         onDragOver={
           node.isDir
             ? (e) => {
-                if (e.dataTransfer.types.includes("text/uniqus-path")) {
+                if (e.dataTransfer.types.includes("text/gate15-path")) {
                   e.preventDefault();
                   setDropTarget(true);
                 }
@@ -601,7 +601,7 @@ function Row({
         // move; everything else just swallows the event.
         onDrop={(e) => {
           if (node.isDir) setDropTarget(false);
-          const from = e.dataTransfer.getData("text/uniqus-path");
+          const from = e.dataTransfer.getData("text/gate15-path");
           if (!from) return;
           e.preventDefault();
           e.stopPropagation();
@@ -612,7 +612,7 @@ function Row({
           type="button"
           draggable
           onDragStart={(e) => {
-            e.dataTransfer.setData("text/uniqus-path", node.path);
+            e.dataTransfer.setData("text/gate15-path", node.path);
             e.dataTransfer.effectAllowed = "move";
           }}
           onClick={() => (node.isDir ? onToggle(node.path) : onOpenFile(node.path))}

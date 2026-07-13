@@ -34,7 +34,7 @@ import {
   type UserRecord,
 } from "./db/users.js";
 
-const STATE_COOKIE = "uniqus_supabase_state";
+const STATE_COOKIE = "gate15_supabase_state";
 const STATE_TTL_SECONDS = 600;
 
 const AUTHORIZE_URL = "https://api.supabase.com/v1/oauth/authorize";

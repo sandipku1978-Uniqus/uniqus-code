@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { Organization, Role } from "@uniqus/api-types";
-import { roleAtLeast } from "@uniqus/api-types";
+import type { Organization, Role } from "@gate15/api-types";
+import { roleAtLeast } from "@gate15/api-types";
 import {
   fetchOrgApi,
   renameOrgApi,

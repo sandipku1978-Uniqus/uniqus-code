@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import type Anthropic from "@anthropic-ai/sdk";
-import type { Citation, ThinkingEffort } from "@uniqus/api-types";
+import type { Citation, ThinkingEffort } from "@gate15/api-types";
 import { normalizeCitations } from "../citations.js";
 import { lastRealUserTurnIndex } from "../messageHistory.js";
 import { parsePartialJson } from "./partialJson.js";

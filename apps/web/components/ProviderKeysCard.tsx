@@ -18,7 +18,7 @@ const PROVIDERS: { id: ByokProvider; label: string; hint: string }[] = [
 /**
  * Bring-your-own-key card (F7): add per-account provider API keys. When set,
  * the agent's calls (including planning + compaction) bill YOUR provider
- * account; otherwise Uniqus's platform key is used. Keys are write-only — never
+ * account; otherwise Gate 15's platform key is used. Keys are write-only — never
  * displayed or logged, and never sent to the sandbox/agent.
  */
 export default function ProviderKeysCard() {
@@ -72,7 +72,7 @@ export default function ProviderKeysCard() {
         Add your own Anthropic / OpenAI / Google API key and the agent&apos;s model
         calls — including planning and history compaction — bill <strong>your</strong>{" "}
         provider account, governed by your own DPA. Leave a provider blank to use
-        Uniqus&apos;s platform key. We never display or log your key, and it never
+        Gate 15&apos;s platform key. We never display or log your key, and it never
         reaches the sandbox or the agent.
       </p>
       <div style={{ display: "grid", gap: 10, marginTop: 8 }}>

@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { skillInvocationName, type DesignTokens, type ProjectSkillsTrust } from "@uniqus/api-types";
+import { skillInvocationName, type DesignTokens, type ProjectSkillsTrust } from "@gate15/api-types";
 
 /** Complete runtime shape for an attached reusable skill. */
 export interface AttachedLibrarySkill {
@@ -276,7 +276,7 @@ export function formatDesignSystemForPrompt(tokens: DesignTokens | null): string
   );
 }
 
-// Curated design skill packs (the picker catalog) now live in @uniqus/api-types
+// Curated design skill packs (the picker catalog) now live in @gate15/api-types
 // so the web settings + workspace pickers and the orchestrator share one source.
 // Re-exported here so existing imports (server.ts) keep working unchanged.
-export { SKILL_PACKS, findPackById, type SkillPack } from "@uniqus/api-types";
+export { SKILL_PACKS, findPackById, type SkillPack } from "@gate15/api-types";

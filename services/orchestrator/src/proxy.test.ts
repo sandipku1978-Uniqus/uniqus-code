@@ -23,27 +23,38 @@ const HTML = "<html><head><title>x</title></head><body><h1>hi</h1></body></html>
 describe("injectPreviewScripts", () => {
   it("injects the nav reporter + element picker + error reporter at the start of <head>", () => {
     const out = injectPreviewScripts(HTML, "srv_1234abcd");
-    expect(out).toContain("__uniqusNavReporterInstalled");
-    expect(out).toContain("__uniqusElementPickerInstalled");
-    expect(out).toContain("__uniqusErrorReporterInstalled");
+    expect(out).toContain("__gate15NavReporterInstalled");
+    expect(out).toContain("__gate15ElementPickerInstalled");
+    expect(out).toContain("__gate15ErrorReporterInstalled");
     // Scripts land immediately after the opening <head> tag, before app code.
     expect(out.indexOf("<script>")).toBeLessThan(out.indexOf("<title>"));
   });
 
-  it("emits the uniqus:runtime-error contract shape from the error reporter", () => {
+  it("emits the gate15:runtime-error contract shape from the error reporter", () => {
     const out = injectPreviewScripts(HTML, "srv_1234abcd");
-    for (const key of ["uniqus:runtime-error", "unhandledrejection", "console.error"]) {
+    for (const key of ["gate15:runtime-error", "unhandledrejection", "console.error"]) {
       expect(out).toContain(key);
     }
   });
 
-  it("emits the uniqus:element contract shape from the picker", () => {
+  it("emits the gate15:element contract shape from the picker", () => {
     const out = injectPreviewScripts(HTML, "srv_1234abcd");
-    for (const key of ["uniqus:element", "selector", "tag", "classes", "id", "rect", "text"]) {
+    for (const key of ["gate15:element", "selector", "tag", "classes", "id", "rect", "text"]) {
       expect(out).toContain(key);
     }
     // serverId is interpolated as a JSON string literal, not left as a token.
     expect(out).toContain('"srv_1234abcd"');
+  });
+
+  it("emits the new picker names but still accepts the legacy uniqus:* control messages", () => {
+    const out = injectPreviewScripts(HTML, "srv_1234abcd");
+    // Outbound: new namespace only.
+    expect(out).toContain("gate15:preview-nav");
+    expect(out).not.toContain('type: "uniqus:');
+    // Inbound: both spellings, so a page from an older web deploy can still arm
+    // pick-mode against a freshly-injected script (Vercel + Hetzner deploy apart).
+    expect(out).toContain('"gate15:picker"');
+    expect(out).toContain('"uniqus:picker"');
   });
 
   it("emits JS that actually parses (guards against escape/quote breakage)", () => {
@@ -88,22 +99,32 @@ describe("injectPreviewScripts", () => {
 
 describe("preview warmup (first-load self-heal)", () => {
   it("withWarmParam adds the param, preserving the path + existing query", () => {
-    expect(withWarmParam("/preview/srv_x/", 1000)).toBe("/preview/srv_x/?__uniqus_warm=1000");
+    expect(withWarmParam("/preview/srv_x/", 1000)).toBe("/preview/srv_x/?__gate15_warm=1000");
     expect(withWarmParam("/preview/srv_x/foo?a=1", 42)).toBe(
-      "/preview/srv_x/foo?a=1&__uniqus_warm=42",
+      "/preview/srv_x/foo?a=1&__gate15_warm=42",
     );
     // Replaces an existing value rather than duplicating it.
-    expect(withWarmParam("/p?__uniqus_warm=1", 2)).toBe("/p?__uniqus_warm=2");
+    expect(withWarmParam("/p?__gate15_warm=1", 2)).toBe("/p?__gate15_warm=2");
+    // A pre-rebrand param riding in from an older warming page is REPLACED, not
+    // carried alongside — the URL must never end up with both names.
+    expect(withWarmParam("/p?__uniqus_warm=1", 2)).toBe("/p?__gate15_warm=2");
   });
 
   it("readWarmStart round-trips the timestamp and rejects junk", () => {
     expect(readWarmStart(withWarmParam("/preview/srv_x/", 1736900000000))).toBe(1736900000000);
     expect(readWarmStart("/preview/srv_x/")).toBeNull();
-    expect(readWarmStart("/p?__uniqus_warm=notanumber")).toBeNull();
+    expect(readWarmStart("/p?__gate15_warm=notanumber")).toBeNull();
+    // Back-compat: a warming page served by the pre-rebrand build is still
+    // polling with the old param, and its start timestamp must keep counting
+    // against the same budget rather than silently restarting it.
+    expect(readWarmStart("/p?__uniqus_warm=1736900000000")).toBe(1736900000000);
   });
 
   it("stripWarmParam removes ONLY our param before forwarding upstream", () => {
-    // The dev server must never see __uniqus_warm.
+    // The dev server must never see __gate15_warm — nor the pre-rebrand name,
+    // which an in-flight warming page can still be sending.
+    expect(stripWarmParam("/foo?a=1&__gate15_warm=99")).toBe("/foo?a=1");
+    expect(stripWarmParam("/?__gate15_warm=99")).toBe("/");
     expect(stripWarmParam("/foo?a=1&__uniqus_warm=99")).toBe("/foo?a=1");
     expect(stripWarmParam("/?__uniqus_warm=99")).toBe("/");
     // Untouched when absent.
@@ -118,7 +139,7 @@ describe("preview warmup (first-load self-heal)", () => {
     expect(html).toContain(reload);
     // Poll-in-place, navigate once: the fetch probe keys on the warming marker
     // header instead of blind-reloading every 2s (the iframe-flash bug).
-    expect(html).toContain("x-uniqus-warming");
+    expect(html).toContain("x-gate15-warming");
     expect(html).toContain("location.replace");
     // The single inline script must parse (escape/quote breakage guard).
     const body = /<script>([\s\S]*?)<\/script>/.exec(html)?.[1] ?? "";

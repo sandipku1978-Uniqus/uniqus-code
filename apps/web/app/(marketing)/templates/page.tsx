@@ -4,7 +4,7 @@ import { TEMPLATE_CATEGORIES } from "@/lib/templates";
 import { TemplatePreview } from "@/components/UiPreview";
 
 export const metadata = {
-  title: "Templates — Uniqus Code",
+  title: "Templates — Gate 15",
   description:
     "Start from a governed template for finance, GRC, audit, and internal operations. Open any starting point in its own private, isolated workspace, then describe what to change and watch the AI build it live — with plan-approval and rewind built in.",
 };
@@ -90,7 +90,7 @@ export default function TemplatesPage() {
           </p>
           <p>
             Don&rsquo;t see the one you want?{" "}
-            <Link href="/login">Just describe it</Link> — Uniqus Code can build
+            <Link href="/login">Just describe it</Link> — Gate 15 can build
             an app from a blank prompt every bit as well as from a starting
             point.
           </p>

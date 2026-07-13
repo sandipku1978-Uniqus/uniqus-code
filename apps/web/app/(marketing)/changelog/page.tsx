@@ -3,9 +3,9 @@ import ChangelogNav, { type ChangelogNavEntry } from "@/components/ChangelogNav"
 type Tag = "new" | "improved" | "fixed";
 
 export const metadata = {
-  title: "Changelog - Uniqus Code",
+  title: "Changelog - Gate 15",
   description:
-    "Product updates, big and small. Follow every substantive Uniqus Code change from the first browser workspace through the latest pre-launch build.",
+    "Product updates, big and small. Follow every substantive Gate 15 change from the first browser workspace through the latest pre-launch build.",
 };
 
 interface Entry {
@@ -16,6 +16,10 @@ interface Entry {
   changes: { tag: Tag; commit: string; text: string }[];
 }
 
+// The real repository these commits live in. This URL is deliberately NOT
+// rebranded — it is a live link to actual commits and must keep resolving. It is
+// only ever used as an href prefix; the link text is the commit SHA, so no brand
+// name is rendered from it. Do not "fix" this string.
 const COMMIT_URL = "https://github.com/sandipku1978-Uniqus/uniqus-code/commit/";
 
 /**
@@ -33,7 +37,7 @@ const ENTRIES: Entry[] = [
       {
         tag: "new",
         commit: "827d09a",
-        text: "Created the initial Uniqus Code monorepo and the first working browser workspace, agent, API, and project runtime.",
+        text: "Created the initial Gate 15 monorepo and the first working browser workspace, agent, API, and project runtime.",
       },
       {
         tag: "fixed",
@@ -288,7 +292,7 @@ const ENTRIES: Entry[] = [
       {
         tag: "new",
         commit: "d3f6ff5",
-        text: "Renamed Codex to Uniqus and added image viewing, drag-and-drop uploads, @file autocomplete, VM sync fixes, and a wide workspace UX overhaul.",
+        text: "Retired the Codex working title in a product-wide rename, and added image viewing, drag-and-drop uploads, @file autocomplete, VM sync fixes, and a wide workspace UX overhaul.",
       },
       {
         tag: "improved",

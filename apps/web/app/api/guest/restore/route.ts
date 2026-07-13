@@ -5,7 +5,7 @@ import { orchestratorFetch } from "@/lib/orchestrator-server";
 /**
  * Guest restore. Same shape as /api/guest signup, but re-attaches to an
  * existing guest account via its recovery code. Sets the first-party
- * `uniqus-guest` cookie from the sealed value the orchestrator returns.
+ * `gate15-guest` cookie from the sealed value the orchestrator returns.
  */
 export async function POST(req: Request) {
   const incoming = (await req.json().catch(() => ({}))) as {

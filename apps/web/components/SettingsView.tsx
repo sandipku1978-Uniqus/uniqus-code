@@ -87,7 +87,7 @@ function Section({
               fontFamily: "var(--font-mono-stack)",
               textTransform: "uppercase",
               letterSpacing: "0.1em",
-              color: "color-mix(in srgb, var(--brand-magenta) 72%, var(--text-muted))",
+              color: "color-mix(in srgb, var(--accent-text) 72%, var(--text-muted))",
             }}
           >
             {title}
@@ -465,7 +465,7 @@ export default function SettingsView({
             <h2>Default model</h2>
             <p className="settings-card-sub">
               Choose which model the coding agent runs on. <strong>Auto</strong>{" "}
-              lets Uniqus pick the strongest model for each task. Under{" "}
+              lets Gate 15 pick the strongest model for each task. Under{" "}
               <strong>Advanced</strong>, override it with a specific model from
               Anthropic (Claude), Z.ai (GLM), OpenAI (ChatGPT), or Google
               (Gemini). This is your account-wide default; you can also change it

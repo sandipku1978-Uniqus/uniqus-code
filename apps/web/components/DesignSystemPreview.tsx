@@ -1,7 +1,7 @@
 "use client";
 
 import { type CSSProperties } from "react";
-import type { DesignTokens } from "@uniqus/api-types";
+import type { DesignTokens } from "@gate15/api-types";
 
 /**
  * A live, at-a-glance preview of a design system. Renders a self-contained

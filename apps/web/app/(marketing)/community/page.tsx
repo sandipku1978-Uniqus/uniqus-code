@@ -1,9 +1,9 @@
 import Link from "next/link";
 
 export const metadata = {
-  title: "Community — Uniqus Code",
+  title: "Community — Gate 15",
   description:
-    "Join the Uniqus Code community: trade ideas in the forum and Discord, follow along on GitHub and X, share what you built, and shape what we build next.",
+    "Join the Gate 15 community: trade ideas in the forum and Discord, follow along on GitHub and X, share what you built, and shape what we build next.",
 };
 
 type Icon =
@@ -87,7 +87,7 @@ const CHANNELS: Channel[] = [
     iconClass: "grad",
     title: "Community forum & Discord",
     body: "Hang out with other builders in real time. Ask questions, swap prompts and skills, and get unstuck with people building the same way you are.",
-    href: "https://discord.gg/uniqus-code",
+    href: "https://discord.gg/gate15",
     cta: "Join the Discord",
     external: true,
   },
@@ -96,7 +96,7 @@ const CHANNELS: Channel[] = [
     iconClass: "purple",
     title: "GitHub discussions",
     body: "Track our public roadmap, file ideas, and talk through the rough edges with the team as we ship.",
-    href: "https://github.com/uniqus-code/uniqus-code/discussions",
+    href: "https://github.com/gate15/gate15/discussions",
     cta: "Open discussions",
     external: true,
   },
@@ -105,8 +105,8 @@ const CHANNELS: Channel[] = [
     iconClass: "cyan",
     title: "X / Twitter",
     body: "Ship-logs, demos, and quick tips on getting the most out of Auto routing and the four model providers. Tag us in what you make.",
-    href: "https://x.com/uniquscode",
-    cta: "Follow @uniquscode",
+    href: "https://x.com/gate15",
+    cta: "Follow @gate15",
     external: true,
   },
   {
@@ -122,7 +122,7 @@ const CHANNELS: Channel[] = [
     iconClass: "amber",
     title: "Office hours",
     body: "Drop into a live session to watch real builds, ask the team anything, and see plan mode, checkpoints, and one-click deploys up close.",
-    href: "https://discord.gg/uniqus-code",
+    href: "https://discord.gg/gate15",
     cta: "See the schedule",
     external: true,
   },
@@ -169,13 +169,13 @@ export default function CommunityPage() {
             Build <span className="grad">together</span>.
           </h1>
           <p className="mk-lede">
-            Uniqus Code is more fun with company. Trade prompts and skills,
-            show off what you shipped, get unstuck fast, and help shape what we
-            build next — whichever AI you build with.
+            Gate 15 is more fun with company. Trade prompts and skills, show off
+            what you shipped, get unstuck fast, and help shape what we build
+            next — whichever AI you build with.
           </p>
           <div className="mk-hero-cta">
             <a
-              href="https://discord.gg/uniqus-code"
+              href="https://discord.gg/gate15"
               target="_blank"
               rel="noopener noreferrer"
               className="btn-primary btn-lg"
@@ -213,7 +213,7 @@ export default function CommunityPage() {
                     target="_blank"
                     rel="noopener noreferrer"
                     style={{
-                      color: "var(--brand-magenta)",
+                      color: "var(--accent-text)",
                       fontWeight: 600,
                       fontSize: 13.5,
                       textDecoration: "none",
@@ -225,7 +225,7 @@ export default function CommunityPage() {
                   <Link
                     href={c.href}
                     style={{
-                      color: "var(--brand-magenta)",
+                      color: "var(--accent-text)",
                       fontWeight: 600,
                       fontSize: 13.5,
                       textDecoration: "none",
@@ -267,9 +267,9 @@ export default function CommunityPage() {
             textAlign: "center",
             padding: "44px 32px",
             borderColor:
-              "color-mix(in srgb, var(--brand-magenta) 40%, var(--mk-line))",
+              "color-mix(in srgb, var(--brand-ember) 40%, var(--mk-line))",
             background:
-              "linear-gradient(160deg, color-mix(in srgb, var(--brand-magenta) 12%, transparent), transparent 60%), color-mix(in srgb, var(--mk-panel-solid) 82%, transparent)",
+              "linear-gradient(160deg, color-mix(in srgb, var(--brand-ember) 12%, transparent), transparent 60%), color-mix(in srgb, var(--mk-panel-solid) 82%, transparent)",
           }}
         >
           <span className="label-eyebrow">Showcase</span>

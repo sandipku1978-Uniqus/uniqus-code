@@ -39,7 +39,7 @@ Backend data and integration rails:
 
   auth: `
 End-user authentication (generated app):
-- Distinguish generated-app auth from the Uniqus workspace connection. Use the connected Supabase project; provision one only when the user authorizes that task.
+- Distinguish generated-app auth from the Gate 15 workspace connection. Use the connected Supabase project; provision one only when the user authorizes that task.
 - For Next.js, use @supabase/supabase-js plus @supabase/ssr so sessions reach server components and route handlers. Put only the public URL and anon key in NEXT_PUBLIC_* variables; the service-role key is server-only.
 - Build complete login, signup, forgot-password, callback, account, logout, and protected-route behavior. Signed-out users go to login; signed-in users should not be bounced back to login screens.
 - Create profiles/user-owned rows keyed to auth.users.id/auth.uid(), enable RLS, and add policies restricting each user to their own records.

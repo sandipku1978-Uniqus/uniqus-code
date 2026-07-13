@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { roleAtLeast, ROLE_RANK, type Role } from "@uniqus/api-types";
+import { roleAtLeast, ROLE_RANK, type Role } from "@gate15/api-types";
 
 /**
  * Locks the role-hierarchy invariant the collab routes rely on to prevent the

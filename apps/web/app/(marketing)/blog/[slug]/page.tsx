@@ -15,12 +15,12 @@ export async function generateMetadata({
   const post = getPost(slug);
   if (!post) {
     return {
-      title: "Post not found — Uniqus Code",
+      title: "Post not found — Gate 15",
       description: "This post could not be found.",
     };
   }
   return {
-    title: `${post.title} — Uniqus Code`,
+    title: `${post.title} — Gate 15`,
     description: post.excerpt,
   };
 }

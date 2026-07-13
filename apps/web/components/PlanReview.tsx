@@ -29,7 +29,7 @@ export default function PlanReview({ item }: { item: PlanItem }) {
     return (
       <div style={{ marginLeft: 30 }}>
         <div className="plan-stub" role="note">
-          <div className="label-micro" style={{ color: "var(--brand-magenta)" }}>
+          <div className="label-micro" style={{ color: "var(--accent-text)" }}>
             Plan — review
           </div>
           <p className="plan-plain">{plain}</p>

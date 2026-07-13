@@ -22,7 +22,7 @@ import type {
   Role,
   SkillLibrary,
   UploadedFileSummary,
-} from "@uniqus/api-types";
+} from "@gate15/api-types";
 
 // Production deployments must set NEXT_PUBLIC_ORCHESTRATOR_URL — the
 // orchestrator usually runs on a different hostname (Railway etc.) than the
@@ -66,7 +66,7 @@ export const fetchMe = (): Promise<{ user: CurrentUser }> => api("/api/me");
 
 // ── Account settings (custom prompt + default skills) ─────────────────────────
 
-export type { AccountSettings } from "@uniqus/api-types";
+export type { AccountSettings } from "@gate15/api-types";
 
 export const fetchAccountSettingsApi = (): Promise<{ settings: AccountSettings }> =>
   api("/api/account/settings");
@@ -116,7 +116,7 @@ export const fetchProjects = (
 
 // ── Account usage rollup (dashboard widgets) ──────────────────────────────────
 
-export type { AccountUsageStats } from "@uniqus/api-types";
+export type { AccountUsageStats } from "@gate15/api-types";
 
 export const fetchUsageStatsApi = (): Promise<{ stats: AccountUsageStats }> =>
   api("/api/account/usage-stats");
@@ -156,8 +156,8 @@ export type {
   DesignSystemDraft,
   DiscoveredComponent,
   SkillLibrary,
-} from "@uniqus/api-types";
-import type { DesignSystemDraft as _DesignSystemDraft } from "@uniqus/api-types";
+} from "@gate15/api-types";
+import type { DesignSystemDraft as _DesignSystemDraft } from "@gate15/api-types";
 
 export const listDesignSystemsApi = (): Promise<{ design_systems: DesignSystem[] }> =>
   api("/api/design-systems");
@@ -229,7 +229,7 @@ export const setProjectSkillLibrariesApi = (
 
 // ── Knowledge library (account-level documents the agent can search) ──────────
 
-export type { KnowledgeDocument } from "@uniqus/api-types";
+export type { KnowledgeDocument } from "@gate15/api-types";
 
 export const listKnowledgeDocumentsApi = (): Promise<{ documents: KnowledgeDocument[] }> =>
   api("/api/knowledge-documents");
@@ -649,7 +649,7 @@ export interface SupabaseProjectInfo {
   database?: { host?: string; version?: string; postgres_engine?: string };
 }
 
-/** A uniqus project ↔ Supabase database link (from projects.supabase_project_ref). */
+/** A Gate 15 project ↔ Supabase database link (from projects.supabase_project_ref). */
 export interface SupabaseLinkInfo {
   ref: string;
   project_id: string;
@@ -782,7 +782,7 @@ export const revokePreviewShareApi = (
 
 // ── Saved smoke-flows (P2.4) ────────────────────────────────────────────────────
 
-export type { ProjectFlow, FlowStep, FlowRunStatus } from "@uniqus/api-types";
+export type { ProjectFlow, FlowStep, FlowRunStatus } from "@gate15/api-types";
 
 /** Per-project saved interaction flows the agent (or user) can replay. */
 export const listFlowsApi = (projectId: string): Promise<{ flows: ProjectFlow[] }> =>
@@ -1024,7 +1024,7 @@ export interface GuestCreateResult {
 
 /**
  * Create a free guest account. Hits the web app's own route handler (not the
- * orchestrator directly) so the uniqus-guest cookie is set first-party with the
+ * orchestrator directly) so the gate15-guest cookie is set first-party with the
  * web app's WORKOS_COOKIE_DOMAIN — otherwise the cookie is host-only to the
  * orchestrator and the dashboard never sees it. Returns the one-time code.
  */

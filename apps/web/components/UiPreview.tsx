@@ -11,9 +11,25 @@ import type { Art } from "@/lib/templates";
  *  - <ProjectPreview id hue> — the hue gradient becomes the app's header and a
  *    light content panel below shows a UI motif picked deterministically from the
  *    project id, so every project keeps a distinct, recognizable preview.
+ *
+ * ── Palette policy: everything below is deliberately OUTSIDE the Gate 15 brand ramp.
+ * These SVGs depict the *user's generated app*, not Gate 15 chrome. The Gate 15
+ * surface is the card the window floats on (`.template-thumb.t1–t5` / `.proj-cover`
+ * in globals.css) — that IS on-brand, and is styled there. Inside the window we are
+ * drawing someone else's product, so the fake app gets its own identity colours: a
+ * light "screenshot" surface that stays light in dark theme, macOS traffic-light
+ * dots, and one accent per app type. Same reason <ProjectPreview> spins the full
+ * hue wheel off the project id (`hsl(${hue} …)`) — a distinct colour per project is
+ * the point of the tile.
+ *
+ * So: do NOT "fix" these to brand tokens. Ember-ising them would make every template
+ * card and every project tile look identical, which is the one thing this file exists
+ * to prevent. Expect a brand-hex sweep to keep re-flagging the violets/magentas here
+ * (crm, pricing, landing, admin) — they are Tailwind categorical hues, not survivors
+ * of the old pre-rebrand purple, and they are exempt by design.
  */
 
-// Wireframe palette — light "screenshot" surface with warm-gray content.
+// Wireframe palette — light "screenshot" surface with cool-gray content.
 const PANEL = "#f6f7fb";
 const HEAD = "#ffffff";
 const LINE = "#e4e6f0";
@@ -71,19 +87,25 @@ function Win({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * One accent per app type — the colour the *depicted* app brands itself with, so
+ * twelve template cards don't read as twelve copies of one card. A categorical set
+ * (Tailwind's 500 ramp), spread around the wheel for maximum separation; no hue
+ * carries meaning and none is a Gate 15 token. See the palette policy above.
+ */
 const ART_ACCENT: Record<Art, string> = {
-  admin: "#6366f1",
-  crm: "#8b5cf6",
-  dashboard: "#3b82f6",
-  wiki: "#14b8a6",
-  landing: "#ec4899",
-  waitlist: "#10b981",
-  blog: "#f59e0b",
-  pricing: "#d946ef",
-  billing: "#0ea5e9",
-  storefront: "#f43f5e",
-  subscription: "#06b6d4",
-  booking: "#7c3aed",
+  admin: "#6366f1", // indigo
+  crm: "#8b5cf6", // violet
+  dashboard: "#3b82f6", // blue
+  wiki: "#14b8a6", // teal
+  landing: "#ec4899", // pink
+  waitlist: "#10b981", // emerald
+  blog: "#f59e0b", // amber
+  pricing: "#d946ef", // fuchsia
+  billing: "#0ea5e9", // sky
+  storefront: "#f43f5e", // rose
+  subscription: "#06b6d4", // cyan
+  booking: "#84cc16", // lime
 };
 
 /** Body content per app type. Coordinates stay within x42–278, y50–174. */
@@ -317,7 +339,10 @@ function scene(art: Art, a: string): ReactNode {
 }
 
 export function TemplatePreview({ art }: { art: Art }) {
-  const a = ART_ACCENT[art] ?? "#7c6cff";
+  // Defensive only — `art` is typed exhaustively, so this fires just for a bad
+  // runtime value. Degrade to the wireframe's own ink (an unaccented mock), never
+  // to a brand colour: the accent belongs to the app being depicted, not to us.
+  const a = ART_ACCENT[art] ?? INK3;
   return (
     <svg
       className="ui-preview"

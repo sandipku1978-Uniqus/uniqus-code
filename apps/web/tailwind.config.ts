@@ -1,31 +1,59 @@
 import type { Config } from "tailwindcss";
 
+/**
+ * Gate 15 — one warm signal colour on cold industrial steel. The greys are
+ * deliberately COOL (gunmetal/graphite): a cold ground is what makes safety
+ * orange read as hi-vis. Never warm them toward brown.
+ *
+ * These mirror the dark-theme `:root` tokens in globals.css, which remain the
+ * source of truth for the running UI — this map exists so Tailwind utilities
+ * resolve to the same palette.
+ */
 const config: Config = {
   content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}"],
   theme: {
     extend: {
       colors: {
-        // Surfaces
-        bg: "#0c0c11",
-        surface: "#16161e",
-        "surface-hover": "#1e1e28",
-        "surface-active": "#252530",
-        // Text
-        primary: "#e4e2dc",
-        muted: "#8a8880",
-        dim: "#5a5850",
-        xdim: "#3a3830",
+        // Surfaces — asphalt / gunmetal
+        bg: "#0A0B0C",
+        pane: "#0F1113",
+        surface: "#16181B",
+        "surface-hover": "#1E2125",
+        "surface-active": "#262A2F",
+        elev: "#1E2125",
+        code: "#08090A",
+        // Text — painted-steel off-white, neutral, not cream
+        primary: "#EDEBE7",
+        muted: "#9A9793",
+        dim: "#7C7A76",
+        xdim: "#3C3A37",
         // Borders
-        border: "#2a2a35",
-        "border-light": "#1e1e28",
-        // Brand
-        purple: "#482879",
-        magenta: "#B21E7D",
-        "purple-hi": "#5a32a0",
-        // Semantic
-        "conf-high": "#34d399",
-        "conf-medium": "#fbbf24",
-        "conf-low": "#f87171",
+        border: "#2A2E33",
+        "border-light": "#1E2125",
+        "border-strong": "rgba(255,255,255,0.17)",
+        "border-active": "#FF6A00",
+        // Brand — safety orange on steel. Ink ON ember is near-black (#140D07),
+        // never white: #FF6A00 + white is ~2.9:1 and fails AA.
+        ember: "#FF6A00",
+        "ember-hi": "#FF8124",
+        signal: "#FFC53D",
+        rust: "#B23F0A",
+        ink: "#140D07",
+        // Semantic — status only. Never use brand `signal` yellow as a warning.
+        "conf-high": "#34D399",
+        "conf-medium": "#FBBF24",
+        "conf-low": "#F87171",
+      },
+      backgroundImage: {
+        "brand-gradient": "linear-gradient(135deg, #FF5A1F, #FFC53D)",
+        hazard:
+          "repeating-linear-gradient(45deg, #FF6A00 0 8px, transparent 8px 16px)",
+      },
+      borderRadius: {
+        sm: "4px",
+        md: "6px",
+        lg: "8px",
+        xl: "12px",
       },
       fontFamily: {
         sans: ["var(--font-sans)", "ui-sans-serif", "system-ui", "sans-serif"],

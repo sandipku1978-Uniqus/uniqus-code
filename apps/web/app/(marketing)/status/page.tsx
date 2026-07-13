@@ -1,9 +1,9 @@
 import Link from "next/link";
 
 export const metadata = {
-  title: "System status — Uniqus Code",
+  title: "System status — Gate 15",
   description:
-    "A current snapshot of Uniqus Code service health: the web app, orchestrator API, workspaces, model routing, live previews, deploys, and GitHub sync.",
+    "A current snapshot of Gate 15 service health: the web app, orchestrator API, workspaces, model routing, live previews, deploys, and GitHub sync.",
 };
 
 const LAST_CHECKED = "July 2026";
@@ -47,7 +47,7 @@ export default function StatusPage() {
           </span>
           <h2>System status.</h2>
           <p>
-            A current snapshot of how Uniqus Code is running. We check these
+            A current snapshot of how Gate 15 is running. We check these
             components by hand on a regular cadence — this page reflects the
             most recent review, not a live monitor.
           </p>
@@ -81,7 +81,7 @@ export default function StatusPage() {
           <span className="label-eyebrow">Uptime</span>
           <h2>Building our track record.</h2>
           <p>
-            Uniqus Code is pre-launch, so we don&rsquo;t have a public uptime
+            Gate 15 is pre-launch, so we don&rsquo;t have a public uptime
             history yet. Once we&rsquo;re generally available, this page will
             show real availability trends for each system above.
           </p>
@@ -95,7 +95,7 @@ export default function StatusPage() {
             We don&rsquo;t run a continuous public dashboard yet, so the cleanest
             way to hear about planned maintenance or an incident is to ask us to
             keep you posted. Email{" "}
-            <a href="mailto:status@uniqus.com">status@uniqus.com</a> and
+            <a href="mailto:status@gate15.dev">status@gate15.dev</a> and
             we&rsquo;ll add you to update notices.
           </p>
           <p>
@@ -105,7 +105,7 @@ export default function StatusPage() {
           </p>
         </div>
         <div style={{ marginTop: 24, display: "flex", gap: 12, flexWrap: "wrap" }}>
-          <a href="mailto:status@uniqus.com" className="btn-secondary">
+          <a href="mailto:status@gate15.dev" className="btn-secondary">
             Subscribe to updates
           </a>
           <Link href="/support" className="btn-ghost">

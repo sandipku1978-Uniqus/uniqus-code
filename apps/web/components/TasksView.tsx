@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AgentTask, AgentTaskStatus } from "@uniqus/api-types";
+import type { AgentTask, AgentTaskStatus } from "@gate15/api-types";
 import { fetchAgentTasksApi, createAgentTaskApi, cancelAgentTaskApi } from "@/lib/api";
 import { toast } from "@/lib/toast";
 
@@ -36,7 +36,7 @@ const STATUS_LABEL: Record<AgentTaskStatus, string> = {
 function statusColor(status: AgentTaskStatus): string {
   switch (status) {
     case "running":
-      return "var(--brand-magenta)";
+      return "var(--accent-text)";
     case "done":
       return "var(--conf-high)";
     case "failed":

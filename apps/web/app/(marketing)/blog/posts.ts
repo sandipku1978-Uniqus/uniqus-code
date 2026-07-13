@@ -1,4 +1,4 @@
-// Shared, pure-data module for the Uniqus Code blog. No JSX here — the index
+// Shared, pure-data module for the Gate 15 blog. No JSX here — the index
 // (/blog) and the detail page (/blog/[slug]) both read from POSTS so a single
 // edit keeps the listing and the article in sync.
 
@@ -27,14 +27,14 @@ export const POSTS: Post[] = [
     excerpt:
       "Describe what you want, watch it build in a live preview, and ship it — all in one tab. Here's how a single sentence becomes a running app.",
     date: "May 28, 2026",
-    author: "The Uniqus Code team",
+    author: "The Gate 15 team",
     readingTime: "6 min read",
     tag: "Product",
     thumb: "p1",
     content: [
       {
         type: "p",
-        text: "Most build tools make you hop between a chat window, an editor, a terminal, a preview, and a deploy dashboard. Each jump is a chance to lose your train of thought. Uniqus Code collapses all of that into one page: you type what you want, the agent plans and builds it inside a private workspace, and you watch the result render live a few feet from where you're typing.",
+        text: "Most build tools make you hop between a chat window, an editor, a terminal, a preview, and a deploy dashboard. Each jump is a chance to lose your train of thought. Gate 15 collapses all of that into one page: you type what you want, the agent plans and builds it inside a private workspace, and you watch the result render live a few feet from where you're typing.",
       },
       {
         type: "h2",
@@ -80,7 +80,7 @@ export const POSTS: Post[] = [
     excerpt:
       "Your coding agent can look things up while it works — current docs, API shapes, package versions — using each provider's own server-side search.",
     date: "May 14, 2026",
-    author: "The Uniqus Code team",
+    author: "The Gate 15 team",
     readingTime: "5 min read",
     tag: "Engineering",
     thumb: "p2",
@@ -130,7 +130,7 @@ export const POSTS: Post[] = [
     excerpt:
       "Every project runs in its own isolated virtual machine — not a shared container, not a browser tab. Here's why that isolation is the foundation.",
     date: "April 30, 2026",
-    author: "The Uniqus Code team",
+    author: "The Gate 15 team",
     readingTime: "6 min read",
     tag: "Infrastructure",
     thumb: "p3",
@@ -179,7 +179,7 @@ export const POSTS: Post[] = [
     excerpt:
       "Before touching a single file, the agent can lay out exactly what it intends to do — so you approve the approach, not just react to the result.",
     date: "April 16, 2026",
-    author: "The Uniqus Code team",
+    author: "The Gate 15 team",
     readingTime: "5 min read",
     tag: "Product",
     thumb: "p4",
@@ -228,7 +228,7 @@ export const POSTS: Post[] = [
     excerpt:
       "Claude, GLM, GPT, or Gemini — and an Auto mode that routes for you. No single model is best at everything, so we don't pretend otherwise.",
     date: "April 2, 2026",
-    author: "The Uniqus Code team",
+    author: "The Gate 15 team",
     readingTime: "6 min read",
     tag: "Engineering",
     thumb: "p1",
@@ -243,7 +243,7 @@ export const POSTS: Post[] = [
       },
       {
         type: "p",
-        text: "Uniqus Code runs on Claude, GLM, GPT, and Gemini, with a curated list of the models actually worth using for serious coding. You can set a default for your account or override it per turn from the composer — switch models mid-conversation without losing context.",
+        text: "Gate 15 runs on Claude, GLM, GPT, and Gemini, with a curated list of the models actually worth using for serious coding. You can set a default for your account or override it per turn from the composer — switch models mid-conversation without losing context.",
       },
       {
         type: "h2",

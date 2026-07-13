@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { Citation, ThinkingEffort } from "@uniqus/api-types";
+import type { Citation, ThinkingEffort } from "@gate15/api-types";
 import { CITATIONS_BLOCK_FIELD, normalizeCitations } from "../citations.js";
 import { webSearchToolForModel } from "../tools.js";
 import { parsePartialJson } from "./partialJson.js";

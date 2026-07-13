@@ -1,4 +1,4 @@
-import type { Citation } from "@uniqus/api-types";
+import type { Citation } from "@gate15/api-types";
 
 /**
  * Turn an answer + its citations into something renderable.

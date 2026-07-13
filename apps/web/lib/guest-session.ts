@@ -1,6 +1,6 @@
 /**
  * Guest session — the web-app mirror of the orchestrator's auth/guest.ts.
- * Unseals the `uniqus-guest` cookie (sealed with the shared
+ * Unseals the `gate15-guest` cookie (sealed with the shared
  * WORKOS_COOKIE_PASSWORD) so the middleware and server components can tell
  * whether the visitor is a guest without a round-trip to the orchestrator.
  *
@@ -17,7 +17,7 @@
 
 import { unsealData } from "iron-session";
 
-export const GUEST_COOKIE_NAME = "uniqus-guest";
+export const GUEST_COOKIE_NAME = "gate15-guest";
 // Must match GUEST_COOKIE_TTL_SECONDS in services/orchestrator/src/auth/guest.ts.
 const GUEST_COOKIE_TTL_SECONDS = 365 * 24 * 60 * 60;
 
@@ -37,7 +37,7 @@ export function guestCookiePassword(): string {
 }
 
 /**
- * Unseal a raw `uniqus-guest` cookie value. Returns null for a missing,
+ * Unseal a raw `gate15-guest` cookie value. Returns null for a missing,
  * malformed, or expired cookie. Safe to call from the Edge middleware.
  */
 export async function unsealGuestCookie(

@@ -1465,7 +1465,7 @@ export interface TreeEntry {
 
 
 // ── Curated design skill packs ───────────────────────────────────────────────
-// Inlined here (not a separate module) so the single "@uniqus/api-types" entry
+// Inlined here (not a separate module) so the single "@gate15/api-types" entry
 // resolves cleanly under both the orchestrator (NodeNext) and Next (webpack).
 
 export interface SkillPack {
@@ -1787,7 +1787,7 @@ export type FlowRunStatus = "pass" | "fail" | "error";
  * paid". The agent records one after building a feature (`save_flow`) and
  * replays it after later changes (`run_flow`); the user can also replay it
  * one-click from the Preview (Agent) tab. The `last_*` fields capture the most
- * recent replay as a compact evidence card ("Uniqus tried the app — here's what
+ * recent replay as a compact evidence card ("Gate 15 tried the app — here's what
  * it checked"), not a mandatory gate.
  */
 export interface ProjectFlow {

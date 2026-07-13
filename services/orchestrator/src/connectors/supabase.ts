@@ -59,7 +59,7 @@ function genDbPass(): string {
   return randomBytes(24).toString("base64url");
 }
 
-/** Read the Supabase project ref already linked to this uniqus project, if any. */
+/** Read the Supabase project ref already linked to this Gate 15 project, if any. */
 async function linkedRef(projectId: string): Promise<string | null> {
   const { data } = await db()
     .from("projects")
@@ -244,7 +244,7 @@ export const supabaseConnector: ConnectorDefinition = {
       args_schema: {
         type: "object",
         properties: {
-          name: { type: "string", description: "Project name. Defaults to a uniqus-derived name." },
+          name: { type: "string", description: "Project name. Defaults to a Gate 15-derived name." },
           organization_id: { type: "string", description: "Org to create under. Defaults to the connected account's org if it has exactly one." },
           region: { type: "string", description: `Region slug (default ${DEFAULT_REGION}).` },
           plan: { type: "string", enum: ["free", "pro"], description: "Defaults to free." },
@@ -293,7 +293,7 @@ export const supabaseConnector: ConnectorDefinition = {
           }
         }
 
-        const name = (typeof args.name === "string" && args.name.trim()) || `uniqus-${ctx.projectId.slice(0, 8)}`;
+        const name = (typeof args.name === "string" && args.name.trim()) || `gate15-${ctx.projectId.slice(0, 8)}`;
         const region = (typeof args.region === "string" && args.region.trim()) || DEFAULT_REGION;
         const plan = args.plan === "pro" ? "pro" : "free";
         const dbPass = genDbPass();

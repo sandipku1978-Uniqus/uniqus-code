@@ -1,9 +1,9 @@
 import { db } from "./client.js";
-import { DEFAULT_DESIGN_TOKENS, type DesignSystem, type DesignTokens } from "@uniqus/api-types";
+import { DEFAULT_DESIGN_TOKENS, type DesignSystem, type DesignTokens } from "@gate15/api-types";
 
 /**
  * Global, per-user design systems. The `tokens` JSON is the canonical artifact
- * (shape = DesignTokens in @uniqus/api-types); it's injected into the agent's
+ * (shape = DesignTokens in @gate15/api-types); it's injected into the agent's
  * system prompt for any project that attaches the system. All reads/writes are
  * user-scoped — a user can only see and edit their own systems.
  */

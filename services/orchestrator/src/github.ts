@@ -30,7 +30,7 @@ import {
   type UserRecord,
 } from "./db/users.js";
 
-const STATE_COOKIE = "uniqus_github_state";
+const STATE_COOKIE = "gate15_github_state";
 const STATE_TTL_SECONDS = 600; // 10 min — plenty for a real human login
 
 // Read-only `repo` is enough to clone any repo the user can see, including
@@ -271,7 +271,7 @@ export async function handleCallback(
       headers: {
         Authorization: `Bearer ${token}`,
         Accept: "application/vnd.github+json",
-        "User-Agent": "uniqus-code",
+        "User-Agent": "gate15",
       },
     });
     if (meRes.ok) {
@@ -324,7 +324,7 @@ export async function listUserRepos(user: UserRecord): Promise<GithubRepo[]> {
       headers: {
         Authorization: `Bearer ${token}`,
         Accept: "application/vnd.github+json",
-        "User-Agent": "uniqus-code",
+        "User-Agent": "gate15",
       },
     },
   );
@@ -391,7 +391,7 @@ export async function createUserRepo(
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github+json",
-      "User-Agent": "uniqus-code",
+      "User-Agent": "gate15",
       "Content-Type": "application/json",
     },
     body: JSON.stringify({

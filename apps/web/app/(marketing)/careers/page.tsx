@@ -1,5 +1,5 @@
 export const metadata = {
-  title: "Careers — Uniqus Code",
+  title: "Careers — Gate 15",
   description:
     "Help build the future of software. Join a small, senior team shipping a frontier AI workspace where people describe what they want and watch it come to life.",
 };
@@ -72,11 +72,11 @@ const WHY: { icon: Icon; iconClass: string; title: string; body: string }[] = [
     icon: "rocket",
     iconClass: "grad",
     title: "Work on a frontier AI product",
-    body: "Uniqus Code turns plain-English ideas into running apps inside private cloud workspaces. You'll ship at the edge of what coding agents can do — routing across Claude, GLM, GPT, and Gemini, plan mode, live previews, and more.",
+    body: "Gate 15 turns plain-English ideas into running apps inside private cloud workspaces. You'll ship at the edge of what coding agents can do — routing across Claude, GLM, GPT, and Gemini, plan mode, live previews, and more.",
   },
   {
     icon: "team",
-    iconClass: "purple",
+    iconClass: "ember",
     title: "A small, senior team",
     body: "We're a tight group of experienced engineers and designers. No layers, no busywork — just people who care about craft, talking directly and shipping things they're proud of.",
   },
@@ -102,7 +102,7 @@ const WHY: { icon: Icon; iconClass: string; title: string; body: string }[] = [
     icon: "growth",
     iconClass: "",
     title: "Grow fast, with the company",
-    body: "Early teams are where careers compound the quickest. As Uniqus Code grows, the people who built it get the first shot at leading what comes next.",
+    body: "Gate 15 is an independent company, early enough that the people who build it set its direction. Early teams are where careers compound the quickest — the people who built it get the first shot at leading what comes next.",
   },
 ];
 
@@ -142,7 +142,7 @@ const ROLES: { title: string; team: string; type: string }[] = [
 ];
 
 function applyHref(role: string) {
-  return `mailto:careers@uniqus.com?subject=${encodeURIComponent(
+  return `mailto:careers@gate15.dev?subject=${encodeURIComponent(
     `Application: ${role}`
   )}`;
 }
@@ -159,10 +159,10 @@ export default function CareersPage() {
             Help build the future of <span className="grad">software</span>.
           </h1>
           <p className="mk-lede">
-            Uniqus Code lets anyone describe what they want, pick the AI they
-            trust, and watch their app come to life in a private workspace.
-            We&rsquo;re a small, senior team looking for people who want to ship
-            that future with us.
+            Gate 15 lets anyone describe what they want, pick the AI they trust,
+            and watch their app come to life in a private workspace. We&rsquo;re
+            a small, senior team looking for people who want to ship that future
+            with us.
           </p>
           <div className="mk-hero-cta">
             <a href="#open-roles" className="btn-primary btn-lg">
@@ -251,10 +251,10 @@ export default function CareersPage() {
         >
           Don&rsquo;t see your role? Email{" "}
           <a
-            href="mailto:careers@uniqus.com?subject=Open application"
-            style={{ color: "var(--brand-magenta)" }}
+            href="mailto:careers@gate15.dev?subject=Open application"
+            style={{ color: "var(--accent-text)" }}
           >
-            careers@uniqus.com
+            careers@gate15.dev
           </a>{" "}
           and tell us how you&rsquo;d help. We read every note.
         </p>

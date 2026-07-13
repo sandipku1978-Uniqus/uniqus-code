@@ -26,7 +26,7 @@ if (fs.existsSync(envPath)) {
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  transpilePackages: ["@uniqus/api-types"],
+  transpilePackages: ["@gate15/api-types"],
   async redirects() {
     return [
       {

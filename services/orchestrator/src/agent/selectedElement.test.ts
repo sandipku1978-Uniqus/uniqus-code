@@ -21,7 +21,7 @@ describe("parseSelectedElement", () => {
 
   it("normalizes a well-formed payload", () => {
     const el = parseSelectedElement({
-      type: "uniqus:element",
+      type: "gate15:element",
       server_id: "srv_abc",
       selector: "  #app > button.btn:nth-of-type(2)  ",
       tag: "  BUTTON  ",

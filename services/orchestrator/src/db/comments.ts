@@ -1,5 +1,5 @@
 import { db } from "./client.js";
-import type { Comment, CommentTargetKind } from "@uniqus/api-types";
+import type { Comment, CommentTargetKind } from "@gate15/api-types";
 
 /**
  * Comments (P3.4). A teammate can comment on a preview element (target_ref = the

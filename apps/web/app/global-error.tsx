@@ -9,18 +9,21 @@ import { useEffect } from "react";
  * inline-styled because the normal app shell (and globals.css class names)
  * may not be available at this point.
  *
- * It is theme-aware: a tiny inline script applies the persisted `uniqus.theme`
+ * It is theme-aware: a tiny inline script applies the persisted `gate15.theme`
  * to <html> before paint, and an inline <style> defines the handful of colour
  * tokens for both themes, so a light-theme user doesn't get a jarring dark
  * recovery screen (UI/UX audit §E).
  */
-const THEME_BOOTSTRAP = `(function(){try{var t=localStorage.getItem("uniqus.theme");document.documentElement.dataset.theme=t==="light"?"light":"dark";}catch(e){document.documentElement.dataset.theme="dark";}})();`;
+const THEME_BOOTSTRAP = `(function(){try{var t=localStorage.getItem("gate15.theme");document.documentElement.dataset.theme=t==="light"?"light":"dark";}catch(e){document.documentElement.dataset.theme="dark";}})();`;
 
 const THEME_TOKENS = `
-:root{--ge-bg:#0c0c11;--ge-text:#e4e2dc;--ge-muted:#8a8880;--ge-border:#2a2a35;}
-:root[data-theme="light"]{--ge-bg:#f4f3f0;--ge-text:#1c1b22;--ge-muted:#57555e;--ge-border:#e3e0e6;}
+:root{--ge-bg:#0A0B0C;--ge-text:#EDEBE7;--ge-muted:#9A9793;--ge-border:#2A2E33;}
+:root[data-theme="light"]{--ge-bg:#EFEEEC;--ge-text:#17181A;--ge-muted:#52555A;--ge-border:#DDDCDA;}
 body{margin:0;}
 `;
+
+/** Ember → signal. Ink on ember is near-black, never white (hazard signage). */
+const EMBER_GRADIENT = "linear-gradient(135deg, #FF5A1F, #FFC53D)";
 
 export default function GlobalError({
   error,
@@ -66,11 +69,11 @@ export default function GlobalError({
               type="button"
               onClick={() => reset()}
               style={{
-                background: "linear-gradient(135deg, #482879, #B21E7D)",
-                color: "#fff",
+                background: EMBER_GRADIENT,
+                color: "#140D07",
                 border: 0,
                 padding: "10px 18px",
-                borderRadius: 8,
+                borderRadius: 6,
                 fontSize: 14,
                 fontWeight: 600,
                 cursor: "pointer",
@@ -88,7 +91,7 @@ export default function GlobalError({
                 color: "var(--ge-text)",
                 border: "1px solid var(--ge-border)",
                 padding: "10px 18px",
-                borderRadius: 8,
+                borderRadius: 6,
                 fontSize: 14,
                 fontWeight: 500,
                 cursor: "pointer",

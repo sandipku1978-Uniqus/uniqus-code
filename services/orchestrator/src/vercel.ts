@@ -32,7 +32,7 @@ import {
   type UserRecord,
 } from "./db/users.js";
 
-const STATE_COOKIE = "uniqus_vercel_state";
+const STATE_COOKIE = "gate15_vercel_state";
 const STATE_TTL_SECONDS = 600;
 
 interface StatePayload {

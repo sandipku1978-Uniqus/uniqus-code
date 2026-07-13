@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { estimateCostUsd } from "@uniqus/api-types";
+import { estimateCostUsd } from "@gate15/api-types";
 import { useStore, type ChatItem } from "@/lib/store";
 import TodoList from "./TodoList";
 import SubAgentList from "./SubAgentList";
@@ -101,7 +101,7 @@ function fmtCost(usd: number): string {
 function Stat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
   return (
     <div className="am-stat">
-      <span className="am-stat-value" style={accent ? { color: "var(--accent, #B21E7D)" } : undefined}>
+      <span className="am-stat-value" style={accent ? { color: "var(--accent, #FF6A00)" } : undefined}>
         <span className="am-stat-value-inner" key={value}>
           {value}
         </span>

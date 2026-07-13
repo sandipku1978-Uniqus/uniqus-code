@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { OrgUsageSummary } from "@uniqus/api-types";
+import type { OrgUsageSummary } from "@gate15/api-types";
 import { fetchOrgUsageApi } from "@/lib/api";
 import { OrgMetric, OrgMetricRail, OrgPageHeader, OrgStatePanel } from "./OrgPageChrome";
 

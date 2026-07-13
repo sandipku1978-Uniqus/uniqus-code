@@ -9,7 +9,7 @@ import { orchestratorFetch } from "@/lib/orchestrator-server";
 
 /**
  * Guest → WorkOS conversion. The /projects page redirects here when a request
- * carries both a wos-session and a uniqus-guest cookie (a guest who just
+ * carries both a wos-session and a gate15-guest cookie (a guest who just
  * signed in with Google). The merge runs in a Route Handler — not the page —
  * because only Route Handlers can write cookies, and we must clear the guest
  * cookie afterwards.

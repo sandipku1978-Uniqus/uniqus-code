@@ -1,5 +1,5 @@
 import { db } from "./client.js";
-import type { AgentTask, AgentTaskStatus } from "@uniqus/api-types";
+import type { AgentTask, AgentTaskStatus } from "@gate15/api-types";
 
 /**
  * Durable agent-task queue (P8.1). Unlike the in-memory background-shell-job Map

@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { fetch as undiciFetch } from "undici";
 import type Anthropic from "@anthropic-ai/sdk";
-import type { Citation, ThinkingEffort } from "@uniqus/api-types";
+import type { Citation, ThinkingEffort } from "@gate15/api-types";
 import { normalizeCitations } from "../citations.js";
 import { safeParseJson } from "./openai.js";
 import { parsePartialJson } from "./partialJson.js";

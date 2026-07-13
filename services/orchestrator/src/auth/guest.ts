@@ -4,7 +4,7 @@
  * A guest signs up with no Google account and no email — districts control
  * what students can sign into, so this is the only way to get students using
  * the product before a district approves it. Authentication is a sealed
- * `uniqus-guest` cookie, structurally the same idea as the WorkOS `wos-session`
+ * `gate15-guest` cookie, structurally the same idea as the WorkOS `wos-session`
  * cookie (see auth/workos.ts): it carries the users.id of a row whose
  * account_type is 'guest', sealed with WORKOS_COOKIE_PASSWORD so it can't be
  * forged. authenticate() in server.ts tries the WorkOS cookie first, then
@@ -41,7 +41,23 @@ import {
 } from "../db/users.js";
 import { reassignProjectsOwner } from "../db/projects.js";
 
-const GUEST_COOKIE = "uniqus-guest";
+export const GUEST_COOKIE = "gate15-guest";
+/**
+ * The pre-rebrand cookie name. READ-ONLY, and only for one release.
+ *
+ * The rebrand renamed the cookie but changed NEITHER the sealed payload shape
+ * NOR the sealing secret (WORKOS_COOKIE_PASSWORD), so a browser still holding
+ * `uniqus-guest` is holding a session that is valid in every way except its
+ * name. Reading only the new name would have signed out every live guest and
+ * forced them to dig out a recovery code they were shown once.
+ *
+ * So: accept both names on the way IN, and keep writing only `gate15-guest`
+ * (the web app owns the Set-Cookie — apps/web/lib/guest-session.ts — and clears
+ * both names on signout). Every active guest is re-cookied under the new name
+ * on their next signup/restore, and the old cookie ages out on its own.
+ * Delete this fallback in a later release.
+ */
+export const LEGACY_GUEST_COOKIE = "uniqus-guest";
 // One year. There is no hard calendar expiry — the inactivity sweeper is what
 // reclaims abandoned accounts — so the cookie just needs to outlive a school
 // term comfortably.
@@ -70,13 +86,20 @@ function getCookiePassword(): string {
 
 // ── Recovery codes ────────────────────────────────────────────────────────────
 
-/** UNIQUS-GUEST-XXXX-XXXX-XXXX-XXXX — 16 random chars, ~79 bits of entropy. */
+/**
+ * GATE15-XXXX-XXXX-XXXX-XXXX — 16 random chars, ~79 bits of entropy.
+ *
+ * Codes issued before the rebrand carry the old `UNIQUS-GUEST-` prefix. They
+ * keep working: the code is stored (and looked up) as a sha256 of its
+ * NORMALIZED form, nothing anywhere parses or validates the prefix, so an old
+ * code hashes to the same value it always did. Only newly-issued codes change.
+ */
 export function generateRecoveryCode(): string {
   let chars = "";
   for (let i = 0; i < 16; i++) {
     chars += RECOVERY_ALPHABET[randomInt(RECOVERY_ALPHABET.length)];
   }
-  return `UNIQUS-GUEST-${chars.match(/.{4}/g)!.join("-")}`;
+  return `GATE15-${chars.match(/.{4}/g)!.join("-")}`;
 }
 
 /** A short friendly handle shown in the UI, e.g. "Guest-7F3K". */
@@ -106,7 +129,10 @@ export async function unsealGuestFromCookieHeader(
   cookieHeader: string | undefined,
 ): Promise<GuestCookiePayload | null> {
   if (!cookieHeader) return null;
-  const sealed = parseCookie(cookieHeader)[GUEST_COOKIE];
+  const jar = parseCookie(cookieHeader);
+  // Prefer the current name; fall back to the pre-rebrand one so an already
+  // signed-in guest isn't logged out by the rename. See LEGACY_GUEST_COOKIE.
+  const sealed = jar[GUEST_COOKIE] ?? jar[LEGACY_GUEST_COOKIE];
   if (!sealed) return null;
   try {
     const data = await unsealData<GuestCookiePayload>(sealed, {
@@ -196,7 +222,7 @@ export async function handleGuestRestore(
 /**
  * POST /api/guest/merge — called server-side by the web app's /projects page
  * once a guest has signed in with Google (the request carries both the
- * wos-session and the uniqus-guest cookie). Moves the guest's projects onto
+ * wos-session and the gate15-guest cookie). Moves the guest's projects onto
  * the WorkOS account and marks the guest row converted. Idempotent: a guest
  * cookie pointing at an already-converted (or missing) account is a no-op.
  *

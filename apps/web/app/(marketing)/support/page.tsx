@@ -1,9 +1,9 @@
 import Link from "next/link";
 
 export const metadata = {
-  title: "Support — Uniqus Code",
+  title: "Support — Gate 15",
   description:
-    "Help with Uniqus Code: getting started, account and billing, workspaces and previews, models and thinking, shipping your app, and troubleshooting.",
+    "Help with Gate 15: getting started, account and billing, workspaces and previews, models and thinking, shipping your app, and troubleshooting.",
 };
 
 type Topic = {
@@ -254,7 +254,7 @@ const TOPICS: Topic[] = [
         q: "How do I connect GitHub?",
         a: (
           <>
-            Link your repository from the project, and Uniqus Code keeps your workspace
+            Link your repository from the project, and Gate 15 keeps your workspace
             and GitHub in sync. Pushes are explicit actions you trigger — code never
             leaves your workspace until you say so.
           </>
@@ -412,7 +412,7 @@ export default function SupportPage() {
               style={{
                 marginTop: 8,
                 background:
-                  "radial-gradient(80% 120% at 50% 0%, color-mix(in srgb, var(--brand-magenta) 14%, transparent), transparent 60%), color-mix(in srgb, var(--mk-panel-solid) 86%, transparent)",
+                  "radial-gradient(80% 120% at 50% 0%, color-mix(in srgb, var(--brand-ember) 14%, transparent), transparent 60%), color-mix(in srgb, var(--mk-panel-solid) 86%, transparent)",
                 borderColor: "var(--mk-line-strong)",
                 textAlign: "center",
                 alignItems: "center",

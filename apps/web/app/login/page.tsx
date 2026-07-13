@@ -1,5 +1,6 @@
 import { getSignInUrl, withAuth } from "@workos-inc/authkit-nextjs";
 import { redirect } from "next/navigation";
+import BrandLockup from "@/components/BrandLockup";
 import GuestLoginActions from "@/components/GuestLoginActions";
 import { getGuestSession } from "@/lib/guest-server";
 
@@ -18,12 +19,7 @@ export default async function LoginPage() {
     <main className="login-shell">
       <div className="login-card">
         <div style={{ display: "flex", justifyContent: "center", marginBottom: 24 }}>
-          <span className="lockup">
-            <span className="mark">u</span>
-            <span>uniqus</span>
-            <span className="slash">/</span>
-            <span className="code">code</span>
-          </span>
+          <BrandLockup />
         </div>
         <h1>Sign in</h1>
         <p className="sub">Engineering, on demand.</p>

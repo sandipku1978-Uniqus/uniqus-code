@@ -1,5 +1,5 @@
 import { db } from "./client.js";
-import type { Role, Organization, OrgMember, ProjectMember } from "@uniqus/api-types";
+import type { Role, Organization, OrgMember, ProjectMember } from "@gate15/api-types";
 
 /**
  * Org + project membership and RBAC (P3.1/P3.2/P3.5).

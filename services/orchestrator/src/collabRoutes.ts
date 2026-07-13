@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { roleAtLeast, type Role } from "@uniqus/api-types";
+import { roleAtLeast, type Role } from "@gate15/api-types";
 import { audit } from "./db/audit.js";
 import * as members from "./db/members.js";
 import * as comments from "./db/comments.js";
@@ -7,7 +7,7 @@ import * as tasks from "./db/agentTasks.js";
 import * as flows from "./db/flows.js";
 import { listOrgProjects } from "./db/projects.js";
 import { orgMonthToDateSpendUsd, startOfMonthIso } from "./db/usage.js";
-import type { FlowStep, OrgUsageSummary } from "@uniqus/api-types";
+import type { FlowStep, OrgUsageSummary } from "@gate15/api-types";
 
 const MAX_ORG_NAME = 60;
 
@@ -92,7 +92,7 @@ export async function handleCollabRoute(
           json(res, r.reason === "no_user" ? 404 : r.reason === "exists" ? 409 : 500, {
             error:
               r.reason === "no_user"
-                ? "no Uniqus account with that email"
+                ? "no Gate 15 account with that email"
                 : r.reason === "exists"
                   ? "that account is already a project member; change its role instead"
                   : r.message ?? "failed",
@@ -395,7 +395,7 @@ export async function handleCollabRoute(
           json(res, r.reason === "no_user" ? 404 : r.reason === "exists" ? 409 : 500, {
             error:
               r.reason === "no_user"
-                ? "no Uniqus account with that email"
+                ? "no Gate 15 account with that email"
                 : r.reason === "exists"
                   ? "that account is already an organization member; change its role instead"
                   : r.message ?? "failed",

@@ -293,7 +293,7 @@ export default function SkillsModal({
                       borderRadius: 6,
                       padding: "8px 10px",
                       cursor: attachBusy ? "default" : "pointer",
-                      background: on ? "color-mix(in srgb, var(--brand-magenta) 9%, var(--bg-surface))" : undefined,
+                      background: on ? "color-mix(in srgb, var(--brand-ember) 9%, var(--bg-surface))" : undefined,
                     }}
                   >
                     <input
@@ -347,7 +347,7 @@ export default function SkillsModal({
                       : "1px solid var(--border-default)",
                     borderRadius: "var(--radius-sm)",
                     padding: 10,
-                    background: isActive ? "color-mix(in srgb, var(--brand-magenta) 9%, var(--bg-surface))" : undefined,
+                    background: isActive ? "color-mix(in srgb, var(--brand-ember) 9%, var(--bg-surface))" : undefined,
                   }}
                 >
                   <div

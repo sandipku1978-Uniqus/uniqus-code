@@ -1,5 +1,5 @@
 import { db } from "./client.js";
-import type { ArtifactKind, CheckpointArtifact } from "@uniqus/api-types";
+import type { ArtifactKind, CheckpointArtifact } from "@gate15/api-types";
 
 /**
  * Checkpoint / interaction artifacts (P2.3). Persists the evidence captured

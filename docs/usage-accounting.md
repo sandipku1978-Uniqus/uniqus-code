@@ -33,7 +33,7 @@ The provider adapters populate all four (`loop.ts`'s `usage` shape carries
 
 ## Per-model pricing (`MODEL_PRICING`)
 
-`MODEL_PRICING` in `@uniqus/api-types` maps the provider-native model id to a
+`MODEL_PRICING` in `@gate15/api-types` maps the provider-native model id to a
 `ModelPrice` in **USD per 1,000,000 tokens**: a base `{ input, output }`, an
 optional per-model `{ cacheRead, cacheWrite }` override, and an optional
 `longContext` band. Current bases include `claude-opus-4-8` (`{5, 25}`),

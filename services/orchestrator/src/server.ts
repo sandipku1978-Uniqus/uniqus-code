@@ -38,7 +38,7 @@ import type {
   Citation,
   PermissionMode,
   ToolRiskCategory,
-} from "@uniqus/api-types";
+} from "@gate15/api-types";
 import {
   MODEL_CATALOG,
   estimateCostUsd,
@@ -46,7 +46,7 @@ import {
   DEFAULT_DESIGN_TOKENS,
   roleAtLeast,
   runModeForPermission,
-} from "@uniqus/api-types";
+} from "@gate15/api-types";
 import { decidePermission } from "./agent/permissions.js";
 import { readCitations } from "./agent/citations.js";
 import { inlineFileRefs as inlineFileRefsConcurrent } from "./agent/inlineFileRefs.js";
@@ -149,7 +149,7 @@ import {
   revokeSharesForServer,
   startShareTokenSweeper,
 } from "./previewShare.js";
-import { readRunConfig, writeRunConfig, detectRunConfig } from "./runConfig.js";
+import { readRunConfig, writeRunConfig, detectRunConfig, RUN_CONFIG_FILE } from "./runConfig.js";
 import { ensureProjectDeps, runCommandSubdir } from "./ensureDeps.js";
 import {
   upsertUser,
@@ -255,12 +255,15 @@ import {
   type WorkosCookieFailureReason,
 } from "./auth/workos.js";
 import { isSensitiveProjectPath } from "./security/sensitivePaths.js";
+import { parse as parseCookieHeader } from "cookie";
 import {
   unsealGuestFromCookieHeader,
   handleGuestCreate,
   handleGuestRestore,
   handleGuestMerge,
   handleGuestRecoveryCode,
+  GUEST_COOKIE,
+  LEGACY_GUEST_COOKIE,
 } from "./auth/guest.js";
 import { turnstileConfigured, verifyTurnstile } from "./auth/turnstile.js";
 import {
@@ -993,6 +996,29 @@ const authFailureDiagnostics = new WeakMap<
   { workos: WorkosCookieFailureReason; guestCookiePresent: boolean }
 >();
 
+/**
+ * Diagnostics only (never an auth decision): did the browser send a guest
+ * cookie at ALL, under either name?
+ *
+ * This must accept exactly the set of names `unsealGuestFromCookieHeader()`
+ * accepts — the current `GUEST_COOKIE` and, for one release, the pre-rebrand
+ * `LEGACY_GUEST_COOKIE` that live guests are still holding. Both names come
+ * from auth/guest.ts rather than being re-typed here: the literal used to be
+ * inlined as a regex, the rebrand renamed the cookie in guest.ts, and this
+ * copy silently kept matching the dead name — reporting "no guest cookie" for
+ * every real guest. That flag is the first thing you look at when a guest
+ * can't sign in, so a lying `false` is worse than no flag at all.
+ *
+ * Presence, not validity: a cookie that is sent but empty/corrupt still counts
+ * as present, which is precisely the state worth telling apart from "the
+ * browser never sent one".
+ */
+function hasGuestCookie(cookieHeader: string | undefined): boolean {
+  if (!cookieHeader) return false;
+  const jar = parseCookieHeader(cookieHeader);
+  return jar[GUEST_COOKIE] !== undefined || jar[LEGACY_GUEST_COOKIE] !== undefined;
+}
+
 async function authenticate(req: IncomingMessage): Promise<{
   kind: "workos" | "guest";
   session?: AuthKitSession;
@@ -1024,9 +1050,7 @@ async function authenticate(req: IncomingMessage): Promise<{
   }
   authFailureDiagnostics.set(req, {
     workos: workosValidation.failure ?? "validation_error",
-    guestCookiePresent:
-      typeof req.headers.cookie === "string" &&
-      /(?:^|;\s*)uniqus-guest=/.test(req.headers.cookie),
+    guestCookiePresent: hasGuestCookie(req.headers.cookie),
   });
   return null;
 }
@@ -1093,7 +1117,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       return;
     }
     if (url.startsWith("/preview/")) {
-      const html = previewErrorPage(404, "Preview server not running", "This dev server has stopped or hasn't been started yet. Go back to the chat and ask Uniqus to start a preview server.");
+      const html = previewErrorPage(404, "Preview server not running", "This dev server has stopped or hasn't been started yet. Go back to the chat and ask Gate 15 to start a preview server.");
       res.writeHead(404, { "Content-Type": "text/html" });
       res.end(html);
       return;
@@ -1748,7 +1772,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const email = (body.email ?? "").trim();
     if (!email) return json(res, 400, { error: "email is required" });
     const target = await findUserByEmail(email);
-    if (!target) return json(res, 404, { error: "no Uniqus account with that email" });
+    if (!target) return json(res, 404, { error: "no Gate 15 account with that email" });
     if (target.id === user.id) return json(res, 400, { error: "that account already owns the project" });
     await transferPersonalProjectOwnership(projectId, user.id, target.id);
     await revokeUnauthorizedProjectActivity(projectId, user.id);
@@ -2438,7 +2462,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return json(res, 200, { ok: true });
   }
   // List the connected account's Supabase projects for the Databases tab,
-  // plus which uniqus project each database is linked to (so the tab can show
+  // plus which Gate 15 project each database is linked to (so the tab can show
   // "powers <project>" chips without an N+1 from the client).
   if (req.url === "/api/supabase/projects" && req.method === "GET") {
     try {
@@ -2737,7 +2761,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
       }
     }
-    const tmp = path.join(tmpdir(), `uniqus-ds-${randomUUID()}`);
+    const tmp = path.join(tmpdir(), `gate15-ds-${randomUUID()}`);
     try {
       await importGithub({ repo_url: repoUrl, branch: body.branch, pat: authToken }, tmp);
       const tokens = await inferDesignTokensFromDir(tmp);
@@ -2863,10 +2887,13 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
 
     // Reuse the project's stored Vercel project name when available so
     // re-deploys converge on the same project. First deploy slugifies the
-    // uniqus project name. We don't trust the user's freeform project name
+    // Gate 15 project name. We don't trust the user's freeform project name
     // verbatim — Vercel rejects names with spaces / capitals.
+    // (The fallback slug is user-visible in their Vercel dashboard. Existing
+    // projects already persisted `vercel_project_name` on first deploy, so
+    // changing it here only affects newly-created projects.)
     const projectName =
-      project.vercel_project_name ?? slugifyForVercel(project.name) ?? `uniqus-${projectId.slice(0, 8)}`;
+      project.vercel_project_name ?? slugifyForVercel(project.name) ?? `gate15-${projectId.slice(0, 8)}`;
 
     const dest = sandboxDirFor(projectId);
 
@@ -3090,8 +3117,10 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         port: config.port,
         source: config.source ?? "user",
       }).catch((err) => console.error("writeRunConfig failed:", err));
+      // Sync the file writeRunConfig actually just wrote — take the name from
+      // the constant, never a literal, or a rename silently syncs nothing.
       getTracker(projectId, dest)
-        .syncFile(".uniqus-run.json")
+        .syncFile(RUN_CONFIG_FILE)
         .then(() => broadcastToProject(projectId, { type: "storage_synced", at: Date.now() }))
         .catch(() => {});
       return json(res, 200, {
@@ -3862,7 +3891,7 @@ function sanitizeEnv(raw: unknown): Record<string, string> {
 
 /**
  * Vercel project names: lowercase letters, digits, hyphens. Length 1–100.
- * We slug the uniqus project name once on first deploy and persist the
+ * We slug the Gate 15 project name once on first deploy and persist the
  * result (`projects.vercel_project_name`) so subsequent deploys converge.
  */
 function slugifyForVercel(name: string): string | null {
@@ -6532,7 +6561,7 @@ async function runSession(
             })
               .then(() =>
                 getTracker(projectId, sandboxDir)
-                  .syncFile(".uniqus-run.json")
+                  .syncFile(RUN_CONFIG_FILE)
                   .then(() => emitSynced()),
               )
               .catch((err) => console.error("writeRunConfig failed:", err));
@@ -7332,9 +7361,9 @@ async function initialPushToRepo(opts: {
   // has something. Doesn't overwrite an existing README.
   const readme = path.join(opts.sandboxDir, "README.md");
   if (!(await fileExists(readme))) {
-    await fs.writeFile(readme, `# ${opts.projectName}\n\nCreated by Uniqus Code.\n`);
+    await fs.writeFile(readme, `# ${opts.projectName}\n\nCreated by Gate 15.\n`);
   }
-  const askpassDir = await fs.mkdtemp(path.join(tmpdir(), "uniqus-git-askpass-"));
+  const askpassDir = await fs.mkdtemp(path.join(tmpdir(), "gate15-git-askpass-"));
   const askpassPath = path.join(askpassDir, "askpass.js");
   await fs.writeFile(
     askpassPath,
@@ -7376,9 +7405,9 @@ process.stdout.write(/username/i.test(prompt) ? "x-access-token\\n" : ${JSON.str
     await run(["init", "-b", opts.defaultBranch]);
     await run([
       "-c",
-      "user.email=uniqus@noreply.invalid",
+      "user.email=noreply@gate15.dev",
       "-c",
-      "user.name=Uniqus Code",
+      "user.name=Gate 15",
       "-c",
       "commit.gpgsign=false",
       "add",
@@ -7386,9 +7415,9 @@ process.stdout.write(/username/i.test(prompt) ? "x-access-token\\n" : ${JSON.str
     ]);
     await run([
       "-c",
-      "user.email=uniqus@noreply.invalid",
+      "user.email=noreply@gate15.dev",
       "-c",
-      "user.name=Uniqus Code",
+      "user.name=Gate 15",
       "-c",
       "commit.gpgsign=false",
       "commit",
@@ -8037,7 +8066,7 @@ async function handleDesignSystemZipInfer(
   if (parseError) return json(res, 400, { error: parseError });
   if (!name) return json(res, 400, { error: "name is required" });
   if (!zipBuffer) return json(res, 400, { error: "no zip file uploaded" });
-  const tmp = path.join(tmpdir(), `uniqus-ds-${randomUUID()}`);
+  const tmp = path.join(tmpdir(), `gate15-ds-${randomUUID()}`);
   try {
     await importZip(zipBuffer, tmp);
     const tokens = await inferDesignTokensFromDir(tmp);
@@ -8181,7 +8210,7 @@ async function fetchLiveSiteContext(rawUrl: string): Promise<string> {
   // 30x-bounce us to 169.254.169.254 / 127.0.0.1 / a peer VM (SSRF). The
   // timeout stops a slow-loris target from hanging the SSE handler forever.
   const pageRes = await safeFetch(url.toString(), {
-    headers: { "User-Agent": "uniqus-code design-system bot" },
+    headers: { "User-Agent": "gate15 design-system bot" },
     signal: AbortSignal.timeout(15_000),
   });
   if (!pageRes.ok) throw new Error(`couldn't fetch the page (${pageRes.status})`);
@@ -8204,7 +8233,7 @@ async function fetchLiveSiteContext(rawUrl: string): Promise<string> {
       const cssUrl = new URL(href, url);
       if (cssUrl.protocol !== "https:" && cssUrl.protocol !== "http:") continue;
       const cssRes = await safeFetch(cssUrl.toString(), {
-        headers: { "User-Agent": "uniqus-code" },
+        headers: { "User-Agent": "gate15" },
         signal: AbortSignal.timeout(10_000),
       });
       if (cssRes.ok) cssText += `\n/* ${cssUrl.pathname} */\n${(await cssRes.text()).slice(0, 20_000)}`;
@@ -8402,7 +8431,7 @@ async function handleDesignSystemAnalyze(
         }
       }
       phase(`Cloning ${fields.repo_full_name || repoUrl}…`);
-      const tmp = path.join(tmpdir(), `uniqus-ds-${randomUUID()}`);
+      const tmp = path.join(tmpdir(), `gate15-ds-${randomUUID()}`);
       try {
         await importGithub({ repo_url: repoUrl, branch: fields.branch || undefined, pat: authToken }, tmp);
         phase("Scanning theme & style files…");
@@ -8416,7 +8445,7 @@ async function handleDesignSystemAnalyze(
       const zip = files.find((f) => f.filename.toLowerCase().endsWith(".zip"));
       if (!zip) return fail(400, "no .zip uploaded");
       phase("Extracting the archive…");
-      const tmp = path.join(tmpdir(), `uniqus-ds-${randomUUID()}`);
+      const tmp = path.join(tmpdir(), `gate15-ds-${randomUUID()}`);
       try {
         await importZip(zip.buf, tmp);
         phase("Scanning theme & style files…");

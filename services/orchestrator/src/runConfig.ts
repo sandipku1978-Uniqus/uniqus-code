@@ -2,9 +2,26 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 /**
- * Per-project run configuration. Persisted as `.uniqus-run.json` in the
- * sandbox so it survives Railway redeploys via the same Storage sync that
- * carries the rest of the user's files.
+ * Per-project run configuration. Persisted as `.gate15-run.json` in the
+ * sandbox so it survives redeploys via the same Storage sync that carries the
+ * rest of the user's files.
+ *
+ * Rebrand note (spec §8): this file sits at the root of the user's sandbox and
+ * `listDir` does not hide dotfiles, so it shows up in the file explorer — it is
+ * user-visible and therefore in scope for the rename. It is NOT covered by the
+ * §8b exemption: that exemption exists because `.uniqus/skills.md` is pinned by
+ * `db/schema.sql` and by UI copy that prints the path, neither of which is true
+ * here. The migration is instead carried in this module:
+ *
+ *   - READ  prefers {@link RUN_CONFIG_FILE} and falls back to
+ *     {@link LEGACY_RUN_CONFIG_FILE}, so a project created before the rebrand
+ *     (whose old file hydrates back out of Storage) keeps its Run config.
+ *   - WRITE emits the new name and removes the legacy file, so a sandbox never
+ *     carries both. The stale Storage object is reconciled away by the sync
+ *     walk, which deletes remote files that no longer exist locally.
+ *
+ * Net effect: no project loses its Run config, and the old name disappears from
+ * the file tree on the first write.
  */
 export interface RunConfig {
   command: string;
@@ -13,11 +30,22 @@ export interface RunConfig {
   source?: "agent" | "user" | "detected";
 }
 
-const CONFIG_FILE = ".uniqus-run.json";
+/**
+ * Current on-disk name, relative to the sandbox root. Exported so callers that
+ * need to push it to Storage (`ProjectSync.syncFile`) reference the constant
+ * rather than re-typing the literal and drifting from it.
+ */
+export const RUN_CONFIG_FILE = ".gate15-run.json";
 
-export async function readRunConfig(sandboxDir: string): Promise<RunConfig | null> {
+/** Pre-rebrand name. Still read when the new file is absent; never written. */
+export const LEGACY_RUN_CONFIG_FILE = ".uniqus-run.json";
+
+async function readConfigFile(
+  sandboxDir: string,
+  file: string,
+): Promise<RunConfig | null> {
   try {
-    const raw = await fs.readFile(path.join(sandboxDir, CONFIG_FILE), "utf-8");
+    const raw = await fs.readFile(path.join(sandboxDir, file), "utf-8");
     const parsed = JSON.parse(raw) as Partial<RunConfig>;
     if (typeof parsed.command !== "string" || typeof parsed.port !== "number") {
       return null;
@@ -32,15 +60,29 @@ export async function readRunConfig(sandboxDir: string): Promise<RunConfig | nul
   }
 }
 
+export async function readRunConfig(sandboxDir: string): Promise<RunConfig | null> {
+  return (
+    (await readConfigFile(sandboxDir, RUN_CONFIG_FILE)) ??
+    (await readConfigFile(sandboxDir, LEGACY_RUN_CONFIG_FILE))
+  );
+}
+
 export async function writeRunConfig(
   sandboxDir: string,
   config: RunConfig,
 ): Promise<void> {
   await fs.writeFile(
-    path.join(sandboxDir, CONFIG_FILE),
+    path.join(sandboxDir, RUN_CONFIG_FILE),
     JSON.stringify(config, null, 2) + "\n",
     "utf-8",
   );
+  // Retire the pre-rebrand file once the new one is safely on disk, so the
+  // sandbox never shows both. Best effort: it is absent on any project created
+  // after the rebrand, and a failure to unlink is harmless because reads prefer
+  // the new name.
+  await fs
+    .rm(path.join(sandboxDir, LEGACY_RUN_CONFIG_FILE), { force: true })
+    .catch(() => {});
 }
 
 /**

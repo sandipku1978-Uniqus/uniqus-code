@@ -1,5 +1,5 @@
 import { db } from "./client.js";
-import type { KnowledgeDocument } from "@uniqus/api-types";
+import type { KnowledgeDocument } from "@gate15/api-types";
 
 /**
  * Account-level Knowledge documents. Each row is a file the user uploaded once

@@ -275,7 +275,7 @@ export default function KnowledgeView({ isGuest }: { isGuest: boolean }) {
         </h1>
         <p className="lede">
           Upload the documents your work relies on — regulations, standards, research papers,
-          datasets, internal policies. Uniqus extracts their text so the agent can search them in
+          datasets, internal policies. Gate 15 extracts their text so the agent can search them in
           any project with the <code>knowledge_search</code> tool, right alongside your prompts.
         </p>
       </header>
