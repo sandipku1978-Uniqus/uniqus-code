@@ -867,6 +867,34 @@ const ENTRIES: Entry[] = [
       },
     ],
   },
+  {
+    id: "v0-8-0",
+    date: "Jul 15, 2026",
+    ver: "v0.8.0",
+    title: "Safer projects, steadier deploys, and a sharper workspace",
+    changes: [
+      {
+        tag: "improved",
+        commit: "ab41aed",
+        text: "Refined the workspace, project picker, editor, preview, settings, and marketing surfaces for clearer navigation and more consistent controls.",
+      },
+      {
+        tag: "fixed",
+        commit: "ab41aed",
+        text: "Protected unsaved edits and file loading from stale responses, and made reconnects, first turns, citations, and permission controls more predictable.",
+      },
+      {
+        tag: "improved",
+        commit: "ab41aed",
+        text: "Hardened authentication, secrets, connectors, imports, exports, collaboration, and database access with stricter validation and safer error handling.",
+      },
+      {
+        tag: "improved",
+        commit: "ab41aed",
+        text: "Made background tasks, deploys, storage cleanup, connected-account refreshes, and sandbox networking more resilient to retries, concurrency, and restarts.",
+      },
+    ],
+  },
 ];
 
 const DISPLAY_ENTRIES = [...ENTRIES].reverse();
