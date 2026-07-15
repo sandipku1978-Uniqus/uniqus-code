@@ -39,7 +39,7 @@ const fieldStyle: React.CSSProperties = {
   padding: "10px 12px",
   color: "var(--text-primary)",
   fontFamily: "var(--font-mono-stack)",
-  fontSize: 12.5,
+  fontSize: 12,
   lineHeight: 1.5,
   resize: "vertical",
   minHeight: 96,
@@ -52,6 +52,8 @@ export default function CustomPromptsCard() {
   const [saved, setSaved] = useState<AccountSettings>({ custom_prompt: "", default_skills: "" });
   const [customPrompt, setCustomPrompt] = useState("");
   const [defaultSkills, setDefaultSkills] = useState("");
+  const [hasLoadedSnapshot, setHasLoadedSnapshot] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
     let alive = true;
@@ -61,6 +63,7 @@ export default function CustomPromptsCard() {
         setSaved(settings);
         setCustomPrompt(settings.custom_prompt);
         setDefaultSkills(settings.default_skills);
+        setHasLoadedSnapshot(true);
         setStatus({ kind: "ready" });
       })
       .catch((err) => {
@@ -70,7 +73,7 @@ export default function CustomPromptsCard() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [loadAttempt]);
 
   const dirty =
     customPrompt !== saved.custom_prompt || defaultSkills !== saved.default_skills;
@@ -79,7 +82,7 @@ export default function CustomPromptsCard() {
   const busy = status.kind === "loading" || status.kind === "saving";
 
   async function handleSave(): Promise<void> {
-    if (!dirty || overLimit) return;
+    if (!hasLoadedSnapshot || !dirty || overLimit) return;
     setStatus({ kind: "saving" });
     // Send only what changed, so saving one field doesn't rewrite the other.
     const patch: Partial<AccountSettings> = {};
@@ -109,6 +112,21 @@ export default function CustomPromptsCard() {
         <div className="settings-row">
           <span className="k">Status</span>
           <span className="v">loading…</span>
+        </div>
+      ) : status.kind === "error" && !hasLoadedSnapshot ? (
+        <div className="async-error" role="alert">
+          <p>We couldn&rsquo;t load your saved prompts. Nothing has changed.</p>
+          <code>{status.message}</code>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => {
+              setStatus({ kind: "loading" });
+              setLoadAttempt((attempt) => attempt + 1);
+            }}
+          >
+            Retry
+          </button>
         </div>
       ) : (
         <div style={{ display: "grid", gap: 18 }}>
@@ -210,8 +228,10 @@ export default function CustomPromptsCard() {
             {status.kind === "saved" && !dirty && (
               <span style={{ fontSize: 12, color: "var(--conf-high)" }}>Saved</span>
             )}
-            {status.kind === "error" && (
-              <span style={{ fontSize: 12, color: "var(--conf-low)" }}>{status.message}</span>
+            {status.kind === "error" && hasLoadedSnapshot && (
+              <span role="alert" style={{ fontSize: 12, color: "var(--conf-low)" }}>
+                Save failed: {status.message}. Your loaded values remain in the editor.
+              </span>
             )}
             {overLimit && (
               <span style={{ fontSize: 12, color: "var(--conf-low)" }}>

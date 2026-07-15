@@ -78,6 +78,7 @@ export interface InteractFrame {
 
 export interface InteractOpts {
   sandboxRoot: string;
+  projectId?: string;
   serverId?: string;
   url?: string;
   pathSuffix?: string;
@@ -213,6 +214,7 @@ export async function runInteractPreview(opts: InteractOpts): Promise<InteractRe
   const targetUrl = await resolvePreviewUrl({
     url: opts.url,
     serverId: opts.serverId,
+    projectId: opts.projectId,
     pathSuffix: opts.pathSuffix,
   });
   if (!targetUrl) {

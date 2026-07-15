@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import {
   GUEST_COOKIE_NAME,
+  LEGACY_GUEST_COOKIE_NAME,
   unsealGuestCookie,
   guestCookieClearOptions,
 } from "@/lib/guest-session";
@@ -21,7 +22,9 @@ import { orchestratorFetch } from "@/lib/orchestrator-server";
  */
 export async function GET(req: Request) {
   const store = await cookies();
-  const guest = await unsealGuestCookie(store.get(GUEST_COOKIE_NAME)?.value);
+  const guest = await unsealGuestCookie(
+    store.get(GUEST_COOKIE_NAME)?.value ?? store.get(LEGACY_GUEST_COOKIE_NAME)?.value,
+  );
   const hasWorkos = !!store.get("wos-session");
 
   if (!guest || !hasWorkos) {
@@ -49,6 +52,8 @@ export async function GET(req: Request) {
   }
 
   const redirect = NextResponse.redirect(new URL("/projects", req.url));
-  redirect.cookies.set(GUEST_COOKIE_NAME, "", guestCookieClearOptions());
+  const clear = guestCookieClearOptions(req);
+  redirect.cookies.set(GUEST_COOKIE_NAME, "", clear);
+  redirect.cookies.set(LEGACY_GUEST_COOKIE_NAME, "", clear);
   return redirect;
 }

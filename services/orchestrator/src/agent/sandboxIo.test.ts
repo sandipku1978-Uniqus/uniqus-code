@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, mkdir, readFile as readHostFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile as readHostFile, rm, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -8,12 +8,17 @@ import {
   editFile,
   grep,
   grepResult,
+  getServer,
   isSandboxTextResult,
   listDir,
   readFile,
   readFileResult,
   runCommand,
+  startServer,
+  stopServer,
   sandboxTextWasTruncated,
+  waitForPort,
+  writeFile as sandboxWriteFile,
   type Sandbox,
 } from "./sandbox.js";
 import * as fcAgent from "../firecracker/agentRpc.js";
@@ -188,11 +193,65 @@ describe("bounded sandbox grep", () => {
 });
 
 describe("sandbox I/O safety", () => {
+  it("rejects a missing child beneath a symlinked parent", async () => {
+    const sandbox = await makeSandbox();
+    const outside = await mkdtemp(path.join(os.tmpdir(), "uniqus-sandbox-outside-"));
+    roots.push(outside);
+    await symlink(
+      outside,
+      path.join(sandbox.rootDir, "escape"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    await expect(sandboxWriteFile(sandbox, "escape/missing/new.txt", "secret")).rejects.toThrow(
+      /escapes sandbox through a symlink/i,
+    );
+    await expect(readHostFile(path.join(outside, "missing", "new.txt"), "utf-8")).rejects.toThrow();
+  });
+
+  it("binds preview control handles to the project that started them", async () => {
+    const sandbox = await makeSandbox();
+    sandbox.vm = fakeVm();
+    vi.spyOn(fcAgent, "startServer").mockResolvedValue({
+      id: "vm-server",
+      port: 4242,
+      pid: 123,
+    });
+    vi.spyOn(fcAgent, "stopServer").mockResolvedValue(undefined);
+
+    const started = await startServer(sandbox, "npm run dev", 4242, 1000, "project-a");
+    expect(getServer("project-a", started.id)).not.toBeNull();
+    expect(getServer("project-b", started.id)).toBeNull();
+    await expect(stopServer("project-b", started.id)).rejects.toThrow(/No server/);
+    expect(getServer("project-a", started.id)).not.toBeNull();
+
+    await stopServer("project-a", started.id);
+    expect(getServer("project-a", started.id)).toBeNull();
+  });
+
+  it("removes each abort listener after a normal waitForPort poll", async () => {
+    const server = http.createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("missing test port");
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+
+    const controller = new AbortController();
+    const added = vi.spyOn(controller.signal, "addEventListener");
+    const removed = vi.spyOn(controller.signal, "removeEventListener");
+
+    await expect(waitForPort(address.port, 550, controller.signal)).resolves.toBe(false);
+    expect(added.mock.calls.filter(([type]) => type === "abort")).not.toHaveLength(0);
+    expect(removed.mock.calls.filter(([type]) => type === "abort")).toHaveLength(
+      added.mock.calls.filter(([type]) => type === "abort").length,
+    );
+  });
+
   it("preserves local command-output truncation as non-serializing metadata", async () => {
     const sandbox = await makeSandbox();
     const previous = process.env.UNIQUS_ALLOW_HOST_SANDBOX;
     process.env.UNIQUS_ALLOW_HOST_SANDBOX = "1";
-    const result = await runCommand(sandbox, `node -e "process.stdout.write('x'.repeat(20000))"`)
+    const result = await runCommand(sandbox, `node -e "process.stdout.write('x'.repeat(2000000))"`)
       .finally(() => {
         if (previous === undefined) delete process.env.UNIQUS_ALLOW_HOST_SANDBOX;
         else process.env.UNIQUS_ALLOW_HOST_SANDBOX = previous;
@@ -200,6 +259,7 @@ describe("sandbox I/O safety", () => {
     const wrapped = commandResultText(result);
 
     expect(result.truncated).toBe(true);
+    expect(Buffer.byteLength(result.stdout)).toBeLessThan(20_000);
     expect(sandboxTextWasTruncated(wrapped)).toBe(true);
     expect(wrapped.text).toContain("[... truncated ");
     expect(JSON.parse(JSON.stringify(wrapped))).toEqual({ text: wrapped.text });

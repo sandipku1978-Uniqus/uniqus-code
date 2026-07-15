@@ -34,6 +34,17 @@ afterEach(async () => {
 });
 
 describe("ProjectSync.syncChanges", () => {
+  it("never persists credential-bearing project files", async () => {
+    const tracker = getTracker(projectId, sandboxDir);
+    await tracker.initialize();
+    await fs.writeFile(path.join(sandboxDir, ".env.production"), "TOKEN=secret");
+    await fs.writeFile(path.join(sandboxDir, "safe.txt"), "safe");
+
+    await expect(tracker.syncChanges()).resolves.toBe(1);
+    expect(storageMocks.upload).toHaveBeenCalledOnce();
+    expect(storageMocks.upload).toHaveBeenCalledWith(projectId, "safe.txt", expect.any(Buffer));
+  });
+
   it("finishes the walk, advances successful files, and reports upload failures", async () => {
     const tracker = getTracker(projectId, sandboxDir);
     await tracker.initialize();

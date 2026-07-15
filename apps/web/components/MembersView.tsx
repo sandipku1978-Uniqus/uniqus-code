@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { ProjectMember, Role } from "@gate15/api-types";
+import { roleAtLeast } from "@gate15/api-types";
 import {
   fetchProjectMembersApi,
   addProjectMemberApi,
@@ -9,6 +10,7 @@ import {
   removeProjectMemberApi,
 } from "@/lib/api";
 import { toast } from "@/lib/toast";
+import Modal from "./Modal";
 
 /**
  * Project collaborators (P3.2). Invite a teammate by email + role, change a
@@ -33,19 +35,30 @@ function initials(name: string | null | undefined, email: string | null | undefi
   return src.slice(0, 1).toUpperCase();
 }
 
-export default function MembersView({ projectId }: { projectId: string }) {
+export default function MembersView({
+  projectId,
+  effectiveRole,
+}: {
+  projectId: string;
+  effectiveRole: Role | null;
+}) {
   const [members, setMembers] = useState<ProjectMember[] | null>(null);
   const [email, setEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<Role>("editor");
   const [busy, setBusy] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<ProjectMember | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const [removing, setRemoving] = useState(false);
+  const canManage = roleAtLeast(effectiveRole, "admin");
 
   const load = useCallback(async () => {
+    setLoadError(null);
     try {
       const { members } = await fetchProjectMembersApi(projectId);
       setMembers(members);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Couldn't load members");
-      setMembers([]);
+      setLoadError(e instanceof Error ? e.message : "Couldn't load members");
     }
   }, [projectId]);
 
@@ -55,21 +68,22 @@ export default function MembersView({ projectId }: { projectId: string }) {
 
   async function invite() {
     const addr = email.trim();
-    if (!addr || busy) return;
+    if (!canManage || !addr || busy) return;
     setBusy(true);
     try {
       await addProjectMemberApi(projectId, addr, inviteRole);
       setEmail("");
-      toast.success(`Invited ${addr} as ${inviteRole}`);
+      toast.success(`Added ${addr} as ${inviteRole}`);
       await load();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Couldn't invite");
+      toast.error(e instanceof Error ? e.message : "Couldn't add member");
     } finally {
       setBusy(false);
     }
   }
 
   async function changeRole(m: ProjectMember, role: Role) {
+    if (!canManage) return;
     try {
       await setProjectMemberRoleApi(projectId, m.user_id, role);
       setMembers((prev) => prev?.map((x) => (x.user_id === m.user_id ? { ...x, role } : x)) ?? null);
@@ -79,12 +93,18 @@ export default function MembersView({ projectId }: { projectId: string }) {
   }
 
   async function remove(m: ProjectMember) {
+    if (!canManage) return;
+    setRemoving(true);
+    setRemoveError(null);
     try {
       await removeProjectMemberApi(projectId, m.user_id);
       setMembers((prev) => prev?.filter((x) => x.user_id !== m.user_id) ?? null);
       toast.success("Removed");
+      setRemoveTarget(null);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Couldn't remove");
+      setRemoveError(e instanceof Error ? e.message : "Couldn't remove member");
+    } finally {
+      setRemoving(false);
     }
   }
 
@@ -107,9 +127,14 @@ export default function MembersView({ projectId }: { projectId: string }) {
         )}
       </div>
 
-      {/* Invite row */}
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+      {/* Existing-account add row. The API does not send invitations. */}
+      {canManage ? <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <label className="sr-only" htmlFor="project-member-email">
+          Existing Gate 15 member email
+        </label>
         <input
+          id="project-member-email"
+          name="memberEmail"
           type="email"
           className="ui-input"
           placeholder="teammate@company.com"
@@ -132,7 +157,7 @@ export default function MembersView({ projectId }: { projectId: string }) {
           className="ui-select"
           value={inviteRole}
           onChange={(e) => setInviteRole(e.target.value as Role)}
-          aria-label="Invite role"
+          aria-label="Member role"
         >
           {ROLES.map((r) => (
             <option key={r} value={r}>
@@ -141,12 +166,25 @@ export default function MembersView({ projectId }: { projectId: string }) {
           ))}
         </select>
         <button type="button" className="btn-primary" onClick={() => void invite()} disabled={busy || !email.trim()}>
-          {busy ? "Inviting…" : "Invite"}
+          {busy ? "Adding…" : "Add existing member"}
         </button>
-      </div>
+      </div> : (
+        <div className="async-error" role="status">
+          <p>Collaborator access is read-only for your {effectiveRole ?? "current"} role.</p>
+          <span>Ask a project admin or owner to add members or change roles.</span>
+        </div>
+      )}
 
       {/* Member list — hairline-divided editorial rows */}
-      {members === null ? (
+      {loadError ? (
+        <div className="async-error" role="alert">
+          <p>We couldn&rsquo;t load collaborators. Existing access may still be there.</p>
+          <code>{loadError}</code>
+          <button type="button" className="btn-secondary" onClick={() => void load()}>
+            Retry
+          </button>
+        </div>
+      ) : members === null ? (
         <div style={{ ...eyebrow }}>Loading…</div>
       ) : members.length === 0 ? (
         <div
@@ -159,7 +197,7 @@ export default function MembersView({ projectId }: { projectId: string }) {
             fontSize: "var(--fs-sm)",
           }}
         >
-          No collaborators yet. Invite a teammate by email above.
+          No collaborators yet. Add an existing Gate 15 member by email above.
         </div>
       ) : (
         <div
@@ -215,9 +253,9 @@ export default function MembersView({ projectId }: { projectId: string }) {
                 )}
               </div>
 
-              {m.role === "owner" ? (
+              {m.role === "owner" || !canManage ? (
                 <span
-                  title={roleNote.owner}
+                  title={roleNote[m.role]}
                   style={{
                     fontFamily: "var(--font-mono)",
                     fontSize: "var(--fs-2xs)",
@@ -230,7 +268,7 @@ export default function MembersView({ projectId }: { projectId: string }) {
                     padding: "3px 10px",
                   }}
                 >
-                  owner
+                  {m.role}
                 </span>
               ) : (
                 <>
@@ -252,16 +290,42 @@ export default function MembersView({ projectId }: { projectId: string }) {
                     className="btn-ghost"
                     aria-label={`Remove ${m.email ?? m.user_id}`}
                     title="Remove"
-                    onClick={() => void remove(m)}
+                    onClick={() => {
+                      setRemoveError(null);
+                      setRemoveTarget(m);
+                    }}
                     style={{ color: "var(--text-dim)", padding: "4px 8px" }}
                   >
-                    ✕
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                      <path d="M6 6l12 12M18 6L6 18" />
+                    </svg>
                   </button>
                 </>
               )}
             </div>
           ))}
         </div>
+      )}
+      {removeTarget && (
+        <Modal
+          title={`Remove ${removeTarget.display_name || removeTarget.email || "member"}?`}
+          subtitle="They will lose access to this project immediately."
+          width={440}
+          onClose={() => !removing && setRemoveTarget(null)}
+          footer={
+            <div className="modal-actions">
+              <button type="button" className="btn-secondary" disabled={removing} onClick={() => setRemoveTarget(null)}>
+                Cancel
+              </button>
+              <button type="button" className="btn-danger" disabled={removing} onClick={() => void remove(removeTarget)}>
+                {removing ? "Removing…" : "Remove access"}
+              </button>
+            </div>
+          }
+        >
+          <p>This does not delete their account or project history.</p>
+          {removeError && <p className="proj-dialog-error" role="alert">{removeError}</p>}
+        </Modal>
       )}
     </div>
   );

@@ -1,23 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { createSecretRedactor } from "./secretRedaction.js";
+import { createSecretRedactor, redactSensitiveShellOutput } from "./secretRedaction.js";
 
-describe("project secret redaction", () => {
-  it("redacts every occurrence, longest values first, in nested provider content", () => {
-    const redactor = createSecretRedactor(["token", "token-long"]);
-    const value = redactor.clone({
-      content: [
-        { type: "text", text: "token-long / token" },
-        { type: "tool_result", content: "token-long" },
-      ],
-    });
-    expect(JSON.stringify(value)).not.toContain("token");
-    expect(JSON.stringify(value)).toContain("[REDACTED PROJECT SECRET]");
+describe("secret redaction", () => {
+  it("redacts known project-secret values", () => {
+    expect(createSecretRedactor(["canary-value"]).text("x=canary-value")).not.toContain(
+      "canary-value",
+    );
   });
 
-  it("does not mutate the caller's value when cloning", () => {
-    const original = { text: "s3cr3t" };
-    const copy = createSecretRedactor(["s3cr3t"]).clone(original);
-    expect(original.text).toBe("s3cr3t");
-    expect(copy.text).toBe("[REDACTED PROJECT SECRET]");
+  it("redacts common local credential-file output", () => {
+    const input = [
+      "DATABASE_URL=postgres://user:password@example.test/db",
+      "aws_secret_access_key: canary-key",
+      "https://user:canary-password@example.test/path",
+      "-----BEGIN PRIVATE KEY-----",
+      "canary-private-material",
+      "-----END PRIVATE KEY-----",
+    ].join("\n");
+    const output = redactSensitiveShellOutput(input);
+
+    expect(output).not.toContain("canary-key");
+    expect(output).not.toContain("canary-password");
+    expect(output).not.toContain("canary-private-material");
+    expect(output).toContain("[REDACTED LOCAL SECRET]");
   });
 });

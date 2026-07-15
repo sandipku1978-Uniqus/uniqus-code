@@ -13,6 +13,7 @@ export interface ProjectRecord {
   updated_at: string;
   vercel_project_id?: string | null;
   vercel_project_name?: string | null;
+  vercel_team_id?: string | null;
   github_repo_url?: string | null;
   github_repo_full_name?: string | null;
   /** Branch the project is linked to on its remote. Null = unknown (UI falls back to 'main'). */
@@ -29,6 +30,8 @@ export interface ProjectRecord {
   skill_library_ids?: string[] | null;
   /** Trust state for `.uniqus/skills.md` prompt injection. */
   skills_trust?: ProjectSkillsTrust | null;
+  /** SHA-256 of the exact `.uniqus/skills.md` bytes a human last approved. */
+  skills_trusted_sha256?: string | null;
   /** Supabase project ref linked to this project, if provisioned. */
   supabase_project_ref?: string | null;
   /** Organization (workspace) the project lives in. Null = the owner's personal workspace. */
@@ -223,11 +226,19 @@ export async function setProjectSkillLibraries(
 export async function setProjectSkillsTrust(
   id: string,
   trust: ProjectSkillsTrust,
+  trustedSha256: string | null = null,
 ): Promise<void> {
-  const { error } = await db().from("projects").update({ skills_trust: trust }).eq("id", id);
+  if (trust === "trusted" && !/^[a-f0-9]{64}$/.test(trustedSha256 ?? "")) {
+    throw new Error("trusted project skills require an exact SHA-256 digest");
+  }
+  const { error } = await db()
+    .from("projects")
+    .update({
+      skills_trust: trust,
+      skills_trusted_sha256: trust === "trusted" ? trustedSha256 : null,
+    })
+    .eq("id", id);
   if (!error) return;
-  // Keep old, not-yet-migrated control planes usable; schema.sql adds the column.
-  if (/skills_trust|schema cache|column/i.test(error.message ?? "")) return;
   throw new Error(`setProjectSkillsTrust failed: ${error.message}`);
 }
 
@@ -339,6 +350,13 @@ export async function deleteProject(id: string, ownerId: string): Promise<void> 
   if (error) throw new Error(`deleteProject failed: ${error.message}`);
 }
 
+/** Service-side lifecycle probe used by the durable erasure outbox. */
+export async function projectExists(id: string): Promise<boolean> {
+  const { data, error } = await db().from("projects").select("id").eq("id", id).maybeSingle();
+  if (error) throw new Error(`projectExists failed: ${error.message}`);
+  return Boolean(data);
+}
+
 /**
  * Stamp the GitHub repo link onto the row after the user creates one through
  * the workspace topbar. Surfaced in the All Projects view's card so the user
@@ -416,6 +434,7 @@ export async function setVercelProject(
   ownerId: string,
   vercelProjectId: string,
   vercelProjectName: string,
+  vercelTeamId: string | null,
 ): Promise<void> {
   await assertProjectRole(id, ownerId, "editor");
   const { error } = await db()
@@ -423,6 +442,7 @@ export async function setVercelProject(
     .update({
       vercel_project_id: vercelProjectId,
       vercel_project_name: vercelProjectName,
+      vercel_team_id: vercelTeamId,
     })
     .eq("id", id);
   if (error) throw new Error(`setVercelProject failed: ${error.message}`);
@@ -446,9 +466,81 @@ export async function setSupabaseProject(
       supabase_project_ref: link.ref,
       supabase_project_name: link.name,
       supabase_org_id: link.orgId,
+      supabase_provisioning_token: null,
+      supabase_provisioning_started_at: null,
+      supabase_provisioning_name: null,
+      supabase_provisioning_org_id: null,
     })
     .eq("id", id);
   if (error) throw new Error(`setSupabaseProject failed: ${error.message}`);
+}
+
+export interface SupabaseProvisioningIntent {
+  token: string;
+  startedAt: string;
+  name: string;
+  orgId: string;
+}
+
+export async function getSupabaseProvisioningIntent(
+  id: string,
+  userId: string,
+): Promise<SupabaseProvisioningIntent | null> {
+  await assertProjectRole(id, userId, "editor");
+  const { data, error } = await db()
+    .from("projects")
+    .select("supabase_provisioning_token, supabase_provisioning_started_at, supabase_provisioning_name, supabase_provisioning_org_id")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw new Error(`getSupabaseProvisioningIntent failed: ${error.message}`);
+  if (!data?.supabase_provisioning_token) return null;
+  return {
+    token: String(data.supabase_provisioning_token),
+    startedAt: String(data.supabase_provisioning_started_at),
+    name: String(data.supabase_provisioning_name),
+    orgId: String(data.supabase_provisioning_org_id),
+  };
+}
+
+export async function beginSupabaseProvisioning(
+  id: string,
+  userId: string,
+  intent: SupabaseProvisioningIntent,
+): Promise<boolean> {
+  await assertProjectRole(id, userId, "editor");
+  const { data, error } = await db()
+    .from("projects")
+    .update({
+      supabase_provisioning_token: intent.token,
+      supabase_provisioning_started_at: intent.startedAt,
+      supabase_provisioning_name: intent.name,
+      supabase_provisioning_org_id: intent.orgId,
+    })
+    .eq("id", id)
+    .is("supabase_project_ref", null)
+    .is("supabase_provisioning_token", null)
+    .select("id");
+  if (error) throw new Error(`beginSupabaseProvisioning failed: ${error.message}`);
+  return Array.isArray(data) && data.length === 1;
+}
+
+export async function clearSupabaseProvisioning(
+  id: string,
+  userId: string,
+  token: string,
+): Promise<void> {
+  await assertProjectRole(id, userId, "editor");
+  const { error } = await db()
+    .from("projects")
+    .update({
+      supabase_provisioning_token: null,
+      supabase_provisioning_started_at: null,
+      supabase_provisioning_name: null,
+      supabase_provisioning_org_id: null,
+    })
+    .eq("id", id)
+    .eq("supabase_provisioning_token", token);
+  if (error) throw new Error(`clearSupabaseProvisioning failed: ${error.message}`);
 }
 
 /**

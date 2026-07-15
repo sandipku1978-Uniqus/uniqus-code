@@ -20,12 +20,14 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import {
-  insertDeployment,
+  attachVercelDeployment,
+  insertDeploymentIntent,
   updateDeploymentState,
   type DeploymentState,
 } from "./db/deployments.js";
 import { setVercelProject } from "./db/projects.js";
 import { getProjectSecretsAsEnv } from "./db/secrets.js";
+import { isSensitiveProjectPath } from "./security/sensitivePaths.js";
 
 // Files we never push. Re-derived on every deploy from the live sandbox.
 // Exported so the .zip export (export.ts) reuses the exact same exclusions —
@@ -101,16 +103,17 @@ async function gatherFiles(rootDir: string): Promise<{
       return;
     }
     for (const e of entries) {
-      if (isSecretEnvFile(e.name)) continue;
+      const full = path.join(dir, e.name);
+      const rel = path.relative(rootDir, full).replaceAll(path.sep, "/");
+      if (isSensitiveProjectPath(rel)) continue;
       if (SKIP_FILE_BASENAMES.has(e.name)) continue;
       if (e.isDirectory()) {
         if (SKIP_DIR_NAMES.has(e.name)) continue;
-        await visit(path.join(dir, e.name));
+        await visit(full);
         continue;
       }
       if (!e.isFile()) continue;
 
-      const full = path.join(dir, e.name);
       const data = await fs.readFile(full);
       if (data.length > VERCEL_MAX_FILE_BYTES) {
         throw new Error(
@@ -126,7 +129,6 @@ async function gatherFiles(rootDir: string): Promise<{
         );
       }
       const sha = createHash("sha1").update(data).digest("hex");
-      const rel = path.relative(rootDir, full).replaceAll(path.sep, "/");
       out.push({ path: rel, sha, size: data.length, data });
     }
   }
@@ -224,6 +226,8 @@ export interface DeployContext {
   ownerId: string;
   vercelToken: string;
   vercelTeamId: string | null;
+  /** Only project admins/owners may export stored project secrets. */
+  includeStoredSecrets: boolean;
 }
 
 export interface DeployStartResult {
@@ -232,6 +236,21 @@ export interface DeployStartResult {
   vercel_url: string; // e.g. my-app-abcd.vercel.app (no scheme)
   inspector_url: string; // dashboard link
   state: DeploymentState;
+}
+
+/**
+ * Keep stored runtime secrets out of Vercel's build environment. Values typed
+ * explicitly into the deploy form remain available to both phases because the
+ * user intentionally supplied them for this deployment.
+ */
+export function deploymentEnvironment(
+  storedSecrets: Record<string, string>,
+  requestEnv: Record<string, string>,
+): { runtime: Record<string, string>; build: Record<string, string> } {
+  return {
+    runtime: { ...storedSecrets, ...requestEnv },
+    build: { ...requestEnv },
+  };
 }
 
 /**
@@ -274,11 +293,18 @@ export async function startDeploy(
   // agent, break live"). Request env (the deploy modal) wins, so the user can
   // override per-deploy. Secrets go as Vercel env vars, never as files
   // (isSecretEnvFile keeps .env* out of the upload). Never logged.
-  const storedSecrets = await getProjectSecretsAsEnv(ctx.uniqusProjectId).catch((err) => {
-    console.error(`[deploy ${ctx.uniqusProjectId}] secret sync failed (deploying with request env only):`, err);
-    return {} as Record<string, string>;
+  // Editors may deploy code, but cannot use deployment as an export oracle for
+  // write-only project secrets. Authorized secret loads fail closed: silently
+  // omitting credentials can publish a broken or insecure application.
+  const storedSecrets = ctx.includeStoredSecrets
+    ? await getProjectSecretsAsEnv(ctx.uniqusProjectId)
+    : {};
+  const deployEnv = deploymentEnvironment(storedSecrets, req.env);
+  const intent = await insertDeploymentIntent({
+    project_id: ctx.uniqusProjectId,
+    user_id: ctx.ownerId,
+    target: req.target,
   });
-  const env = { ...storedSecrets, ...req.env };
 
   // /v13/deployments wants `env` and `build.env` as flat Record<string,string>.
   // The array-of-objects form is for project-level env (/v9/projects/.../env)
@@ -294,8 +320,9 @@ export async function startDeploy(
       // future phase.
       framework: null,
     },
-    env,
-    build: { env },
+    env: deployEnv.runtime,
+    build: { env: deployEnv.build },
+    meta: { gate15OperationKey: intent.operation_key },
   };
 
   const createRes = await fetch(
@@ -314,6 +341,7 @@ export async function startDeploy(
   };
   if (!createRes.ok) {
     const msg = created.error?.message ?? `${createRes.status}`;
+    await updateDeploymentState(intent.id, { state: "ERROR", error_message: "deployment_failed" });
     throw new Error(`vercel deploy create failed: ${msg}`);
   }
 
@@ -323,18 +351,21 @@ export async function startDeploy(
 
   if (created.projectId && created.name) {
     // Stamp the project link on first deploy so the dashboard URL is stable.
-    await setVercelProject(ctx.uniqusProjectId, ctx.ownerId, created.projectId, created.name).catch(
+    await setVercelProject(
+      ctx.uniqusProjectId,
+      ctx.ownerId,
+      created.projectId,
+      created.name,
+      ctx.vercelTeamId,
+    ).catch(
       (err) => console.error("setVercelProject failed (continuing):", err),
     );
   }
 
-  const row = await insertDeployment({
-    project_id: ctx.uniqusProjectId,
-    user_id: ctx.ownerId,
+  await attachVercelDeployment(intent.id, {
     vercel_deployment_id: vercelDeploymentId,
     vercel_url: url ?? null,
     state: initialState,
-    target: req.target,
   });
 
   console.log(
@@ -342,7 +373,7 @@ export async function startDeploy(
   );
 
   return {
-    deployment_id: row.id,
+    deployment_id: intent.id,
     vercel_deployment_id: vercelDeploymentId,
     vercel_url: url,
     inspector_url: created.projectId
@@ -397,6 +428,7 @@ export async function pollUntilTerminal(
     const state = toState(status.readyState);
     const url = status.url ?? null;
     const errorMessage = status.errorMessage ?? null;
+    const publicErrorMessage = errorMessage ? "deployment_failed" : null;
 
     if (state !== lastState) {
       lastState = state;
@@ -404,12 +436,12 @@ export async function pollUntilTerminal(
         await updateDeploymentState(rowId, {
           state,
           vercel_url: url,
-          error_message: errorMessage,
+          error_message: publicErrorMessage,
         });
       } catch (err) {
         console.error("updateDeploymentState failed:", err);
       }
-      onUpdate(state, url, errorMessage);
+      onUpdate(state, url, publicErrorMessage);
     }
 
     if (state === "READY" || state === "ERROR" || state === "CANCELED") {
@@ -423,6 +455,57 @@ export async function pollUntilTerminal(
   // finish; the row's state lags reality but doesn't lie.
   console.warn(`[poll ${vercelDeploymentId}] timed out after 10min, last state ${lastState}`);
   return lastState;
+}
+
+/**
+ * Resolve a provider create whose HTTP response was lost. The operation key is
+ * persisted before POST and attached as Vercel metadata, which their list API
+ * can filter. No match means the caller should retry this reconciliation later,
+ * never issue another create immediately.
+ */
+export async function reconcileCreatingDeployment(
+  ctx: { vercelToken: string; vercelTeamId: string | null },
+  row: { id: string; operation_key: string },
+): Promise<{ id: string; url: string | null; state: DeploymentState } | null> {
+  const query = new URLSearchParams({
+    limit: "2",
+    [`meta-gate15OperationKey`]: row.operation_key,
+  });
+  if (ctx.vercelTeamId) query.set("teamId", ctx.vercelTeamId);
+  const res = await fetch(`https://api.vercel.com/v6/deployments?${query}`, {
+    headers: { Authorization: `Bearer ${ctx.vercelToken}` },
+  });
+  const body = (await res.json()) as {
+    deployments?: Array<{
+      uid?: string;
+      id?: string;
+      url?: string;
+      state?: string;
+      readyState?: string;
+      meta?: Record<string, unknown>;
+    }>;
+    error?: { message?: string };
+  };
+  if (!res.ok) {
+    throw new Error(`vercel deployment reconciliation failed: ${body.error?.message ?? res.status}`);
+  }
+  const matches = (body.deployments ?? []).filter(
+    (deployment) => deployment.meta?.gate15OperationKey === row.operation_key,
+  );
+  if (matches.length === 0) return null;
+  if (matches.length !== 1) {
+    throw new Error(`vercel operation ${row.operation_key} matched multiple deployments`);
+  }
+  const remote = matches[0];
+  const id = remote.uid ?? remote.id;
+  if (!id) throw new Error("reconciled Vercel deployment has no id");
+  const state = toState(remote.readyState ?? remote.state);
+  await attachVercelDeployment(row.id, {
+    vercel_deployment_id: id,
+    vercel_url: remote.url ?? null,
+    state,
+  });
+  return { id, url: remote.url ?? null, state };
 }
 
 function sleep(ms: number): Promise<void> {

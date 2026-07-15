@@ -384,7 +384,13 @@ export class GoogleAdapter implements ModelProviderAdapter {
     // Capture the thought signature that rides on each function-call part —
     // Gemini 3.x requires it echoed back on the next turn for multi-turn
     // function calling, so we stash it on the tool_use block (see toGeminiContents).
-    const calls: Array<{ id: string; name: string; args: unknown; signature?: string }> = [];
+    const calls: Array<{
+      id: string;
+      name: string;
+      args: unknown;
+      signature?: string;
+      hasProviderId: boolean;
+    }> = [];
     const announced = new Set<string>();
     // Our client tools (everything else in a functionCall part is a server-side
     // tool like googleSearch — surfaced as web_search, never executed).
@@ -478,7 +484,8 @@ export class GoogleAdapter implements ModelProviderAdapter {
             surfaceSearch({ name }, "Searched the web.");
             continue;
           }
-          const id = fc.id ?? this.nextSyntheticId("fn");
+          const hasProviderId = typeof fc.id === "string" && fc.id.length > 0;
+          const id = hasProviderId ? fc.id! : this.nextSyntheticId("fn");
           if (!announced.has(id)) {
             announced.add(id);
             p.onToolCallStarted?.(id, name);
@@ -489,7 +496,13 @@ export class GoogleAdapter implements ModelProviderAdapter {
             // after a call could keep the label blank for seconds).
             p.onToolCallPartial?.(id, name, fc.args ?? {});
           }
-          calls.push({ id, name, args: fc.args ?? {}, signature: part.thoughtSignature });
+          calls.push({
+            id,
+            name,
+            args: fc.args ?? {},
+            signature: part.thoughtSignature,
+            hasProviderId,
+          });
         }
       }
       const fr = chunk.candidates?.[0]?.finishReason;
@@ -553,6 +566,10 @@ export class GoogleAdapter implements ModelProviderAdapter {
         block.thought_signature = c.signature;
         block.thought_signature_model = p.model;
       }
+      // Canonical tool IDs can come from any provider. Record whether this one
+      // was actually minted by Gemini so replay cannot send an unmatched or
+      // foreign-provider ID.
+      block.google_function_call_id = c.hasProviderId;
       content.push(block as unknown as Anthropic.ToolUseBlockParam);
       p.onToolCall?.(c.id, c.name, c.args);
       toolCalls.push({ id: c.id, name: c.name, input: c.args });
@@ -685,11 +702,17 @@ export function toGeminiContents(
   model: string,
 ): Array<Record<string, unknown>> {
   // tool_use id → function name, so tool_results can be matched back to calls.
-  const idToName = new Map<string, string>();
+  const idToCall = new Map<string, { name: string; hasProviderId: boolean }>();
   for (const msg of messages) {
     if (msg.role === "assistant" && Array.isArray(msg.content)) {
       for (const b of msg.content) {
-        if (b.type === "tool_use") idToName.set(b.id, b.name);
+        if (b.type === "tool_use") {
+          const metadata = b as unknown as Record<string, unknown>;
+          idToCall.set(b.id, {
+            name: b.name,
+            hasProviderId: metadata.google_function_call_id === true,
+          });
+        }
       }
     }
   }
@@ -711,8 +734,14 @@ export function toGeminiContents(
             if (sig) part.thoughtSignature = sig;
             parts.push(part);
           } else if (b.type === "tool_use") {
+            const metadata = b as unknown as Record<string, unknown>;
+            const functionCall: Record<string, unknown> = {
+              name: b.name,
+              args: (b.input ?? {}) as object,
+            };
+            if (metadata.google_function_call_id === true) functionCall.id = b.id;
             const part: Record<string, unknown> = {
-              functionCall: { name: b.name, args: (b.input ?? {}) as object },
+              functionCall,
             };
             // Echo back the thought signature captured on the way out, so 3.x
             // multi-turn function calling keeps its reasoning context — same-
@@ -735,8 +764,8 @@ export function toGeminiContents(
     const parts: Array<Record<string, unknown>> = [];
     for (const b of msg.content) {
       if (b.type === "tool_result") {
-        const matchedName = idToName.get(b.tool_use_id);
-        const name = matchedName ?? "unknown_tool";
+        const matchedCall = idToCall.get(b.tool_use_id);
+        const name = matchedCall?.name ?? "unknown_tool";
         const { text, images } = splitToolResult(b);
         // Echo the call id on the response only when it pairs with a REAL Gemini
         // functionCall id: the id must match an assistant tool_use in THIS
@@ -748,7 +777,7 @@ export function toGeminiContents(
           name,
           response: { result: text },
         };
-        if (matchedName !== undefined && !b.tool_use_id.startsWith("gem_")) {
+        if (matchedCall?.hasProviderId) {
           functionResponse.id = b.tool_use_id;
         }
         parts.push({ functionResponse });

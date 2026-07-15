@@ -231,9 +231,9 @@ export default function ModelsPage() {
             Pick the AI you trust <span className="grad">for each step</span>.
           </h1>
           <p className="mk-lede">
-            Gate 15 runs on four frontier model families — Anthropic Claude,
-            Z.ai GLM, OpenAI GPT, and Google Gemini. Stay on Auto and let it route
-            planning and building to the right model, or choose yourself for any turn.
+            Gate 15 offers four frontier model families — Anthropic Claude,
+            Z.ai GLM, OpenAI GPT, and Google Gemini. Auto routes across Claude
+            and Gemini; GPT and GLM remain available as manual choices for any turn.
           </p>
           <div className="mk-hero-cta">
             <Link href="/login" className="btn-primary btn-lg">
@@ -252,7 +252,7 @@ export default function ModelsPage() {
           <span className="mk-ic grad">
             <ModelIcon name="auto" />
           </span>
-          <h3 style={{ fontSize: 22 }}>Auto mode picks the right AI for you</h3>
+          <h2 style={{ fontSize: 22 }}>Auto mode picks the right AI for you</h2>
           <p style={{ fontSize: 15 }}>
             Don&rsquo;t want to think about which model to use? Auto is the default.
             Gate 15 reads what you&rsquo;re asking for and routes it to the model best
@@ -276,7 +276,7 @@ export default function ModelsPage() {
           <h2>Four strong models, each great at something.</h2>
           <p>
             They each have a personality. Knowing the differences helps you reach
-            for the right one — or trust Auto to do it for you.
+            for the right one; Auto currently chooses between Claude and Gemini.
           </p>
         </div>
         <div className="mk-grid cols-2">
@@ -353,7 +353,7 @@ export default function ModelsPage() {
                       <span
                         style={{
                           fontFamily: "var(--font-mono-stack)",
-                          fontSize: 10.5,
+                          fontSize: 11,
                           letterSpacing: "0.05em",
                           textTransform: "uppercase",
                           color: "var(--mk-dim)",
@@ -417,7 +417,7 @@ export default function ModelsPage() {
                     background:
                       "color-mix(in srgb, var(--mk-bg) 50%, transparent)",
                     color: "var(--mk-muted)",
-                    fontSize: 13.5,
+                    fontSize: 14,
                   }}
                 >
                   <span style={{ display: "inline-flex", color: "var(--brand-ember)" }}>
@@ -455,7 +455,7 @@ export default function ModelsPage() {
                       style={{
                         marginLeft: "auto",
                         fontFamily: "var(--font-mono-stack)",
-                        fontSize: 10.5,
+                        fontSize: 11,
                         letterSpacing: "0.05em",
                         textTransform: "uppercase",
                         color: "var(--mk-dim)",

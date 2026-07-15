@@ -28,11 +28,11 @@ export default function NotFound() {
           the link might be out of date.
         </p>
         <div className="route-error-actions">
-          <Link className="btn-primary" href="/projects">
-            Back to projects
+          <Link className="btn-primary" href="/">
+            Go to Gate 15 home
           </Link>
-          <Link className="btn-secondary" href="/">
-            Go home
+          <Link className="btn-secondary" href="/projects">
+            Open projects
           </Link>
         </div>
       </div>

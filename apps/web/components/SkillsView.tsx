@@ -663,8 +663,9 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
           <div className="skill-editor-grid">
             <div className="skill-editor-row">
               <div className="skill-field">
-                <label>Name</label>
+                <label htmlFor="skill-editor-name">Name</label>
                 <input
+                  id="skill-editor-name"
                   className="ds-name"
                   value={editor.name}
                   onChange={(e) => setEditor({ ...editor, name: e.target.value })}
@@ -673,11 +674,12 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
                 />
               </div>
               <div className="skill-field">
-                <label>
+                <label htmlFor="skill-editor-description">
                   Description{" "}
                   <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(required trigger metadata)</span>
                 </label>
                 <input
+                  id="skill-editor-description"
                   className="ds-name"
                   value={editor.description}
                   onChange={(e) => setEditor({ ...editor, description: e.target.value })}
@@ -687,13 +689,14 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
               </div>
             </div>
             <div className="skill-field">
-              <label>
+              <label htmlFor="skill-editor-body">
                 Skill (markdown)
                 {editor.body.length > MAX_BODY && (
                   <span style={{ color: "var(--conf-low)" }}> · over the 64 KB limit</span>
                 )}
               </label>
               <textarea
+                id="skill-editor-body"
                 className="skill-body-input"
                 value={editor.body}
                 onChange={(e) => setEditor({ ...editor, body: e.target.value })}
@@ -799,6 +802,7 @@ export default function SkillsView({ isGuest }: { isGuest: boolean }) {
         >
           <div style={{ display: "grid", gap: 10 }}>
             <textarea
+              aria-label="Describe the skill to generate"
               className="ds-brief"
               value={genBrief}
               onChange={(e) => setGenBrief(e.target.value)}

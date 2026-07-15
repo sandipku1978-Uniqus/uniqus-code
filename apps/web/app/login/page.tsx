@@ -16,7 +16,7 @@ export default async function LoginPage() {
   const signInUrl = await getSignInUrl({ returnTo: "/projects" });
 
   return (
-    <main className="login-shell">
+    <main id="main-content" tabIndex={-1} className="login-shell">
       <div className="login-card">
         <div style={{ display: "flex", justifyContent: "center", marginBottom: 24 }}>
           <BrandLockup />
@@ -30,13 +30,21 @@ export default async function LoginPage() {
         <div style={{ textAlign: "center", marginTop: 14 }}>
           <a
             href="/docs"
-            style={{ fontSize: 12, color: "var(--text-muted)", textDecoration: "none" }}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              minHeight: 44,
+              fontSize: 12,
+              color: "var(--text-muted)",
+              textDecoration: "none",
+            }}
           >
             New here? Read the docs →
           </a>
         </div>
         <div className="footer">
-          By signing in you agree to the terms and privacy policy.
+          Authentication is handled securely by WorkOS. Gate 15&rsquo;s formal
+          Terms and Privacy Policy are pending publication.
         </div>
       </div>
     </main>

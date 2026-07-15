@@ -4,9 +4,10 @@ import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import { createHash, randomUUID, randomBytes } from "node:crypto";
 import { FirecrackerClient, spawnFirecracker } from "./client.js";
-import { pingAgent, pushFile, finalizeRestore, pingAt } from "./agentRpc.js";
+import { pingAgent, pushFile, removePath, finalizeRestore, manifest, pingAt } from "./agentRpc.js";
 import { removeServersForProject } from "../agent/sandbox.js";
 import type { VmHandle } from "./types.js";
+import { parseFirecrackerNetworkConfig, PersistentNetworkAllocator } from "./networkConfig.js";
 
 /**
  * Firecracker fleet manager (Plan §1).
@@ -31,9 +32,9 @@ import type { VmHandle } from "./types.js";
  * Hetzner notes:
  *   - The per-host setup script in `infra/firecracker/host-setup.sh`
  *     creates the bridge and iptables masquerade once at boot.
- *   - Each VM gets a /16 host pair (a.b) from the 172.16.0.0/16 range,
- *     hashed off projectId for stability across restarts. Collisions are
- *     a Phase-3 problem (~256 projects/host birthday).
+ *   - Each VM gets a persistent address from FIRECRACKER_CIDR. The project
+ *     hash is only its first candidate; the local IPAM probes collisions and
+ *     records the winner across orchestrator restarts.
  */
 
 const STATE_DIR =
@@ -91,8 +92,14 @@ const VM_FS_REAP_MAX_IDLE_MS = Number(
   process.env.FIRECRACKER_FS_REAP_MAX_IDLE_MS ?? 14 * 24 * 60 * 60_000,
 );
 const BRIDGE_NAME = process.env.FIRECRACKER_BRIDGE ?? "fcbr0";
-const BRIDGE_GATEWAY = process.env.FIRECRACKER_GATEWAY ?? "172.16.0.1";
-const BRIDGE_NETMASK = process.env.FIRECRACKER_NETMASK ?? "255.255.0.0";
+const NETWORK_CONFIG = parseFirecrackerNetworkConfig();
+const BRIDGE_GATEWAY = NETWORK_CONFIG.gateway;
+const BRIDGE_NETMASK = NETWORK_CONFIG.netmask;
+const NETWORK_PREFIX = NETWORK_CONFIG.prefix;
+const networkAllocator = new PersistentNetworkAllocator(
+  NETWORK_CONFIG,
+  path.join(STATE_DIR, "ipam.json"),
+);
 
 // ── base ("golden") snapshot: sub-second FIRST boots for brand-new projects ──
 // Opt-in (FIRECRACKER_BASE_SNAPSHOT=1). When enabled and a golden snapshot
@@ -132,7 +139,7 @@ export const AGENT_AUTH_ENFORCED = true;
 // Identity the golden image is frozen with — IDENTICAL on every clone until the
 // orchestrator re-stamps it (agent /net/configure). Reserved out of the project
 // IP range (allocateNetwork skips it) and the project MAC range (02:fc:<hash>).
-const BOOTSTRAP_IP = process.env.FIRECRACKER_BOOTSTRAP_IP ?? "172.16.255.254";
+const BOOTSTRAP_IP = NETWORK_CONFIG.bootstrapIp;
 const BOOTSTRAP_MAC = "02:fc:ff:ff:ff:fe";
 const BOOTSTRAP_TAP = "tap-uniqus-base";
 const BASE_DIR = path.join(STATE_DIR, "base");
@@ -153,6 +160,8 @@ interface ManagedVm {
 }
 
 const vms = new Map<string, ManagedVm>();
+/** Exact in-flight guest RPC ownership; last-used timestamps alone are not a lease. */
+const activeOperations = new Map<string, number>();
 /**
  * Single-flight the first-boot path per project (B-5). Two concurrent first
  * messages (two tabs, or an abort+reconnect) would both see `vms.get()===
@@ -292,9 +301,8 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
   }
   sw.phase("copy-on-write rootfs overlay");
 
-  // Allocate per-VM networking. Hash projectId → /16 host octets so the
-  // same project gets the same IP across orchestrator restarts. MAC is
-  // a locally-administered prefix (02:fc:…) seeded from the same hash.
+  // Allocate per-VM networking. The persistent IPAM keeps the same project
+  // address across restarts while probing away active hash collisions.
   const { ip, gatewayIp, mac, tapName } = allocateNetwork(opts.projectId);
   console.log(`[fleet ${id}] step 2/8: allocated ip=${ip} mac=${mac} tap=${tapName}`);
   await ensureBridge();
@@ -336,7 +344,7 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
     // don't use the kernel's IP_PNP `ip=` because most Firecracker CI
     // kernels are built without CONFIG_IP_PNP — that arg is silently
     // ignored and eth0 ends up unconfigured.)
-    const ipArg = `uniqus_ip=${ip}/16 uniqus_gw=${gatewayIp}`;
+    const ipArg = `uniqus_ip=${ip}/${NETWORK_PREFIX} uniqus_gw=${gatewayIp}`;
     const authArg = `uniqus_token=${authToken}${authEnforced ? " uniqus_auth=1" : ""}`;
     await client.putBootSource({
       kernel_image_path: KERNEL_PATH,
@@ -465,9 +473,17 @@ async function bootNew(opts: BootOpts): Promise<VmHandle> {
   // Initial hydration: push host-side project files into the VM. Cheap on
   // small projects; the in-VM agent acks each file. Cap so a runaway
   // hydration doesn't pin the boot path forever.
-  await hydrateInto(handle, opts.hostSandboxDir).catch((err) => {
-    console.error(`[vm ${id}] initial hydration failed:`, err);
-  });
+  try {
+    await hydrateInto(handle, opts.hostSandboxDir);
+  } catch (err) {
+    fc.close();
+    await teardownTap(tapName).catch(() => {});
+    await fs.rm(apiSocket, { force: true }).catch(() => {});
+    await fs.rm(vsockUds, { force: true }).catch(() => {});
+    throw new Error(
+      `[vm ${id}] initial hydration failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
   sw.phase("hydration");
   sw.total("cold boot");
 
@@ -605,7 +621,7 @@ async function buildBaseSnapshot(): Promise<void> {
       // uniqus_golden=1: skip the sandbox mount + come up on the bootstrap IP.
       boot_args:
         `console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on ro ` +
-        `uniqus_ip=${BOOTSTRAP_IP}/16 uniqus_gw=${BRIDGE_GATEWAY} uniqus_golden=1 ` +
+        `uniqus_ip=${BOOTSTRAP_IP}/${NETWORK_PREFIX} uniqus_gw=${BRIDGE_GATEWAY} uniqus_golden=1 ` +
         `i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd`,
     });
     await client.putDrive({
@@ -757,7 +773,7 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
             BOOTSTRAP_IP,
             51_000,
             {
-              ip: `${ip}/16`,
+              ip: `${ip}/${NETWORK_PREFIX}`,
               gw: gatewayIp,
               mac,
               mount_sandbox: true,
@@ -836,9 +852,7 @@ async function restoreFromGolden(opts: BootOpts): Promise<VmHandle> {
     handle.agentKind = "rust";
     // Seed project files (cheap/empty for a brand-new project; the per-project
     // sandbox.ext4 persists node_modules across reopens just like the cold path).
-    await hydrateInto(handle, opts.hostSandboxDir).catch((err) => {
-      console.error(`[vm ${id}] hydration after restore failed:`, err);
-    });
+    await hydrateInto(handle, opts.hostSandboxDir);
     sw.phase("hydration");
     sw.total("golden restore");
     vms.set(opts.projectId, {
@@ -913,6 +927,22 @@ async function hydrateInto(vm: VmHandle, hostDir: string): Promise<void> {
     }
   }
   await walk(root);
+  if (capped) {
+    throw new Error(
+      `project hydration exceeds the ${HYDRATE_MAX_FILES}-file or ` +
+        `${Math.round(HYDRATE_MAX_BYTES / (1024 * 1024))} MiB safety limit; refusing a partial VM`,
+    );
+  }
+
+  // The host mirror is authoritative at boot/restore. Remove guest source files
+  // that are no longer present so a persisted ext4 cannot resurrect deleted
+  // paths on the next strict pull. Manifest exclusions preserve dependency and
+  // package caches.
+  const desired = new Set(files.map((file) => file.rel));
+  const guestFiles = await manifest(vm);
+  for (const stale of guestFiles) {
+    if (!desired.has(stale.path)) await removePath(vm, stale.path);
+  }
 
   for (let i = 0; i < files.length; i += HYDRATE_PUSH_BATCH_SIZE) {
     const batch = files.slice(i, i + HYDRATE_PUSH_BATCH_SIZE);
@@ -1230,6 +1260,32 @@ export async function destroy(projectId: string): Promise<void> {
 }
 
 /**
+ * Permanent-deletion variant. Normal VM shutdown is best-effort, but privacy
+ * erasure must not acknowledge completion while a named disk, snapshot, or TAP
+ * still exists.
+ */
+export async function destroyForDeletion(projectId: string): Promise<void> {
+  await destroy(projectId);
+  const paths = snapshotPaths(projectId);
+  const candidates = [
+    paths.snapshot,
+    paths.memory,
+    projectRootImagePath(projectId),
+    path.join(STATE_DIR, `${projectId}.sandbox.ext4`),
+  ];
+  const remaining: string[] = [];
+  for (const candidate of candidates) {
+    if (await pathExists(candidate)) remaining.push(candidate);
+  }
+  const tapName = tapNameForProject(projectId);
+  const tap = await runCmdResult("ip", ["link", "show", tapName]);
+  if (tap.code === 0) remaining.push(`network interface ${tapName}`);
+  if (remaining.length > 0) {
+    throw new Error(`Firecracker deletion incomplete: ${remaining.join(", ")}`);
+  }
+}
+
+/**
  * Soft idle reclaim: free the firecracker process + the ~1 GiB snapshot/memory
  * pair + the rootfs overlay (regenerable) + tap, and drop the in-memory record,
  * but KEEP the sandbox.ext4 so the next reopen reattaches node_modules instead
@@ -1274,7 +1330,7 @@ async function reclaimOnDiskArtifacts(projectId: string): Promise<void> {
   await fs.rm(paths.snapshot, { force: true }).catch(() => {});
   await fs.rm(paths.memory, { force: true }).catch(() => {});
   await fs.rm(projectRootImagePath(projectId), { force: true }).catch(() => {});
-  const { tapName } = allocateNetwork(projectId);
+  const tapName = tapNameForProject(projectId);
   await teardownTap(tapName).catch(() => {});
 }
 
@@ -1288,7 +1344,7 @@ async function destroyOnDiskArtifacts(projectId: string): Promise<void> {
     .rm(path.join(STATE_DIR, `${projectId}.sandbox.ext4`), { force: true })
     .catch(() => {});
   // Tap device — we know its name by convention.
-  const { tapName } = allocateNetwork(projectId);
+  const tapName = tapNameForProject(projectId);
   await teardownTap(tapName).catch(() => {});
 }
 
@@ -1455,7 +1511,11 @@ export function startIdleSweeper(): void {
         reclaimVm(vm.handle.projectId).catch(() => {});
         continue;
       }
-      if (vm.handle.state === "running" && idleMs > IDLE_PAUSE_MS) {
+      if (
+        vm.handle.state === "running" &&
+        idleMs > IDLE_PAUSE_MS &&
+        !activeOperations.has(vm.handle.projectId)
+      ) {
         pause(vm.handle.projectId).catch(() => {});
         continue;
       }
@@ -1561,6 +1621,24 @@ export function touch(projectId: string): void {
   if (vm) vm.handle.lastUsedAt = Date.now();
 }
 
+/**
+ * Hold a VM active for the lifetime of an RPC. The returned release function is
+ * idempotent so competing timeout/error/abort paths cannot underflow the lease.
+ */
+export function acquireOperation(projectId: string): () => void {
+  activeOperations.set(projectId, (activeOperations.get(projectId) ?? 0) + 1);
+  touch(projectId);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const remaining = (activeOperations.get(projectId) ?? 1) - 1;
+    if (remaining <= 0) activeOperations.delete(projectId);
+    else activeOperations.set(projectId, remaining);
+    touch(projectId);
+  };
+}
+
 /** Stop every VM at orchestrator shutdown. */
 export async function shutdownAll(): Promise<void> {
   await Promise.all([...vms.keys()].map((pid) => destroy(pid)));
@@ -1576,51 +1654,52 @@ interface NetAlloc {
 }
 
 /**
- * Hash projectId → /16 host octets so the same project lands on the same IP
- * across restarts. Two projects collide once per ~256k pairs (birthday at
- * ~256 projects on a single host); collision retry would only matter at
- * thousands of VMs/host. Phase-3 problem if it shows up.
- *
- * The tap name is also derived from projectId (not the per-boot VM id), so
+ * Allocate a collision-free persistent guest IP. The tap name and MAC remain
+ * derived from projectId (not the per-boot VM id), so
  * a snapshot taken in one orchestrator process can be reattached to the
  * same tap by the next process. Linux caps tap names at 15 chars — we use
  * `tap-` (4) + 11 hex chars (44 bits of the project hash) to stay under it.
  */
 function allocateNetwork(projectId: string): NetAlloc {
   const h = createHash("sha256").update(projectId).digest();
-  // Reserve .0 (network), .1 (gateway), .255 (broadcast). Skip 1..2.
-  const a = h[0];
-  const bRaw = h[1];
-  let b = bRaw <= 1 ? 2 : bRaw === 255 ? 254 : bRaw;
-  // Reserve BOOTSTRAP_IP (default 172.16.255.254) so no project can be handed
-  // the address the golden snapshot is frozen with.
-  if (a === 255 && b === 254) b = 253;
-  const ip = `172.16.${a}.${b}`;
+  const ip = networkAllocator.allocate(projectId);
   // Locally-administered MAC: 02:FC:<projectHash[2..6]>
   const hex = (n: number): string => n.toString(16).padStart(2, "0");
   const mac = `02:fc:${hex(h[2])}:${hex(h[3])}:${hex(h[4])}:${hex(h[5])}`;
   // Deterministic, ≤15 chars: "tap-" + 11 hex chars of project hash.
-  const tapName = `tap-${h.subarray(7, 13).toString("hex").slice(0, 11)}`;
+  const tapName = tapNameForProject(projectId);
   return { ip, gatewayIp: BRIDGE_GATEWAY, mac, tapName };
+}
+
+function tapNameForProject(projectId: string): string {
+  const h = createHash("sha256").update(projectId).digest();
+  return `tap-${h.subarray(7, 13).toString("hex").slice(0, 11)}`;
+}
+
+/** Called only after permanent project deletion has removed VM/snapshot state. */
+export function releaseNetworkAllocation(projectId: string): void {
+  networkAllocator.release(projectId);
 }
 
 let bridgeChecked = false;
 async function ensureBridge(): Promise<void> {
-  if (bridgeChecked) return;
-  // We only verify the bridge exists; host-setup.sh creates it. If it's
-  // missing we surface a clear error rather than try to create it on the
-  // fly (creating it requires CAP_NET_ADMIN and reordering iptables).
-  const probe = await runCmdResult("ip", ["link", "show", BRIDGE_NAME]);
-  if (probe.code !== 0) {
-    throw new Error(
-      `Firecracker bridge '${BRIDGE_NAME}' is missing. Run infra/firecracker/host-setup.sh on this host.`,
-    );
+  if (!bridgeChecked) {
+    // We only verify the bridge exists; host-setup.sh creates it. If it's
+    // missing we surface a clear error rather than try to create it on the
+    // fly (creating it requires CAP_NET_ADMIN and reordering iptables).
+    const probe = await runCmdResult("ip", ["link", "show", BRIDGE_NAME]);
+    if (probe.code !== 0) {
+      throw new Error(
+        `Firecracker bridge '${BRIDGE_NAME}' is missing. Run infra/firecracker/host-setup.sh on this host.`,
+      );
+    }
+    bridgeChecked = true;
   }
+  // Re-verify isolation before every boot so a flushed/reordered rule cannot
+  // leave later tenants exposed for the lifetime of this process.
   await ensureVmIsolation();
-  bridgeChecked = true;
 }
 
-let isolationChecked = false;
 /**
  * P0.3: sever VM↔VM traffic on the shared bridge. host-setup.sh installs this
  * once at provisioning time, but we re-assert it (best-effort) at runtime so a
@@ -1632,8 +1711,6 @@ let isolationChecked = false;
  * unavailable rather than failing the boot.
  */
 async function ensureVmIsolation(): Promise<void> {
-  if (isolationChecked) return;
-  isolationChecked = true;
   try {
     await runCmdResult("modprobe", ["br_netfilter"]);
     await runCmdResult("sysctl", ["-w", "net.bridge.bridge-nf-call-iptables=1"]);
@@ -1657,6 +1734,35 @@ async function ensureVmIsolation(): Promise<void> {
   } catch (err) {
     console.warn(
       `[fleet] VM isolation setup failed (best-effort): ${err instanceof Error ? err.message : err}`,
+    );
+  }
+  // Best-effort setup is never enough for a tenant boundary. Verify the
+  // effective kernel/rule state and fail the boot if it cannot be proven.
+  const bridgeFilter = await runCmdResult("sysctl", [
+    "-n",
+    "net.bridge.bridge-nf-call-iptables",
+  ]);
+  if (bridgeFilter.code !== 0 || bridgeFilter.stdout.trim() !== "1") {
+    throw new Error(
+      `VM isolation unavailable: bridge-nf-call-iptables=${bridgeFilter.stdout.trim() || "unset"}`,
+    );
+  }
+  const expected = `-A FORWARD -i ${BRIDGE_NAME} -o ${BRIDGE_NAME} -j DROP`;
+  let listed = await runCmdResult("iptables", ["-S", "FORWARD"]);
+  let firstRule = listed.stdout.split(/\r?\n/).find((line) => line.startsWith("-A FORWARD "));
+  if (listed.code !== 0 || firstRule !== expected) {
+    const inserted = await runCmdResult("iptables", [
+      "-I", "FORWARD", "1", "-i", BRIDGE_NAME, "-o", BRIDGE_NAME, "-j", "DROP",
+    ]);
+    if (inserted.code !== 0) {
+      throw new Error(`VM isolation rule install failed: ${inserted.stderr.trim()}`);
+    }
+    listed = await runCmdResult("iptables", ["-S", "FORWARD"]);
+    firstRule = listed.stdout.split(/\r?\n/).find((line) => line.startsWith("-A FORWARD "));
+  }
+  if (listed.code !== 0 || firstRule !== expected) {
+    throw new Error(
+      `VM isolation rule is not first in FORWARD (found ${firstRule ?? "none"})`,
     );
   }
 }
@@ -1703,12 +1809,14 @@ async function preseedNeighbor(ip: string, mac: string): Promise<void> {
 async function runCmdResult(
   cmd: string,
   args: string[],
-): Promise<{ code: number | null; stderr: string }> {
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return await new Promise((resolve) => {
-    const p = spawn(cmd, args, { stdio: ["ignore", "ignore", "pipe"] });
+    const p = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
     let stderr = "";
+    p.stdout?.on("data", (c: Buffer) => (stdout += c.toString()));
     p.stderr?.on("data", (c: Buffer) => (stderr += c.toString()));
-    p.once("error", () => resolve({ code: 1, stderr }));
-    p.once("close", (code) => resolve({ code, stderr }));
+    p.once("error", () => resolve({ code: 1, stdout, stderr }));
+    p.once("close", (code) => resolve({ code, stdout, stderr }));
   });
 }

@@ -3,6 +3,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import AdmZip from "adm-zip";
 import { safeChildEnv } from "./safeEnv.js";
+import { isSensitiveProjectPath } from "./security/sensitivePaths.js";
 
 // Cap on uncompressed extracted size (200 MB) to prevent zip-bomb DoS.
 const MAX_TOTAL_SIZE = 200 * 1024 * 1024;
@@ -61,6 +62,7 @@ export async function importZip(
     if (stripPrefix && rel.startsWith(stripPrefix)) rel = rel.slice(stripPrefix.length);
     if (!rel) return false;
     if (SKIP_TOP_DIRS.has(rel.split("/")[0])) return false;
+    if (isSensitiveProjectPath(rel)) return false;
     return true;
   };
 
@@ -94,6 +96,7 @@ export async function importZip(
     if (!rel) continue;
     const top = rel.split("/")[0];
     if (SKIP_TOP_DIRS.has(top)) continue;
+    if (isSensitiveProjectPath(rel)) continue;
 
     const full = path.resolve(root, rel);
     if (full !== root && !full.startsWith(root + path.sep)) {
@@ -223,6 +226,11 @@ export async function importGithub(
     await fs.rm(path.join(destDir, ".git"), { recursive: true, force: true });
   }
 
+  // Imported credential files must never enter the durable host/storage tree
+  // or become model-readable. Git history is retained only when explicitly
+  // requested, but checked-out sensitive paths are removed before sync.
+  await removeSensitiveProjectFiles(destDir);
+
   // Walk to count files + bytes for the response. Bail with a hard error if
   // the clone exceeds MAX_CLONE_SIZE so callers can roll back the project
   // instead of leaving a giant tree on disk.
@@ -292,6 +300,7 @@ export function validateCredentialedGithubRepo(
   } catch {
     throw new Error("credentialed clone URL must be a valid GitHub HTTPS URL");
   }
+
   if (
     parsed.protocol !== "https:" ||
     parsed.hostname.toLowerCase() !== "github.com" ||
@@ -315,6 +324,33 @@ export function validateCredentialedGithubRepo(
     throw new Error("credentialed clone URL does not match the selected GitHub repository");
   }
   return { parsed, fullName };
+}
+
+/** Remove credential-bearing files from an imported checkout before syncing. */
+export async function removeSensitiveProjectFiles(rootDir: string): Promise<number> {
+  const root = path.resolve(rootDir);
+  let removed = 0;
+  const visit = async (dir: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === ".git") continue;
+      const full = path.join(dir, entry.name);
+      const rel = path.relative(root, full).replaceAll(path.sep, "/");
+      if (isSensitiveProjectPath(rel)) {
+        await fs.rm(full, { recursive: true, force: true });
+        removed++;
+      } else if (entry.isDirectory()) {
+        await visit(full);
+      }
+    }
+  };
+  await visit(root);
+  return removed;
 }
 
 /** Run git and capture stdout (for branch/remote lookups after a preserveGit clone). */

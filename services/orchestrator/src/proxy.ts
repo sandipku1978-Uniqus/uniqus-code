@@ -5,7 +5,7 @@ import http, {
 } from "node:http";
 import type { Duplex } from "node:stream";
 import { createHash } from "node:crypto";
-import { getServer } from "./agent/sandbox.js";
+import { getServerByCapability } from "./agent/sandbox.js";
 import { touch as touchVm } from "./firecracker/index.js";
 import { resolveShareToken } from "./previewShare.js";
 
@@ -238,7 +238,7 @@ export function resolveTarget(
     const token = shareDirect[1];
     const serverId = resolveShareToken(token);
     if (!serverId) return null;
-    const srv = getServer(serverId);
+    const srv = getServerByCapability(serverId);
     if (!srv) return null;
     keepAlive(srv);
     return { serverId, host: srv.host, port: srv.port, innerPath: normalizeInnerPath(shareDirect[2]), shareToken: token };
@@ -248,7 +248,7 @@ export function resolveTarget(
   if (direct) {
     const serverId = direct[1];
     const innerPath = normalizeInnerPath(direct[2]);
-    const srv = getServer(serverId);
+    const srv = getServerByCapability(serverId);
     if (!srv) return null;
     keepAlive(srv);
     return { serverId, host: srv.host, port: srv.port, innerPath };
@@ -263,7 +263,7 @@ export function resolveTarget(
       if (sm) {
         const serverId = resolveShareToken(sm[1]);
         if (serverId) {
-          const srv = getServer(serverId);
+          const srv = getServerByCapability(serverId);
           if (srv) {
             keepAlive(srv);
             return { serverId, host: srv.host, port: srv.port, innerPath: url, shareToken: sm[1] };
@@ -273,7 +273,7 @@ export function resolveTarget(
       const m = parsed.pathname.match(/^\/preview\/([^/?#]+)/);
       if (m && m[1] !== "share") {
         const serverId = m[1];
-        const srv = getServer(serverId);
+        const srv = getServerByCapability(serverId);
         if (srv) {
           keepAlive(srv);
           return { serverId, host: srv.host, port: srv.port, innerPath: url };
@@ -290,7 +290,7 @@ export function resolveTarget(
   if (shareCookie) {
     const serverId = resolveShareToken(shareCookie);
     if (serverId) {
-      const srv = getServer(serverId);
+      const srv = getServerByCapability(serverId);
       if (srv) {
         keepAlive(srv);
         return { serverId, host: srv.host, port: srv.port, innerPath: url, shareToken: shareCookie };
@@ -300,7 +300,7 @@ export function resolveTarget(
 
   const cookieId = readPreviewCookie(headers);
   if (cookieId) {
-    const srv = getServer(cookieId);
+    const srv = getServerByCapability(cookieId);
     if (srv) {
       keepAlive(srv);
       return { serverId: cookieId, host: srv.host, port: srv.port, innerPath: url };

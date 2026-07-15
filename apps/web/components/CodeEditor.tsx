@@ -3,6 +3,7 @@
 import dynamic from "next/dynamic";
 import { useEffect, useRef, useState } from "react";
 import { useStore, flushSave, type SaveStatus, type ThemeChoice } from "@/lib/store";
+import { requestFile } from "@/lib/ws-client";
 
 const Monaco = dynamic(() => import("@monaco-editor/react"), { ssr: false });
 
@@ -190,8 +191,9 @@ function useDocumentTheme(): ThemeChoice {
   return theme;
 }
 
-export default function CodeEditor() {
-  const path = useStore((s) => s.selectedFile);
+export default function CodeEditor({ path }: { path: string }) {
+  const contentPath = useStore((s) => s.fileContentPath);
+  const loadError = useStore((s) => s.fileLoadError);
   const content = useStore((s) => s.fileContent);
   const busy = useStore((s) => s.busy);
   const rawSaveStatus = useStore((s) => (path ? s.saveStatus[path] : undefined));
@@ -236,11 +238,17 @@ export default function CodeEditor() {
     return () => window.removeEventListener("keydown", onKey);
   }, [path]);
 
-  if (!path) {
+  if (contentPath !== path) {
+    const error = loadError?.path === path ? loadError.message : null;
     return (
-      <div className="editor-empty">
-        <h3>No file open.</h3>
-        <p>Open a file from the explorer to view it here.</p>
+      <div className="editor-empty" role="status">
+        <h3>{error ? "Couldn't load file." : "Loading file…"}</h3>
+        <p>{error ?? path}</p>
+        {error && (
+          <button type="button" className="btn-secondary" onClick={() => requestFile(path)}>
+            Retry
+          </button>
+        )}
       </div>
     );
   }
@@ -267,6 +275,7 @@ export default function CodeEditor() {
       }}
     >
       <Monaco
+        path={path}
         theme={theme === "light" ? LIGHT_THEME : DARK_THEME}
         language={languageFor(path)}
         value={content}

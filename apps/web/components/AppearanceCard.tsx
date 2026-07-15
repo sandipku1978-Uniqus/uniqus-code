@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import {
   useStore,
   hydrateAppearanceFromStorage,
@@ -27,17 +27,28 @@ const DENSITY_OPTIONS: { value: DensityChoice; label: string; hint: string }[] =
 ];
 
 function Segmented<T extends string>({
+  label,
   value,
   options,
   onChange,
 }: {
+  label: string;
   value: T;
   options: { value: T; label: string }[];
   onChange: (v: T) => void;
 }) {
+  const refs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  const move = (index: number): void => {
+    const next = options[(index + options.length) % options.length];
+    onChange(next.value);
+    refs.current[(index + options.length) % options.length]?.focus();
+  };
+
   return (
     <div
       role="radiogroup"
+      aria-label={label}
       style={{
         display: "inline-flex",
         gap: 2,
@@ -47,15 +58,34 @@ function Segmented<T extends string>({
         borderRadius: 8,
       }}
     >
-      {options.map((opt) => {
+      {options.map((opt, index) => {
         const active = opt.value === value;
         return (
           <button
+            ref={(element) => {
+              refs.current[index] = element;
+            }}
             key={opt.value}
             type="button"
             role="radio"
             aria-checked={active ? "true" : "false"}
+            tabIndex={active ? 0 : -1}
             onClick={() => onChange(opt.value)}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+                event.preventDefault();
+                move(index + 1);
+              } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+                event.preventDefault();
+                move(index - 1);
+              } else if (event.key === "Home") {
+                event.preventDefault();
+                move(0);
+              } else if (event.key === "End") {
+                event.preventDefault();
+                move(options.length - 1);
+              }
+            }}
             style={{
               border: 0,
               cursor: "pointer",
@@ -64,7 +94,7 @@ function Segmented<T extends string>({
               fontWeight: 600,
               padding: "6px 14px",
               borderRadius: 6,
-              color: active ? "#fff" : "var(--text-muted)",
+              color: active ? "#140D07" : "var(--text-muted)",
               background: active ? "var(--brand-gradient)" : "transparent",
               transition: "color var(--dur-base) ease, background var(--dur-base) ease",
             }}
@@ -107,7 +137,7 @@ export default function AppearanceCard() {
             {themeHint}
           </span>
         </span>
-        <Segmented value={theme} options={THEME_OPTIONS} onChange={setTheme} />
+        <Segmented label="Theme" value={theme} options={THEME_OPTIONS} onChange={setTheme} />
       </div>
 
       <div className="settings-row">
@@ -117,7 +147,7 @@ export default function AppearanceCard() {
             {densityHint}
           </span>
         </span>
-        <Segmented value={density} options={DENSITY_OPTIONS} onChange={setDensity} />
+        <Segmented label="Density" value={density} options={DENSITY_OPTIONS} onChange={setDensity} />
       </div>
     </div>
   );

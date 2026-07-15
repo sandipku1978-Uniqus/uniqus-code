@@ -7,6 +7,7 @@ import {
   buildCloneUrl,
   detectSingleRoot,
   importZip,
+  removeSensitiveProjectFiles,
   scrubPat,
   validateCredentialedGithubRepo,
 } from "./import.js";
@@ -239,6 +240,33 @@ describe("importZip", () => {
     for (const skipped of [".git", "node_modules", "dist", "build", ".next"]) {
       expect(await exists(path.join(dir, skipped))).toBe(false);
     }
+  });
+
+  it("drops credential-bearing paths before they enter the project tree", async () => {
+    const dir = await freshDir();
+    const zip = makeZip({
+      "src/index.ts": "export {};",
+      ".env.production": "TOKEN=secret",
+      "config/client.pem": "private material",
+      ".ssh/id_ed25519": "private key",
+    });
+
+    const result = await importZip(zip, dir);
+    expect(result.files_imported).toBe(1);
+    expect(await exists(path.join(dir, ".env.production"))).toBe(false);
+    expect(await exists(path.join(dir, "config/client.pem"))).toBe(false);
+    expect(await exists(path.join(dir, ".ssh"))).toBe(false);
+  });
+
+  it("scrubs sensitive files from a cloned checkout before persistence", async () => {
+    const dir = await freshDir();
+    await fs.mkdir(path.join(dir, "nested"), { recursive: true });
+    await fs.writeFile(path.join(dir, "keep.txt"), "safe");
+    await fs.writeFile(path.join(dir, "nested", ".npmrc"), "token=secret");
+
+    await expect(removeSensitiveProjectFiles(dir)).resolves.toBe(1);
+    expect(await read(dir, "keep.txt")).toBe("safe");
+    expect(await exists(path.join(dir, "nested", ".npmrc"))).toBe(false);
   });
 
   it("rejects an archive whose only content is a skip-dir (no silent empty import)", async () => {

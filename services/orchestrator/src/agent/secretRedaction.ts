@@ -1,4 +1,31 @@
 const REDACTED_SECRET = "[REDACTED PROJECT SECRET]";
+const REDACTED_LOCAL_SECRET = "[REDACTED LOCAL SECRET]";
+
+/**
+ * Defense in depth for command/log output sourced from workspace files rather
+ * than the encrypted project-secret store. Arbitrary shell plus local secrets
+ * is inherently broad, so lifecycle filters remain the primary control; these
+ * patterns stop common `cat .env`, credential JSON/YAML, URL-auth, token, and
+ * PEM disclosures from crossing into model context.
+ */
+export function redactSensitiveShellOutput(value: string): string {
+  return value
+    .replace(
+      /-----BEGIN [^-\r\n]*(?:PRIVATE KEY|CERTIFICATE)-----[\s\S]*?-----END [^-\r\n]*(?:PRIVATE KEY|CERTIFICATE)-----/gi,
+      REDACTED_LOCAL_SECRET,
+    )
+    .replace(
+      /^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*).+$/gm,
+      `$1${REDACTED_LOCAL_SECRET}`,
+    )
+    .replace(
+      /((?:"|')?[A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|private[_-]?key)[A-Za-z0-9_.-]*(?:"|')?\s*[:=]\s*)(["']?)[^\s,"'}]+\2/gi,
+      `$1${REDACTED_LOCAL_SECRET}`,
+    )
+    .replace(/(https?:\/\/[^\s:/@]+:)[^\s/@]+@/gi, `$1${REDACTED_LOCAL_SECRET}@`)
+    .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16})\b/g, REDACTED_LOCAL_SECRET)
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, REDACTED_LOCAL_SECRET);
+}
 
 export interface SecretRedactor {
   text(value: string): string;

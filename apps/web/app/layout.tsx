@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Archivo, JetBrains_Mono } from "next/font/google";
+import { headers } from "next/headers";
 import "./globals.css";
 import Toaster from "@/components/Toaster";
 
@@ -38,7 +39,8 @@ export const metadata: Metadata = {
  */
 const APPEARANCE_BOOTSTRAP = `(function(){try{var d=document.documentElement;var t=localStorage.getItem("gate15.theme");d.dataset.theme=t==="light"?"light":"dark";var s=localStorage.getItem("gate15.density");d.dataset.density=s==="compact"?"compact":"comfortable";}catch(e){document.documentElement.dataset.theme="dark";document.documentElement.dataset.density="comfortable";}})();`;
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
   return (
     <html
       lang="en"
@@ -46,9 +48,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       suppressHydrationWarning
     >
       <head>
-        <script dangerouslySetInnerHTML={{ __html: APPEARANCE_BOOTSTRAP }} />
+        <script nonce={nonce} dangerouslySetInnerHTML={{ __html: APPEARANCE_BOOTSTRAP }} />
       </head>
       <body>
+        <a className="skip-link" href="#main-content">
+          Skip to main content
+        </a>
         {children}
         <Toaster />
       </body>

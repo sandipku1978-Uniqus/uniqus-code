@@ -3,7 +3,11 @@
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Modal from "./Modal";
-import Turnstile, { turnstileEnabled, type TurnstileHandle } from "./Turnstile";
+import Turnstile, {
+  turnstileEnabled,
+  type TurnstileHandle,
+  type TurnstileState,
+} from "./Turnstile";
 import { createGuestApi, restoreGuestApi, RestoreError } from "@/lib/api";
 
 /**
@@ -33,6 +37,9 @@ export default function GuestLoginActions({
   // Stays null — and the flows stay gated — until the widget solves. When
   // Turnstile isn't configured (`turnstileEnabled` false), the token is ignored.
   const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+  const [captchaState, setCaptchaState] = useState<TurnstileState>(
+    turnstileEnabled ? "loading" : "ready",
+  );
   const captchaRef = useRef<TurnstileHandle>(null);
   const captchaReady = !turnstileEnabled || !!captchaToken;
 
@@ -180,11 +187,37 @@ export default function GuestLoginActions({
           >
             {busy && !restoreOpen
               ? "Creating guest account…"
-              : !captchaReady
-                ? "Verifying you're human…"
-                : "Continue as a guest"}
+              : captchaState === "error"
+                ? "Verification unavailable"
+                : captchaState === "expired"
+                  ? "Verification expired"
+                  : !captchaReady
+                    ? "Verifying you're human…"
+                    : "Continue as a guest"}
           </button>
-          <Turnstile ref={captchaRef} onToken={setCaptchaToken} action="guest" />
+          <Turnstile
+            ref={captchaRef}
+            onToken={setCaptchaToken}
+            onStateChange={setCaptchaState}
+            action="guest"
+          />
+          {turnstileEnabled &&
+            (captchaState === "error" || captchaState === "expired") && (
+              <div className="captcha-recovery" role="alert">
+                <p>
+                  {captchaState === "expired"
+                    ? "Human verification expired. Retry to continue."
+                    : "Human verification couldn’t load. Check your connection or privacy blocker, then retry."}
+                </p>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => captchaRef.current?.retry()}
+                >
+                  Retry verification
+                </button>
+              </div>
+            )}
           <p
             style={{
               fontSize: 11,
@@ -202,7 +235,9 @@ export default function GuestLoginActions({
               type="button"
               onClick={() => setRestoreOpen((v) => !v)}
               className="btn-ghost"
-              style={{ fontSize: 11, padding: "2px 6px" }}
+              aria-expanded={restoreOpen}
+              aria-controls="guest-recovery-form"
+              style={{ fontSize: 11, padding: "8px 10px", minHeight: 44 }}
             >
               {restoreOpen ? "Hide" : "Have a recovery code?"}
             </button>
@@ -210,16 +245,25 @@ export default function GuestLoginActions({
 
           {restoreOpen && (
             <form
+              id="guest-recovery-form"
               onSubmit={restoreGuest}
               style={{ display: "flex", gap: 6, marginTop: 8 }}
             >
+              <label className="sr-only" htmlFor="guest-recovery-code">
+                Recovery code
+              </label>
               <input
+                id="guest-recovery-code"
+                name="recoveryCode"
                 value={restoreCode}
                 onChange={(e) => setRestoreCode(e.target.value)}
                 placeholder="GATE15-XXXX-XXXX-XXXX-XXXX"
                 disabled={busy}
                 autoComplete="off"
                 spellCheck={false}
+                aria-describedby="guest-recovery-help"
+                aria-errormessage={error ? "guest-entry-error" : undefined}
+                aria-invalid={!!error}
                 style={inputStyle}
               />
               <button
@@ -235,6 +279,7 @@ export default function GuestLoginActions({
 
           {restoreOpen && (
             <p
+              id="guest-recovery-help"
               style={{
                 fontSize: 11,
                 color: "var(--text-muted)",
@@ -251,6 +296,8 @@ export default function GuestLoginActions({
 
           {error && (
             <div
+              id="guest-entry-error"
+              role="alert"
               style={{
                 color: "var(--conf-low)",
                 fontSize: 12,

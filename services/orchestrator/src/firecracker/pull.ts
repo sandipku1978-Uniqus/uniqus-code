@@ -3,6 +3,7 @@ import path from "node:path";
 import { getRunningVm } from "./fleet.js";
 import * as agentRpc from "./agentRpc.js";
 import type { VmHandle } from "./types.js";
+import { isSensitiveProjectPath } from "../security/sensitivePaths.js";
 
 /**
  * VM → host file pull (the fix for C-8/C-18).
@@ -75,6 +76,7 @@ const EXEC_CHUNK_BYTES = 8 * 1024;
 const EXEC_MANIFEST_MAX_FILES = 250;
 
 function shouldPull(relPath: string): boolean {
+  if (isSensitiveProjectPath(relPath)) return false;
   const parts = relPath.split("/");
   for (const part of parts) {
     if (SKIP_DIRS.has(part)) return false;

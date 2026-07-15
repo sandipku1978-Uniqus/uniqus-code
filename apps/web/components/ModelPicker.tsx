@@ -99,7 +99,7 @@ function CompactPicker() {
       >
         <span style={{ fontWeight: 600 }}>{modelChoiceLabel(curModel)}</span>
         <span className="model-picker-badge">{badge}</span>
-        <span style={{ opacity: 0.55, fontSize: 9 }}>▾</span>
+        <ChevronIcon direction="down" />
       </button>
 
       {/* Portaled + fixed so it can't be clipped by the composer / chat pane
@@ -111,6 +111,9 @@ function CompactPicker() {
         placement="top-start"
         onRequestClose={() => setOpen(false)}
         className="model-picker-pop"
+        role="dialog"
+        ariaLabel="Model and thinking settings"
+        focusOnOpen
       >
         <PickerBody flyout onDone={() => setOpen(false)} />
       </Popover>
@@ -133,7 +136,7 @@ function SettingsPicker() {
       </div>
       {isOverride && (
         <p style={{ margin: 0, fontSize: 12, color: "var(--conf-low)" }}>
-          ⚠ Advanced override active. Results, tool use, and quality may vary by
+          Advanced override active. Results, tool use, and quality may vary by
           provider; switch back to <strong>Auto</strong> for the best experience.
         </p>
       )}
@@ -146,9 +149,11 @@ function SettingsPicker() {
 function ModelList({
   model,
   onPick,
+  asOptions = false,
 }: {
   model: string;
   onPick: (m: string) => void;
+  asOptions?: boolean;
 }) {
   return (
     <>
@@ -166,6 +171,7 @@ function ModelList({
                 label={m.label}
                 sub={m.description}
                 active={model === m.id}
+                asOption={asOptions}
                 onClick={() => onPick(m.id)}
               />
             ))}
@@ -202,19 +208,21 @@ function ModelFlyout({
       gap={8}
       onRequestClose={onClose}
       className="model-picker-flyout"
-      role="menu"
+      role="listbox"
+      ariaLabel="Choose a model"
       style={{ maxHeight: "min(440px, 65vh)", zIndex: 120 }}
     >
       <div className="label-micro" style={{ marginBottom: 4 }}>
         Choose a model
       </div>
       <OptionRow
-        label="⚡ Auto"
+        label="Auto"
         sub="Recommended — strongest model per task"
         active={model === "auto"}
+        asOption
         onClick={() => onPick("auto")}
       />
-      <ModelList model={model} onPick={onPick} />
+      <ModelList model={model} onPick={onPick} asOptions />
     </Popover>
   );
 }
@@ -284,7 +292,7 @@ function PickerBody({
         >
           <span
             style={{
-              fontSize: 12.5,
+              fontSize: 12,
               fontWeight: 600,
               color: "var(--text-primary)",
               overflow: "hidden",
@@ -294,11 +302,9 @@ function PickerBody({
               minWidth: 0,
             }}
           >
-            {model === "auto" ? "⚡ Auto" : modelChoiceLabel(model)}
+            {model === "auto" ? "Auto" : modelChoiceLabel(model)}
           </span>
-          <span style={{ fontSize: 10, opacity: 0.6, flexShrink: 0 }}>
-            {flyout ? "›" : expanded ? "▴" : "▾"}
-          </span>
+          <ChevronIcon direction={flyout ? "right" : expanded ? "up" : "down"} />
         </button>
       </Tooltip>
 
@@ -314,7 +320,7 @@ function PickerBody({
         expanded && (
           <div style={{ display: "grid", gap: 4 }}>
             <OptionRow
-              label="⚡ Auto"
+              label="Auto"
               sub="Recommended — strongest model per task"
               active={model === "auto"}
               onClick={() => pickModel("auto")}
@@ -349,11 +355,13 @@ function OptionRow({
   sub,
   active,
   onClick,
+  asOption = false,
 }: {
   label: string;
   sub: string;
   active: boolean;
   onClick: () => void;
+  asOption?: boolean;
 }) {
   // Traditional compact menu row: label only. The description lives in a
   // hover/focus tooltip instead of an always-on sub-line — that sub-line is
@@ -362,6 +370,8 @@ function OptionRow({
     <Tooltip label={sub} placement="right">
       <button
         type="button"
+        role={asOption ? "option" : undefined}
+        aria-selected={asOption ? active : undefined}
         onClick={onClick}
         className="model-picker-option"
         data-active={active ? "true" : "false"}
@@ -380,9 +390,22 @@ function OptionRow({
         >
           {label}
         </span>
-        {active && <span style={{ color: "var(--accent)", fontSize: 12, flexShrink: 0 }}>✓</span>}
+        {active && (
+          <svg aria-hidden="true" viewBox="0 0 16 16" width="12" height="12" fill="none" style={{ color: "var(--accent-text)", flexShrink: 0 }}>
+            <path d="m3.5 8 3 3 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        )}
       </button>
     </Tooltip>
+  );
+}
+
+function ChevronIcon({ direction }: { direction: "up" | "down" | "right" }) {
+  const path = direction === "right" ? "m4.5 3 3 3-3 3" : direction === "up" ? "m3 7.5 3-3 3 3" : "m3 4.5 3 3 3-3";
+  return (
+    <svg aria-hidden="true" viewBox="0 0 12 12" width="10" height="10" fill="none" style={{ opacity: 0.55, flexShrink: 0 }}>
+      <path d={path} stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 

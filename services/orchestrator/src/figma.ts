@@ -31,6 +31,7 @@ const STATE_TTL_SECONDS = 600;
 //   current_user:read    → GET /v1/me (handle for the "Connected as" label)
 // These must match the scopes selected on the registered Figma app.
 const SCOPE = "file_content:read library_content:read current_user:read";
+const refreshInFlight = new Map<string, Promise<string>>();
 
 interface StatePayload {
   state: string;
@@ -245,6 +246,22 @@ async function getFigmaAccessToken(userId: string): Promise<string> {
   const t = await getFigmaTokens(userId);
   if (!t) throw new Error("figma_not_connected");
   if (Date.now() < t.expires_at - 60_000) return t.access_token;
+
+  const existing = refreshInFlight.get(userId);
+  if (existing) return existing;
+  const pending = refreshFigmaAccessToken(userId);
+  refreshInFlight.set(userId, pending);
+  try {
+    return await pending;
+  } finally {
+    if (refreshInFlight.get(userId) === pending) refreshInFlight.delete(userId);
+  }
+}
+
+async function refreshFigmaAccessToken(userId: string): Promise<string> {
+  const t = await getFigmaTokens(userId);
+  if (!t) throw new Error("figma_not_connected");
+  if (Date.now() < t.expires_at - 60_000) return t.access_token;
   const { clientId, clientSecret } = getOauthConfig();
   const res = await fetch("https://api.figma.com/v1/oauth/refresh", {
     method: "POST",
@@ -252,20 +269,28 @@ async function getFigmaAccessToken(userId: string): Promise<string> {
     body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: t.refresh_token }),
   });
   if (!res.ok) {
-    await clearFigmaToken(userId);
+    // A concurrent process may have consumed a single-use refresh token and
+    // already stored its replacement. Never clear credentials from this stale
+    // snapshot; prefer the winner when its generation changed.
+    const winner = await getFigmaTokens(userId);
+    if (winner && winner.generation !== t.generation) return winner.access_token;
     throw new Error("figma_not_connected");
   }
   const body = (await res.json()) as { access_token?: string; refresh_token?: string; expires_in?: number };
   if (!body.access_token) {
-    await clearFigmaToken(userId);
+    const winner = await getFigmaTokens(userId);
+    if (winner && winner.generation !== t.generation) return winner.access_token;
     throw new Error("figma_not_connected");
   }
-  await updateFigmaTokens(userId, {
+  const won = await updateFigmaTokens(userId, {
     access_token: body.access_token,
     refresh_token: body.refresh_token ?? t.refresh_token,
     expires_in: body.expires_in ?? 3600,
-  });
-  return body.access_token;
+  }, t.generation);
+  if (won) return body.access_token;
+  const winner = await getFigmaTokens(userId);
+  if (!winner) throw new Error("figma_not_connected");
+  return winner.access_token;
 }
 
 /** Pull the file key out of a Figma file/design URL, or null. */

@@ -52,6 +52,22 @@ FIRECRACKER_MEM_MIB=1024
 FIRECRACKER_IDLE_PAUSE_MS=300000
 ```
 
+`FIRECRACKER_CIDR` is the single network setting (default
+`172.16.0.0/16`). `host-setup.sh` installs both systemd units with the same
+optional `EnvironmentFile=/etc/default/uniqus-firecracker`, so a custom subnet
+is configured once:
+
+```env
+FIRECRACKER_CIDR=10.44.7.0/24
+```
+
+The bridge gateway, netmask, golden bootstrap address, guest prefix, NAT range,
+and persistent collision-aware IPAM all derive from it. Legacy
+`FIRECRACKER_SUBNET`, `FIRECRACKER_BRIDGE_CIDR`, `FIRECRACKER_GATEWAY`,
+`FIRECRACKER_NETMASK`, and `FIRECRACKER_BOOTSTRAP_IP` values are accepted only
+when they exactly match the derived values; contradictory partial overrides
+fail startup/provisioning.
+
 ## What this gives you
 
 - Per-project Alpine microVM. Cold boot is ~3-8s with the always-on boot
@@ -63,7 +79,7 @@ FIRECRACKER_IDLE_PAUSE_MS=300000
   `/var/lib/uniqus/firecracker/<projectId>.sandbox.ext4` — sparse, default
   8 GiB, tunable via `FIRECRACKER_SANDBOX_SIZE` (truncate-style size, e.g.
   `"16G"`; existing images are grown offline with `truncate` + `resize2fs`).
-- Static-IP VM with a 172.16/16 private IP, NAT'd egress through the host NIC.
+- Static-IP VM from `FIRECRACKER_CIDR`, NAT'd egress through the host NIC.
   There is **no DHCP** on the bridge: the agent configures eth0 itself from the
   kernel cmdline (`uniqus_ip`/`uniqus_gw`). A stray `iface eth0 inet dhcp` in the
   guest used to make `udhcpc` block OpenRC ~10-15s waiting for a lease that never
@@ -118,7 +134,8 @@ the only path that governs new-project latency. Two changes attack it:
    (Firecracker's "relative paths + per-sandbox cwd" clone pattern).
 
    The golden is frozen with a shared **bootstrap identity** (`uniqus_ip`
-   = `172.16.255.254`, MAC `02:fc:ff:ff:ff:fe`, cmdline `uniqus_golden=1` so the
+   = the subnet's penultimate address, MAC `02:fc:ff:ff:ff:fe`, cmdline
+   `uniqus_golden=1` so the
    sandbox is left unmounted). On restore the orchestrator loads the snapshot
    with `network_overrides` pointing eth0 at the project's TAP, resumes, then —
    holding a global lock so only one clone wears the bootstrap identity at a time
@@ -160,8 +177,8 @@ journalctl -u uniqus-orchestrator -f | grep '\[fleet'
 #      A "falling back to cold boot" line means investigate before relying on it.
 ```
 
-Tunable: `FIRECRACKER_BOOTSTRAP_IP` (default `172.16.255.254`, reserved out of
-the project IP range). The fleet auto-detects a stale golden snapshot (rootfs
+The derived bootstrap IP is reserved out of the project IPAM range. The fleet
+auto-detects a stale golden snapshot (rootfs
 mtime newer than the snapshot — e.g. after `build-rootfs.sh` re-runs) and
 regenerates it on the next new project, since a stale snapshot's frozen ext4
 blocks no longer line up with the rebuilt rootfs and surface in-guest as `npm`

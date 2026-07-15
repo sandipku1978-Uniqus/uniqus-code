@@ -39,6 +39,9 @@ alter table users add column if not exists vercel_connected_at timestamptz;
 alter table users add column if not exists supabase_access_token text;
 alter table users add column if not exists supabase_refresh_token text;
 alter table users add column if not exists supabase_token_expires_at timestamptz;
+-- Refresh writes compare this opaque generation before replacing a rotated
+-- credential pair. It is the cross-process CAS token for OAuth refreshes.
+alter table users add column if not exists supabase_token_generation uuid not null default gen_random_uuid();
 alter table users add column if not exists supabase_org_id text;
 alter table users add column if not exists supabase_org_name text;
 alter table users add column if not exists supabase_connected_at timestamptz;
@@ -51,8 +54,29 @@ alter table users add column if not exists supabase_connected_at timestamptz;
 alter table users add column if not exists figma_access_token text;
 alter table users add column if not exists figma_refresh_token text;
 alter table users add column if not exists figma_token_expires_at timestamptz;
+alter table users add column if not exists figma_token_generation uuid not null default gen_random_uuid();
 alter table users add column if not exists figma_handle text;
 alter table users add column if not exists figma_connected_at timestamptz;
+
+-- Durable erasure outbox. The minimal cleanup key survives deletion of the
+-- user-visible project/document row, so transient Storage/host failures remain
+-- observable and retryable across orchestrator restarts (B27).
+create table if not exists cleanup_jobs (
+  id uuid primary key default gen_random_uuid(),
+  kind text not null check (kind in ('project', 'knowledge')),
+  resource_id uuid not null,
+  owner_id uuid,
+  storage_paths text[] not null default '{}',
+  attempts integer not null default 0,
+  next_attempt_at timestamptz not null default now(),
+  last_error text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (kind, resource_id)
+);
+alter table cleanup_jobs enable row level security;
+revoke all on table cleanup_jobs from public, anon, authenticated;
+create index if not exists cleanup_jobs_due_idx on cleanup_jobs(next_attempt_at, created_at);
 
 -- Guest / education accounts. A guest signs up with no Google account and no
 -- email — districts control what students can sign into, so this is the only
@@ -80,8 +104,45 @@ alter table users add column if not exists guest_recovery_code_enc text;
 alter table users add column if not exists last_active_at timestamptz;
 alter table users add column if not exists grace_started_at timestamptz;
 alter table users add column if not exists converted_at timestamptz;
+-- Exclusive lifecycle claim: once cleanup owns a guest, authentication and
+-- conversion cannot race irreversible project teardown. A later sweeper may
+-- resume an abandoned claim after one hour because cleanup is idempotent.
+alter table users add column if not exists guest_lifecycle_claim uuid;
+alter table users add column if not exists guest_lifecycle_claimed_at timestamptz;
 create unique index if not exists users_guest_recovery_hash_idx
   on users (guest_recovery_hash) where guest_recovery_hash is not null;
+
+create or replace function claim_guest_for_deletion(
+  p_guest_id uuid,
+  p_grace_cutoff timestamptz,
+  p_claim uuid
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare claimed_count integer;
+begin
+  update users
+     set guest_lifecycle_claim = p_claim,
+         guest_lifecycle_claimed_at = now()
+   where id = p_guest_id
+     and account_type = 'guest'
+     and converted_at is null
+     and grace_started_at < p_grace_cutoff
+     and (
+       guest_lifecycle_claim is null
+       or guest_lifecycle_claimed_at < now() - interval '1 hour'
+     );
+  get diagnostics claimed_count = row_count;
+  return claimed_count = 1;
+end;
+$$;
+revoke all on function claim_guest_for_deletion(uuid, timestamptz, uuid)
+  from public, anon, authenticated;
+grant execute on function claim_guest_for_deletion(uuid, timestamptz, uuid)
+  to service_role;
 
 -- Account-wide agent customization (Settings → Custom prompts & default skills).
 -- custom_prompt is appended to the agent system prompt on every turn, on top of
@@ -116,6 +177,9 @@ create index if not exists projects_owner_idx on projects (owner_id, updated_at 
 -- it from the agent system prompt until the user explicitly saves it in Gate 15.
 alter table projects add column if not exists skills_trust text not null default 'trusted'
   check (skills_trust in ('trusted', 'untrusted_import'));
+-- Exact bytes approved through a human-authenticated UI/API save. A trusted
+-- state without a digest is deliberately fail-closed until the user re-saves.
+alter table projects add column if not exists skills_trusted_sha256 text;
 
 -- Touch updated_at on every row that owns an updated_at column.
 create or replace function touch_project_updated_at() returns trigger as $$
@@ -129,6 +193,7 @@ $$ language plpgsql;
 -- subsequent deploys hit the same project and the dashboard URL is stable.
 alter table projects add column if not exists vercel_project_id text;
 alter table projects add column if not exists vercel_project_name text;
+alter table projects add column if not exists vercel_team_id text;
 
 -- Per-project Supabase link. Populated when the agent provisions (or the user
 -- attaches) a Supabase project. `ref` is the 20-char project ref; the anon key,
@@ -137,6 +202,12 @@ alter table projects add column if not exists vercel_project_name text;
 alter table projects add column if not exists supabase_project_ref text;
 alter table projects add column if not exists supabase_project_name text;
 alter table projects add column if not exists supabase_org_id text;
+-- Durable create intent. Supabase's project-create API has no idempotency key,
+-- so an ambiguous response must be reconciled to a concrete ref before retry.
+alter table projects add column if not exists supabase_provisioning_token uuid;
+alter table projects add column if not exists supabase_provisioning_started_at timestamptz;
+alter table projects add column if not exists supabase_provisioning_name text;
+alter table projects add column if not exists supabase_provisioning_org_id text;
 
 -- Per-project GitHub repo. Populated when the user clicks "Create GitHub
 -- repo" in the workspace topbar. The orchestrator creates a fresh repo via
@@ -164,10 +235,11 @@ create table if not exists deployments (
   id uuid primary key default gen_random_uuid(),
   project_id uuid not null references projects(id) on delete cascade,
   user_id uuid not null references users(id) on delete cascade,
-  vercel_deployment_id text not null,
+  vercel_deployment_id text,
+  operation_key uuid not null default gen_random_uuid(),
   vercel_url text,
   state text not null default 'QUEUED'
-    check (state in ('QUEUED', 'BUILDING', 'READY', 'ERROR', 'CANCELED')),
+    check (state in ('CREATING', 'QUEUED', 'BUILDING', 'READY', 'ERROR', 'CANCELED')),
   error_message text,
   target text not null default 'production'
     check (target in ('production', 'preview')),
@@ -177,6 +249,14 @@ create table if not exists deployments (
 
 create index if not exists deployments_project_idx
   on deployments (project_id, created_at desc);
+alter table deployments alter column vercel_deployment_id drop not null;
+alter table deployments add column if not exists operation_key uuid not null default gen_random_uuid();
+alter table deployments drop constraint if exists deployments_state_check;
+alter table deployments add constraint deployments_state_check
+  check (state in ('CREATING', 'QUEUED', 'BUILDING', 'READY', 'ERROR', 'CANCELED'));
+create unique index if not exists deployments_operation_key_idx on deployments (operation_key);
+create unique index if not exists deployments_one_creating_per_project_idx
+  on deployments (project_id) where state = 'CREATING';
 
 drop trigger if exists deployments_updated_at on deployments;
 create trigger deployments_updated_at
@@ -307,8 +387,22 @@ create table if not exists account_provider_keys (
   unique (user_id, provider)
 );
 
+-- Z.ai is selectable through BYOK. Existing installations still carry the
+-- original three-provider check, so replace it idempotently.
+alter table account_provider_keys
+  drop constraint if exists account_provider_keys_provider_check;
+alter table account_provider_keys
+  add constraint account_provider_keys_provider_check
+  check (provider in ('anthropic', 'openai', 'google', 'zai'));
+
 create index if not exists account_provider_keys_user_idx
   on account_provider_keys (user_id);
+
+-- Server-private credential material. No client policy is intentional: the
+-- service-role connection is the only supported access path.
+alter table account_provider_keys enable row level security;
+alter table account_provider_keys force row level security;
+revoke all on table account_provider_keys from anon, authenticated;
 
 -- Per-environment scoping (Phase 2.x). Same name can exist in multiple envs
 -- with different values (e.g. STRIPE_API_KEY in 'production' vs 'development').
@@ -1002,6 +1096,37 @@ create index if not exists project_members_project_idx on project_members (proje
 create index if not exists project_members_user_idx on project_members (user_id);
 alter table project_members enable row level security;
 
+-- Serialize direct project-owner demotions/removals on the parent row so two
+-- concurrent requests cannot both observe another owner and orphan the direct
+-- membership set. Parent deletion cascades remain allowed.
+create or replace function prevent_last_project_owner_removal()
+returns trigger language plpgsql as $$
+begin
+  if old.role <> 'owner' then
+    if tg_op = 'DELETE' then return old; end if;
+    return new;
+  end if;
+  if tg_op = 'UPDATE' and new.role = 'owner' then return new; end if;
+  perform 1 from projects where id = old.project_id for update;
+  if not found then
+    if tg_op = 'DELETE' then return old; end if;
+    return new;
+  end if;
+  if not exists (
+    select 1 from project_members
+    where project_id = old.project_id and role = 'owner' and id <> old.id
+  ) then
+    raise exception 'project must retain at least one direct owner' using errcode = '23514';
+  end if;
+  if tg_op = 'DELETE' then return old; end if;
+  return new;
+end;
+$$;
+drop trigger if exists project_members_retain_owner on project_members;
+create trigger project_members_retain_owner
+  before delete or update of role on project_members
+  for each row execute function prevent_last_project_owner_removal();
+
 -- Projects can belong to an org (P3.1). owner_id is authoritative only while
 -- the project is personal; organization access comes from live membership.
 alter table projects add column if not exists org_id uuid references organizations(id) on delete set null;
@@ -1165,15 +1290,67 @@ create table if not exists agent_tasks (
   acceptance_criteria text,
   result_summary text,
   error text,
+  worker_id text,
+  lease_expires_at timestamptz,
+  heartbeat_at timestamptz,
+  attempt integer not null default 0,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+alter table agent_tasks add column if not exists worker_id text;
+alter table agent_tasks add column if not exists lease_expires_at timestamptz;
+alter table agent_tasks add column if not exists heartbeat_at timestamptz;
+alter table agent_tasks add column if not exists attempt integer not null default 0;
 create index if not exists agent_tasks_project_idx on agent_tasks (project_id, created_at desc);
 create index if not exists agent_tasks_status_idx on agent_tasks (status, created_at);
+create index if not exists agent_tasks_lease_idx
+  on agent_tasks (lease_expires_at)
+  where status = 'running';
 drop trigger if exists agent_tasks_updated_at on agent_tasks;
 create trigger agent_tasks_updated_at before update on agent_tasks
   for each row execute function touch_project_updated_at();
 alter table agent_tasks enable row level security;
+
+-- Multi-worker-safe claim with crash recovery. Expired running rows become
+-- eligible again; FOR UPDATE SKIP LOCKED guarantees one owner across instances.
+create or replace function claim_next_agent_task(
+  p_worker_id text,
+  p_lease_seconds integer default 120
+)
+returns setof agent_tasks
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if p_worker_id is null or btrim(p_worker_id) = '' then
+    raise exception 'worker id is required';
+  end if;
+  return query
+  with candidate as (
+    select id
+      from agent_tasks
+     where status = 'queued'
+        or (status = 'running' and (lease_expires_at is null or lease_expires_at < now()))
+     order by created_at asc
+     for update skip locked
+     limit 1
+  )
+  update agent_tasks as task
+     set status = 'running',
+         worker_id = p_worker_id,
+         heartbeat_at = now(),
+         lease_expires_at = now()
+           + make_interval(secs => greatest(30, least(p_lease_seconds, 3600))),
+         attempt = task.attempt + 1,
+         error = null
+    from candidate
+   where task.id = candidate.id
+  returning task.*;
+end;
+$$;
+revoke all on function claim_next_agent_task(text, integer) from public, anon, authenticated;
+grant execute on function claim_next_agent_task(text, integer) to service_role;
 
 -- Existing installations used ON DELETE SET NULL, which could turn a queued
 -- user task into an apparently system-owned task after account offboarding.

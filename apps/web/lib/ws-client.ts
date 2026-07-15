@@ -80,6 +80,50 @@ let activeProjectId: string | null = null;
 let activeRequestedSessionId: string | null = null;
 /** Concrete session id learned from session_started/run_capability. */
 let activeSessionId: string | null = null;
+/** Monotonic identity for the current socket, including reconnects. */
+let socketGeneration = 0;
+let fileRequestSequence = 0;
+
+export interface SocketContextToken {
+  projectId: string | null;
+  requestedSessionId: string | null;
+  generation: number;
+}
+
+/** Capture the exact project/session/socket an async operation intends to use. */
+export function captureSocketContext(): SocketContextToken {
+  return {
+    projectId: activeProjectId,
+    requestedSessionId: activeRequestedSessionId,
+    generation: socketGeneration,
+  };
+}
+
+export function isSocketContextCurrent(context: SocketContextToken): boolean {
+  return (
+    socket?.readyState === WebSocket.OPEN &&
+    activeProjectId === context.projectId &&
+    activeRequestedSessionId === context.requestedSessionId &&
+    socketGeneration === context.generation
+  );
+}
+
+/** Send only if no project/session switch or reconnect replaced the socket. */
+export function sendInSocketContext(context: SocketContextToken, event: ClientEvent): boolean {
+  return isSocketContextCurrent(context) && send(event);
+}
+
+/** Begin a path-correlated file load and send its generation to the server. */
+export function requestFile(path: string): boolean {
+  const requestId = ++fileRequestSequence;
+  const state = useStore.getState();
+  const hasPendingEdit = Object.prototype.hasOwnProperty.call(state.pendingEdits, path);
+  state.startFileLoad(path, requestId);
+  if (hasPendingEdit) return true;
+  const ok = send({ type: "request_file", path, request_id: requestId });
+  if (!ok) state.failFileLoad(path, requestId, "Disconnected before the file could be loaded.");
+  return ok;
+}
 
 // Reconnect backoff. A fixed 1.5s delay made every connected browser hammer
 // the orchestrator after a deploy/OOM/network blip, which can stall recovery
@@ -149,6 +193,7 @@ function openSocket(projectId: string, sessionId: string | null): void {
   activeSessionId = sessionId;
 
   const ws = new WebSocket(defaultWsUrl(projectId, sessionId));
+  socketGeneration += 1;
   socket = ws;
 
   ws.onopen = () => {
@@ -209,6 +254,7 @@ export function disconnect(): void {
   activeProjectId = null;
   activeRequestedSessionId = null;
   activeSessionId = null;
+  socketGeneration += 1;
   reconnectAttempts = 0;
   discardStreamBuffers();
   if (reconnectTimer) {
@@ -363,7 +409,7 @@ function handleEvent(event: ServerEvent): void {
       if (s.selectedFile) {
         const status = s.saveStatus[s.selectedFile]?.kind;
         if (status !== "dirty" && status !== "saving") {
-          send({ type: "request_file", path: s.selectedFile });
+          requestFile(s.selectedFile);
         }
       }
       break;
@@ -462,6 +508,14 @@ function handleEvent(event: ServerEvent): void {
       s.setTree(event.entries);
       break;
     case "file_content":
+      if (typeof event.request_id !== "number") break;
+      if (
+        s.fileRequest?.path !== event.path ||
+        s.fileRequest.id !== event.request_id ||
+        s.selectedFile !== event.path
+      ) {
+        break;
+      }
       if (event.content !== null) {
         // Don't clobber an in-flight local edit. Re-requesting an already-dirty
         // file (re-click the open tab, or switch-away-and-back while the agent
@@ -469,13 +523,15 @@ function handleEvent(event: ServerEvent): void {
         // Mirror the file_changed guard and skip the whole apply in that case.
         const status = s.saveStatus[event.path]?.kind;
         if (status !== "dirty" && status !== "saving") {
-          s.setFile(event.path, event.content);
+          s.setFile(event.path, event.content, event.request_id);
           // Server is the source of truth post-load — clear any stale dirty
           // marker so the status footer doesn't lie. Also drop any pending
           // edit since it's been overwritten by the server's content.
           s.setSaveStatus(event.path, { kind: "idle" });
           s.clearPendingEdit(event.path);
         }
+      } else {
+        s.failFileLoad(event.path, event.request_id, "File not found or could not be read.");
       }
       break;
     case "file_changed":
@@ -489,7 +545,7 @@ function handleEvent(event: ServerEvent): void {
       if (s.selectedFile === event.path) {
         const status = s.saveStatus[event.path]?.kind;
         if (status !== "dirty" && status !== "saving") {
-          send({ type: "request_file", path: event.path });
+          requestFile(event.path);
         }
       }
       break;
@@ -590,11 +646,17 @@ function handleEvent(event: ServerEvent): void {
       flushAllPendingEdits().catch(() => {});
       break;
     case "session_reset":
+      if (event.reason === "checkpoint_restore") {
+        // The restored tree is authoritative for every connected client.
+        // Invalidate pre-restore dirty/saving buffers before any surviving
+        // debounce can send them and recreate content from the abandoned state.
+        useStore.setState({ pendingEdits: {}, saveStatus: {} });
+      }
       s.resetChat();
       s.setTodos([]);
       send({ type: "request_tree" });
       if (s.selectedFile) {
-        send({ type: "request_file", path: s.selectedFile });
+        requestFile(s.selectedFile);
       }
       break;
     case "storage_synced":
@@ -671,9 +733,14 @@ function handleEvent(event: ServerEvent): void {
     case "error":
       // Friendly error card (C7) instead of a bare muted `error: <raw>` line.
       s.addErrorItem(event.message, event.code, event.retryable);
-      s.setBusy(false);
-      s.setInstallInProgress(null);
-      s.setRunReattaching(false);
+      // Auxiliary request failures (file reads, history reset, permissions,
+      // etc.) can arrive while an agent turn is still live. Only the server can
+      // declare an error terminal; otherwise retain the active run state.
+      if (event.terminal === true) {
+        s.setBusy(false);
+        s.setInstallInProgress(null);
+        s.setRunReattaching(false);
+      }
       break;
   }
 }

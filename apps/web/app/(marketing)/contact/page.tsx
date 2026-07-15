@@ -103,8 +103,8 @@ export default function ContactPage() {
           </h1>
           <p className="mk-lede">
             Whether you&rsquo;re sizing up Gate 15 for a team, stuck on a build,
-            or just have a question — send us a note and a real person will get
-            back to you.
+            or just have a question — prepare an email and send it from your
+            preferred mail app to reach a real person.
           </p>
         </div>
       </section>
@@ -113,11 +113,11 @@ export default function ContactPage() {
         <div className="contact-grid">
           <div>
             <div className="mk-section-head">
-              <span className="label-eyebrow">Send a message</span>
+              <span className="label-eyebrow">Prepare an email</span>
               <h2>Tell us what you need.</h2>
               <p>
-                Fill in the form and we&rsquo;ll route it to the right people.
-                Pick a topic so it lands in the right inbox.
+                Fill in the form and we&rsquo;ll open a pre-filled email draft.
+                Review it and press Send in your mail app to contact us.
               </p>
             </div>
             <ContactForm />

@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useStore } from "@/lib/store";
 import {
   createGithubRepoApi,
   disconnectProjectRepoApi,
   fetchGithubStatus,
+  githubOauthStartUrl,
 } from "@/lib/api";
 import Modal from "./Modal";
 
@@ -25,6 +27,7 @@ export default function GithubRepoButton({ projectId }: { projectId: string }) {
   const addSystem = useStore((s) => s.addSystem);
   const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState<boolean | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Guard against accidental repo creation — confirm before the (irreversible,
   // outward-facing) create + push.
@@ -34,20 +37,58 @@ export default function GithubRepoButton({ projectId }: { projectId: string }) {
   const [visibility, setVisibility] = useState<"private" | "public">("private");
   // "Disconnect repo" confirm — clears the stale link so the user can relink.
   const [unlinking, setUnlinking] = useState(false);
+  const searchParams = useSearchParams();
+  const githubFlag = searchParams?.get("github") ?? null;
+  const intentKey = `gate15.github.intent:${projectId}`;
 
-  useEffect(() => {
+  const loadStatus = useCallback(() => {
     let cancel = false;
+    setConnected(null);
+    setStatusError(null);
     fetchGithubStatus()
       .then((s) => {
         if (!cancel) setConnected(s.connected);
       })
-      .catch(() => {
-        if (!cancel) setConnected(false);
+      .catch((statusErr) => {
+        if (!cancel) {
+          setStatusError(
+            statusErr instanceof Error ? statusErr.message : "Couldn't check GitHub",
+          );
+        }
       });
     return () => {
       cancel = true;
     };
   }, []);
+
+  useEffect(() => loadStatus(), [loadStatus, githubFlag]);
+
+  useEffect(() => {
+    if (!connected || githubFlag !== "connected") return;
+    let resume = false;
+    try {
+      resume = sessionStorage.getItem(intentKey) === "create-repo";
+      sessionStorage.removeItem(intentKey);
+    } catch {
+      // Storage may be unavailable; returning to the project still succeeds.
+    }
+    if (resume) setConfirming(true);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("github");
+    url.searchParams.delete("reason");
+    window.history.replaceState({}, "", url.pathname + url.search);
+  }, [connected, githubFlag, intentKey]);
+
+  function startConnect(): void {
+    try {
+      sessionStorage.setItem(intentKey, "create-repo");
+    } catch {
+      // The return path still preserves the project even without auto-resume.
+    }
+    window.location.href = githubOauthStartUrl(
+      `${window.location.origin}/projects/${encodeURIComponent(projectId)}`,
+    );
+  }
 
   // Auto-clear transient errors after a few seconds so the button doesn't sit
   // in a stuck error state.
@@ -143,17 +184,31 @@ export default function GithubRepoButton({ projectId }: { projectId: string }) {
     );
   }
 
+  if (statusError) {
+    return (
+      <button
+        type="button"
+        className="toggle-btn"
+        onClick={() => loadStatus()}
+        title="Connection status unavailable. Your GitHub connection may still be active."
+      >
+        <GithubIcon />
+        <span>Retry GitHub status</span>
+      </button>
+    );
+  }
+
   if (connected === false) {
     return (
-      <a
-        href="/api/github/start?return=/projects"
+      <button
+        type="button"
+        onClick={startConnect}
         className="toggle-btn"
-        title="Connect your GitHub account to create a repo for this project"
-        style={{ textDecoration: "none" }}
+        title="Connect GitHub, then return here to create a repo for this project"
       >
         <GithubIcon />
         <span>Connect GitHub</span>
-      </a>
+      </button>
     );
   }
 

@@ -39,6 +39,8 @@ interface ManagedJob {
   started_at: number;
   finished_at: number | null;
   project_id: string | null;
+  /** Cancels the VM RPC and triggers an acknowledged guest process-group kill. */
+  abort: AbortController | null;
 }
 
 const jobs = new Map<string, ManagedJob>();
@@ -103,6 +105,7 @@ export function startBackgroundJob(
     started_at: Date.now(),
     finished_at: null,
     project_id: projectId,
+    abort: null,
   };
   jobs.set(id, job);
 
@@ -116,8 +119,9 @@ export function startBackgroundJob(
     // run_command RPC and record its result when it resolves: the log isn't
     // incremental, but the job semantics (poll status / exit code) hold.
     const vm = sandbox.vm;
+    job.abort = new AbortController();
     fcAgent
-      .runCommand(vm, command, VM_JOB_TIMEOUT_MS)
+      .runCommand(vm, command, VM_JOB_TIMEOUT_MS, job.abort.signal)
       .then((r) => {
         job.log.value = `${r.stdout}${r.stderr ? `\n${r.stderr}` : ""}`.slice(-MAX_LOG);
         job.exit_code = r.exitCode;
@@ -179,15 +183,23 @@ export function listJobs(projectId?: string | null): BackgroundJobInfo[] {
   return filtered.map(toInfo);
 }
 
-export function killJob(id: string): void {
+export async function killJob(id: string): Promise<void> {
   const job = jobs.get(id);
   if (!job) throw new Error(`No background job with id ${id}`);
-  // VM-backed jobs (proc === null) run inside the guest via a single
-  // run_command RPC — there's no kill RPC, so we can only stop tracking it
-  // here; it exits on its own or hits VM_JOB_TIMEOUT_MS inside the VM.
+  job.abort?.abort();
   if (job.proc?.pid) treeKill(job.proc.pid, "SIGKILL");
-  job.exit_code = job.exit_code ?? -1;
-  job.finished_at = job.finished_at ?? Date.now();
+  if (job.abort) {
+    const deadline = Date.now() + 5_000;
+    while (job.finished_at === null && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    if (job.finished_at === null) {
+      throw new Error(`guest did not acknowledge termination of ${id}`);
+    }
+  } else {
+    job.exit_code = job.exit_code ?? -1;
+    job.finished_at = job.finished_at ?? Date.now();
+  }
 }
 
 function toInfo(j: ManagedJob): BackgroundJobInfo {
@@ -204,6 +216,7 @@ function toInfo(j: ManagedJob): BackgroundJobInfo {
 export function killAllJobs(): void {
   for (const j of jobs.values()) {
     try {
+      j.abort?.abort();
       if (j.proc?.pid) treeKill(j.proc.pid, "SIGKILL");
     } catch {}
   }

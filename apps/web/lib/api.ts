@@ -81,7 +81,7 @@ export const updateAccountSettingsApi = (
 
 // ── Bring-your-own provider keys (F7) ─────────────────────────────────────────
 
-export type ByokProvider = "anthropic" | "openai" | "google";
+export type ByokProvider = "anthropic" | "openai" | "google" | "zai";
 
 /** Which providers this account has a key for (names only — values never leave the server). */
 export const fetchAccountProviderKeysApi = (): Promise<{ providers: ByokProvider[] }> =>
@@ -111,8 +111,11 @@ export const deleteAccountProviderKeyApi = (
  */
 export const fetchProjects = (
   workspace?: string | null,
+  signal?: AbortSignal,
 ): Promise<{ projects: ProjectSummary[] }> =>
-  api(`/api/projects${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`);
+  api(`/api/projects${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`, {
+    signal,
+  });
 
 // ── Account usage rollup (dashboard widgets) ──────────────────────────────────
 
@@ -506,7 +509,12 @@ export const fileOpApi = (
     | { op: "create_dir"; path: string }
     | { op: "rename"; from: string; to: string }
     | { op: "delete"; path: string },
-): Promise<{ ok: true }> =>
+): Promise<{
+  ok: true;
+  path_mapping?: { from: string; to: string };
+  removed_path?: string;
+  is_directory?: boolean;
+}> =>
   api(`/api/projects/${projectId}/files`, {
     method: "POST",
     body: JSON.stringify(body),
@@ -662,11 +670,22 @@ export const fetchSupabaseProjects = (): Promise<{
 }> => api("/api/supabase/projects");
 
 /** Run SQL against one of the user's Supabase databases (Management API query). */
+export interface SupabaseQueryResult {
+  rows: unknown;
+  requires_confirmation?: true;
+  operation?: string;
+  confirmation_token?: string;
+}
+
 export const supabaseQueryApi = (
   ref: string,
   query: string,
-): Promise<{ rows: unknown }> =>
-  api(`/api/supabase/projects/${ref}/query`, { method: "POST", body: JSON.stringify({ query }) });
+  confirmationToken?: string,
+): Promise<SupabaseQueryResult> =>
+  api(`/api/supabase/projects/${ref}/query`, {
+    method: "POST",
+    body: JSON.stringify({ query, confirmation_token: confirmationToken }),
+  });
 
 export const supabasePauseApi = (ref: string): Promise<{ ok: true }> =>
   api(`/api/supabase/projects/${ref}/pause`, { method: "POST" });
@@ -996,10 +1015,25 @@ export const applySkillPackApi = (
     body: JSON.stringify({ mode }),
   });
 
+export interface ProjectUploadFailure {
+  input_index: number;
+  name: string;
+  path: string;
+  failed_stage: "host" | "vm" | "storage";
+  error: string;
+  rollback_complete: boolean;
+}
+
+export interface ProjectUploadResult {
+  files: UploadedFileSummary[];
+  failures: ProjectUploadFailure[];
+}
+
 export async function uploadProjectFilesApi(input: {
   projectId: string;
   files: File[];
-}): Promise<{ files: UploadedFileSummary[] }> {
+  signal?: AbortSignal;
+}): Promise<ProjectUploadResult> {
   const fd = new FormData();
   input.files.forEach((file) => fd.append("files", file));
 
@@ -1007,12 +1041,14 @@ export async function uploadProjectFilesApi(input: {
     method: "POST",
     credentials: "include",
     body: fd,
+    signal: input.signal,
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`API ${res.status}: ${body || res.statusText}`);
   }
-  return (await res.json()) as { files: UploadedFileSummary[] };
+  const body = (await res.json()) as Partial<ProjectUploadResult>;
+  return { files: body.files ?? [], failures: body.failures ?? [] };
 }
 
 // ── Guest / education accounts ────────────────────────────────────────────────
@@ -1114,8 +1150,11 @@ export const createOrgApi = (name: string): Promise<{ org: Organization }> =>
   api("/api/orgs", { method: "POST", body: JSON.stringify({ name }) });
 
 /** Org detail + the caller's role on it. */
-export const fetchOrgApi = (orgId: string): Promise<{ org: Organization; role: Role }> =>
-  api(`/api/orgs/${orgId}`);
+export const fetchOrgApi = (
+  orgId: string,
+  signal?: AbortSignal,
+): Promise<{ org: Organization; role: Role }> =>
+  api(`/api/orgs/${orgId}`, { signal });
 
 export const renameOrgApi = (orgId: string, name: string): Promise<{ ok: true }> =>
   api(`/api/orgs/${orgId}`, { method: "PATCH", body: JSON.stringify({ name }) });
@@ -1128,8 +1167,11 @@ export const leaveOrgApi = (orgId: string): Promise<{ ok: true }> =>
   api(`/api/orgs/${orgId}/leave`, { method: "POST" });
 
 /** Org month-to-date spend vs. cap, for the Usage card. */
-export const fetchOrgUsageApi = (orgId: string): Promise<{ usage: OrgUsageSummary }> =>
-  api(`/api/orgs/${orgId}/usage`);
+export const fetchOrgUsageApi = (
+  orgId: string,
+  signal?: AbortSignal,
+): Promise<{ usage: OrgUsageSummary }> =>
+  api(`/api/orgs/${orgId}/usage`, { signal });
 
 /** Move a project into an org workspace (orgId) or back to personal (null). */
 export const setProjectOrgApi = (
@@ -1138,8 +1180,11 @@ export const setProjectOrgApi = (
 ): Promise<{ project: ProjectSummary | null }> =>
   api(`/api/projects/${projectId}/org`, { method: "PATCH", body: JSON.stringify({ org_id: orgId }) });
 
-export const fetchOrgMembersApi = (orgId: string): Promise<{ members: OrgMember[] }> =>
-  api(`/api/orgs/${orgId}/members`);
+export const fetchOrgMembersApi = (
+  orgId: string,
+  signal?: AbortSignal,
+): Promise<{ members: OrgMember[] }> =>
+  api(`/api/orgs/${orgId}/members`, { signal });
 
 export const addOrgMemberApi = (orgId: string, email: string, role: Role): Promise<{ ok: true }> =>
   api(`/api/orgs/${orgId}/members`, { method: "POST", body: JSON.stringify({ email, role }) });
@@ -1169,7 +1214,9 @@ export const resolveCommentApi = (
 ): Promise<{ ok: true }> =>
   api(`/api/projects/${projectId}/comments/${commentId}`, { method: "PATCH", body: JSON.stringify({ resolved }) });
 
-export const fetchAgentTasksApi = (projectId: string): Promise<{ tasks: AgentTask[] }> =>
+export const fetchAgentTasksApi = (
+  projectId: string,
+): Promise<{ tasks: AgentTask[]; task_worker_enabled: boolean }> =>
   api(`/api/projects/${projectId}/tasks`);
 
 export const createAgentTaskApi = (

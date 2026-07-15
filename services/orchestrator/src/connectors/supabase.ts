@@ -1,34 +1,20 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { ConnectorCtx, ConnectorDefinition } from "./index.js";
 import { supabaseFetch } from "../supabase.js";
 import { db } from "../db/client.js";
-import { setSupabaseProject } from "../db/projects.js";
+import {
+  beginSupabaseProvisioning,
+  clearSupabaseProvisioning,
+  getSupabaseProvisioningIntent,
+  setSupabaseProject,
+} from "../db/projects.js";
 import { upsertSecret } from "../db/secrets.js";
 import { audit } from "../db/audit.js";
-
-/**
- * P5.2: classify a SQL statement as destructive so run_sql can require explicit
- * confirmation (and surface an impact preview) before it runs. Conservative on
- * purpose — DROP/TRUNCATE/DELETE and `ALTER ... DROP`/REVOKE gate; additive DDL
- * (CREATE, ALTER ADD COLUMN) and SELECT/INSERT/UPDATE flow straight through.
- */
-function classifyDestructiveSql(sql: string): { destructive: boolean; op?: string; impactQuery?: string } {
-  const s = sql.trim();
-  const truncate = s.match(/\btruncate\s+(?:table\s+)?([a-zA-Z0-9_."]+)/i);
-  if (truncate) return { destructive: true, op: "TRUNCATE", impactQuery: `select count(*) as rows from ${truncate[1]}` };
-  const dropTable = s.match(/\bdrop\s+(?:table|view|materialized\s+view)\s+(?:if\s+exists\s+)?([a-zA-Z0-9_."]+)/i);
-  if (dropTable) return { destructive: true, op: "DROP", impactQuery: `select count(*) as rows from ${dropTable[1]}` };
-  if (/\bdrop\s+(schema|database)\b/i.test(s)) return { destructive: true, op: "DROP" };
-  const del = s.match(/\bdelete\s+from\s+([a-zA-Z0-9_."]+)([\s\S]*)$/i);
-  if (del) {
-    const where = del[2].match(/\bwhere\b[\s\S]*$/i);
-    const impact = `select count(*) as rows from ${del[1]} ${where ? where[0].replace(/;\s*$/, "") : ""}`.trim();
-    return { destructive: true, op: "DELETE", impactQuery: impact };
-  }
-  if (/\balter\s+table\b[\s\S]*\bdrop\b/i.test(s)) return { destructive: true, op: "ALTER ... DROP" };
-  if (/\brevoke\b/i.test(s)) return { destructive: true, op: "REVOKE" };
-  return { destructive: false };
-}
+import {
+  classifySqlSafety,
+  consumeSqlConfirmationToken,
+  issueSqlConfirmationToken,
+} from "../security/sqlSafety.js";
 
 /**
  * Supabase connector — lets the agent provision and operate a real Postgres
@@ -248,6 +234,10 @@ export const supabaseConnector: ConnectorDefinition = {
           organization_id: { type: "string", description: "Org to create under. Defaults to the connected account's org if it has exactly one." },
           region: { type: "string", description: `Region slug (default ${DEFAULT_REGION}).` },
           plan: { type: "string", enum: ["free", "pro"], description: "Defaults to free." },
+          resume_project_ref: {
+            type: "string",
+            description: "Recovery only: the exact Supabase ref shown after an earlier ambiguous create. Links that existing project instead of creating another.",
+          },
         },
       },
       invoke: async (ctx, args) => {
@@ -279,6 +269,36 @@ export const supabaseConnector: ConnectorDefinition = {
           );
         }
 
+        const pending = await getSupabaseProvisioningIntent(ctx.projectId, userId);
+        if (pending) {
+          const resumeRef =
+            typeof args.resume_project_ref === "string" && args.resume_project_ref.trim()
+              ? assertValidRef(args.resume_project_ref.trim())
+              : null;
+          if (!resumeRef) {
+            throw new Error(
+              "A Supabase create is already pending for this project. Automatic retry is disabled because " +
+                "the provider create API has no idempotency key. Inspect the Supabase dashboard, then call " +
+                "provision_database with resume_project_ref set to the exact created project ref.",
+            );
+          }
+          const dbPass = await ctx.secret("SUPABASE_DB_PASSWORD");
+          const remote = (await supabaseFetch(userId, `/projects/${resumeRef}`)) as ProjectStatus;
+          await setSupabaseProject(ctx.projectId, userId, {
+            ref: resumeRef,
+            name: remote.name ?? pending.name,
+            orgId: remote.organization_id ?? pending.orgId,
+          });
+          return await pollAndFinish(
+            ctx,
+            userId,
+            resumeRef,
+            remote.name ?? pending.name,
+            dbPass,
+            remote.status ?? "INITIAL_PROVISIONING",
+          );
+        }
+
         // Resolve the org.
         let organizationId = typeof args.organization_id === "string" ? args.organization_id : "";
         if (!organizationId) {
@@ -297,6 +317,31 @@ export const supabaseConnector: ConnectorDefinition = {
         const region = (typeof args.region === "string" && args.region.trim()) || DEFAULT_REGION;
         const plan = args.plan === "pro" ? "pro" : "free";
         const dbPass = genDbPass();
+        const provisioningToken = randomUUID();
+        const acquired = await beginSupabaseProvisioning(ctx.projectId, userId, {
+          token: provisioningToken,
+          startedAt: new Date().toISOString(),
+          name,
+          orgId: organizationId,
+        });
+        if (!acquired) {
+          throw new Error("Supabase provisioning was started by another request; retry after it completes.");
+        }
+
+        // Persist the one-time database password before the remote side effect.
+        // If this local write fails, no provider resource has been created and
+        // the intent can safely be released.
+        try {
+          await upsertSecret({
+            project_id: ctx.projectId,
+            name: "SUPABASE_DB_PASSWORD",
+            value: dbPass,
+            description: "Supabase Postgres password (write-only on Supabase's side)",
+          });
+        } catch (err) {
+          await clearSupabaseProvisioning(ctx.projectId, userId, provisioningToken).catch(() => {});
+          throw err;
+        }
 
         // Create. Response carries the project ref we use for everything after.
         const created = (await supabaseFetch(userId, "/projects", {
@@ -311,7 +356,6 @@ export const supabaseConnector: ConnectorDefinition = {
         // Persist the db password + link the project IMMEDIATELY so nothing is
         // lost (and a re-call RESUMES) if polling times out — db_pass is not
         // retrievable from Supabase later.
-        await upsertSecret({ project_id: ctx.projectId, name: "SUPABASE_DB_PASSWORD", value: dbPass, description: "Supabase Postgres password (write-only on Supabase's side)" });
         await setSupabaseProject(ctx.projectId, userId, { ref, name, orgId: organizationId });
 
         return await pollAndFinish(ctx, userId, ref, name, dbPass, created.status ?? "INITIAL_PROVISIONING");
@@ -351,15 +395,15 @@ export const supabaseConnector: ConnectorDefinition = {
       name: "run_sql",
       risk: "write",
       description:
-        "Run a SQL statement against the linked Supabase project's database (create tables, apply a migration, query). Uses the Management API query endpoint. DESTRUCTIVE statements (DROP, TRUNCATE, DELETE, ALTER ... DROP, REVOKE) are NOT executed unless you pass confirm:true — the first call returns an impact preview (e.g. row count affected) so you can confirm with the user in plain language what will be lost, then re-run with confirm:true.",
+        "Run one SQL statement against the linked Supabase project's database. Read-only and narrowly additive DDL execute directly. DML, destructive, procedural, multi-statement, or unknown SQL is NOT executed on the first call: show the user the returned warning, obtain explicit approval, then repeat the exact query with its short-lived confirmation_token.",
       args_schema: {
         type: "object",
         properties: {
           query: { type: "string", description: "The SQL to execute." },
           project_ref: { type: "string", description: "Defaults to the project's linked ref." },
-          confirm: {
-            type: "boolean",
-            description: "Required (true) to actually run a destructive statement. Only set this AFTER the user has approved the impact in plain language.",
+          confirmation_token: {
+            type: "string",
+            description: "The short-lived token returned by a blocked first call. Pass it only after the user explicitly approves the exact query.",
           },
         },
         required: ["query"],
@@ -370,43 +414,33 @@ export const supabaseConnector: ConnectorDefinition = {
           throw new Error("run_sql requires a non-empty 'query'.");
         }
         const ref = await resolveRef(ctx, args);
-        const cls = classifyDestructiveSql(args.query);
-        const confirmed = args.confirm === true;
-        if (cls.destructive && !confirmed) {
-          // P5.2: don't execute — return an impact preview + a clear instruction
-          // to confirm in plain language first. Never mutate the user's SQL.
-          let impact: unknown = null;
-          if (cls.impactQuery) {
-            try {
-              impact = await supabaseFetch(userId, `/projects/${ref}/database/query`, {
-                method: "POST",
-                body: { query: cls.impactQuery },
-              });
-            } catch {
-              /* impact preview is best-effort */
-            }
-          }
+        const cls = classifySqlSafety(args.query);
+        const confirmationScope = `agent:${userId}:${ctx.projectId}:${ref}`;
+        if (
+          cls.requiresConfirmation &&
+          !consumeSqlConfirmationToken(args.confirmation_token, confirmationScope, args.query)
+        ) {
           return {
             blocked: true,
-            destructive: true,
-            operation: cls.op,
-            impact_preview: impact,
+            requires_confirmation: true,
+            operation: cls.operation,
+            confirmation_token: issueSqlConfirmationToken(confirmationScope, args.query),
             message:
-              `This statement is destructive (${cls.op}) and was NOT executed. Tell the user in plain language ` +
-              `what will be permanently lost (use the impact_preview row count above if present), get their ` +
-              `approval, then re-run run_sql with the same query and confirm:true.`,
+              `This ${cls.operation} statement may mutate or destroy database state and was NOT executed. ` +
+              `Show the exact query and risk to the user, get explicit approval, then re-run run_sql with ` +
+              `the exact same query and the returned confirmation_token.`,
           };
         }
         const result = await supabaseFetch(userId, `/projects/${ref}/database/query`, {
           method: "POST",
           body: { query: args.query },
         });
-        if (cls.destructive) {
+        if (cls.requiresConfirmation) {
           void audit({
             project_id: ctx.projectId,
             user_id: ctx.userId,
             kind: "db_lifecycle",
-            target: `run_sql:${cls.op}`,
+            target: `run_sql:${cls.operation}`,
             metadata: { ref },
           });
         }

@@ -13,7 +13,7 @@ export default function ContactForm() {
   const [company, setCompany] = useState("");
   const [topic, setTopic] = useState<Topic>("Sales");
   const [message, setMessage] = useState("");
-  const [sent, setSent] = useState(false);
+  const [draftOpened, setDraftOpened] = useState(false);
 
   function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -33,17 +33,7 @@ export default function ContactForm() {
     )}&body=${encodeURIComponent(bodyLines.join("\n"))}`;
 
     window.location.href = mailto;
-    setSent(true);
-  }
-
-  if (sent) {
-    return (
-      <div className="form-ok" role="status">
-        Thanks — your email client should open with your message ready to send. If
-        it didn&rsquo;t, email us at{" "}
-        <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>.
-      </div>
-    );
+    setDraftOpened(true);
   }
 
   return (
@@ -128,8 +118,14 @@ export default function ContactForm() {
       </div>
 
       <button type="submit" className="btn-primary">
-        Send message
+        Open email draft
       </button>
+      {draftOpened && (
+        <div className="form-ok" role="status">
+          Your email app should open with a draft. Review it and press Send to
+          contact us. Your completed form stays here in case the app did not open.
+        </div>
+      )}
       <p className="form-note">
         This opens your email client with the message pre-filled — no form data
         is stored on our servers. Prefer to write directly? Email{" "}

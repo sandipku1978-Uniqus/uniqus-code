@@ -313,4 +313,41 @@ export async function getVercelAuth(
   return { token, teamId: link?.team_id ?? null };
 }
 
+/**
+ * Delete a Vercel project in the exact account/team scope that created it.
+ * The immutable Vercel project id avoids deleting an unrelated same-name app.
+ */
+export async function deleteVercelProject(
+  user: UserRecord,
+  project: { id: string; teamId: string | null },
+): Promise<void> {
+  const auth = await getVercelAuth(user);
+  if (!auth) {
+    throw new Error("Reconnect Vercel before deleting this published project.");
+  }
+  if (auth.teamId !== project.teamId) {
+    throw new Error(
+      "Reconnect the Vercel account or team that owns this published project before deleting it.",
+    );
+  }
+  const query = project.teamId
+    ? `?teamId=${encodeURIComponent(project.teamId)}`
+    : "";
+  const response = await fetch(
+    `https://api.vercel.com/v9/projects/${encodeURIComponent(project.id)}${query}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${auth.token}` },
+      signal: AbortSignal.timeout(15_000),
+    },
+  );
+  // A missing project is already offline, so local deletion can safely finish.
+  if (response.status === 404) return;
+  if (!response.ok) {
+    throw new Error(
+      `Vercel could not delete the published project (HTTP ${response.status}). Try again before deleting Gate 15 data.`,
+    );
+  }
+}
+
 export { getVercelToken };

@@ -182,6 +182,31 @@ export async function listProjectMembers(projectId: string): Promise<ProjectMemb
   return out;
 }
 
+/** Direct project membership role, including a personal project's implicit owner. */
+export async function getDirectProjectMemberRole(
+  projectId: string,
+  userId: string,
+): Promise<Role | null> {
+  const po = await projectOwnerOrg(projectId);
+  if (!po) return null;
+  if (!po.org_id && po.owner_id === userId) return "owner";
+  const { data, error } = await db()
+    .from("project_members")
+    .select("role")
+    .eq("project_id", projectId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) {
+    if (isMissingTable(error)) return null;
+    throw new Error(`getDirectProjectMemberRole failed: ${error.message}`);
+  }
+  return (data as { role?: Role } | null)?.role ?? null;
+}
+
+export async function countDirectProjectOwners(projectId: string): Promise<number> {
+  return (await listProjectMembers(projectId)).filter((member) => member.role === "owner").length;
+}
+
 export async function findUserByEmail(email: string): Promise<{ id: string } | null> {
   const { data } = await db().from("users").select("id").ilike("email", email.trim()).maybeSingle();
   return (data as { id: string } | null) ?? null;
@@ -243,16 +268,21 @@ export async function createOrganization(name: string, ownerId: string): Promise
 }
 
 export async function listOrganizationsForUser(userId: string): Promise<Organization[]> {
-  const om = await db().from("org_members").select("org_id").eq("user_id", userId);
+  const om = await db().from("org_members").select("org_id, role").eq("user_id", userId);
   if (om.error) {
     if (isMissingTable(om.error)) return [];
     throw new Error(`listOrganizationsForUser failed: ${om.error.message}`);
   }
-  const ids = (om.data ?? []).map((r) => (r as { org_id: string }).org_id);
+  const memberships = (om.data ?? []) as Array<{ org_id: string; role: Role }>;
+  const ids = memberships.map((r) => r.org_id);
   if (!ids.length) return [];
   const { data, error } = await db().from("organizations").select("*").in("id", ids).order("created_at");
   if (error) throw new Error(`listOrganizationsForUser failed: ${error.message}`);
-  return (data ?? []) as Organization[];
+  const roles = new Map(memberships.map((membership) => [membership.org_id, membership.role]));
+  return ((data ?? []) as Organization[]).map((org) => ({
+    ...org,
+    effective_role: roles.get(org.id),
+  }));
 }
 
 export async function getOrgRole(orgId: string, userId: string): Promise<Role | null> {

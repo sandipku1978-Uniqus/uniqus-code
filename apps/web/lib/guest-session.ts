@@ -18,6 +18,8 @@
 import { unsealData } from "iron-session";
 
 export const GUEST_COOKIE_NAME = "gate15-guest";
+/** Temporary compatibility name accepted by the orchestrator during the rebrand migration. */
+export const LEGACY_GUEST_COOKIE_NAME = "uniqus-guest";
 // Must match GUEST_COOKIE_TTL_SECONDS in services/orchestrator/src/auth/guest.ts.
 const GUEST_COOKIE_TTL_SECONDS = 365 * 24 * 60 * 60;
 
@@ -77,14 +79,20 @@ export function guestCookieSetOptions(req: Request) {
  * was set (guestCookieSetOptions) or the browser keeps the stale cookie. Used
  * by the signout + convert route handlers.
  */
-export function guestCookieClearOptions(): {
+export function guestCookieClearOptions(req?: Request): {
   maxAge: number;
   path: string;
   domain: string | undefined;
+  httpOnly: boolean;
+  sameSite: "lax";
+  secure: boolean;
 } {
   return {
     maxAge: 0,
     path: "/",
     domain: process.env.WORKOS_COOKIE_DOMAIN || undefined,
+    httpOnly: true,
+    sameSite: "lax",
+    secure: req ? new URL(req.url).protocol === "https:" : process.env.NODE_ENV === "production",
   };
 }

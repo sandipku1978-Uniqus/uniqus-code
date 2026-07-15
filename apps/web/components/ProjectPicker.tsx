@@ -12,6 +12,7 @@ import {
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { DeploymentState, ProjectSummary, Organization } from "@gate15/api-types";
+import { roleAtLeast } from "@gate15/api-types";
 import BrandLockup from "./BrandLockup";
 import GuestBanner from "./GuestBanner";
 import DatabasesView from "./DatabasesView";
@@ -34,6 +35,7 @@ import { useStore } from "@/lib/store";
 import { toast } from "@/lib/toast";
 import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
 import { PENDING_BRIEF_KEY, draftKeyFor } from "./LandingPrompt";
+import { createFirstTurnIntent } from "@/lib/first-turn-intent";
 import {
   fetchProjects,
   fetchUsageStatsApi,
@@ -78,40 +80,51 @@ const EXAMPLE_PROMPTS = [
 
 /** Starter templates shown in the empty state. Each seeds the describe box. */
 const STARTERS: ReadonlyArray<{
-  icon: string;
+  icon: "chart" | "bot" | "approval" | "register";
   title: string;
   blurb: string;
   prompt: string;
 }> = [
   {
-    icon: "📊",
+    icon: "chart",
     title: "Internal dashboard",
     blurb: "Charts + a filterable data table for your team's metrics.",
     prompt:
       "Build an internal dashboard that shows our key metrics with charts and a filterable, sortable data table.",
   },
   {
-    icon: "🤖",
+    icon: "bot",
     title: "Slack bot",
     blurb: "Responds to commands and posts daily summaries.",
     prompt:
       "Build a Slack bot that responds to slash commands and posts a daily summary message to a channel.",
   },
   {
-    icon: "✅",
+    icon: "approval",
     title: "Approval workflow",
     blurb: "Submit, route, and approve with a clear status trail.",
     prompt:
       "Build an expense approval workflow where staff submit expenses and managers approve or reject them, with policy checks over a configurable limit and an immutable activity log of who did what and when.",
   },
   {
-    icon: "📋",
+    icon: "register",
     title: "Control register",
     blurb: "Controls, owners, test status, and audit evidence.",
     prompt:
       "Build a SOX control register: a table of internal controls with owner, frequency, last test date, pass/fail/overdue status, and an evidence note, plus filtering and a summary of how many passed, failed, or are overdue.",
   },
 ];
+
+function StarterIcon({ kind }: { kind: (typeof STARTERS)[number]["icon"] }) {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+      {kind === "chart" && <><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" /></>}
+      {kind === "bot" && <><rect x="4" y="7" width="16" height="12" rx="3" /><path d="M9 12h.01M15 12h.01M9 16h6M12 7V4" /></>}
+      {kind === "approval" && <><circle cx="12" cy="12" r="9" /><path d="m8 12 2.5 2.5L16 9" /></>}
+      {kind === "register" && <><rect x="5" y="3" width="14" height="18" rx="2" /><path d="M9 8h6M9 12h6M9 16h4" /></>}
+    </svg>
+  );
+}
 
 /**
  * Close a popover when the user clicks anywhere outside `ref.current`.
@@ -202,6 +215,12 @@ function deployStatus(state: DeploymentState | null | undefined): {
         label: "Live",
         title: "Latest deploy is live.",
       };
+    case "CREATING":
+      return {
+        dotClass: "building",
+        label: "Starting",
+        title: "A deploy is being created.",
+      };
     case "BUILDING":
     case "QUEUED":
       return {
@@ -285,6 +304,41 @@ const MODE_TABS: ReadonlyArray<readonly [Mode, string]> = [
   ["zip", "Upload .zip"],
   ["github", "Clone GitHub"],
 ];
+
+const DASHBOARD_VIEWS = [
+  "home",
+  "templates",
+  "all",
+  "recent",
+  "databases",
+  "design-systems",
+  "skills",
+  "knowledge",
+  "members",
+  "usage",
+  "settings",
+] as const;
+type DashboardView = (typeof DASHBOARD_VIEWS)[number];
+
+function dashboardView(value: string | null): DashboardView {
+  return DASHBOARD_VIEWS.includes(value as DashboardView)
+    ? (value as DashboardView)
+    : "home";
+}
+
+const DASHBOARD_VIEW_TITLES: Record<DashboardView, string> = {
+  home: "Projects",
+  templates: "Templates",
+  all: "All projects",
+  recent: "Recent projects",
+  databases: "Databases",
+  "design-systems": "Design systems",
+  skills: "Skills",
+  knowledge: "Knowledge",
+  members: "Organization members",
+  usage: "Organization usage",
+  settings: "Organization settings",
+};
 
 export default function ProjectPicker({
   userEmail,
@@ -371,19 +425,25 @@ export default function ProjectPicker({
   // more verbose timestamps.
   // "members" | "usage" | "settings" are the org-context views, only reachable
   // (and only shown in the nav) while an organization workspace is active.
-  type View =
-    | "home"
-    | "templates"
-    | "all"
-    | "recent"
-    | "databases"
-    | "design-systems"
-    | "skills"
-    | "knowledge"
-    | "members"
-    | "usage"
-    | "settings";
-  const [view, setView] = useState<View>("home");
+  const requestedView = dashboardView(searchParams?.get("view") ?? null);
+  const [view, setViewState] = useState<DashboardView>(requestedView);
+
+  function setView(next: DashboardView, replace = false): void {
+    setViewState(next);
+    const params = new URLSearchParams(searchParams?.toString() ?? "");
+    if (next === "home") params.delete("view");
+    else params.set("view", next);
+    const query = params.toString();
+    const href = query ? `/projects?${query}` : "/projects";
+    if (replace) router.replace(href, { scroll: false });
+    else router.push(href, { scroll: false });
+  }
+
+  // Keep component state synchronized with browser Back/Forward and deep links.
+  useEffect(() => setViewState(requestedView), [requestedView]);
+  useEffect(() => {
+    document.title = `${DASHBOARD_VIEW_TITLES[view]} — Gate 15`;
+  }, [view]);
 
   // Active dashboard workspace (P3.1): null = Personal, else an org id. Persisted
   // account-wide in the store; the project list + new-project target follow it.
@@ -394,12 +454,14 @@ export default function ProjectPicker({
   const [orgName, setOrgName] = useState("");
   const [creatingOrg, setCreatingOrg] = useState(false);
   const activeOrg = activeWorkspaceId ? orgs.find((o) => o.id === activeWorkspaceId) ?? null : null;
-  const ORG_VIEWS = new Set<View>(["members", "usage", "settings"]);
+  const ORG_VIEWS = new Set<DashboardView>(["members", "usage", "settings"]);
 
   const [editing, setEditing] = useState<{
     project: ProjectSummary;
     field: "rename" | "icon" | "delete";
   } | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
+  useEffect(() => setEditError(null), [editing?.project.id, editing?.field]);
 
   // Import form state
   const [repoUrl, setRepoUrl] = useState("");
@@ -427,21 +489,28 @@ export default function ProjectPicker({
 
   // GitHub OAuth state
   const [github, setGithub] = useState<GithubStatus | null>(null);
+  const [githubStatusError, setGithubStatusError] = useState<string | null>(null);
+  const [githubStatusAttempt, setGithubStatusAttempt] = useState(0);
   const [githubAuthMode, setGithubAuthMode] = useState<GithubAuthMode>("oauth");
   const [repos, setRepos] = useState<GithubRepoSummary[] | null>(null);
   const [reposError, setReposError] = useState<string | null>(null);
   const [selectedRepo, setSelectedRepo] = useState<string>(""); // full_name
 
-  const loadProjects = useCallback(() => {
+  const loadProjects = useCallback((signal?: AbortSignal) => {
     setProjectsError(null);
     setProjects(null);
     // Scope to the active workspace: "personal" lists un-orged projects; an org
     // id lists that org's projects (membership-checked server-side). Guests have
     // no org concept, so they always read Personal regardless of any stale id.
     const ws = isGuest ? "personal" : activeWorkspaceId ?? "personal";
-    fetchProjects(ws)
-      .then((r) => setProjects(r.projects))
-      .catch((e) => setProjectsError(e instanceof Error ? e.message : String(e)));
+    fetchProjects(ws, signal)
+      .then((r) => {
+        if (!signal?.aborted) setProjects(r.projects);
+      })
+      .catch((e) => {
+        if (signal?.aborted) return;
+        setProjectsError(e instanceof Error ? e.message : String(e));
+      });
   }, [activeWorkspaceId, isGuest]);
 
   // A guest should never carry an org workspace (e.g. a stale id left in
@@ -451,12 +520,14 @@ export default function ProjectPicker({
   }, [isGuest, activeWorkspaceId, setActiveWorkspace]);
 
   useEffect(() => {
-    loadProjects();
+    const controller = new AbortController();
+    loadProjects(controller.signal);
     // Usage rollup for the dashboard widgets. Best-effort — a failure (e.g.
     // the usage table not yet migrated) just leaves the widgets at zero.
     fetchUsageStatsApi()
       .then((r) => setUsage(r.stats))
       .catch(() => {});
+    return () => controller.abort();
   }, [loadProjects]);
 
   // Load the user's organizations for the workspace switcher, and reconcile a
@@ -488,7 +559,7 @@ export default function ProjectPicker({
     if (id === activeWorkspaceId) return;
     setActiveWorkspace(id);
     setMenuFor(null);
-    if (id === null && ORG_VIEWS.has(view)) setView("home");
+    if (id === null && ORG_VIEWS.has(view)) setView("home", true);
   }
 
   async function createOrg() {
@@ -513,7 +584,7 @@ export default function ProjectPicker({
   function handleOrgRemoved() {
     // After leaving/deleting the active org: drop back to Personal and refresh.
     setActiveWorkspace(null);
-    setView("home");
+    setView("home", true);
     void loadOrgs();
   }
 
@@ -534,7 +605,7 @@ export default function ProjectPicker({
     } catch {
       /* ignore */
     }
-    setView("home");
+    setView("home", true);
     setMode("describe");
     setDescribeText(pending);
   }, []);
@@ -548,14 +619,18 @@ export default function ProjectPicker({
     // Abort the previous fetch on re-fire so a slow earlier response can't
     // stomp the newer `connected` state when githubFlag flips rapidly.
     const ctrl = new AbortController();
+    setGithub(null);
+    setGithubStatusError(null);
     fetchGithubStatus(ctrl.signal)
       .then((s) => setGithub(s))
       .catch((err) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
-        setGithub({ connected: false, login: null, connected_at: null });
+        setGithubStatusError(
+          err instanceof Error ? err.message : "Couldn't check GitHub connection",
+        );
       });
     return () => ctrl.abort();
-  }, [githubFlag, isGuest]);
+  }, [githubFlag, githubStatusAttempt, isGuest]);
 
   // When the user is connected, default to OAuth mode and fetch their
   // repos so the dropdown is ready before they switch to "Clone GitHub".
@@ -639,9 +714,13 @@ export default function ProjectPicker({
         }
         router.push(`/projects/${project.id}?${planQ}`);
       } else {
-        router.push(
-          `/projects/${project.id}?brief=${encodeURIComponent(first_message)}&${planQ}`,
-        );
+        try {
+          const intent = createFirstTurnIntent(project.id, first_message);
+          router.push(`/projects/${project.id}?intent=${encodeURIComponent(intent)}&${planQ}`);
+        } catch {
+          try { localStorage.setItem(draftKeyFor(project.id), first_message); } catch {}
+          router.push(`/projects/${project.id}?${planQ}`);
+        }
       }
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -667,8 +746,8 @@ export default function ProjectPicker({
 
     // Describe mode: send the full paragraph to the orchestrator, which
     // calls Haiku to produce a sane name + a refined first message, then
-    // creates the project. Forward the refined first_message through ?brief=
-    // so the workspace fires it as the agent's opening turn.
+    // creates the project. Forward an opaque first-turn intent so prompt text
+    // never enters the URL while the workspace prepares the opening turn.
     if (mode === "describe") {
       const trimmed = describeText.trim();
       if (!trimmed) return;
@@ -796,6 +875,7 @@ export default function ProjectPicker({
   }
 
   async function handleRename(project: ProjectSummary, newName: string): Promise<void> {
+    setEditError(null);
     try {
       const r = await updateProjectApi(project.id, { name: newName });
       setProjects((current) =>
@@ -803,11 +883,13 @@ export default function ProjectPicker({
       );
       setEditing(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const detail = err instanceof Error ? err.message : String(err);
+      setEditError(`Project wasn’t renamed. ${detail}`);
     }
   }
 
   async function handleSetIcon(project: ProjectSummary, icon: string | null): Promise<void> {
+    setEditError(null);
     try {
       const r = await updateProjectApi(project.id, { icon });
       setProjects((current) =>
@@ -815,17 +897,20 @@ export default function ProjectPicker({
       );
       setEditing(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const detail = err instanceof Error ? err.message : String(err);
+      setEditError(`Project icon wasn’t changed. ${detail}`);
     }
   }
 
   async function handleDelete(project: ProjectSummary): Promise<void> {
+    setEditError(null);
     try {
       await deleteProjectApi(project.id);
       setProjects((current) => (current ?? []).filter((p) => p.id !== project.id));
       setEditing(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const detail = err instanceof Error ? err.message : String(err);
+      setEditError(`Project wasn’t deleted. It is still available. ${detail}`);
       // Rethrow so the DeleteDialog clears its pending/spinner state and
       // re-enables the button for a retry (on success the dialog unmounts).
       throw err;
@@ -866,9 +951,11 @@ export default function ProjectPicker({
           <span style={{ color: "var(--text-muted)", fontSize: 12 }}>
             {displayLabel}
           </span>
-          <a href={signOutUrl} className="btn-ghost" style={{ fontSize: 12 }}>
-            Sign out
-          </a>
+          <form action={signOutUrl} method="post">
+            <button type="submit" className="btn-ghost" style={{ fontSize: 12 }}>
+              Sign out
+            </button>
+          </form>
         </div>
       </nav>
 
@@ -910,8 +997,40 @@ export default function ProjectPicker({
 
       <div className="dash-shell">
         <aside className="dash-side">
+          <div className="dash-mobile-nav">
+            <label htmlFor="dashboard-section">Dashboard section</label>
+            <select
+              id="dashboard-section"
+              value={view}
+              onChange={(event) => setView(event.target.value as DashboardView)}
+            >
+              <optgroup label="Projects">
+                <option value="home">Home</option>
+                <option value="templates">Templates</option>
+                <option value="all">All projects</option>
+                <option value="recent">Recent</option>
+              </optgroup>
+              <optgroup label="Resources">
+                <option value="databases">Databases</option>
+                <option value="design-systems">Design systems</option>
+                <option value="skills">Skills</option>
+                <option value="knowledge">Knowledge</option>
+              </optgroup>
+              {activeOrg && (
+                <optgroup label={activeOrg.name}>
+                  <option value="members">Organization members</option>
+                  <option value="usage">Organization usage</option>
+                  <option value="settings">Organization settings</option>
+                </optgroup>
+              )}
+            </select>
+            <div>
+              <Link href="/docs">Docs</Link>
+              <Link href="/settings">Account settings</Link>
+            </div>
+          </div>
           {!isGuest && (
-            <div className="group" style={{ paddingBottom: 4 }}>
+            <div className="group workspace-switcher-group" style={{ paddingBottom: 4 }}>
               <WorkspaceSwitcher
                 orgs={orgs}
                 activeWorkspaceId={activeWorkspaceId}
@@ -1141,7 +1260,7 @@ export default function ProjectPicker({
                     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
                   </svg>
                 </span>
-                Settings
+                Organization settings
               </button>
             </div>
           )}
@@ -1180,7 +1299,7 @@ export default function ProjectPicker({
                   <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
                 </svg>
               </span>
-              Settings
+              Account settings
             </Link>
           </div>
 
@@ -1199,7 +1318,7 @@ export default function ProjectPicker({
           </div>
         </aside>
 
-        <main className="dash-main">
+        <main id="main-content" tabIndex={-1} className="dash-main">
           {view === "templates" ? (
             <TemplatesView onUse={handleUseTemplate} />
           ) : view === "databases" ? (
@@ -1211,7 +1330,10 @@ export default function ProjectPicker({
           ) : view === "knowledge" ? (
             <KnowledgeView isGuest={isGuest} />
           ) : view === "members" && activeWorkspaceId ? (
-            <OrgMembersView orgId={activeWorkspaceId} />
+            <OrgMembersView
+              orgId={activeWorkspaceId}
+              effectiveRole={activeOrg?.effective_role ?? null}
+            />
           ) : view === "usage" && activeWorkspaceId ? (
             <OrgUsageView orgId={activeWorkspaceId} />
           ) : view === "settings" && activeWorkspaceId ? (
@@ -1440,7 +1562,22 @@ export default function ProjectPicker({
 
             {!isGuest && mode === "github" && (
               <div className="newproj-extra" style={{ display: "grid", gap: 10, marginTop: 10 }}>
-                {github === null ? (
+                {githubStatusError ? (
+                  <div className="async-error" role="alert">
+                    <p>
+                      GitHub connection status is unavailable. An existing
+                      connection may still be active.
+                    </p>
+                    <code>{githubStatusError}</code>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => setGithubStatusAttempt((attempt) => attempt + 1)}
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : github === null ? (
                   <Skeleton height={36} radius={6} />
                 ) : github.connected ? (
                   <div
@@ -1759,7 +1896,7 @@ export default function ProjectPicker({
               <p style={{ margin: "0 0 14px", color: "var(--text-muted)", fontSize: 12 }}>
                 {projectsError}
               </p>
-              <button type="button" className="btn-secondary" onClick={loadProjects}>
+              <button type="button" className="btn-secondary" onClick={() => void loadProjects()}>
                 Retry
               </button>
             </div>
@@ -1778,7 +1915,7 @@ export default function ProjectPicker({
                     className="starter-card"
                     onClick={() => startFromExample(s.prompt)}
                   >
-                    <span className="ic" aria-hidden="true">{s.icon}</span>
+                    <span className="ic"><StarterIcon kind={s.icon} /></span>
                     <span className="t">{s.title}</span>
                     <span className="d">{s.blurb}</span>
                   </button>
@@ -1816,6 +1953,7 @@ export default function ProjectPicker({
           {editing && editing.field === "rename" && (
             <RenameDialog
               project={editing.project}
+              error={editError}
               onCancel={() => setEditing(null)}
               onSubmit={(name) => handleRename(editing.project, name)}
             />
@@ -1824,6 +1962,7 @@ export default function ProjectPicker({
           {editing && editing.field === "icon" && (
             <IconDialog
               project={editing.project}
+              error={editError}
               onCancel={() => setEditing(null)}
               onPick={(icon) => handleSetIcon(editing.project, icon)}
             />
@@ -1832,6 +1971,7 @@ export default function ProjectPicker({
           {editing && editing.field === "delete" && (
             <DeleteDialog
               project={editing.project}
+              error={editError}
               onCancel={() => setEditing(null)}
               onConfirm={() => handleDelete(editing.project)}
             />
@@ -2342,6 +2482,8 @@ function ProjectActionsMenu({
   orgs,
   currentOrgId,
   onMove,
+  canAdmin,
+  canOwn,
 }: {
   anchorRef: RefObject<HTMLButtonElement | null>;
   onEdit: (field: "rename" | "icon" | "delete") => void;
@@ -2351,11 +2493,13 @@ function ProjectActionsMenu({
   /** The project's current org (null = personal), so the menu omits it as a target. */
   currentOrgId?: string | null;
   onMove?: (orgId: string | null) => void;
+  canAdmin: boolean;
+  canOwn: boolean;
 }) {
   // Move targets = Personal + every org, minus where it already lives. Only
   // shown when the user actually has an org to move between.
   const moveTargets =
-    orgs && orgs.length > 0 && onMove
+    canOwn && orgs && orgs.length > 0 && onMove
       ? [{ id: null as string | null, name: "Personal" }, ...orgs.map((o) => ({ id: o.id as string | null, name: o.name }))].filter(
           (t) => t.id !== (currentOrgId ?? null),
         )
@@ -2410,26 +2554,30 @@ function ProjectActionsMenu({
       onClick={(e) => e.stopPropagation()}
       onKeyDown={onKeyDown}
     >
-      <button
-        type="button"
-        role="menuitem"
-        onClick={() => {
-          onClose();
-          onEdit("rename");
-        }}
-      >
-        Rename
-      </button>
-      <button
-        type="button"
-        role="menuitem"
-        onClick={() => {
-          onClose();
-          onEdit("icon");
-        }}
-      >
-        Change icon
-      </button>
+      {canAdmin && (
+        <>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onClose();
+              onEdit("rename");
+            }}
+          >
+            Rename
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onClose();
+              onEdit("icon");
+            }}
+          >
+            Change icon
+          </button>
+        </>
+      )}
       {moveTargets.length > 0 && onMove && (
         <>
           <div className="proj-menu-label" role="presentation">
@@ -2450,17 +2598,19 @@ function ProjectActionsMenu({
           ))}
         </>
       )}
-      <button
-        type="button"
-        role="menuitem"
-        className="danger"
-        onClick={() => {
-          onClose();
-          onEdit("delete");
-        }}
-      >
-        Delete
-      </button>
+      {canOwn && (
+        <button
+          type="button"
+          role="menuitem"
+          className="danger"
+          onClick={() => {
+            onClose();
+            onEdit("delete");
+          }}
+        >
+          Delete
+        </button>
+      )}
     </Popover>
   );
 }
@@ -2482,6 +2632,9 @@ function ProjectTile({
 }) {
   const tileRef = useRef<HTMLDivElement>(null);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
+  const canAdmin = roleAtLeast(project.effective_role, "admin");
+  const canOwn = roleAtLeast(project.effective_role, "owner");
+  const canOpen = roleAtLeast(project.effective_role, "editor");
   useOutsideClick(tileRef, menuOpen, () => onOpenMenu(false));
   return (
     <div className="proj proj-tile" ref={tileRef}>
@@ -2494,7 +2647,7 @@ function ProjectTile({
       </div>
       <div className="proj-tile-head">
         <ProjectAvatar project={project} />
-        <button
+        {(canAdmin || canOwn) && <button
           type="button"
           ref={menuBtnRef}
           className="proj-menu-btn"
@@ -2508,7 +2661,7 @@ function ProjectTile({
           }}
         >
           ⋯
-        </button>
+        </button>}
         {menuOpen && (
           <ProjectActionsMenu
             anchorRef={menuBtnRef}
@@ -2517,10 +2670,12 @@ function ProjectTile({
             orgs={orgs}
             currentOrgId={project.org_id ?? null}
             onMove={onMove ? (orgId) => onMove(project, orgId) : undefined}
+            canAdmin={canAdmin}
+            canOwn={canOwn}
           />
         )}
       </div>
-      <Link href={`/projects/${project.id}`} className="proj-tile-link">
+      {canOpen ? <Link href={`/projects/${project.id}`} className="proj-tile-link">
         <h3>{project.name}</h3>
         <p className="desc">{project.description ?? "No description"}</p>
         <div className="meta">
@@ -2550,7 +2705,10 @@ function ProjectTile({
             {relativeTime(project.updated_at)}
           </span>
         </div>
-      </Link>
+      </Link> : <div className="proj-tile-link" aria-disabled="true" title="Viewer access cannot open the build workspace. Ask for editor access.">
+        <h3>{project.name}</h3>
+        <p className="desc">Viewer access · ask for editor access to open the workspace.</p>
+      </div>}
     </div>
   );
 }
@@ -2631,10 +2789,12 @@ function RecentTimelineSkeleton() {
 
 function RenameDialog({
   project,
+  error,
   onCancel,
   onSubmit,
 }: {
   project: ProjectSummary;
+  error: string | null;
   onCancel: () => void;
   onSubmit: (name: string) => void;
 }) {
@@ -2675,13 +2835,25 @@ function RenameDialog({
           else onCancel();
         }}
       >
+        <label className="sr-only" htmlFor="rename-project-name">
+          Project name
+        </label>
         <input
+          id="rename-project-name"
+          name="projectName"
           ref={inputRef}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           style={{ ...fieldStyle, width: "100%" }}
           maxLength={80}
+          aria-invalid={!!error}
+          aria-errormessage={error ? "project-edit-error" : undefined}
         />
+        {error && (
+          <p id="project-edit-error" className="proj-dialog-error" role="alert">
+            {error}
+          </p>
+        )}
       </form>
     </Modal>
   );
@@ -2689,10 +2861,12 @@ function RenameDialog({
 
 function IconDialog({
   project,
+  error,
   onCancel,
   onPick,
 }: {
   project: ProjectSummary;
+  error: string | null;
   onCancel: () => void;
   onPick: (icon: string | null) => void;
 }) {
@@ -2731,16 +2905,23 @@ function IconDialog({
           </button>
         ))}
       </div>
+      {error && (
+        <p id="project-edit-error" className="proj-dialog-error" role="alert">
+          {error}
+        </p>
+      )}
     </Modal>
   );
 }
 
 function DeleteDialog({
   project,
+  error,
   onCancel,
   onConfirm,
 }: {
   project: ProjectSummary;
+  error: string | null;
   onCancel: () => void;
   onConfirm: () => void | Promise<void>;
 }) {
@@ -2805,14 +2986,29 @@ function DeleteDialog({
     >
       <p className="proj-dialog-warn">
         This permanently removes the project, its files, its chat history,
-        and any deployments tracked by Gate 15. The action cannot be undone.
+        and Gate 15&rsquo;s deployment records. If it has a linked Vercel project,
+        that public site and its Vercel deployments are removed first. If Gate 15
+        cannot safely remove the public site, this deletion stops without removing
+        your Gate 15 project. This cannot be undone.
       </p>
+      {error && (
+        <p id="project-edit-error" className="proj-dialog-error" role="alert">
+          {error}
+        </p>
+      )}
+      <label className="sr-only" htmlFor="delete-project-confirmation">
+        Type the project name to confirm deletion
+      </label>
       <input
+        id="delete-project-confirmation"
+        name="projectNameConfirmation"
         value={confirmName}
         onChange={(e) => setConfirmName(e.target.value)}
         placeholder={`Type "${project.name}" to confirm`}
         style={{ ...fieldStyle, width: "100%", marginTop: 12 }}
         autoFocus
+        aria-invalid={!!error}
+        aria-errormessage={error ? "project-edit-error" : undefined}
       />
     </Modal>
   );
@@ -3298,6 +3494,9 @@ function TimelineRow({
       : null;
   const repoUrl = project.github_repo_url ?? null;
   const repoName = project.github_repo_full_name ?? null;
+  const canAdmin = roleAtLeast(project.effective_role, "admin");
+  const canOwn = roleAtLeast(project.effective_role, "owner");
+  const canOpen = roleAtLeast(project.effective_role, "editor");
 
   return (
     <div
@@ -3306,12 +3505,14 @@ function TimelineRow({
       role="link"
       tabIndex={0}
       aria-label={`Open ${project.name}`}
+      aria-disabled={!canOpen}
       onClick={(e) => {
         if ((e.target as HTMLElement).closest('a,button,input,select,[role="menu"]')) return;
+        if (!canOpen) return;
         router.push(`/projects/${project.id}`);
       }}
       onKeyDown={(e) => {
-        if ((e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
+        if (canOpen && (e.key === "Enter" || e.key === " ") && e.target === e.currentTarget) {
           e.preventDefault();
           router.push(`/projects/${project.id}`);
         }
@@ -3327,13 +3528,19 @@ function TimelineRow({
       <div className="timeline-body">
         <div className="timeline-row-top">
           <ProjectAvatar project={project} />
-          <Link
-            href={`/projects/${project.id}`}
-            className="timeline-name"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {project.name}
-          </Link>
+          {canOpen ? (
+            <Link
+              href={`/projects/${project.id}`}
+              className="timeline-name"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {project.name}
+            </Link>
+          ) : (
+            <span className="timeline-name" title="Ask for editor access to open the workspace">
+              {project.name} · viewer
+            </span>
+          )}
           <span className="status" title={ds.title}>
             <span className={`d ${ds.dotClass}`} /> {ds.label}
           </span>
@@ -3361,14 +3568,20 @@ function TimelineRow({
         </div>
       </div>
       <div className="timeline-actions">
-        <Link
-          href={`/projects/${project.id}`}
-          onClick={(e) => e.stopPropagation()}
-          className="btn-secondary timeline-open"
-        >
-          Open
-        </Link>
-        <button
+        {canOpen ? (
+          <Link
+            href={`/projects/${project.id}`}
+            onClick={(e) => e.stopPropagation()}
+            className="btn-secondary timeline-open"
+          >
+            Open
+          </Link>
+        ) : (
+          <span className="timeline-open" title="Ask for editor access to open the workspace">
+            View only
+          </span>
+        )}
+        {(canAdmin || canOwn) && <button
           type="button"
           ref={menuBtnRef}
           className="proj-menu-btn"
@@ -3382,7 +3595,7 @@ function TimelineRow({
           }}
         >
           ⋯
-        </button>
+        </button>}
         {menuOpen && (
           <ProjectActionsMenu
             anchorRef={menuBtnRef}
@@ -3391,6 +3604,8 @@ function TimelineRow({
             orgs={orgs}
             currentOrgId={project.org_id ?? null}
             onMove={onMove ? (orgId) => onMove(project, orgId) : undefined}
+            canAdmin={canAdmin}
+            canOwn={canOwn}
           />
         )}
       </div>

@@ -43,7 +43,7 @@ export default function BlogPage() {
                   <span>{feature.date}</span>
                   <span>{feature.readingTime}</span>
                 </div>
-                <h3>{feature.title}</h3>
+                <h2>{feature.title}</h2>
                 <p>{feature.excerpt}</p>
               </div>
             </Link>
@@ -62,7 +62,7 @@ export default function BlogPage() {
                   <span>{post.date}</span>
                   <span>{post.readingTime}</span>
                 </div>
-                <h3>{post.title}</h3>
+                <h2>{post.title}</h2>
                 <p>{post.excerpt}</p>
               </div>
             </Link>

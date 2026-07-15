@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import Popover from "./Popover";
 import type { Placement } from "@/lib/useAnchoredPosition";
 
@@ -32,18 +32,35 @@ export default function Tooltip({
   const [open, setOpen] = useState(false);
   const id = useId();
   const wrapRef = useRef<HTMLSpanElement>(null);
+  const describedRef = useRef<HTMLElement | null>(null);
+
+  useEffect(
+    () => () => describedRef.current?.removeAttribute("aria-describedby"),
+    [],
+  );
   return (
     <span
       ref={wrapRef}
       className="tt-wrap"
       onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-      onFocusCapture={() => setOpen(true)}
-      onBlurCapture={() => setOpen(false)}
+      onMouseLeave={() => {
+        if (!wrapRef.current?.contains(document.activeElement)) setOpen(false);
+      }}
+      onFocusCapture={(event) => {
+        const target = event.target as HTMLElement;
+        describedRef.current?.removeAttribute("aria-describedby");
+        describedRef.current = target;
+        target.setAttribute("aria-describedby", id);
+        setOpen(true);
+      }}
+      onBlurCapture={(event) => {
+        if (wrapRef.current?.contains(event.relatedTarget as Node | null)) return;
+        describedRef.current?.removeAttribute("aria-describedby");
+        describedRef.current = null;
+        setOpen(false);
+      }}
     >
-      <span aria-describedby={open ? id : undefined} style={{ display: "contents" }}>
-        {children}
-      </span>
+      <span style={{ display: "contents" }}>{children}</span>
       <Popover
         open={open}
         anchorRef={wrapRef}

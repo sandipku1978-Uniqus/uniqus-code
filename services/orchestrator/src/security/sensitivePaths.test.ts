@@ -1,22 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { isSensitiveProjectPath } from "./sensitivePaths.js";
 
-describe("isSensitiveProjectPath", () => {
+describe("sensitive project path policy", () => {
   it.each([
     ".env",
-    "apps/web/.env.local",
-    ".env.example",
+    "config/.env.production",
     ".ssh/id_ed25519",
     ".aws/credentials",
-    "certs/server.pem",
-    ".pem",
-    ".key",
-    "keys/client.p12",
+    ".config/gcloud/application_default_credentials.json",
     ".npmrc",
-  ])("blocks %s", (value) => expect(isSensitiveProjectPath(value)).toBe(true));
+    "nested/.git-credentials",
+    "certs/client.pem",
+    "certs/client.p12",
+  ])("blocks %s across every project lifecycle", (candidate) => {
+    expect(isSensitiveProjectPath(candidate)).toBe(true);
+  });
 
-  it.each(["src/env.ts", "public/logo.svg", "README.md"])(
-    "allows %s",
-    (value) => expect(isSensitiveProjectPath(value)).toBe(false),
+  it.each(["src/index.ts", "README.md", "config/public.json"])(
+    "allows ordinary project path %s",
+    (candidate) => expect(isSensitiveProjectPath(candidate)).toBe(false),
   );
 });

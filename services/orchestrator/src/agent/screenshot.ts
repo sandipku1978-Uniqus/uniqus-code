@@ -89,6 +89,7 @@ export async function persistScreenshot(
 
 interface ShotOpts {
   sandboxRoot: string;
+  projectId?: string;
   serverId?: string;
   url?: string;
   pathSuffix?: string; // path appended to the server's base URL when serverId is used
@@ -195,6 +196,7 @@ async function resolveUrl(opts: ShotOpts): Promise<string | null> {
 export async function resolvePreviewUrl(opts: {
   url?: string;
   serverId?: string;
+  projectId?: string;
   pathSuffix?: string;
 }): Promise<string | null> {
   if (opts.url) {
@@ -211,7 +213,8 @@ export async function resolvePreviewUrl(opts: {
     return parsed.toString();
   }
   if (opts.serverId) {
-    const s = getServer(opts.serverId);
+    if (!opts.projectId) throw new Error("project id is required for a preview server");
+    const s = getServer(opts.projectId, opts.serverId);
     if (!s) {
       throw new Error(`No running server with id ${opts.serverId}`);
     }

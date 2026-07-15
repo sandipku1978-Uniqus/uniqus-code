@@ -156,6 +156,9 @@ export default function ChatSessionDropdown({ projectId }: { projectId: string }
         anchorRef={triggerRef}
         placement="bottom-end"
         onRequestClose={() => setOpen(false)}
+        role="dialog"
+        ariaLabel="Chat sessions"
+        focusOnOpen
         style={{
           minWidth: 260,
           background: "var(--bg-surface, #16161e)",
@@ -183,7 +186,7 @@ export default function ChatSessionDropdown({ projectId }: { projectId: string }
               textAlign: "left",
             }}
           >
-            + New chat
+            New chat
           </button>
           <div style={{ maxHeight: 320, overflow: "auto", marginTop: 4 }}>
             {sessions === null && (
@@ -205,7 +208,9 @@ export default function ChatSessionDropdown({ projectId }: { projectId: string }
                     gap: 4,
                     alignItems: "center",
                     padding: "4px 6px",
-                    background: isActive ? "rgba(99,102,241,0.10)" : "transparent",
+                    background: isActive
+                      ? "color-mix(in srgb, var(--brand-ember) 10%, transparent)"
+                      : "transparent",
                     borderRadius: 4,
                   }}
                 >
@@ -236,17 +241,25 @@ export default function ChatSessionDropdown({ projectId }: { projectId: string }
                     type="button"
                     onClick={() => onRename(s)}
                     title="Rename"
+                    aria-label={`Rename ${s.title ?? "untitled chat"}`}
                     className="icon-btn-xs"
                   >
-                    ✎
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                      <path d="M12 20h9" />
+                      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                    </svg>
                   </button>
                   <button
                     type="button"
                     onClick={() => onDelete(s)}
                     title="Delete"
+                    aria-label={`Delete ${s.title ?? "untitled chat"}`}
                     className="icon-btn-xs danger"
                   >
-                    ×
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                      <path d="M3 6h18" />
+                      <path d="M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5" />
+                    </svg>
                   </button>
                 </div>
               );

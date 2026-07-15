@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { skillInvocationName, type DesignTokens, type ProjectSkillsTrust } from "@gate15/api-types";
 
@@ -40,6 +41,23 @@ export function projectSkillsAreTrusted(value: unknown): boolean {
   return normalizeProjectSkillsTrust(value) === "trusted";
 }
 
+export function projectSkillsHash(content: string | Buffer): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+export function projectSkillsContentIsTrusted(
+  trust: unknown,
+  trustedSha256: unknown,
+  content: string | Buffer,
+): boolean {
+  return (
+    projectSkillsAreTrusted(trust) &&
+    typeof trustedSha256 === "string" &&
+    /^[a-f0-9]{64}$/.test(trustedSha256) &&
+    projectSkillsHash(content) === trustedSha256
+  );
+}
+
 export function isSkillsRelPath(relPath: string): boolean {
   const normalized = relPath.replaceAll("\\", "/").replace(/^\.\/+/, "");
   return normalized === SKILLS_PATH;
@@ -65,6 +83,42 @@ export async function readSkills(sandboxDir: string): Promise<string | null> {
     if (buf.length > MAX_SKILLS_BYTES) {
       return buf.subarray(0, MAX_SKILLS_BYTES).toString("utf-8");
     }
+    return buf.toString("utf-8");
+  } catch {
+    return null;
+  }
+}
+
+/** Hash the exact on-disk bytes that a human explicitly approved. */
+export async function hashSkillsFile(sandboxDir: string): Promise<string | null> {
+  const full = path.resolve(sandboxDir, SKILLS_PATH);
+  if (!full.startsWith(path.resolve(sandboxDir) + path.sep)) return null;
+  try {
+    const buf = await fs.readFile(full);
+    if (buf.length > MAX_SKILLS_BYTES) return null;
+    return projectSkillsHash(buf);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Return prompt guidance only when the current bytes exactly match the last
+ * human-approved digest. Shell commands, imports, restores, sync, and model
+ * file tools can mutate the regular file, but any such mutation invalidates it
+ * without relying on every write path to update a trust flag.
+ */
+export async function readTrustedSkills(
+  sandboxDir: string,
+  trust: unknown,
+  trustedSha256: unknown,
+): Promise<string | null> {
+  const full = path.resolve(sandboxDir, SKILLS_PATH);
+  if (!full.startsWith(path.resolve(sandboxDir) + path.sep)) return null;
+  try {
+    const buf = await fs.readFile(full);
+    if (buf.length === 0 || buf.length > MAX_SKILLS_BYTES) return null;
+    if (!projectSkillsContentIsTrusted(trust, trustedSha256, buf)) return null;
     return buf.toString("utf-8");
   } catch {
     return null;

@@ -13,7 +13,6 @@ interface ModeMeta {
   /** Full label inside the menu. */
   label: string;
   sub: string;
-  icon: string;
 }
 
 /** The four modes, ordered most-cautious → most-permissive (top to bottom). */
@@ -23,28 +22,24 @@ const MODES: ModeMeta[] = [
     short: "Plan",
     label: "Plan first",
     sub: "Investigate and propose a plan before changing anything.",
-    icon: "◔",
   },
   {
     value: "default",
     short: "Ask edits",
     label: "Ask before edits",
     sub: "Pause for approval before each edit, command, or risky op.",
-    icon: "◑",
   },
   {
     value: "acceptEdits",
     short: "Auto edits",
     label: "Auto-accept edits",
     sub: "Run edits & routine commands; still ask for dangerous/expensive ops.",
-    icon: "◕",
   },
   {
     value: "bypass",
     short: "Bypass",
     label: "Bypass permissions",
     sub: "Run everything without asking. No safety prompts.",
-    icon: "●",
   },
 ];
 
@@ -90,11 +85,11 @@ export default function PermissionModePicker() {
         aria-haspopup="true"
         aria-expanded={open ? "true" : "false"}
       >
-        <span aria-hidden style={{ fontSize: 11 }}>
-          {cur.icon}
-        </span>
+        <PermissionLevelIcon mode={cur.value} />
         {cur.short}
-        <span style={{ opacity: 0.55, fontSize: 9 }}>▾</span>
+        <svg aria-hidden="true" viewBox="0 0 12 12" width="10" height="10" fill="none" style={{ opacity: 0.55 }}>
+          <path d="m3 4.5 3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
       </button>
 
       <Popover
@@ -103,6 +98,8 @@ export default function PermissionModePicker() {
         placement="top-start"
         onRequestClose={() => setOpen(false)}
         className="model-picker-pop"
+        role="menu"
+        ariaLabel="Permission mode"
       >
         <div style={{ display: "grid", gap: 6, minWidth: 256 }}>
           <div className="label-micro">Permission mode</div>
@@ -110,14 +107,16 @@ export default function PermissionModePicker() {
             <button
               key={m.value}
               type="button"
+              role="menuitemradio"
+              aria-checked={m.value === permissionMode}
               onClick={() => pick(m.value)}
               className="model-picker-option"
               data-active={m.value === permissionMode ? "true" : "false"}
             >
               <span style={{ display: "grid", gap: 1, textAlign: "left" }}>
                 <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>
-                  <span aria-hidden style={{ marginRight: 6, opacity: 0.8 }}>
-                    {m.icon}
+                  <span aria-hidden style={{ display: "inline-flex", marginRight: 6, opacity: 0.8, verticalAlign: "middle" }}>
+                    <PermissionLevelIcon mode={m.value} />
                   </span>
                   {m.label}
                 </span>
@@ -126,7 +125,9 @@ export default function PermissionModePicker() {
                 </span>
               </span>
               {m.value === permissionMode && (
-                <span style={{ color: "var(--accent)", fontSize: 12 }}>✓</span>
+                <svg aria-hidden="true" viewBox="0 0 16 16" width="12" height="12" fill="none" style={{ color: "var(--accent-text)" }}>
+                  <path d="m3.5 8 3 3 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
               )}
             </button>
           ))}
@@ -138,5 +139,27 @@ export default function PermissionModePicker() {
         </div>
       </Popover>
     </div>
+  );
+}
+
+function PermissionLevelIcon({ mode }: { mode: PermissionMode }) {
+  const filled = mode === "plan" ? 1 : mode === "default" ? 2 : mode === "acceptEdits" ? 3 : 4;
+  return (
+    <svg aria-hidden="true" viewBox="0 0 16 12" width="14" height="12" fill="none">
+      {[0, 1, 2, 3].map((index) => (
+        <rect
+          key={index}
+          x={index * 4 + 0.5}
+          y={8 - index * 2}
+          width="3"
+          height={4 + index * 2}
+          rx="1"
+          fill={index < filled ? "currentColor" : "none"}
+          stroke="currentColor"
+          strokeWidth="1"
+          opacity={index < filled ? 0.9 : 0.35}
+        />
+      ))}
+    </svg>
   );
 }

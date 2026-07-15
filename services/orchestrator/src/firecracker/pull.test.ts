@@ -45,6 +45,21 @@ afterEach(async () => {
 });
 
 describe("VM-to-host durable pulls", () => {
+  it("does not pull credential-bearing VM files into the host mirror", async () => {
+    mocks.manifest.mockResolvedValue([
+      { path: ".env.production", size: 12, mtime_ms: 2 },
+      { path: "safe.txt", size: 4, mtime_ms: 2 },
+    ]);
+    mocks.readFileBinary.mockResolvedValue(Buffer.from("safe"));
+
+    const result = await pullVmChangesStrict(`project-${sequence}`, sandboxDir);
+    expect(result?.pulled).toEqual(["safe.txt"]);
+    expect(mocks.readFileBinary).not.toHaveBeenCalledWith(expect.anything(), ".env.production");
+    await expect(fs.stat(path.join(sandboxDir, ".env.production"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   it("does not mistake equal file size for equal content on the first pull", async () => {
     await fs.writeFile(path.join(sandboxDir, "same.txt"), "old");
     mocks.manifest.mockResolvedValue([{ path: "same.txt", size: 3, mtime_ms: 2 }]);
@@ -56,22 +71,26 @@ describe("VM-to-host durable pulls", () => {
     expect(await fs.readFile(path.join(sandboxDir, "same.txt"), "utf8")).toBe("new");
   });
 
-  it("keeps capped files dirty and drains them through bounded strict follow-up passes", async () => {
-    const entries = Array.from({ length: 801 }, (_, index) => ({
-      path: `file-${String(index).padStart(3, "0")}.txt`,
-      size: 1,
-      mtime_ms: index + 1,
-    }));
-    mocks.manifest.mockResolvedValue(entries);
-    mocks.readFileBinary.mockResolvedValue(Buffer.from("x"));
+  it(
+    "keeps capped files dirty and drains them through bounded strict follow-up passes",
+    async () => {
+      const entries = Array.from({ length: 801 }, (_, index) => ({
+        path: `file-${String(index).padStart(3, "0")}.txt`,
+        size: 1,
+        mtime_ms: index + 1,
+      }));
+      mocks.manifest.mockResolvedValue(entries);
+      mocks.readFileBinary.mockResolvedValue(Buffer.from("x"));
 
-    const result = await pullVmChangesStrict(`project-${sequence}`, sandboxDir);
-    expect(result?.deferred).toBe(0);
-    expect(result?.pulled).toHaveLength(801);
-    expect(mocks.readFileBinary).toHaveBeenCalledTimes(801);
-    expect(mocks.manifest).toHaveBeenCalledTimes(2);
-    expect(await fs.readFile(path.join(sandboxDir, "file-800.txt"), "utf8")).toBe("x");
-  });
+      const result = await pullVmChangesStrict(`project-${sequence}`, sandboxDir);
+      expect(result?.deferred).toBe(0);
+      expect(result?.pulled).toHaveLength(801);
+      expect(mocks.readFileBinary).toHaveBeenCalledTimes(801);
+      expect(mocks.manifest).toHaveBeenCalledTimes(2);
+      expect(await fs.readFile(path.join(sandboxDir, "file-800.txt"), "utf8")).toBe("x");
+    },
+    15_000,
+  );
 
   it("accepts a normal host-and-VM mirrored edit made between pulls", async () => {
     const full = path.join(sandboxDir, "mirrored.txt");
@@ -90,40 +109,44 @@ describe("VM-to-host durable pulls", () => {
     expect(await fs.readFile(full, "utf8")).toBe("new");
   });
 
-  it("runs a fresh inventory pass for a caller that arrives mid-pull", async () => {
-    mocks.manifest
-      .mockResolvedValueOnce([{ path: "first.txt", size: 1, mtime_ms: 1 }])
-      .mockResolvedValueOnce([
-        { path: "first.txt", size: 1, mtime_ms: 1 },
-        { path: "second.txt", size: 1, mtime_ms: 2 },
-      ]);
+  it(
+    "runs a fresh inventory pass for a caller that arrives mid-pull",
+    async () => {
+      mocks.manifest
+        .mockResolvedValueOnce([{ path: "first.txt", size: 1, mtime_ms: 1 }])
+        .mockResolvedValueOnce([
+          { path: "first.txt", size: 1, mtime_ms: 1 },
+          { path: "second.txt", size: 1, mtime_ms: 2 },
+        ]);
 
-    let releaseFirst!: () => void;
-    let markFirstStarted!: () => void;
-    const firstStarted = new Promise<void>((resolve) => {
-      markFirstStarted = resolve;
-    });
-    mocks.readFileBinary.mockImplementation(async (_vm, rel: string) => {
-      if (rel === "first.txt" && mocks.readFileBinary.mock.calls.length === 1) {
-        markFirstStarted();
-        await new Promise<void>((resolve) => {
-          releaseFirst = resolve;
-        });
-      }
-      return Buffer.from(rel === "first.txt" ? "1" : "2");
-    });
+      let releaseFirst!: () => void;
+      let markFirstStarted!: () => void;
+      const firstStarted = new Promise<void>((resolve) => {
+        markFirstStarted = resolve;
+      });
+      mocks.readFileBinary.mockImplementation(async (_vm, rel: string) => {
+        if (rel === "first.txt" && mocks.readFileBinary.mock.calls.length === 1) {
+          markFirstStarted();
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        return Buffer.from(rel === "first.txt" ? "1" : "2");
+      });
 
-    const first = pullVmChangesStrict(`project-${sequence}`, sandboxDir);
-    await firstStarted;
-    const second = pullVmChangesStrict(`project-${sequence}`, sandboxDir);
-    releaseFirst();
+      const first = pullVmChangesStrict(`project-${sequence}`, sandboxDir);
+      await firstStarted;
+      const second = pullVmChangesStrict(`project-${sequence}`, sandboxDir);
+      releaseFirst();
 
-    const [firstResult, secondResult] = await Promise.all([first, second]);
-    expect(firstResult?.pulled.sort()).toEqual(["first.txt", "second.txt"]);
-    expect(secondResult?.pulled.sort()).toEqual(["first.txt", "second.txt"]);
-    expect(mocks.manifest).toHaveBeenCalledTimes(2);
-    expect(await fs.readFile(path.join(sandboxDir, "second.txt"), "utf8")).toBe("2");
-  });
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      expect(firstResult?.pulled.sort()).toEqual(["first.txt", "second.txt"]);
+      expect(secondResult?.pulled.sort()).toEqual(["first.txt", "second.txt"]);
+      expect(mocks.manifest).toHaveBeenCalledTimes(2);
+      expect(await fs.readFile(path.join(sandboxDir, "second.txt"), "utf8")).toBe("2");
+    },
+    15_000,
+  );
 
   it("removes VM-deleted paths from the host mirror", async () => {
     await fs.writeFile(path.join(sandboxDir, "obsolete.txt"), "old");

@@ -408,6 +408,17 @@ export type SaveStatus =
   | { kind: "saved"; at: number }
   | { kind: "error"; message: string };
 
+/** Central data-loss selector used by workspace navigation/unload guards. */
+export function selectHasUnsavedWork(state: {
+  pendingEdits: Record<string, string>;
+  saveStatus: Record<string, SaveStatus>;
+}): boolean {
+  if (Object.keys(state.pendingEdits).length > 0) return true;
+  return Object.values(state.saveStatus).some(
+    (status) => status.kind === "dirty" || status.kind === "saving" || status.kind === "error",
+  );
+}
+
 /**
  * Optional panels in the IDE. Default both off — the IDE is chat-centric and
  * users opt into the explorer / terminal.
@@ -641,7 +652,11 @@ interface State {
    */
   treeLoaded: boolean;
   selectedFile: string | null;
+  /** Path that `fileContent` is proven to belong to; null while loading. */
+  fileContentPath: string | null;
   fileContent: string;
+  fileRequest: { path: string; id: number } | null;
+  fileLoadError: { path: string; message: string } | null;
   terminalLines: TerminalLine[];
   /** Count of log lines dropped past the ring-buffer cap, for a "trimmed" note. */
   terminalDropped: number;
@@ -896,7 +911,9 @@ interface State {
   /** Empty the brief-files hand-off (ChatPanel calls after draining). */
   clearBriefFiles(): void;
   setTree(entries: TreeEntry[]): void;
-  setFile(path: string | null, content: string): void;
+  startFileLoad(path: string, requestId: number): void;
+  setFile(path: string, content: string, requestId: number): void;
+  failFileLoad(path: string, requestId: number, message: string): void;
   appendTerminalLine(text: string, stream?: TerminalLine["stream"]): void;
   /** Empty the Logs pane (user-invoked Clear). */
   clearTerminal(): void;
@@ -1011,7 +1028,10 @@ export const useStore = create<State>((set, get) => ({
   tree: [],
   treeLoaded: false,
   selectedFile: null,
+  fileContentPath: null,
   fileContent: "",
+  fileRequest: null,
+  fileLoadError: null,
   terminalLines: [],
   terminalDropped: 0,
   pendingPlanItemId: null,
@@ -1452,7 +1472,34 @@ export const useStore = create<State>((set, get) => ({
     set((s) => (s.briefFiles.length === 0 ? {} : { briefFiles: [] })),
 
   setTree: (entries) => set({ tree: entries, treeLoaded: true }),
-  setFile: (path, content) => set({ selectedFile: path, fileContent: content }),
+  startFileLoad: (path, requestId) =>
+    set((s) => {
+      const pending = s.pendingEdits[path];
+      return {
+        selectedFile: path,
+        fileContentPath: pending === undefined ? null : path,
+        fileContent: pending ?? "",
+        fileRequest: pending === undefined ? { path, id: requestId } : null,
+        fileLoadError: null,
+      };
+    }),
+  setFile: (path, content, requestId) =>
+    set((s) =>
+      s.fileRequest?.path === path && s.fileRequest.id === requestId && s.selectedFile === path
+        ? {
+            fileContentPath: path,
+            fileContent: content,
+            fileRequest: null,
+            fileLoadError: null,
+          }
+        : {},
+    ),
+  failFileLoad: (path, requestId, message) =>
+    set((s) =>
+      s.fileRequest?.path === path && s.fileRequest.id === requestId && s.selectedFile === path
+        ? { fileRequest: null, fileLoadError: { path, message } }
+        : {},
+    ),
   appendTerminalLine: (text, stream = "out") =>
     set((s) => {
       const overflow = s.terminalLines.length >= 500;
@@ -1670,7 +1717,10 @@ export const useStore = create<State>((set, get) => ({
       // until the new project's tree arrives, not a stale "No files yet."
       treeLoaded: false,
       selectedFile: null,
+      fileContentPath: null,
       fileContent: "",
+      fileRequest: null,
+      fileLoadError: null,
       terminalLines: [],
       terminalDropped: 0,
       pendingPlanItemId: null,
@@ -1708,6 +1758,88 @@ export const useStore = create<State>((set, get) => ({
     });
   },
 }));
+
+function pathWithin(path: string, root: string, includeDescendants: boolean): boolean {
+  return path === root || (includeDescendants && path.startsWith(`${root}/`));
+}
+
+function mappedPath(path: string, from: string, to: string, includeDescendants: boolean): string {
+  return pathWithin(path, from, includeDescendants) ? `${to}${path.slice(from.length)}` : path;
+}
+
+function mapPathRecord<T>(
+  record: Record<string, T>,
+  from: string,
+  to: string,
+  includeDescendants: boolean,
+): Record<string, T> {
+  return Object.fromEntries(
+    Object.entries(record).map(([path, value]) => [
+      mappedPath(path, from, to, includeDescendants),
+      value,
+    ]),
+  );
+}
+
+/**
+ * Apply a server-confirmed namespace move to every path-keyed editor surface in
+ * one store transaction. Local debounce callbacks keep the old path and become
+ * harmless no-ops because their pending buffer moves with this transaction.
+ */
+export function applyFilePathMapping(from: string, to: string, isDirectory: boolean): void {
+  useStore.setState((s) => {
+    const map = (path: string): string => mappedPath(path, from, to, isDirectory);
+    const openFiles = Array.from(new Set(s.openFiles.map(map)));
+    const selectedFile = s.selectedFile ? map(s.selectedFile) : null;
+    const activeFilePath = s.editorTab.startsWith("file:") ? s.editorTab.slice(5) : null;
+    return {
+      tree: s.tree.map((entry) => ({ ...entry, path: map(entry.path) })),
+      openFiles,
+      selectedFile,
+      fileContentPath: s.fileContentPath ? map(s.fileContentPath) : null,
+      // An in-flight response carries the old path and is no longer valid.
+      // EditorPreviewArea will issue a fresh request for the mapped active tab.
+      fileRequest: null,
+      fileLoadError: null,
+      editorTab: activeFilePath ? fileTabId(map(activeFilePath)) : s.editorTab,
+      saveStatus: mapPathRecord(s.saveStatus, from, to, isDirectory),
+      pendingEdits: mapPathRecord(s.pendingEdits, from, to, isDirectory),
+    };
+  });
+}
+
+/** Prune a server-confirmed deletion from the tree, tabs, selection, and saves. */
+export function applyFilePathRemoval(path: string, isDirectory: boolean): void {
+  useStore.setState((s) => {
+    const removed = (candidate: string): boolean => pathWithin(candidate, path, isDirectory);
+    const openFiles = s.openFiles.filter((candidate) => !removed(candidate));
+    const activeFilePath = s.editorTab.startsWith("file:") ? s.editorTab.slice(5) : null;
+    const selectedWasRemoved = s.selectedFile ? removed(s.selectedFile) : false;
+    const contentWasRemoved = s.fileContentPath ? removed(s.fileContentPath) : false;
+    let editorTab = s.editorTab;
+    if (activeFilePath && removed(activeFilePath)) {
+      editorTab = openFiles[0]
+        ? fileTabId(openFiles[0])
+        : s.previews[0]
+          ? previewTabId(s.previews[0].id)
+          : "";
+    }
+    const keepRecordPaths = <T>(record: Record<string, T>): Record<string, T> =>
+      Object.fromEntries(Object.entries(record).filter(([candidate]) => !removed(candidate)));
+    return {
+      tree: s.tree.filter((entry) => !removed(entry.path)),
+      openFiles,
+      selectedFile: selectedWasRemoved ? null : s.selectedFile,
+      fileContentPath: contentWasRemoved ? null : s.fileContentPath,
+      fileContent: contentWasRemoved ? "" : s.fileContent,
+      fileRequest: s.fileRequest && removed(s.fileRequest.path) ? null : s.fileRequest,
+      fileLoadError: s.fileLoadError && removed(s.fileLoadError.path) ? null : s.fileLoadError,
+      editorTab,
+      saveStatus: keepRecordPaths(s.saveStatus),
+      pendingEdits: keepRecordPaths(s.pendingEdits),
+    };
+  });
+}
 
 /**
  * Send the most recent buffered content for `path` to the orchestrator now,

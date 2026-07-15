@@ -37,6 +37,8 @@ export default function SkillsModal({
   const [trusted, setTrusted] = useState(true);
   // The content as loaded/last-saved, to detect unsaved edits (§D).
   const pristineRef = useRef<string>("");
+  const contentRef = useRef<string>("");
+  const editGenerationRef = useRef(0);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   // Pack pending confirmation before it overwrites the editor.
   const [confirmPack, setConfirmPack] = useState<string | null>(null);
@@ -63,6 +65,7 @@ export default function SkillsModal({
         ]);
         if (abort) return;
         setContent(s.content);
+        contentRef.current = s.content;
         pristineRef.current = s.content;
         setTrusted(s.trusted !== false);
         setPacks(p.packs);
@@ -100,14 +103,20 @@ export default function SkillsModal({
   };
 
   const onSave = async () => {
+    const submitted = contentRef.current;
+    const submittedGeneration = editGenerationRef.current;
     setSaving(true);
     setError(null);
     try {
-      await writeSkillsApi(projectId, content);
-      pristineRef.current = content;
+      await writeSkillsApi(projectId, submitted);
+      pristineRef.current = submitted;
       setTrusted(true);
-      toast.success("Skills saved");
-      onClose();
+      if (editGenerationRef.current === submittedGeneration) {
+        toast.success("Skills saved");
+        onClose();
+      } else {
+        toast.success("Skills saved; newer edits remain unsaved");
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
@@ -142,13 +151,20 @@ export default function SkillsModal({
     setPackBusy(id);
     setError(null);
     try {
-      const previous = content;
+      const previous = contentRef.current;
+      const generation = editGenerationRef.current;
       // Fetch the pack body and apply it into the LOCAL editor buffer only.
       // Nothing is persisted until the user clicks Save (C-5) — so Undo (which
       // restores `previous`) and Discard actually undo the change, and the
       // dialog's "nothing is saved until you click Save" promise holds.
       const { body } = await fetchSkillPackBodyApi(id);
+      if (editGenerationRef.current !== generation) {
+        setError("Starter was not applied because the Skills text changed while it loaded.");
+        return;
+      }
       setUndoBuffer(previous);
+      contentRef.current = body;
+      editGenerationRef.current += 1;
       setContent(body); // "replace" semantics, matching the old default
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -159,6 +175,8 @@ export default function SkillsModal({
 
   const undoPack = () => {
     if (undoBuffer === null) return;
+    contentRef.current = undoBuffer;
+    editGenerationRef.current += 1;
     setContent(undoBuffer);
     setUndoBuffer(null);
   };
@@ -208,7 +226,7 @@ export default function SkillsModal({
                     background: "none",
                     border: 0,
                     padding: 0,
-                    color: "var(--accent)",
+                    color: "var(--accent-text)",
                     cursor: "pointer",
                     font: "inherit",
                     textDecoration: "underline",
@@ -240,7 +258,12 @@ export default function SkillsModal({
         ) : (
           <textarea
             value={content}
-            onChange={(e) => setContent(e.target.value)}
+            onChange={(e) => {
+              contentRef.current = e.target.value;
+              editGenerationRef.current += 1;
+              setContent(e.target.value);
+            }}
+            disabled={saving || !!packBusy}
             aria-label="Project guidance for the agent"
             placeholder={`# Project guidance for the agent\n\n- Always use Python 3.11.\n- Brand voice is dry and concise.\n- Avoid jQuery; prefer fetch + DOM APIs.\n- Bind dev servers to 0.0.0.0.`}
             style={{
@@ -365,7 +388,7 @@ export default function SkillsModal({
                       <span
                         style={{
                           fontSize: 10,
-                          color: "var(--accent)",
+                          color: "var(--accent-text)",
                           border: "1px solid var(--accent)",
                           borderRadius: 3,
                           padding: "0 4px",

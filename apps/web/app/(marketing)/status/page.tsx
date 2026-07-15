@@ -45,7 +45,7 @@ export default function StatusPage() {
           <span className="mk-eyebrow">
             <span className="dot" /> Status
           </span>
-          <h2>System status.</h2>
+          <h1>Gate 15 system status.</h1>
           <p>
             A current snapshot of how Gate 15 is running. We check these
             components by hand on a regular cadence — this page reflects the

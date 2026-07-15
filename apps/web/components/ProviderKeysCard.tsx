@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "@/lib/toast";
 import {
   fetchAccountProviderKeysApi,
@@ -13,6 +13,7 @@ const PROVIDERS: { id: ByokProvider; label: string; hint: string }[] = [
   { id: "anthropic", label: "Anthropic (Claude)", hint: "sk-ant-…" },
   { id: "openai", label: "OpenAI (ChatGPT)", hint: "sk-…" },
   { id: "google", label: "Google (Gemini)", hint: "AIza… / API key" },
+  { id: "zai", label: "Z.ai (GLM)", hint: "Z.ai API key" },
 ];
 
 /**
@@ -27,14 +28,29 @@ export default function ProviderKeysCard() {
     anthropic: "",
     openai: "",
     google: "",
+    zai: "",
   });
   const [busy, setBusy] = useState<ByokProvider | null>(null);
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [statusError, setStatusError] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    setStatus("loading");
+    setStatusError(null);
+    fetchAccountProviderKeysApi()
+      .then((r) => {
+        setConfigured(new Set(r.providers));
+        setStatus("ready");
+      })
+      .catch((error) => {
+        setStatusError(error instanceof Error ? error.message : "Couldn't check provider keys");
+        setStatus("error");
+      });
+  }, []);
 
   useEffect(() => {
-    fetchAccountProviderKeysApi()
-      .then((r) => setConfigured(new Set(r.providers)))
-      .catch(() => setConfigured(new Set()));
-  }, []);
+    load();
+  }, [load]);
 
   const save = async (provider: ByokProvider) => {
     const key = drafts[provider].trim();
@@ -69,12 +85,29 @@ export default function ProviderKeysCard() {
     <div className="settings-card">
       <h2>Model provider keys (bring your own)</h2>
       <p className="settings-card-sub">
-        Add your own Anthropic / OpenAI / Google API key and the agent&apos;s model
+        Add your own Anthropic, OpenAI, Google, or Z.ai API key and the agent&apos;s model
         calls — including planning and history compaction — bill <strong>your</strong>{" "}
         provider account, governed by your own DPA. Leave a provider blank to use
         Gate 15&apos;s platform key. We never display or log your key, and it never
         reaches the sandbox or the agent.
       </p>
+      {status === "error" ? (
+        <div className="async-error" role="alert">
+          <p>
+            Provider-key status is unavailable. We cannot confirm which account
+            will be billed, so key changes are paused.
+          </p>
+          <code>{statusError}</code>
+          <button type="button" className="btn-secondary" onClick={load}>
+            Retry
+          </button>
+        </div>
+      ) : status === "loading" ? (
+        <div className="settings-row">
+          <span className="k">Status</span>
+          <span className="v">Checking provider keys…</span>
+        </div>
+      ) : (
       <div style={{ display: "grid", gap: 10, marginTop: 8 }}>
         {PROVIDERS.map((p) => {
           const isSet = configured.has(p.id);
@@ -127,6 +160,7 @@ export default function ProviderKeysCard() {
           );
         })}
       </div>
+      )}
     </div>
   );
 }

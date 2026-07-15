@@ -1,12 +1,13 @@
 import { db } from "./client.js";
 
-export type DeploymentState = "QUEUED" | "BUILDING" | "READY" | "ERROR" | "CANCELED";
+export type DeploymentState = "CREATING" | "QUEUED" | "BUILDING" | "READY" | "ERROR" | "CANCELED";
 
 export interface DeploymentRecord {
   id: string;
   project_id: string;
   user_id: string;
-  vercel_deployment_id: string;
+  vercel_deployment_id: string | null;
+  operation_key: string;
   vercel_url: string | null;
   state: DeploymentState;
   error_message: string | null;
@@ -37,6 +38,59 @@ export async function insertDeployment(input: {
     .single();
   if (error || !data) throw new Error(`insertDeployment failed: ${error?.message}`);
   return data as DeploymentRecord;
+}
+
+/** Persist intent before the provider-side create, preventing orphan retries. */
+export async function insertDeploymentIntent(input: {
+  project_id: string;
+  user_id: string;
+  target: "production" | "preview";
+}): Promise<DeploymentRecord> {
+  const { data, error } = await db()
+    .from("deployments")
+    .insert({
+      project_id: input.project_id,
+      user_id: input.user_id,
+      vercel_deployment_id: null,
+      vercel_url: null,
+      state: "CREATING",
+      target: input.target,
+    })
+    .select("*")
+    .single();
+  if (error || !data) throw new Error(`insertDeploymentIntent failed: ${error?.message}`);
+  return data as DeploymentRecord;
+}
+
+export async function attachVercelDeployment(
+  id: string,
+  patch: {
+    vercel_deployment_id: string;
+    vercel_url: string | null;
+    state: DeploymentState;
+  },
+): Promise<void> {
+  const { data, error } = await db()
+    .from("deployments")
+    .update(patch)
+    .eq("id", id)
+    .eq("state", "CREATING")
+    .select("id");
+  if (error) throw new Error(`attachVercelDeployment failed: ${error.message}`);
+  if (!Array.isArray(data) || data.length !== 1) {
+    throw new Error("attachVercelDeployment failed: create intent is no longer active");
+  }
+}
+
+export async function listUnfinishedDeployments(limit = 100): Promise<DeploymentRecord[]> {
+  const { data, error } = await db()
+    .from("deployments")
+    .select("*")
+    .in("state", ["CREATING", "QUEUED", "BUILDING"])
+    .order("created_at", { ascending: true })
+    .limit(limit);
+  if (error) throw new Error(`listUnfinishedDeployments failed: ${error.message}`);
+  return (data ?? []) as DeploymentRecord[];
 }
 
 export async function updateDeploymentState(

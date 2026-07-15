@@ -643,7 +643,7 @@ export type ClientEvent =
       feedback?: string;
     }
   | { type: "request_tree" }
-  | { type: "request_file"; path: string }
+  | { type: "request_file"; path: string; request_id?: number }
   | { type: "reset_session" }
   /** Summarize older model-facing history now, without deleting the raw transcript. */
   | { type: "compact_context" }
@@ -679,6 +679,8 @@ export interface ProjectSummary {
   skills_trust?: ProjectSkillsTrust | null;
   /** Organization (workspace) the project belongs to. Null = the owner's personal workspace. */
   org_id?: string | null;
+  /** Acting user's resolved project role. Present on authenticated list/session responses. */
+  effective_role?: Role;
 }
 
 export type ProjectSkillsTrust = "trusted" | "untrusted_import";
@@ -1093,7 +1095,7 @@ export interface AccountSettings {
   default_skill_library_ids?: string[];
 }
 
-export type DeploymentState = "QUEUED" | "BUILDING" | "READY" | "ERROR" | "CANCELED";
+export type DeploymentState = "CREATING" | "QUEUED" | "BUILDING" | "READY" | "ERROR" | "CANCELED";
 
 export type ServerEvent =
   | {
@@ -1241,11 +1243,11 @@ export type ServerEvent =
    */
   | { type: "permission_mode_changed"; mode: PermissionMode }
   | { type: "tree_listing"; entries: TreeEntry[] }
-  | { type: "file_content"; path: string; content: string | null }
+  | { type: "file_content"; path: string; content: string | null; request_id?: number }
   | { type: "file_changed"; path: string }
   | { type: "server_started"; id: string; command: string; port: number }
   | { type: "server_stopped"; id: string }
-  | { type: "session_reset" }
+  | { type: "session_reset"; reason?: "checkpoint_restore" }
   | {
       /**
        * Live cumulative token usage for the in-flight turn (Plan §5). Emitted
@@ -1451,6 +1453,11 @@ export type ServerEvent =
       code?: string;
       /** True for transient classes the run may auto-retry / the user may retry. */
       retryable?: boolean;
+      /**
+       * True only when this event authoritatively ends the active run. File,
+       * history, permission, and other auxiliary errors leave it unset.
+       */
+      terminal?: boolean;
     };
 
 export interface TodoItem {
@@ -1672,6 +1679,8 @@ export interface Organization {
   monthly_budget_usd: number | null;
   created_at: string;
   updated_at: string;
+  /** Acting user's membership role. Present on authenticated list responses. */
+  effective_role?: Role;
 }
 
 /** Org-scoped month-to-date spend vs. cap, for the org Usage card (P3.5). */
@@ -1729,7 +1738,7 @@ export interface AgentTask {
   id: string;
   project_id: string;
   org_id: string | null;
-  created_by: string | null;
+  created_by: string;
   title: string;
   prompt: string;
   status: AgentTaskStatus;
@@ -1737,6 +1746,10 @@ export interface AgentTask {
   acceptance_criteria: string | null;
   result_summary: string | null;
   error: string | null;
+  worker_id: string | null;
+  lease_expires_at: string | null;
+  heartbeat_at: string | null;
+  attempt: number;
   created_at: string;
   updated_at: string;
 }

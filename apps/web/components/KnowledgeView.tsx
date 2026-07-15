@@ -500,8 +500,9 @@ export default function KnowledgeView({ isGuest }: { isGuest: boolean }) {
           <div className="skill-editor-grid">
             <div className="skill-editor-row">
               <div className="skill-field">
-                <label>Title</label>
+                <label htmlFor="knowledge-title">Title</label>
                 <input
+                  id="knowledge-title"
                   className="ds-name"
                   value={detail.title}
                   onChange={(e) => setDetail({ ...detail, title: e.target.value })}
@@ -510,10 +511,11 @@ export default function KnowledgeView({ isGuest }: { isGuest: boolean }) {
                 />
               </div>
               <div className="skill-field">
-                <label>
+                <label htmlFor="knowledge-description">
                   Note <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(optional)</span>
                 </label>
                 <input
+                  id="knowledge-description"
                   className="ds-name"
                   value={detail.description}
                   onChange={(e) => setDetail({ ...detail, description: e.target.value })}
@@ -523,12 +525,12 @@ export default function KnowledgeView({ isGuest }: { isGuest: boolean }) {
               </div>
             </div>
             <div className="skill-field">
-              <label>
+              <div className="field-label">
                 Extracted text{" "}
                 <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>
                   — what the agent searches
                 </span>
-              </label>
+              </div>
               {detail.content === null ? (
                 <p className="db-empty-note">Loading…</p>
               ) : detail.contentError ? (

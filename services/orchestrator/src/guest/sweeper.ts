@@ -12,11 +12,13 @@
  */
 
 import { promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
 import {
   markStaleGuestsForGrace,
   listGuestsToDelete,
   deleteUser,
-  getUserById,
+  claimGuestForDeletion,
 } from "../db/users.js";
 import { listProjects } from "../db/projects.js";
 import {
@@ -24,7 +26,8 @@ import {
   remove as storageRemove,
 } from "../storage/client.js";
 import { clearTracker } from "../storage/sync.js";
-import { destroy as destroyVm } from "../firecracker/index.js";
+import { destroyForDeletion, releaseNetworkAllocation } from "../firecracker/index.js";
+import { clearCheckpoints } from "../agent/checkpoints.js";
 
 const GUEST_INACTIVE_DAYS = Number(process.env.GUEST_INACTIVE_DAYS ?? 60);
 const GUEST_GRACE_DAYS = Number(process.env.GUEST_GRACE_DAYS ?? 30);
@@ -33,7 +36,7 @@ const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
 let sweeperTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
- * Tear down one guest project: best-effort Storage + VM + sandbox-dir cleanup.
+ * Strictly erase one guest project before its metadata is deleted.
  * Mirrors the non-DB half of handleProjectDelete in server.ts — the DB rows
  * themselves are deleted by deleteUser before the user row is removed.
  */
@@ -41,24 +44,22 @@ async function teardownGuestProject(
   projectId: string,
   sandboxDir: string,
 ): Promise<void> {
-  try {
-    const remoteFiles = await storageListAll(projectId);
-    if (remoteFiles.length > 0) await storageRemove(projectId, remoteFiles);
-  } catch (err) {
-    console.error(`[guest-sweeper] storage cleanup for ${projectId} failed:`, err);
+  const remoteFiles = await storageListAll(projectId);
+  if (remoteFiles.length > 0) await storageRemove(projectId, remoteFiles);
+  const remainingRemote = await storageListAll(projectId);
+  if (remainingRemote.length > 0) {
+    throw new Error(`${remainingRemote.length} Storage objects remain for ${projectId}`);
   }
-  try {
-    // No-op when Firecracker is disabled or the VM was never booted.
-    await destroyVm(projectId);
-  } catch (err) {
-    console.error(`[guest-sweeper] VM destroy for ${projectId} failed:`, err);
-  }
-  try {
-    await fs.rm(sandboxDir, { recursive: true, force: true });
-  } catch (err) {
-    console.error(`[guest-sweeper] sandbox cleanup for ${projectId} failed:`, err);
+  await destroyForDeletion(projectId);
+  await fs.rm(sandboxDir, { recursive: true, force: true });
+  await clearCheckpoints(sandboxDir, projectId);
+  const checkpointDir = path.join(path.dirname(sandboxDir), `${projectId}.checkpoints`);
+  for (const candidate of [sandboxDir, checkpointDir]) {
+    const remains = await fs.access(candidate).then(() => true, () => false);
+    if (remains) throw new Error(`local guest project data remains at ${candidate}`);
   }
   clearTracker(projectId);
+  releaseNetworkAllocation(projectId);
 }
 
 async function runSweep(
@@ -81,30 +82,10 @@ async function runSweep(
     return;
   }
 
-  // listGuestsToDelete is a single up-front snapshot, but teardown below is slow
-  // (per-project Storage listing/removal + VM destroy). A guest who returns
-  // (touchUserActivity nulls grace_started_at) or converts via merge during that
-  // window must NOT be torn down — destroying their files while the projects'
-  // rows survive under a new owner is permanent data loss (C-49). Re-check
-  // eligibility immediately before the irreversible teardown.
-  const graceCutoff = Date.now() - GUEST_GRACE_DAYS * 86_400_000;
-  const stillDeletable = async (guestId: string): Promise<boolean> => {
-    const u = await getUserById(guestId);
-    if (!u) return false; // already gone
-    const rec = u as unknown as {
-      account_type?: string;
-      converted_at?: string | null;
-      grace_started_at?: string | null;
-    };
-    if (rec.account_type !== "guest") return false;
-    if (rec.converted_at) return false; // converted mid-sweep
-    if (!rec.grace_started_at) return false; // returned (grace cleared)
-    return new Date(rec.grace_started_at).getTime() < graceCutoff;
-  };
-
   for (const guestId of toDelete) {
     try {
-      if (!(await stillDeletable(guestId))) {
+      const lifecycleClaim = randomUUID();
+      if (!(await claimGuestForDeletion(guestId, GUEST_GRACE_DAYS, lifecycleClaim))) {
         console.log(`[guest-sweeper] skipping ${guestId} — no longer eligible (returned/converted)`);
         continue;
       }
@@ -114,14 +95,8 @@ async function runSweep(
       for (const project of projects) {
         await teardownGuestProject(project.id, sandboxDirFor(project.id));
       }
-      // Final re-check after the slow teardown, right before the irreversible
-      // row delete, to shrink the race window as far as possible.
-      if (!(await stillDeletable(guestId))) {
-        console.log(`[guest-sweeper] ${guestId} became active during teardown — keeping row`);
-        continue;
-      }
       // deleteUser removes personal projects first; their dependent rows cascade.
-      await deleteUser(guestId);
+      await deleteUser(guestId, lifecycleClaim);
       console.log(
         `[guest-sweeper] deleted guest ${guestId} (${projects.length} project(s))`,
       );

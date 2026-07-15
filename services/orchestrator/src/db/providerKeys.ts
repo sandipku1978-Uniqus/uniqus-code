@@ -13,10 +13,14 @@ import { providerKeysFromEnv, type ProviderKeys, type ProviderName } from "../ag
  * platform env key; otherwise we fall back to the platform key.
  */
 
-const PROVIDERS: ProviderName[] = ["anthropic", "openai", "google"];
+const PROVIDERS: ProviderName[] = ["anthropic", "openai", "google", "zai"];
 
 export function isProviderName(v: string): v is ProviderName {
   return (PROVIDERS as string[]).includes(v);
+}
+
+function providerKeyContext(userId: string, provider: ProviderName): string {
+  return `account-provider-key:${userId}:${provider}`;
 }
 
 /** Which providers this account has a stored key for (names only, never values). */
@@ -36,7 +40,7 @@ export async function setAccountProviderKey(
   provider: ProviderName,
   value: string,
 ): Promise<void> {
-  const encrypted = encryptToken(value);
+  const encrypted = encryptToken(value, providerKeyContext(userId, provider));
   const { error } = await db()
     .from("account_provider_keys")
     .upsert(
@@ -69,7 +73,10 @@ async function getAccountProviderKeys(userId: string): Promise<Partial<Record<Pr
   for (const row of (data ?? []) as { provider: string; encrypted_value: string }[]) {
     if (!isProviderName(row.provider)) continue;
     try {
-      out[row.provider] = decryptToken(row.encrypted_value);
+      out[row.provider] = decryptToken(
+        row.encrypted_value,
+        providerKeyContext(userId, row.provider),
+      );
     } catch {
       // A key encrypted under a rotated master key can't be read — skip it and
       // fall back to the platform key rather than failing the whole turn.
@@ -98,10 +105,6 @@ export async function resolveProviderKeysForUser(userId: string): Promise<Provid
     anthropic: account.anthropic ?? env.anthropic,
     openai: account.openai ?? env.openai,
     google: account.google ?? env.google,
-    // Z.ai (GLM) is platform-env only — it's not in the BYOK `PROVIDERS` list,
-    // so there's never an account key to prefer. Must still be threaded through
-    // here, or every GLM/Auto-→-GLM turn throws MissingProviderKeyError("zai")
-    // despite ZAI_API_KEY being set.
-    zai: env.zai,
+    zai: account.zai ?? env.zai,
   };
 }

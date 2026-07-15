@@ -48,8 +48,6 @@ const READ_ONLY_TOOLS = new Set<string>([
   "read_background_log",
   "todo_write",
   "load_capabilities",
-  "screenshot_preview",
-  "interact_preview",
   // Vision bridge (reads an image, asks a vision model) — part of the verify
   // loop; low cost and would be maddening to gate per screenshot.
   "analyze_image",
@@ -137,6 +135,45 @@ function truncate(s: string, n = 100): string {
  */
 export function classifyToolRisk(name: string, input: unknown): ToolRisk {
   const args = (input ?? {}) as Record<string, unknown>;
+
+  if (name === "screenshot_preview") {
+    if (typeof args.server_id === "string" && args.server_id.length > 0 && !args.url) {
+      return { category: "read", summary: "Screenshot the project preview", reason: "read-only" };
+    }
+    const destination = typeof args.url === "string" ? truncate(args.url) : "an external URL";
+    return {
+      category: "dangerous",
+      summary: `Open and screenshot ${destination}`,
+      reason: "Arbitrary browser navigation can send data off-origin and requires confirmation.",
+    };
+  }
+
+  if (name === "interact_preview") {
+    const actions = Array.isArray(args.actions)
+      ? args.actions as Array<Record<string, unknown>>
+      : [];
+    const observationalActions = new Set([
+      "wait",
+      "wait_for_text",
+      "assert_text",
+      "assert_url",
+      "assert_visible",
+      "screenshot",
+    ]);
+    const projectBound = typeof args.server_id === "string" && args.server_id.length > 0 && !args.url;
+    const readOnly = projectBound && actions.every((action) =>
+      typeof action.type === "string" && observationalActions.has(action.type)
+    );
+    if (readOnly) {
+      return { category: "read", summary: "Inspect the project preview", reason: "read-only" };
+    }
+    const destination = typeof args.url === "string" ? ` at ${truncate(args.url)}` : "";
+    return {
+      category: "dangerous",
+      summary: `Interact with a browser${destination}`,
+      reason: "Browser navigation or interaction can transmit data or change external state.",
+    };
+  }
 
   if (READ_ONLY_TOOLS.has(name)) {
     return { category: "read", summary: name, reason: "read-only" };

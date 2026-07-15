@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Modal from "./Modal";
 import { toast } from "@/lib/toast";
+import { flushAllPendingEdits, useStore } from "@/lib/store";
 import {
   fetchCheckpointsApi,
   fetchCheckpointDiffApi,
@@ -10,6 +11,24 @@ import {
   type CheckpointMeta,
   type CheckpointFileDelta,
 } from "@/lib/api";
+
+function waitForPendingSaves(timeoutMs = 8_000): Promise<boolean> {
+  if (Object.keys(useStore.getState().pendingEdits).length === 0) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (saved: boolean): void => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      unsubscribe();
+      resolve(saved);
+    };
+    const unsubscribe = useStore.subscribe((state) => {
+      if (Object.keys(state.pendingEdits).length === 0) finish(true);
+    });
+    const timer = window.setTimeout(() => finish(false), timeoutMs);
+  });
+}
 
 /**
  * Checkpoints / rewind modal (Plan §3.5).
@@ -37,6 +56,9 @@ export default function CheckpointsModal({
   const [diffFor, setDiffFor] = useState<CheckpointMeta | null>(null);
   const [diff, setDiff] = useState<{ diff: string; truncated: boolean; files: CheckpointFileDelta[] } | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
+  const agentBusy = useStore((state) => state.busy);
+  const connected = useStore((state) => state.connected);
+  const pendingEditCount = useStore((state) => Object.keys(state.pendingEdits).length);
 
   const openDiff = async (c: CheckpointMeta) => {
     setDiffFor(c);
@@ -72,11 +94,25 @@ export default function CheckpointsModal({
 
   const doRestore = async (sha: string) => {
     if (busy) return;
-    setPendingRestore(null);
     setBusy(sha);
     setError(null);
     try {
+      if (agentBusy) {
+        throw new Error("Stop the active Gate 15 run before rewinding files.");
+      }
+      if (pendingEditCount > 0) {
+        if (!connected) {
+          throw new Error("Reconnect before rewinding so unsaved editor changes can be saved.");
+        }
+        await flushAllPendingEdits();
+        if (!(await waitForPendingSaves())) {
+          throw new Error("Unsaved editor changes did not finish saving. Resolve the save error and try again.");
+        }
+      }
       await restoreCheckpointApi(projectId, sha);
+      // A successful restore is authoritative. Invalidate every local path
+      // buffer so a pre-restore debounce cannot recreate overwritten content.
+      useStore.setState({ pendingEdits: {}, saveStatus: {} });
       toast.success(`Rewound to ${sha.slice(0, 8)}`);
       onClose();
     } catch (err) {
@@ -173,7 +209,7 @@ export default function CheckpointsModal({
                           fontSize: 12,
                         }}
                       >
-                        <code style={{ fontSize: 11, color: "var(--accent)" }}>
+                          <code style={{ fontSize: 11, color: "var(--accent-text)" }}>
                           {c.short_sha}
                         </code>
                         <button
@@ -201,8 +237,8 @@ export default function CheckpointsModal({
                           type="button"
                           className="btn-secondary"
                           onClick={() => setPendingRestore(c)}
-                          disabled={busy === c.sha}
-                          title="Rewind the sandbox to this checkpoint"
+                          disabled={!!busy || agentBusy}
+                          title={agentBusy ? "Stop the active run before rewinding" : "Rewind the sandbox to this checkpoint"}
                           style={{ fontSize: 11, padding: "3px 9px" }}
                         >
                           Rewind
@@ -225,7 +261,9 @@ export default function CheckpointsModal({
           footer={
             <>
               <span className="modal-status">
-                Your current state is checkpointed first, so this is reversible.
+                {pendingEditCount > 0
+                  ? `${pendingEditCount} unsaved editor change${pendingEditCount === 1 ? "" : "s"} will be saved first.`
+                  : "Your current state is checkpointed first, so this is reversible."}
               </span>
               <div className="modal-actions">
                 <button
@@ -239,6 +277,7 @@ export default function CheckpointsModal({
                   type="button"
                   className="btn-primary"
                   onClick={() => doRestore(pendingRestore.sha)}
+                  disabled={!!busy || agentBusy}
                 >
                   Rewind
                 </button>
@@ -248,7 +287,7 @@ export default function CheckpointsModal({
         >
           <div style={{ fontSize: 13, color: "var(--text-primary)", display: "grid", gap: 6 }}>
             <div>
-              <code style={{ color: "var(--accent)" }}>{pendingRestore.short_sha}</code> ·{" "}
+              <code style={{ color: "var(--accent-text)" }}>{pendingRestore.short_sha}</code> ·{" "}
               {new Date(pendingRestore.created_at).toLocaleString()}
             </div>
             <div style={{ color: "var(--text-dim)" }}>{pendingRestore.message}</div>
@@ -336,7 +375,7 @@ function DiffView({ text }: { text: string }) {
         padding: 10,
         background: "var(--bg-code)",
         borderRadius: 6,
-        fontSize: 11.5,
+        fontSize: 12,
         lineHeight: 1.5,
         maxHeight: 420,
         overflow: "auto",
@@ -349,7 +388,7 @@ function DiffView({ text }: { text: string }) {
           : ln.startsWith("-") && !ln.startsWith("---")
             ? "var(--conf-low, #d9534f)"
             : ln.startsWith("@@")
-              ? "var(--accent, #a78bfa)"
+              ? "var(--accent-text)"
               : ln.startsWith("diff ") || ln.startsWith("index ") || ln.startsWith("+++") || ln.startsWith("---")
                 ? "var(--text-dim)"
                 : "var(--text-muted)";

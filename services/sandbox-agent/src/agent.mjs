@@ -16,10 +16,13 @@
  *                                       text responses include total/returned bytes + truncated)
  *   PUT  /fs/file                    body: { path, content, encoding? }
  *   GET  /fs/manifest                → { files: [{ path, size, mtime_ms }] } (storage-sync exclusions applied)
+ *   DELETE /fs/file                  body: { path, recursive? }
+ *   POST /fs/rename                  body: { from, to }
  *   POST /fs/edit                    body: { path, old_string, new_string }
  *   GET  /fs/dir?path=…              → { entries }
  *   POST /fs/grep                    body: { pattern, path?, case_insensitive?, literal? } → { matches }
  *   POST /exec/run                   body: { command, timeout_ms } → { stdout, stderr, exitCode }
+ *   POST /exec/kill                  body: { id }
  *   POST /exec/start-server          body: { command, port, ready_timeout_ms } → { id, pid, port }
  *   POST /exec/stop-server           body: { id }
  *   GET  /exec/server-log?id=…       → { log }
@@ -36,7 +39,13 @@
 import http from "node:http";
 import net from "node:net";
 import { createReadStream, promises as fs } from "node:fs";
-import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  constants as fsConstants,
+  existsSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID, timingSafeEqual } from "node:crypto";
@@ -125,9 +134,27 @@ function applyNetwork(ip, gw, mac) {
 }
 
 /** Mount the per-project sandbox volume on a base-snapshot restore. */
+function sandboxMountedFromVdb() {
+  try {
+    return readFileSync("/proc/self/mountinfo", "utf-8").split("\n").some((line) => {
+      const fields = line.trim().split(/\s+/);
+      const separator = fields.indexOf("-");
+      return separator > 4
+        && fields[4] === SANDBOX_DIR
+        && fields[separator + 1] === "ext4"
+        && fields[separator + 2] === "/dev/vdb";
+    });
+  } catch {
+    return false;
+  }
+}
+
 function mountSandbox() {
   runSync("mkdir", ["-p", SANDBOX_DIR]);
-  runSync("mount", ["-t", "ext4", "/dev/vdb", SANDBOX_DIR]);
+  if (!sandboxMountedFromVdb() && !runSync("mount", ["-t", "ext4", "/dev/vdb", SANDBOX_DIR])) {
+    return false;
+  }
+  return sandboxMountedFromVdb();
 }
 
 /** Mix orchestrator-supplied entropy into the clone's RNG (base64). */
@@ -234,7 +261,9 @@ async function handleRequest(req, res) {
       }
       // Base-snapshot restore. Safe-now steps: mount this project's sandbox drive
       // (golden left it unmounted) and de-correlate clock + RNG. Mirrors main.rs.
-      if (body.mount_sandbox) mountSandbox();
+      if (body.mount_sandbox && !mountSandbox()) {
+        return json(res, 500, { error: `/dev/vdb is not mounted at ${SANDBOX_DIR}` });
+      }
       if (body.seed) reseedUrandom(body.seed);
       if (typeof body.time_ms === "number") setClock(body.time_ms);
       // Re-stamp eth0 only AFTER this reply is flushed — applyNetwork drops the
@@ -307,7 +336,32 @@ async function handleRequest(req, res) {
       const buf = body.encoding === "base64"
         ? Buffer.from(String(body.content ?? ""), "base64")
         : Buffer.from(String(body.content ?? ""), "utf-8");
-      await fs.writeFile(p, buf);
+      await writeNoFollow(p, buf);
+      return json(res, 200, { ok: true });
+    }
+    if (method === "DELETE" && url.pathname === "/fs/file") {
+      const body = await readBody(req);
+      const p = resolveSandbox(body.path ?? "");
+      const stat = await fs.lstat(p);
+      if (stat.isDirectory() && body.recursive !== true) {
+        return json(res, 400, { error: `${body.path} is a directory` });
+      }
+      await fs.rm(p, { recursive: stat.isDirectory(), force: false });
+      return json(res, 200, { ok: true });
+    }
+    if (method === "POST" && url.pathname === "/fs/rename") {
+      const body = await readBody(req);
+      const from = resolveSandbox(body.from ?? "");
+      const to = resolveSandbox(body.to ?? "");
+      await fs.lstat(from);
+      try {
+        await fs.lstat(to);
+        return json(res, 400, { error: `destination already exists: ${body.to}` });
+      } catch (err) {
+        if (err?.code !== "ENOENT") throw err;
+      }
+      await fs.mkdir(path.dirname(to), { recursive: true });
+      await fs.rename(from, to);
       return json(res, 200, { ok: true });
     }
     if (method === "POST" && url.pathname === "/fs/edit") {
@@ -324,7 +378,7 @@ async function handleRequest(req, res) {
       const occ = content.split(body.old_string).length - 1;
       if (occ === 0) return json(res, 400, { error: `old_string not found in ${body.path}` });
       if (occ > 1) return json(res, 400, { error: `old_string is not unique in ${body.path} (${occ} matches)` });
-      await fs.writeFile(p, content.replace(body.old_string, body.new_string));
+      await writeNoFollow(p, content.replace(body.old_string, body.new_string));
       return json(res, 200, { ok: true });
     }
     if (method === "GET" && url.pathname === "/fs/dir") {
@@ -354,8 +408,13 @@ async function handleRequest(req, res) {
     }
     if (method === "POST" && url.pathname === "/exec/run") {
       const body = await readBody(req);
-      const result = await runCommand(body.command ?? "", body.timeout_ms ?? 60_000);
+      const result = await runCommand(String(body.id ?? ""), body.command ?? "", body.timeout_ms ?? 60_000);
       return json(res, 200, result);
+    }
+    if (method === "POST" && url.pathname === "/exec/kill") {
+      const body = await readBody(req);
+      await killCommand(String(body.id ?? ""));
+      return json(res, 200, { ok: true });
     }
     if (method === "POST" && url.pathname === "/exec/start-server") {
       const body = await readBody(req);
@@ -385,11 +444,37 @@ function resolveSandbox(rel) {
   const lexicalRoot = path.resolve(SANDBOX_DIR);
   const root = existsSync(lexicalRoot) ? realpathSync(lexicalRoot) : lexicalRoot;
   const lexical = path.resolve(lexicalRoot, rel || ".");
-  const full = existsSync(lexical) ? realpathSync(lexical) : lexical;
-  if (full !== root && !full.startsWith(root + path.sep)) {
+  const lexicalRelative = path.relative(lexicalRoot, lexical);
+  if (lexicalRelative.startsWith("..") || path.isAbsolute(lexicalRelative)) {
     throw new Error(`path escapes sandbox: ${rel}`);
   }
-  return full;
+  let ancestor = lexical;
+  const missing = [];
+  while (!existsSync(ancestor)) {
+    const parent = path.dirname(ancestor);
+    if (parent === ancestor) throw new Error(`path escapes sandbox: ${rel}`);
+    missing.unshift(path.basename(ancestor));
+    ancestor = parent;
+  }
+  const canonicalAncestor = realpathSync(ancestor);
+  const canonicalRelative = path.relative(root, canonicalAncestor);
+  if (canonicalRelative.startsWith("..") || path.isAbsolute(canonicalRelative)) {
+    throw new Error(`path escapes sandbox through a symlink: ${rel}`);
+  }
+  return path.join(canonicalAncestor, ...missing);
+}
+
+async function writeNoFollow(target, content) {
+  const flags = fsConstants.O_WRONLY
+    | fsConstants.O_CREAT
+    | fsConstants.O_TRUNC
+    | (fsConstants.O_NOFOLLOW ?? 0);
+  const handle = await fs.open(target, flags, 0o666);
+  try {
+    await handle.writeFile(content);
+  } finally {
+    await handle.close();
+  }
 }
 
 function json(res, status, body) {
@@ -905,9 +990,35 @@ async function walkForGrep(target, root, test, bounded) {
 // otherwise `cat /dev/zero` grows the string without bound and OOMs the 1 GiB
 // VM. Mirrors RUN_OUTPUT_CAP in main.rs.
 const RUN_OUTPUT_CAP = 4 * 1024 * 1024;
+const runningCommands = new Map();
+const canceledCommands = new Set();
 
-async function runCommand(command, timeoutMs) {
+function killProcessGroup(child) {
+  try {
+    if (child?.pid) process.kill(-child.pid, "SIGKILL");
+  } catch {
+    try {
+      child?.kill("SIGKILL");
+    } catch {}
+  }
+}
+
+async function killCommand(id) {
+  if (!id) return;
+  // The tombstone closes the small race where /kill reaches another handler
+  // just before /run has registered its child.
+  canceledCommands.add(id);
+  killProcessGroup(runningCommands.get(id));
+  const deadline = Date.now() + 2_000;
+  while (runningCommands.has(id) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  if (runningCommands.has(id)) throw new Error(`command ${id} did not exit after SIGKILL`);
+}
+
+async function runCommand(id, command, timeoutMs) {
   return await new Promise((resolve) => {
+    if (!id) return resolve({ stdout: "", stderr: "[invalid exec id]", exitCode: 1 });
     // C-60: detached → the child leads its own process group, so a timeout can
     // SIGKILL the whole group (kill(-pid)) instead of just /bin/sh. Otherwise a
     // daemonized grandchild survives and keeps the stdout/stderr pipes open.
@@ -916,6 +1027,8 @@ async function runCommand(command, timeoutMs) {
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });
+    runningCommands.set(id, child);
+    if (canceledCommands.has(id)) killProcessGroup(child);
     let stdout = "";
     let stderr = "";
     let stdoutCapped = false;
@@ -925,13 +1038,7 @@ async function runCommand(command, timeoutMs) {
       killed = true;
       // Negative pid → signal the whole process group. Fall back to the bare
       // child if the group send fails (e.g. it already exited).
-      try {
-        if (child.pid) process.kill(-child.pid, "SIGKILL");
-      } catch {
-        try {
-          child.kill("SIGKILL");
-        } catch {}
-      }
+      killProcessGroup(child);
     }, timeoutMs);
     child.stdout?.on("data", (d) => {
       if (stdoutCapped) return; // keep draining, drop the bytes
@@ -951,11 +1058,15 @@ async function runCommand(command, timeoutMs) {
     });
     child.on("close", (code) => {
       clearTimeout(t);
+      runningCommands.delete(id);
+      canceledCommands.delete(id);
       if (killed) stderr += `\n[killed: timeout after ${timeoutMs}ms]`;
       resolve({ stdout: truncate(stdout), stderr: truncate(stderr), exitCode: code });
     });
     child.on("error", (err) => {
       clearTimeout(t);
+      runningCommands.delete(id);
+      canceledCommands.delete(id);
       resolve({ stdout: "", stderr: `[spawn error] ${err.message}`, exitCode: 1 });
     });
   });

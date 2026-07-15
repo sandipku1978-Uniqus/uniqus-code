@@ -8,12 +8,13 @@ import {
   PanelGroup,
   PanelResizeHandle,
 } from "react-resizable-panels";
-import { type PermissionMode, runModeForPermission } from "@gate15/api-types";
+import { roleAtLeast, type PermissionMode, runModeForPermission } from "@gate15/api-types";
 import { connect, disconnect, send } from "@/lib/ws-client";
 import { useStore, previewTabId, fileTabId, AGENT_PREVIEW_TAB, ACTIVITY_TAB } from "@/lib/store";
 import { useIsMobile } from "@/lib/use-is-mobile";
 import { runProjectApi, switchProjectBranchApi } from "@/lib/api";
 import { toast } from "@/lib/toast";
+import { completeFirstTurnIntent, readFirstTurnIntent } from "@/lib/first-turn-intent";
 import ChatPanel from "./ChatPanel";
 import FileExplorer from "./FileExplorer";
 import EditorPreviewArea from "./EditorPreviewArea";
@@ -55,6 +56,7 @@ export default function Workspace({
   const project = useStore((s) => s.project);
   const setProject = useStore((s) => s.setProject);
   const reset = useStore((s) => s.reset);
+  const resetChat = useStore((s) => s.resetChat);
   const lastSyncedAt = useStore((s) => s.lastSyncedAt);
   // Real conversation history — anything that isn't a `system` item. The
   // `session_started` handler always adds a "session ready" system message,
@@ -76,10 +78,13 @@ export default function Workspace({
   // account_type arrives on the WS session_started event. Guests get full
   // parity except GitHub + deploys, so we drop those two topbar buttons.
   const isGuest = useStore((s) => s.user?.account_type) === "guest";
+  const effectiveRole = project?.effective_role ?? null;
+  const canEditProject = roleAtLeast(effectiveRole, "editor");
+  const canAdminProject = roleAtLeast(effectiveRole, "admin");
 
   const router = useRouter();
   const searchParams = useSearchParams();
-  const briefParam = searchParams?.get("brief") ?? null;
+  const intentParam = searchParams?.get("intent") ?? null;
   // Plan-mode preference carried from the landing-page composer ("1"/"0"). Only
   // honored for a brand-new project's first turn (see the first-turn effect).
   const planParam = searchParams?.get("plan") ?? null;
@@ -93,6 +98,7 @@ export default function Workspace({
   const [membersOpen, setMembersOpen] = useState(false);
   const [commentsOpen, setCommentsOpen] = useState(false);
   const [tasksOpen, setTasksOpen] = useState(false);
+  const [pendingFirstTurn, setPendingFirstTurn] = useState<string | null>(null);
   // Bumped to force a clean PanelGroup remount after "Reset layout" clears the
   // saved drag sizes (UI/UX audit §B).
   const [layoutKey, setLayoutKey] = useState(0);
@@ -201,10 +207,16 @@ export default function Workspace({
   // of both behaviors. Refs are reset per project below.
   const firstTurnDecidedRef = useRef(false);
   const sentFirstTurnRef = useRef(false);
+  const connectedProjectRef = useRef<string | null>(null);
   const [firstTurnModeReady, setFirstTurnModeReady] = useState(false);
 
   useEffect(() => {
-    reset();
+    // A chat-session switch must not reset project-scoped editor buffers.
+    // Clear only conversation state when the project id is unchanged; the new
+    // session_started event will replay authoritative chat history.
+    if (connectedProjectRef.current === projectId) resetChat();
+    else reset();
+    connectedProjectRef.current = projectId;
     firstTurnDecidedRef.current = false;
     sentFirstTurnRef.current = false;
     setFirstTurnModeReady(false);
@@ -212,7 +224,32 @@ export default function Workspace({
     return () => {
       disconnect();
     };
-  }, [projectId, sessionParam, reset]);
+  }, [projectId, sessionParam, reset, resetChat]);
+
+  // Resolve the opaque same-tab handoff. Prompt content never appears in the
+  // URL, browser history, access logs, analytics, or referrer headers.
+  useEffect(() => {
+    if (!intentParam) {
+      setPendingFirstTurn(null);
+      return;
+    }
+    let content: string | null = null;
+    try {
+      content = readFirstTurnIntent(projectId, intentParam);
+    } catch {
+      // Storage denied/disabled is handled as a recoverable handoff failure.
+    }
+    if (!content) {
+      toast.error("We couldn't transfer your brief. Return to Projects and try again.");
+      const params = new URLSearchParams(searchParams?.toString() ?? "");
+      params.delete("intent");
+      const query = params.toString();
+      router.replace(`/projects/${projectId}${query ? `?${query}` : ""}`);
+      setPendingFirstTurn(null);
+      return;
+    }
+    setPendingFirstTurn(content);
+  }, [intentParam, projectId, router, searchParams]);
 
   // Decide the first-turn mode once the session is ready. Runs before the brief
   // auto-fire below (which waits on firstTurnModeReady) so the brief is sent
@@ -236,26 +273,25 @@ export default function Workspace({
     if (!modeTouched) setMode("execute-only");
   }, [hasHistory, modeTouched, setMode]);
 
-  // One-sentence project creation: the picker passes the brief through
-  // ?brief=…; once the WS is up, the project loaded, and the chat is
-  // still empty (i.e. no replayed history), fire it as the first turn.
+  // One-sentence project creation: the picker passes only an opaque intent id;
+  // once the WS is ready and chat is empty, fire its session-stored content.
   // Tracked in a ref so a chat update mid-fire doesn't double-send.
   const briefFiredRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!briefParam) return;
+    if (!intentParam || !pendingFirstTurn) return;
     if (!connected || !project) return;
     // Wait until the first-turn mode is resolved so the brief fires with the
     // intended mode (plan-then-execute on a new project) rather than the stale
     // default.
     if (!firstTurnModeReady) return;
     if (hasHistory) {
-      // History exists — strip the param without firing. Avoids
-      // surprise-re-running an old brief on re-open.
+      // History exists: consume the one-shot intent without replaying it.
+      try { completeFirstTurnIntent(projectId, intentParam); } catch {}
       router.replace(`/projects/${projectId}`);
       return;
     }
-    if (briefFiredRef.current === briefParam) return;
-    briefFiredRef.current = briefParam;
+    if (briefFiredRef.current === intentParam) return;
+    briefFiredRef.current = intentParam;
     // Derive the first-turn mode SYNCHRONOUSLY from the URL's ?plan= flag
     // instead of reading the store's `mode` (B1 race fix). The decision effect
     // above writes `mode` asynchronously; gating the fire on a *separate*
@@ -277,26 +313,28 @@ export default function Workspace({
     const firstTurnMode = runModeForPermission(firstTurnPermissionMode);
     // Send first, echo only on success (mirrors ChatPanel.handleSubmit). A
     // failed send used to leave the echoed user bubble behind, which flipped
-    // hasHistory true and made the retry path strip ?brief= — so the new
+    // hasHistory true and made the retry path consume the handoff — so the new
     // project's opening prompt was shown but never delivered.
     const ok = send({
       type: "user_message",
-      content: briefParam,
+      content: pendingFirstTurn,
       mode: firstTurnMode,
       permission_mode: firstTurnPermissionMode,
       model: model !== "auto" ? model : undefined,
       thinking: thinking !== "medium" ? thinking : undefined,
     });
     if (!ok) {
-      // Leave the param in place so a reconnect retries the fire.
+      // Leave the intent in place so a reconnect can retry idempotently.
       briefFiredRef.current = null;
       return;
     }
-    addUserMessage(briefParam);
+    addUserMessage(pendingFirstTurn);
     setBusy(true);
+    try { completeFirstTurnIntent(projectId, intentParam); } catch {}
     router.replace(`/projects/${projectId}`);
   }, [
-    briefParam,
+    intentParam,
+    pendingFirstTurn,
     connected,
     project,
     hasHistory,
@@ -321,7 +359,7 @@ export default function Workspace({
   //     Code; folded into the ⋯ menu in Builder and on mobile so the
   //     beginner topbar stays uncluttered.
   // The resting Deploy button reads "Publish" in Builder (plain language).
-  const deployAction = !isGuest ? (
+  const deployAction = !isGuest && canEditProject ? (
     <DeployButton
       projectId={projectId}
       label={view === "builder" ? "Publish" : "Deploy"}
@@ -329,14 +367,17 @@ export default function Workspace({
   ) : null;
   const secondaryActionsRest = (
     <>
-      {!isGuest && <GithubRepoButton projectId={projectId} />}
+      {!isGuest && canAdminProject && <GithubRepoButton projectId={projectId} />}
       <button
         onClick={() => {
           setSkillsOpen(true);
           setOverflowOpen(false);
         }}
         className="toggle-btn"
-        title="Edit project Skills (instructions prepended to the agent's system prompt)"
+        disabled={!canAdminProject}
+        title={canAdminProject
+          ? "Edit project Skills (instructions prepended to the agent's system prompt)"
+          : "Only project admins and owners can edit Skills"}
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
@@ -352,6 +393,7 @@ export default function Workspace({
           setOverflowOpen(false);
         }}
         className="toggle-btn"
+        disabled={!canEditProject}
         title="Manage project secrets (encrypted; available only to trusted connectors and deployments)"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -366,6 +408,7 @@ export default function Workspace({
           setOverflowOpen(false);
         }}
         className="toggle-btn"
+        disabled={!canEditProject}
         title="Browse + restore agent-made checkpoints"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -381,7 +424,9 @@ export default function Workspace({
             setOverflowOpen(false);
           }}
           className="toggle-btn"
-          title="Invite teammates and manage their roles on this project"
+          title={canAdminProject
+            ? "Invite teammates and manage their roles on this project"
+            : "View collaborators; only project admins and owners can change access"}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
@@ -392,7 +437,7 @@ export default function Workspace({
           <span>Members</span>
         </button>
       )}
-      {!isGuest && (
+      {!isGuest && canEditProject && (
         <button
           onClick={() => {
             setCommentsOpen(true);
@@ -407,7 +452,7 @@ export default function Workspace({
           <span>Comments</span>
         </button>
       )}
-      {!isGuest && (
+      {!isGuest && canEditProject && (
         <button
           onClick={() => {
             setTasksOpen(true);
@@ -490,14 +535,16 @@ export default function Workspace({
               <span>Reset layout</span>
             </button>
             <span className="topbar-overflow-sep" />
-            <a href={signOutUrl} className="toggle-btn" style={{ textDecoration: "none" }}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-                <polyline points="16 17 21 12 16 7" />
-                <line x1="21" y1="12" x2="9" y2="12" />
-              </svg>
-              <span>Sign out</span>
-            </a>
+            <form action={signOutUrl} method="post">
+              <button type="submit" className="toggle-btn">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                  <polyline points="16 17 21 12 16 7" />
+                  <line x1="21" y1="12" x2="9" y2="12" />
+                </svg>
+                <span>Sign out</span>
+              </button>
+            </form>
           </div>
         </>
       )}
@@ -852,13 +899,13 @@ export default function Workspace({
         </nav>
       )}
 
-      {skillsOpen && (
+      {skillsOpen && canAdminProject && (
         <SkillsModal projectId={projectId} onClose={() => setSkillsOpen(false)} />
       )}
-      {secretsOpen && (
+      {secretsOpen && canEditProject && (
         <SecretsModal projectId={projectId} onClose={() => setSecretsOpen(false)} />
       )}
-      {checkpointsOpen && (
+      {checkpointsOpen && canEditProject && (
         <CheckpointsModal projectId={projectId} onClose={() => setCheckpointsOpen(false)} />
       )}
       {membersOpen && (
@@ -867,10 +914,10 @@ export default function Workspace({
           subtitle="Invite teammates by email and set their role on this project."
           onClose={() => setMembersOpen(false)}
         >
-          <MembersView projectId={projectId} />
+          <MembersView projectId={projectId} effectiveRole={effectiveRole} />
         </Modal>
       )}
-      {commentsOpen && (
+      {commentsOpen && canEditProject && (
         <Modal
           title="Comments"
           subtitle="Leave review comments scoped to an element, file, checkpoint, PR, or the whole project."
@@ -879,7 +926,7 @@ export default function Workspace({
           <CommentsView projectId={projectId} />
         </Modal>
       )}
-      {tasksOpen && (
+      {tasksOpen && canEditProject && (
         <Modal
           title="Agent tasks"
           subtitle="Queue durable tasks for the agent and track their status."

@@ -294,3 +294,37 @@ export async function safeFetch(
     current = next;
   }
 }
+
+/** Read a fetch response without allowing a peer to stream unbounded bytes into memory. */
+export async function readResponseTextLimited(
+  response: Pick<UndiciResponse, "body">,
+  maxBytes: number,
+): Promise<{ text: string; truncated: boolean }> {
+  if (!response.body) return { text: "", truncated: false };
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      const remaining = maxBytes - total;
+      if (remaining > 0) chunks.push(value.subarray(0, remaining));
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel("response body exceeded limit").catch(() => {});
+        return {
+          text: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf-8"),
+          truncated: true,
+        };
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return {
+    text: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf-8"),
+    truncated: false,
+  };
+}

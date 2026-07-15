@@ -1,7 +1,8 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import AdmZip from "adm-zip";
-import { SKIP_DIR_NAMES, SKIP_FILE_BASENAMES, isSecretEnvFile } from "./deploy.js";
+import { SKIP_DIR_NAMES, SKIP_FILE_BASENAMES } from "./deploy.js";
+import { isSensitiveProjectPath } from "./security/sensitivePaths.js";
 
 // Total uncompressed cap so a runaway sandbox can't produce a gigabyte zip.
 // Matches the import + deploy caps (200 MB).
@@ -25,22 +26,22 @@ export async function buildProjectZip(rootDir: string): Promise<Buffer> {
       return;
     }
     for (const e of entries) {
-      // Skip secret .env family + known junk files.
-      if (isSecretEnvFile(e.name)) continue;
+      const full = path.join(dir, e.name);
+      const rel = path.relative(rootDir, full).replaceAll(path.sep, "/");
+      // Skip every credential-bearing path, not only the `.env` family.
+      if (isSensitiveProjectPath(rel)) continue;
       if (SKIP_FILE_BASENAMES.has(e.name)) continue;
       if (e.isDirectory()) {
         if (SKIP_DIR_NAMES.has(e.name)) continue;
-        await visit(path.join(dir, e.name));
+        await visit(full);
         continue;
       }
       if (!e.isFile()) continue;
-      const full = path.join(dir, e.name);
       const data = await fs.readFile(full);
       totalBytes += data.length;
       if (totalBytes > TOTAL_SIZE_CAP) {
         throw new Error(`export exceeds ${TOTAL_SIZE_CAP / 1024 / 1024} MB cap`);
       }
-      const rel = path.relative(rootDir, full).replaceAll(path.sep, "/");
       zip.addFile(rel, data);
     }
   }

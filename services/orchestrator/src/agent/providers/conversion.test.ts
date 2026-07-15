@@ -425,6 +425,7 @@ describe("google · toGeminiContents", () => {
       },
     ];
 
+    (messages[0].content as Array<Record<string, unknown>>)[0].google_function_call_id = true;
     const contents = toGeminiContents(messages);
 
     expect(contents).toEqual([
@@ -432,7 +433,7 @@ describe("google · toGeminiContents", () => {
         role: "model",
         parts: [
           {
-            functionCall: { name: "read_file", args: { path: "a.txt" } },
+            functionCall: { id: "call_1", name: "read_file", args: { path: "a.txt" } },
             // This call carries no thought_signature (as if minted by a
             // non-Gemini provider); on a 3.x target it gets the documented
             // dummy bypass so Gemini's reasoning state isn't poisoned.
@@ -457,21 +458,54 @@ describe("google · toGeminiContents", () => {
     ]);
   });
 
-  it("preserves a Gemini thought signature on the function-call part", () => {
+  it("preserves a Gemini thought signature and provider ID on the function-call part", () => {
     const block = {
       type: "tool_use",
       id: "call_1",
       name: "read_file",
       input: { path: "a.txt" },
       thought_signature: "SIG",
+      google_function_call_id: true,
     } as unknown as Anthropic.ContentBlockParam;
 
     const contents = toGeminiContents([{ role: "assistant", content: [block] }]);
     const part = (contents[0].parts as Array<Record<string, unknown>>)[0];
     expect(part.thoughtSignature).toBe("SIG");
     expect(part.functionCall).toEqual({
+      id: "call_1",
       name: "read_file",
       args: { path: "a.txt" },
+    });
+  });
+
+  it("omits foreign provider IDs from both the function call and response", () => {
+    const messages: Anthropic.MessageParam[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_anthropic_1",
+            name: "read_file",
+            input: { path: "a.txt" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "toolu_anthropic_1", content: "x" },
+        ],
+      },
+    ];
+
+    const contents = toGeminiContents(messages);
+    const call = (contents[0].parts as Array<Record<string, unknown>>)[0];
+    const result = (contents[1].parts as Array<Record<string, unknown>>)[0];
+    expect(call.functionCall).toEqual({ name: "read_file", args: { path: "a.txt" } });
+    expect(result.functionResponse).toEqual({
+      name: "read_file",
+      response: { result: "x" },
     });
   });
 

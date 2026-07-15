@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Organization, Role } from "@gate15/api-types";
 import { roleAtLeast } from "@gate15/api-types";
 import {
@@ -30,36 +30,56 @@ export default function OrgSettingsView({
   const [budget, setBudget] = useState("");
   const [savingBudget, setSavingBudget] = useState(false);
   const [confirm, setConfirm] = useState<null | "leave" | "delete">(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
+  const [loadedOrgId, setLoadedOrgId] = useState<string | null>(null);
+  const loadGenerationRef = useRef(0);
+  const orgIdRef = useRef(orgId);
+  orgIdRef.current = orgId;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
+    const generation = ++loadGenerationRef.current;
+    setOrg(null);
+    setRole(null);
+    setLoadedOrgId(null);
     setLoadError(null);
     try {
-      const { org, role } = await fetchOrgApi(orgId);
+      const { org, role } = await fetchOrgApi(orgId, signal);
+      if (signal?.aborted || generation !== loadGenerationRef.current) return;
       setOrg(org);
       setRole(role);
+      setLoadedOrgId(orgId);
       setName(org.name);
       setBudget(org.monthly_budget_usd == null ? "" : String(org.monthly_budget_usd));
     } catch (e) {
+      if (signal?.aborted || generation !== loadGenerationRef.current) return;
       setLoadError(e instanceof Error ? e.message : "Couldn't load organization");
     }
   }, [orgId]);
 
   useEffect(() => {
-    setOrg(null);
+    const controller = new AbortController();
     setConfirm(null);
-    void load();
+    void load(controller.signal);
+    return () => {
+      controller.abort();
+      loadGenerationRef.current += 1;
+    };
   }, [load]);
 
-  const canManage = roleAtLeast(role, "admin");
-  const isOwner = role === "owner";
+  useEffect(() => setDeleteConfirmation(""), [confirm]);
+
+  const canManage = loadedOrgId === orgId && roleAtLeast(role, "admin");
+  const isOwner = loadedOrgId === orgId && role === "owner";
 
   async function saveName() {
     const trimmed = name.trim();
-    if (!trimmed || savingName || !org || trimmed === org.name) return;
+    const targetOrgId = loadedOrgId;
+    if (!trimmed || savingName || !org || !targetOrgId || targetOrgId !== orgId || trimmed === org.name) return;
     setSavingName(true);
     try {
-      await renameOrgApi(orgId, trimmed);
+      await renameOrgApi(targetOrgId, trimmed);
+      if (orgIdRef.current !== targetOrgId) return;
       setOrg({ ...org, name: trimmed });
       onRenamed(trimmed);
       toast.success("Organization renamed");
@@ -71,7 +91,8 @@ export default function OrgSettingsView({
   }
 
   async function saveBudget() {
-    if (savingBudget || !org) return;
+    const targetOrgId = loadedOrgId;
+    if (savingBudget || !org || !targetOrgId || targetOrgId !== orgId) return;
     const trimmed = budget.trim();
     let value: number | null;
     if (trimmed === "") {
@@ -86,7 +107,8 @@ export default function OrgSettingsView({
     }
     setSavingBudget(true);
     try {
-      await setOrgBudgetApi(orgId, value);
+      await setOrgBudgetApi(targetOrgId, value);
+      if (orgIdRef.current !== targetOrgId) return;
       setOrg({ ...org, monthly_budget_usd: value });
       toast.success(value == null ? "Budget cleared" : `Monthly cap set to $${value}`);
     } catch (e) {
@@ -97,10 +119,12 @@ export default function OrgSettingsView({
   }
 
   async function doLeave() {
-    if (busy) return;
+    const targetOrgId = loadedOrgId;
+    if (busy || !targetOrgId || targetOrgId !== orgId) return;
     setBusy(true);
     try {
-      await leaveOrgApi(orgId);
+      await leaveOrgApi(targetOrgId);
+      if (orgIdRef.current !== targetOrgId) return;
       toast.success("You left the organization");
       onRemoved();
     } catch (e) {
@@ -112,10 +136,12 @@ export default function OrgSettingsView({
   }
 
   async function doDelete() {
-    if (busy) return;
+    const targetOrgId = loadedOrgId;
+    if (busy || !targetOrgId || targetOrgId !== orgId) return;
     setBusy(true);
     try {
-      await deleteOrgApi(orgId);
+      await deleteOrgApi(targetOrgId);
+      if (orgIdRef.current !== targetOrgId) return;
       toast.success("Organization deleted");
       onRemoved();
     } catch (e) {
@@ -198,12 +224,15 @@ export default function OrgSettingsView({
                 <div className="org-section-head">
                   <span className="org-section-index">Spend policy</span>
                   <h2>Monthly agent budget</h2>
-                  <p>Runs pause when combined organization spend reaches this ceiling.</p>
+                  <p>
+                    A best-effort guard for starting new runs. Concurrent runs can finish over
+                    the target, and recently incurred cost can take time to appear.
+                  </p>
                 </div>
                 <div className="org-setting-form">
                   <div className="org-setting-label-row">
-                    <label htmlFor="org-settings-budget">Monthly cap in USD</label>
-                    <span>{org.monthly_budget_usd == null ? "No cap" : `$${org.monthly_budget_usd} / month`}</span>
+                    <label htmlFor="org-settings-budget">Monthly guard in USD</label>
+                    <span>{org.monthly_budget_usd == null ? "No guard" : `$${org.monthly_budget_usd} / month`}</span>
                   </div>
                   <div className="org-field-action org-money-field">
                     <span aria-hidden="true">$</span>
@@ -213,7 +242,7 @@ export default function OrgSettingsView({
                       min={0}
                       step="any"
                       inputMode="decimal"
-                      placeholder="No cap"
+                      placeholder="No guard"
                       value={budget}
                       disabled={!canManage}
                       onChange={(event) => setBudget(event.target.value)}
@@ -230,7 +259,9 @@ export default function OrgSettingsView({
                       {savingBudget ? "Saving…" : "Save budget"}
                     </button>
                   </div>
-                  <p className="org-field-note">Leave blank to monitor spend without enforcing a cap.</p>
+                  <p className="org-field-note">
+                    Leave blank for monitoring only. This guard is not a guaranteed billing cap.
+                  </p>
                 </div>
               </section>
             </div>
@@ -275,7 +306,8 @@ export default function OrgSettingsView({
                 <div>
                   <div className="t">Leave organization</div>
                   <div className="d">
-                    You&apos;ll lose access to shared projects. Projects you own return to Personal.
+                    You&apos;ll immediately lose access to every organization project.
+                    No projects move to Personal.
                   </div>
                 </div>
                 {confirm === "leave" ? (
@@ -299,15 +331,31 @@ export default function OrgSettingsView({
                   <div>
                     <div className="t">Delete organization</div>
                     <div className="d">
-                      Membership is removed; projects remain and return to their owners.
+                      All organization projects move to your Personal workspace;
+                      every other member loses access.
                     </div>
                   </div>
                   {confirm === "delete" ? (
                     <div className="org-confirm-actions">
+                      <label className="sr-only" htmlFor="delete-org-confirmation">
+                        Type the organization name to confirm deletion
+                      </label>
+                      <input
+                        id="delete-org-confirmation"
+                        value={deleteConfirmation}
+                        onChange={(event) => setDeleteConfirmation(event.target.value)}
+                        placeholder={`Type “${org.name}”`}
+                        autoComplete="off"
+                      />
                       <button type="button" className="btn-ghost" onClick={() => setConfirm(null)} disabled={busy}>
                         Cancel
                       </button>
-                      <button type="button" className="btn-danger" onClick={() => void doDelete()} disabled={busy}>
+                      <button
+                        type="button"
+                        className="btn-danger"
+                        onClick={() => void doDelete()}
+                        disabled={busy || deleteConfirmation.trim() !== org.name}
+                      >
                         {busy ? "Deleting…" : "Delete forever"}
                       </button>
                     </div>

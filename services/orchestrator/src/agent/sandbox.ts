@@ -1,4 +1,10 @@
-import { createReadStream, promises as fs, existsSync } from "node:fs";
+import {
+  constants as fsConstants,
+  createReadStream,
+  promises as fs,
+  existsSync,
+  realpathSync,
+} from "node:fs";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
@@ -84,12 +90,41 @@ export function shellInfo(): { name: string; isUnixLike: boolean } {
 }
 
 function resolvePath(sandbox: Sandbox, p: string): string {
-  const root = path.resolve(sandbox.rootDir);
-  const resolved = path.resolve(root, p);
-  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+  const lexicalRoot = path.resolve(sandbox.rootDir);
+  const lexical = path.resolve(lexicalRoot, p);
+  const lexicalRelative = path.relative(lexicalRoot, lexical);
+  if (lexicalRelative.startsWith("..") || path.isAbsolute(lexicalRelative)) {
     throw new Error(`Path escapes sandbox: ${p}`);
   }
-  return resolved;
+  const root = existsSync(lexicalRoot) ? realpathSync(lexicalRoot) : lexicalRoot;
+  let ancestor = lexical;
+  const missing: string[] = [];
+  while (!existsSync(ancestor)) {
+    const parent = path.dirname(ancestor);
+    if (parent === ancestor) throw new Error(`Path escapes sandbox: ${p}`);
+    missing.unshift(path.basename(ancestor));
+    ancestor = parent;
+  }
+  const canonicalAncestor = realpathSync(ancestor);
+  const canonicalRelative = path.relative(root, canonicalAncestor);
+  if (canonicalRelative.startsWith("..") || path.isAbsolute(canonicalRelative)) {
+    throw new Error(`Path escapes sandbox through a symlink: ${p}`);
+  }
+  return path.join(canonicalAncestor, ...missing);
+}
+
+async function writeResolvedFile(full: string, content: string | Buffer): Promise<void> {
+  const flags =
+    fsConstants.O_WRONLY |
+    fsConstants.O_CREAT |
+    fsConstants.O_TRUNC |
+    (fsConstants.O_NOFOLLOW ?? 0);
+  const handle = await fs.open(full, flags, 0o666);
+  try {
+    await handle.writeFile(typeof content === "string" ? Buffer.from(content, "utf-8") : content);
+  } finally {
+    await handle.close();
+  }
 }
 
 /** Preserve the existing cap for internal consumers such as predeploy scans. */
@@ -513,7 +548,7 @@ export async function writeFile(
     try {
       const full = resolvePath(sandbox, p);
       await fs.mkdir(path.dirname(full), { recursive: true });
-      await fs.writeFile(full, content, "utf-8");
+      await writeResolvedFile(full, content);
     } catch (err) {
       console.error(`[sandbox] host mirror failed for ${p}:`, err);
     }
@@ -521,7 +556,7 @@ export async function writeFile(
   }
   const full = resolvePath(sandbox, p);
   await fs.mkdir(path.dirname(full), { recursive: true });
-  await fs.writeFile(full, content, "utf-8");
+  await writeResolvedFile(full, content);
 }
 
 /**
@@ -539,7 +574,7 @@ export async function writeFileBinary(
     try {
       const full = resolvePath(sandbox, p);
       await fs.mkdir(path.dirname(full), { recursive: true });
-      await fs.writeFile(full, content);
+      await writeResolvedFile(full, content);
     } catch (err) {
       console.error(`[sandbox] host mirror failed for ${p}:`, err);
     }
@@ -547,7 +582,7 @@ export async function writeFileBinary(
   }
   const full = resolvePath(sandbox, p);
   await fs.mkdir(path.dirname(full), { recursive: true });
-  await fs.writeFile(full, content);
+  await writeResolvedFile(full, content);
 }
 
 /** Internal full-file pull for host mirroring. Model-facing readFile is capped. */
@@ -592,7 +627,7 @@ export async function editFile(
           const vmContent = await readVmTextForMirror(sandbox.vm, p);
           if (vmContent !== null) {
             await fs.mkdir(path.dirname(full), { recursive: true });
-            await fs.writeFile(full, vmContent, "utf-8");
+            await writeResolvedFile(full, vmContent);
           }
         }
       } else {
@@ -600,7 +635,7 @@ export async function editFile(
         const vmContent = await readVmTextForMirror(sandbox.vm, p);
         if (vmContent !== null) {
           await fs.mkdir(path.dirname(full), { recursive: true });
-          await fs.writeFile(full, vmContent, "utf-8");
+          await writeResolvedFile(full, vmContent);
         }
       }
     } catch (err) {
@@ -616,7 +651,7 @@ export async function editFile(
     throw new Error(
       `old_string is not unique in ${p} (${occurrences} matches)`,
     );
-  await fs.writeFile(full, content.replace(oldString, newString), "utf-8");
+  await writeResolvedFile(full, content.replace(oldString, newString));
 }
 
 export async function listDir(sandbox: Sandbox, p?: string): Promise<string[]> {
@@ -862,8 +897,8 @@ export async function runCommand(
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    let stdout = "";
-    let stderr = "";
+    const stdout = new BoundedCommandOutput();
+    const stderr = new BoundedCommandOutput();
     let killed = false;
     let abortedByUser = false;
 
@@ -886,19 +921,19 @@ export async function runCommand(
     }
 
     child.stdout.on("data", (d) => {
-      stdout += d.toString();
+      stdout.append(d);
     });
     child.stderr.on("data", (d) => {
-      stderr += d.toString();
+      stderr.append(d);
     });
 
     child.on("close", (code) => {
       clearTimeout(timer);
       if (signal) signal.removeEventListener("abort", onAbort);
-      if (abortedByUser) stderr += `\n[killed: aborted by user]`;
-      else if (killed) stderr += `\n[killed: timeout after ${timeoutMs}ms]`;
-      const boundedStdout = truncateCommandOutput(stdout);
-      const boundedStderr = truncateCommandOutput(stderr);
+      if (abortedByUser) stderr.append("\n[killed: aborted by user]");
+      else if (killed) stderr.append(`\n[killed: timeout after ${timeoutMs}ms]`);
+      const boundedStdout = stdout.result();
+      const boundedStderr = stderr.result();
       resolve({
         stdout: boundedStdout.text,
         stderr: boundedStderr.text,
@@ -919,14 +954,37 @@ export async function runCommand(
   });
 }
 
-function truncateCommandOutput(s: string): { text: string; truncated: boolean } {
-  if (s.length <= HALF_MAX * 2) return { text: s, truncated: false };
-  const head = s.slice(0, HALF_MAX);
-  const tail = s.slice(-HALF_MAX);
-  return {
-    text: `${head}\n\n[... truncated ${s.length - HALF_MAX * 2} bytes ...]\n\n${tail}`,
-    truncated: true,
-  };
+class BoundedCommandOutput {
+  private head = Buffer.alloc(0);
+  private tail = Buffer.alloc(0);
+  private totalBytes = 0;
+
+  append(value: Buffer | string): void {
+    let chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+    this.totalBytes += chunk.length;
+    if (this.head.length < HALF_MAX) {
+      const take = Math.min(HALF_MAX - this.head.length, chunk.length);
+      this.head = Buffer.concat([this.head, chunk.subarray(0, take)]);
+      chunk = chunk.subarray(take);
+    }
+    if (chunk.length > 0) {
+      this.tail = Buffer.concat([this.tail, chunk]);
+      if (this.tail.length > HALF_MAX) this.tail = this.tail.subarray(this.tail.length - HALF_MAX);
+    }
+  }
+
+  result(): { text: string; truncated: boolean } {
+    if (this.totalBytes <= HALF_MAX * 2) {
+      return { text: Buffer.concat([this.head, this.tail]).toString("utf-8"), truncated: false };
+    }
+    return {
+      text:
+        `${this.head.toString("utf-8")}\n\n` +
+        `[... truncated ${this.totalBytes - HALF_MAX * 2} bytes ...]\n\n` +
+        this.tail.toString("utf-8"),
+      truncated: true,
+    };
+  }
 }
 
 export async function waitForPort(
@@ -949,13 +1007,20 @@ export async function waitForPort(
     // Abort-aware sleep so Stop responds within ~250ms instead of waiting
     // out the full timeout.
     const aborted = await new Promise<boolean>((resolve) => {
-      const t = setTimeout(() => resolve(false), 250);
+      let settled = false;
+      let t: ReturnType<typeof setTimeout> | undefined;
+      const finish = (abortedNow: boolean): void => {
+        if (settled) return;
+        settled = true;
+        if (t) clearTimeout(t);
+        if (signal) signal.removeEventListener("abort", onAbort);
+        resolve(abortedNow);
+      };
+      const onAbort = (): void => finish(true);
+      t = setTimeout(() => finish(false), 250);
       if (signal) {
-        const onAbort = (): void => {
-          clearTimeout(t);
-          resolve(true);
-        };
-        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) finish(true);
+        else signal.addEventListener("abort", onAbort, { once: true });
       }
     });
     if (aborted) return false;
@@ -1217,16 +1282,21 @@ export async function startServer(
   return { id, command, port, pid: server.pid, started_at: server.started_at };
 }
 
-export function stopServer(id: string): void {
+function ownedServer(expectedProjectId: string, id: string): ManagedServer | null {
   const server = servers.get(id);
+  return server?.project_id === expectedProjectId ? server : null;
+}
+
+export async function stopServer(expectedProjectId: string, id: string): Promise<void> {
+  const server = ownedServer(expectedProjectId, id);
   if (!server) throw new Error(`No server with id ${id}`);
   if (server.vm) {
-    // Fire-and-forget — the in-VM agent kills the process tree inside the VM.
     // Address the agent by the id IT knows (vmServerId), not the host id.
-    void fcAgent.stopServer(server.vm, server.vmServerId ?? id).catch(() => {});
+    await fcAgent.stopServer(server.vm, server.vmServerId ?? id);
   } else {
     treeKill(server.pid, "SIGKILL");
   }
+  // Keep the handle retryable when guest termination fails.
   servers.delete(id);
 }
 
@@ -1263,7 +1333,7 @@ export function listServers(projectId?: string | null): ServerInfo[] {
   }));
 }
 
-export function getServer(id: string): {
+export function getServer(expectedProjectId: string, id: string): {
   id: string;
   command: string;
   port: number;
@@ -1271,7 +1341,7 @@ export function getServer(id: string): {
   /** Host to dial when proxying to this server. "127.0.0.1" for process-backed; the VM's IP for VM-backed. */
   host: string;
 } | null {
-  const s = servers.get(id);
+  const s = ownedServer(expectedProjectId, id);
   if (!s) return null;
   const host = s.vm?.ip ?? "127.0.0.1";
   return {
@@ -1283,8 +1353,15 @@ export function getServer(id: string): {
   };
 }
 
-export function readServerLog(id: string, maxBytes = 8000): string {
+/** View-capability lookup used only by the isolated preview proxy/share path. */
+export function getServerByCapability(id: string): ReturnType<typeof getServer> {
   const server = servers.get(id);
+  if (!server?.project_id) return null;
+  return getServer(server.project_id, id);
+}
+
+export function readServerLog(expectedProjectId: string, id: string, maxBytes = 8000): string {
+  const server = ownedServer(expectedProjectId, id);
   if (!server) throw new Error(`No server with id ${id}`);
   // For VM-backed servers we don't tail synchronously today — the in-VM
   // agent buffers log lines and exposes them via a separate RPC; callers
@@ -1297,10 +1374,11 @@ export function readServerLog(id: string, maxBytes = 8000): string {
  * servers. Process-backed servers fall through to the in-memory buffer.
  */
 export async function readServerLogAsync(
+  expectedProjectId: string,
   id: string,
   maxBytes = 8000,
 ): Promise<string> {
-  const server = servers.get(id);
+  const server = ownedServer(expectedProjectId, id);
   if (!server) throw new Error(`No server with id ${id}`);
   if (server.vm) {
     try {

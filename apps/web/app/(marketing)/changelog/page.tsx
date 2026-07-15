@@ -907,7 +907,7 @@ export default function ChangelogPage() {
                   <span className="ver">{entry.ver}</span>
                 </div>
                 <div className="changelog-body">
-                  <h3>{entry.title}</h3>
+                  <h2>{entry.title}</h2>
                   <ul>
                     {entry.changes.map((change) => (
                       <li key={change.commit}>
@@ -917,6 +917,7 @@ export default function ChangelogPage() {
                         <span>
                           {change.text}{" "}
                           <a
+                            className="changelog-commit-link"
                             href={`${COMMIT_URL}${change.commit}`}
                             target="_blank"
                             rel="noreferrer"

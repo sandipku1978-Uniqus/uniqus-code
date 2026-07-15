@@ -1,5 +1,5 @@
 import type { ConnectorDefinition } from "./index.js";
-import { assertPublicUrl, safeFetch } from "./ssrfGuard.js";
+import { assertPublicUrl, readResponseTextLimited, safeFetch } from "./ssrfGuard.js";
 
 export function isAllowedSecretDestination(hostname: string, allowedHosts: readonly string[]): boolean {
   const normalize = (host: string): string => host.trim().toLowerCase().replace(/\.$/, "");
@@ -123,25 +123,25 @@ export const httpConnector: ConnectorDefinition = {
             { method, headers, body, signal: ctrl.signal },
             usingSecret ? 0 : 4,
           );
-          const text = await res.text();
+          const limited = await readResponseTextLimited(res, 32_000);
+          const text = limited.text;
           let parsedBody: unknown = text;
           const ct = res.headers.get("content-type") ?? "";
-          if (ct.includes("application/json") && text) {
+          if (!limited.truncated && ct.includes("application/json") && text) {
             try {
               parsedBody = JSON.parse(text);
             } catch {
               // leave as text
             }
           }
-          // Cap body to ~32 KB so the agent context doesn't balloon.
-          const truncated = typeof parsedBody === "string" && parsedBody.length > 32_000
-            ? `${parsedBody.slice(0, 32_000)}\n[... truncated ${parsedBody.length - 32_000} bytes ...]`
+          const bodyResult = limited.truncated
+            ? `${text}\n[... response truncated at 32000 bytes ...]`
             : parsedBody;
           return {
             status: res.status,
             ok: res.ok,
             headers: Object.fromEntries(res.headers.entries()),
-            body: truncated,
+            body: bodyResult,
           };
         } finally {
           clearTimeout(t);

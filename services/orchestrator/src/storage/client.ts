@@ -47,10 +47,25 @@ function storage(): SupabaseClient {
 export async function ensureBucket(): Promise<void> {
   const { data: buckets, error: listErr } = await storage().storage.listBuckets();
   if (listErr) throw new Error(`listBuckets failed: ${listErr.message}`);
-  if (buckets?.some((b) => b.name === BUCKET)) return;
+  const existing = buckets?.find((bucket) => bucket.name === BUCKET);
+  if (existing) {
+    if (existing.public !== false) {
+      throw new Error(`storage bucket ${BUCKET} must be private`);
+    }
+    return;
+  }
   const { error } = await storage().storage.createBucket(BUCKET, { public: false });
-  if (error && !/already exists/i.test(error.message)) {
+  if (!error) return;
+  if (!/already exists/i.test(error.message)) {
     throw new Error(`createBucket failed: ${error.message}`);
+  }
+  // A concurrent creator won the race. Re-read instead of treating
+  // "already exists" as proof that the bucket has the required privacy.
+  const { data: racedBuckets, error: racedListErr } = await storage().storage.listBuckets();
+  if (racedListErr) throw new Error(`listBuckets after create race failed: ${racedListErr.message}`);
+  const raced = racedBuckets?.find((bucket) => bucket.name === BUCKET);
+  if (!raced || raced.public !== false) {
+    throw new Error(`storage bucket ${BUCKET} must exist and be private`);
   }
 }
 
@@ -119,22 +134,31 @@ export async function removeObjects(keys: string[]): Promise<void> {
  */
 export async function listAll(projectId: string): Promise<string[]> {
   const collected: string[] = [];
+  const pageSize = 1000;
 
   async function walk(prefix: string): Promise<void> {
-    const { data, error } = await storage()
-      .storage.from(BUCKET)
-      .list(prefix, { limit: 1000, sortBy: { column: "name", order: "asc" } });
-    if (error) throw new Error(`list ${prefix}: ${error.message}`);
-    for (const item of data ?? []) {
-      const fullPath = `${prefix}/${item.name}`;
-      if (item.id === null) {
-        // folder
-        await walk(fullPath);
-      } else {
-        // Decode the encoded segments back to the user-facing path
-        // (so callers see app/[slug]/page.tsx, not app/%5Bslug%5D/page.tsx).
-        collected.push(decodePath(fullPath.slice(projectId.length + 1)));
+    for (let offset = 0; ; offset += pageSize) {
+      const { data, error } = await storage()
+        .storage.from(BUCKET)
+        .list(prefix, {
+          limit: pageSize,
+          offset,
+          sortBy: { column: "name", order: "asc" },
+        });
+      if (error) throw new Error(`list ${prefix}: ${error.message}`);
+      const page = data ?? [];
+      for (const item of page) {
+        const fullPath = `${prefix}/${item.name}`;
+        if (item.id === null) {
+          // folder
+          await walk(fullPath);
+        } else {
+          // Decode the encoded segments back to the user-facing path
+          // (so callers see app/[slug]/page.tsx, not app/%5Bslug%5D/page.tsx).
+          collected.push(decodePath(fullPath.slice(projectId.length + 1)));
+        }
       }
+      if (page.length < pageSize) break;
     }
   }
 

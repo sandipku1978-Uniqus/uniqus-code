@@ -4,11 +4,19 @@ import {
   handleAuthkitHeaders,
 } from "@workos-inc/authkit-nextjs";
 import {
+  NextRequest,
   NextResponse,
-  type NextRequest,
   type NextFetchEvent,
 } from "next/server";
-import { GUEST_COOKIE_NAME, unsealGuestCookie } from "@/lib/guest-session";
+import {
+  GUEST_COOKIE_NAME,
+  LEGACY_GUEST_COOKIE_NAME,
+  unsealGuestCookie,
+} from "@/lib/guest-session";
+import {
+  applySecurityHeaders,
+  buildContentSecurityPolicy,
+} from "@/lib/security-headers";
 
 /**
  * Public marketing + resource pages (app/(marketing)/*, which now includes the
@@ -70,20 +78,35 @@ export default async function middleware(
   req: NextRequest,
   event: NextFetchEvent,
 ) {
-  const { pathname } = req.nextUrl;
+  const nonce = crypto.randomUUID().replaceAll("-", "");
+  const csp = buildContentSecurityPolicy(nonce);
+  const requestHeaders = new Headers(req.headers);
+  requestHeaders.set("x-nonce", nonce);
+  requestHeaders.set("Content-Security-Policy", csp);
+  const securedReq = new NextRequest(req, { headers: requestHeaders });
+  const secure = <T extends Response>(response: T): T => {
+    applySecurityHeaders(response.headers, csp);
+    return response;
+  };
+
+  const { pathname } = securedReq.nextUrl;
   if (pathname === "/api/guest" || pathname.startsWith("/api/guest/")) {
-    return NextResponse.next();
+    return secure(NextResponse.next({ request: { headers: requestHeaders } }));
   }
   const guest = await unsealGuestCookie(
-    req.cookies.get(GUEST_COOKIE_NAME)?.value,
+    securedReq.cookies.get(GUEST_COOKIE_NAME)?.value ??
+      securedReq.cookies.get(LEGACY_GUEST_COOKIE_NAME)?.value,
   );
   if (guest) {
     // Same as authkitMiddleware minus the unauthenticated-paths redirect:
     // guests must reach /projects etc. without being bounced to sign-in.
-    const { headers } = await authkit(req);
-    return handleAuthkitHeaders(req, headers);
+    const { headers } = await authkit(securedReq);
+    return secure(handleAuthkitHeaders(securedReq, headers));
   }
-  return workosMiddleware(req, event);
+  const response = await workosMiddleware(securedReq, event);
+  return secure(
+    response ?? NextResponse.next({ request: { headers: requestHeaders } }),
+  );
 }
 
 export const config = {

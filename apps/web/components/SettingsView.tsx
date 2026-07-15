@@ -92,7 +92,7 @@ function Section({
           >
             {title}
           </span>
-          <span style={{ fontSize: 12.5, color: "var(--text-muted)" }}>{subtitle}</span>
+          <span style={{ fontSize: 13, color: "var(--text-muted)" }}>{subtitle}</span>
         </span>
       </summary>
       <div style={{ marginTop: 4 }}>{children}</div>
@@ -105,6 +105,29 @@ function Section({
         .settings-section[open] > summary { margin-bottom: 4px; }
       `}</style>
     </details>
+  );
+}
+
+function IntegrationStatusError({
+  service,
+  message,
+  onRetry,
+}: {
+  service: string;
+  message: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="async-error" role="alert">
+      <p>
+        {service} connection status is unavailable. An existing connection may
+        still be active.
+      </p>
+      <code>{message}</code>
+      <button type="button" className="btn-secondary" onClick={onRetry}>
+        Retry
+      </button>
+    </div>
   );
 }
 
@@ -121,28 +144,56 @@ export default function SettingsView({
 }) {
   const isGuest = accountType === "guest";
   const [github, setGithub] = useState<GithubStatus | null>(null);
+  const [githubError, setGithubError] = useState<string | null>(null);
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const [supabase, setSupabase] = useState<SupabaseStatus | null>(null);
+  const [supabaseError, setSupabaseError] = useState<string | null>(null);
   const [confirmingSupabaseDisconnect, setConfirmingSupabaseDisconnect] = useState(false);
   const [disconnectingSupabase, setDisconnectingSupabase] = useState(false);
   const [figma, setFigma] = useState<FigmaStatus | null>(null);
+  const [figmaError, setFigmaError] = useState<string | null>(null);
   const [confirmingFigmaDisconnect, setConfirmingFigmaDisconnect] = useState(false);
   const [disconnectingFigma, setDisconnectingFigma] = useState(false);
 
-  useEffect(() => {
-    if (isGuest) return;
+  function loadGithubStatus(): void {
+    setGithub(null);
+    setGithubError(null);
     fetchGithubStatus()
       .then(setGithub)
-      .catch(() => setGithub({ connected: false, login: null, connected_at: null }));
+      .catch((error) =>
+        setGithubError(error instanceof Error ? error.message : "Couldn't check GitHub"),
+      );
+  }
+
+  function loadSupabaseStatus(): void {
+    setSupabase(null);
+    setSupabaseError(null);
     fetchSupabaseStatus()
       .then(setSupabase)
-      .catch(() =>
-        setSupabase({ connected: false, org_id: null, org_name: null, connected_at: null }),
+      .catch((error) =>
+        setSupabaseError(error instanceof Error ? error.message : "Couldn't check Supabase"),
       );
+  }
+
+  function loadFigmaStatus(): void {
+    setFigma(null);
+    setFigmaError(null);
     fetchFigmaStatus()
       .then(setFigma)
-      .catch(() => setFigma({ connected: false, handle: null, connected_at: null }));
+      .catch((error) =>
+        setFigmaError(error instanceof Error ? error.message : "Couldn't check Figma"),
+      );
+  }
+
+  useEffect(() => {
+    if (isGuest) return;
+    loadGithubStatus();
+    loadSupabaseStatus();
+    loadFigmaStatus();
+    // These load helpers only close over state setters; this effect intentionally
+    // runs when the account type changes, not on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isGuest]);
 
   // Surface the OAuth round-trip result when Supabase redirects back to /settings.
@@ -169,7 +220,7 @@ export default function SettingsView({
     if (!result) return;
     if (result === "connected") {
       toast.success("Figma connected");
-      fetchFigmaStatus().then(setFigma).catch(() => {});
+      loadFigmaStatus();
     } else if (result === "error") {
       toast.error(`Couldn't connect Figma${params.get("reason") ? `: ${params.get("reason")}` : ""}`);
     }
@@ -241,7 +292,7 @@ export default function SettingsView({
         </div>
       </nav>
 
-      <div className="settings-wrap">
+      <main id="main-content" tabIndex={-1} className="settings-wrap">
         <span className="page-eyebrow">Account</span>
         <h1>Settings</h1>
         <p className="settings-lede">
@@ -273,9 +324,11 @@ export default function SettingsView({
             </div>
             <div className="settings-row">
               <span className="k">Session</span>
-              <a href={signOutUrl} className="btn-ghost" style={{ fontSize: 12 }}>
-                Sign out
-              </a>
+              <form action={signOutUrl} method="post">
+                <button type="submit" className="btn-ghost" style={{ fontSize: 12 }}>
+                  Sign out
+                </button>
+              </form>
             </div>
           </div>
         </Section>
@@ -294,7 +347,13 @@ export default function SettingsView({
                 Connect GitHub to import private repos and push projects without
                 pasting a token each time.
               </p>
-              {github === null ? (
+              {githubError ? (
+                <IntegrationStatusError
+                  service="GitHub"
+                  message={githubError}
+                  onRetry={loadGithubStatus}
+                />
+              ) : github === null ? (
                 <div className="settings-row">
                   <span className="k">Status</span>
                   <span className="v">checking…</span>
@@ -342,7 +401,13 @@ export default function SettingsView({
                 project and wire its keys automatically. Manage databases from the
                 Databases tab on the projects page.
               </p>
-              {supabase === null ? (
+              {supabaseError ? (
+                <IntegrationStatusError
+                  service="Supabase"
+                  message={supabaseError}
+                  onRetry={loadSupabaseStatus}
+                />
+              ) : supabase === null ? (
                 <div className="settings-row">
                   <span className="k">Status</span>
                   <span className="v">checking…</span>
@@ -389,7 +454,13 @@ export default function SettingsView({
                 Connect Figma so the agent can read a file&apos;s published color &amp; text
                 styles and infer a design system from them. Use it from the Design Systems tab.
               </p>
-              {figma === null ? (
+              {figmaError ? (
+                <IntegrationStatusError
+                  service="Figma"
+                  message={figmaError}
+                  onRetry={loadFigmaStatus}
+                />
+              ) : figma === null ? (
                 <div className="settings-row">
                   <span className="k">Status</span>
                   <span className="v">checking…</span>
@@ -490,7 +561,7 @@ export default function SettingsView({
             <ProviderKeysCard />
           </Section>
         )}
-      </div>
+      </main>
 
       {confirmingDisconnect && (
         <Modal

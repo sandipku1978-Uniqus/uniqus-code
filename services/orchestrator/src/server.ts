@@ -38,6 +38,7 @@ import type {
   Citation,
   PermissionMode,
   ToolRiskCategory,
+  Role,
 } from "@gate15/api-types";
 import {
   MODEL_CATALOG,
@@ -69,6 +70,11 @@ import {
 } from "./agent/autoRouter.js";
 import { detectActiveConnectors } from "./connectors/detector.js";
 import { createRunMetrics, type RunMetricsCollector } from "./telemetry/runMetrics.js";
+import {
+  ProjectMutationLanes,
+  type ProjectMutationLease,
+} from "./projectMutationLane.js";
+import { commitProjectUpload, type UploadCommitStage } from "./projectUploadCommit.js";
 import { looksLikeImmediateCorrection } from "./telemetry/correctionSignal.js";
 import {
   previewBlockingReasons,
@@ -85,12 +91,22 @@ import {
 } from "./agent/selectedElement.js";
 import { proposePlan, formatPlanForExecution } from "./agent/plan.js";
 import { getTodos, clearTodos } from "./agent/todos.js";
-import { assertPublicHost, safeFetch } from "./connectors/ssrfGuard.js";
 import {
-  hasSkillsFile,
+  assertPublicHost,
+  readResponseTextLimited,
+  safeFetch,
+} from "./connectors/ssrfGuard.js";
+import {
+  classifySqlSafety,
+  consumeSqlConfirmationToken,
+  issueSqlConfirmationToken,
+} from "./security/sqlSafety.js";
+import {
+  hashSkillsFile,
   isSkillsRelPath,
-  projectSkillsAreTrusted,
+  projectSkillsContentIsTrusted,
   readSkills,
+  readTrustedSkills,
   writeSkills,
   skillsRelPath,
   SKILL_PACKS,
@@ -120,8 +136,11 @@ import {
 import {
   isFirecrackerEnabled,
   ensureVm,
-  destroy as destroyVm,
+  destroyForDeletion,
+  releaseNetworkAllocation,
   syncRestoreToVm,
+  getRunningVm,
+  reclaimVm,
   listVms,
   startIdleSweeper,
   stopIdleSweeper,
@@ -171,6 +190,7 @@ import {
   getProjectForUser,
   touchProject,
   deleteProject,
+  projectExists,
   deleteProjectByIdForRollback,
   transferPersonalProjectOwnership,
   updateProject,
@@ -206,7 +226,15 @@ import {
   createKnowledgeDocument,
   updateKnowledgeDocument,
   deleteKnowledgeDocument,
+  knowledgeDocumentExists,
 } from "./db/knowledgeDocuments.js";
+import {
+  ensureCleanupJob,
+  listDueCleanupJobs,
+  completeCleanupJob,
+  deferCleanupJob,
+  type CleanupJob,
+} from "./db/cleanupJobs.js";
 import { extractText } from "./agent/knowledgeExtract.js";
 import {
   loadHistory,
@@ -219,9 +247,10 @@ import {
 } from "./db/messages.js";
 import {
   claimNextQueuedTask,
-  updateAgentTask,
+  finishAgentTask,
+  renewAgentTaskLease,
+  requeueAgentTask,
   cancelTasksForUserInProject,
-  getAgentTask,
 } from "./db/agentTasks.js";
 import {
   recordUsageEvent,
@@ -269,6 +298,7 @@ import { turnstileConfigured, verifyTurnstile } from "./auth/turnstile.js";
 import {
   ensureBucket,
   listAll as storageListAll,
+  upload as storageUpload,
   remove as storageRemove,
   uploadObject as storageUploadObject,
   downloadObject as storageDownloadObject,
@@ -298,6 +328,7 @@ import {
   handleStatus as vercelStatus,
   handleDisconnect as vercelDisconnect,
   getVercelAuth,
+  deleteVercelProject,
 } from "./vercel.js";
 import {
   handleStart as supabaseStart,
@@ -314,7 +345,7 @@ import {
   parseFigmaFileKey,
   extractFigmaDesignContext,
 } from "./figma.js";
-import { startDeploy, pollUntilTerminal } from "./deploy.js";
+import { startDeploy, pollUntilTerminal, reconcileCreatingDeployment } from "./deploy.js";
 import { buildProjectZip } from "./export.js";
 import {
   resolveProviderKeysForUser,
@@ -325,8 +356,10 @@ import {
 } from "./db/providerKeys.js";
 import {
   getLatestDeployment,
+  listUnfinishedDeployments,
   listDeployments,
   updateDeploymentState,
+  type DeploymentRecord,
   type DeploymentState,
 } from "./db/deployments.js";
 import Busboy from "busboy";
@@ -339,6 +372,7 @@ import {
   mayReconnectToRun,
 } from "./agent/runAuthorization.js";
 import { assertPreviewOriginConfigured } from "./previewOrigin.js";
+import { publicError } from "./security/publicError.js";
 
 // Railway/Fly inject PORT; local dev sets ORCHESTRATOR_PORT or falls back to 8787.
 const PORT = Number(process.env.PORT ?? process.env.ORCHESTRATOR_PORT ?? 8787);
@@ -355,6 +389,50 @@ function sandboxDirFor(projectId: string): string {
   return path.resolve(SANDBOX_ROOT, projectId);
 }
 
+/** Stable code + correlation id for non-HTTP client surfaces (WS/SSE/stored status). */
+function publicFailureText(code: string, cause: unknown): string {
+  const failure = publicError(code, cause);
+  return `${failure.error} (request ${failure.request_id})`;
+}
+
+function hasExactErrorMessage(cause: unknown, expected: string): boolean {
+  return cause instanceof Error && cause.message === expected;
+}
+
+const GITHUB_VALIDATION_MESSAGES = new Set([
+  "credentialed clone URL must be a valid GitHub HTTPS URL",
+  "credentials may be sent only to the exact https://github.com origin",
+  "credentialed GitHub URL must identify exactly one owner/repository",
+  "credentialed GitHub URL has an invalid repository identity",
+  "credentialed clone URL does not match the selected GitHub repository",
+]);
+
+/** Only these locally-authored validation messages may cross the HTTP boundary. */
+function githubValidationMessage(cause: unknown): string {
+  const candidate = cause instanceof Error ? cause.message : "";
+  return GITHUB_VALIDATION_MESSAGES.has(candidate)
+    ? candidate
+    : "invalid credentialed GitHub repository";
+}
+
+/** Secret host validation may quote the caller's hostname, but never an internal error. */
+function secretHostValidationMessage(cause: unknown): string | null {
+  const candidate = cause instanceof Error ? cause.message : "";
+  if (
+    candidate === "secret host bindings cannot contain wildcards" ||
+    candidate === "secret destination hosts cannot contain credentials" ||
+    /^invalid secret destination host '[^'\r\n]{1,255}'$/.test(candidate)
+  ) {
+    return candidate;
+  }
+  return null;
+}
+
+/** Historical/provider deployment rows may contain raw text; never replay it. */
+function publicDeploymentError(message: string | null | undefined): string | null {
+  return message ? "deployment_failed" : null;
+}
+
 /**
  * Seed a brand-new project's `.uniqus/skills.md` from the owner's account-wide
  * default skills (Settings → Custom prompts & default skills). No-op when the
@@ -362,13 +440,18 @@ function sandboxDirFor(projectId: string): string {
  * skills file (so an imported repo's own conventions are never clobbered).
  * Best-effort: a failure here must not block project creation.
  */
-async function seedDefaultSkills(ownerId: string, sandboxDir: string): Promise<void> {
+async function seedDefaultSkills(
+  ownerId: string,
+  projectId: string,
+  sandboxDir: string,
+): Promise<void> {
   try {
     const { default_skills } = await getAccountSettings(ownerId);
     if (!default_skills.trim()) return;
     const existing = await readSkills(sandboxDir);
     if (existing && existing.trim()) return;
     await writeSkills(sandboxDir, default_skills);
+    await markProjectSkillsTrusted(projectId, sandboxDir, "account-default");
   } catch (err) {
     console.error("seedDefaultSkills failed (non-fatal):", err);
   }
@@ -397,21 +480,23 @@ async function resolveNewProjectSkillIds(
   }
 }
 
-async function markImportedSkillsUntrustedIfPresent(
+async function markImportedSkillsUntrusted(
   projectId: string,
-  sandboxDir: string,
   source: "github" | "zip",
 ): Promise<void> {
-  if (!(await hasSkillsFile(sandboxDir))) return;
-  await setProjectSkillsTrust(projectId, "untrusted_import").catch((err) =>
-    console.error(`[${source}-import] mark imported skills untrusted failed for ${projectId}:`, err),
-  );
+  await setProjectSkillsTrust(projectId, "untrusted_import");
+  console.log(`[${source}-import] project skills require explicit human approval (${projectId})`);
 }
 
-async function markProjectSkillsTrusted(projectId: string, source: string): Promise<void> {
-  await setProjectSkillsTrust(projectId, "trusted").catch((err) =>
-    console.error(`[skills] mark trusted failed for ${projectId} (${source}):`, err),
-  );
+async function markProjectSkillsTrusted(
+  projectId: string,
+  sandboxDir: string,
+  source: string,
+): Promise<void> {
+  const digest = await hashSkillsFile(sandboxDir);
+  if (!digest) throw new Error("skills file is missing or exceeds the 64 KB limit");
+  await setProjectSkillsTrust(projectId, "trusted", digest);
+  console.log(`[skills] trusted exact digest for ${projectId} (${source})`);
 }
 
 type Sender = (event: ServerEvent) => void;
@@ -495,8 +580,11 @@ interface RunHandle {
   >;
   /** One-shot user request, consumed by the loop at its next safe boundary. */
   manualCompactionRequested: boolean;
+  /** Exclusive project mutation lane held for the full turn. */
+  mutationLease: ProjectMutationLease;
 }
 const runs = new Map<string, RunHandle>();
+const projectMutationLanes = new ProjectMutationLanes();
 /** Session keys currently compacting outside an agent turn. */
 const manualCompactionsInFlight = new Set<string>();
 const runKey = (projectId: string, sessionId: string): string => `${projectId}:${sessionId}`;
@@ -615,6 +703,7 @@ function registerRun(
   prompt: string,
   socketSend: Sender,
   initiatorUserId: string,
+  mutationLease: ProjectMutationLease,
 ): RunHandle {
   const handle: RunHandle = {
     initiatorUserId,
@@ -634,6 +723,7 @@ function registerRun(
     steerWaiters: [],
     approvalResolvers: new Map(),
     manualCompactionRequested: false,
+    mutationLease,
   };
   runs.set(key, handle);
   return handle;
@@ -642,6 +732,7 @@ function registerRun(
 function unregisterRun(key: string): void {
   const run = runs.get(key);
   if (run?.graceTimer) clearTimeout(run.graceTimer);
+  run?.mutationLease.release();
   runs.delete(key);
 }
 
@@ -743,11 +834,10 @@ async function main(): Promise<void> {
 
   await fs.mkdir(SANDBOX_ROOT, { recursive: true });
 
-  try {
-    await ensureBucket();
-  } catch (err) {
-    console.error("ensureBucket failed (Storage sync may not work):", err);
-  }
+  // Storage is part of the project confidentiality boundary. A missing or
+  // public/drifted bucket must fail startup instead of serving while silently
+  // assuming project objects are private.
+  await ensureBucket();
 
   if (isFirecrackerEnabled()) {
     startIdleSweeper();
@@ -758,31 +848,33 @@ async function main(): Promise<void> {
   }
 
   // Guest account inactivity cleanup runs regardless of Firecracker — the
-  // Storage + DB teardown matters either way, and destroyVm is a no-op when
-  // Firecracker is off.
+  // Storage + DB teardown matters regardless of Firecracker mode.
   startGuestSweeper(sandboxDirFor);
+  startCleanupSweeper();
   startShareTokenSweeper();
   // Durable agent-task worker (P8.1). Dark by default — logs its enabled/disabled
   // state and only drains the queue when UNIQUS_TASK_WORKER=1 (see startTaskWorker
   // for the P3.3 concurrency-safety rationale).
   startTaskWorker();
+  startDeploymentReconciler();
 
   const httpServer = createServer((req, res) => {
     handleHttp(req, res).catch((err) => {
-      console.error("HTTP handler crashed:", err);
       try {
         if (!res.headersSent) {
           setCors(res, req);
           res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(
-            JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
-          );
+          res.end(JSON.stringify(publicError("internal_error", err)));
         }
       } catch {}
     });
   });
 
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({
+    noServer: true,
+    maxPayload: 512 * 1024,
+    perMessageDeflate: false,
+  });
 
   httpServer.on("upgrade", (req, socket, head) => {
     handleUpgrade(wss, req, socket, head).catch((err) => {
@@ -1041,12 +1133,13 @@ async function authenticate(req: IncomingMessage): Promise<{
   if (guest) {
     const user = await getUserById(guest.userId);
     // Accept only a live guest row — a converted guest's cookie is dead.
-    if (user && user.account_type === "guest" && !user.converted_at) {
-      // Fire-and-forget: keep the inactivity sweeper from reaping an account
-      // that's actually in use, and pull it back out of the grace window.
-      void touchUserActivity(user.id).catch((err) =>
-        console.error(`touchUserActivity(${user.id}) failed:`, err),
-      );
+    if (
+      user &&
+      user.account_type === "guest" &&
+      !user.converted_at &&
+      !user.guest_lifecycle_claim &&
+      (await touchUserActivity(user.id))
+    ) {
       return { kind: "guest", user };
     }
   }
@@ -1196,19 +1289,22 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // value we return into a first-party cookie. No session needed, so these run
   // above the auth gate.
   if (req.url === "/api/guest" && req.method === "POST") {
+    const peer = clientIp(req);
+    const captchaEnabled = turnstileConfigured();
     // Blunt anonymous floods of throwaway guest rows (M-8). Generous on purpose:
     // legit signups normally arrive relayed through the web app (one egress IP),
     // so this only trips a hammering single source. The real fix is the CAPTCHA
     // below; the rate-limit stays as defense-in-depth (and covers a ship-dark
     // deploy where Turnstile isn't provisioned yet).
-    if (!rateLimitOk(`guest-create:${clientIp(req)}`, 30, 5 * 60 * 1000)) {
+    const preCaptchaLimit = captchaEnabled ? 300 : 30;
+    if (!rateLimitOk(`guest-create-circuit:${peer}`, preCaptchaLimit, 5 * 60 * 1000)) {
       return json(res, 429, { error: "too many requests — please wait a moment and try again" });
     }
     // Cloudflare Turnstile. Verified HERE (not the web app) because this
     // endpoint is directly reachable and bypasses the web relay. Ships dark —
     // skipped when TURNSTILE_SECRET_KEY is unset — and fails closed once set:
     // a missing/invalid token or an unreachable siteverify denies the signup.
-    if (turnstileConfigured()) {
+    if (captchaEnabled) {
       const body = await readJsonBody<{ captcha_token?: string }>(req).catch(
         () => ({}) as { captcha_token?: string },
       );
@@ -1217,14 +1313,20 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         console.warn(`guest-create: captcha rejected (${verdict.reason})`);
         return json(res, 403, { error: "captcha verification failed — please try again" });
       }
+      if (!rateLimitOk(`guest-create-valid:${peer}`, 30, 5 * 60 * 1000)) {
+        return json(res, 429, { error: "too many requests — please wait a moment and try again" });
+      }
     }
     return await handleGuestCreate(res);
   }
   if (req.url === "/api/guest/restore" && req.method === "POST") {
+    const peer = clientIp(req);
+    const captchaEnabled = turnstileConfigured();
     // Throttle unauthenticated recovery-code guesses from a single source
     // (C-107). The code space is ~79 bits so brute force is already infeasible,
     // but this caps free guesses + unthrottled DB hits, matching /api/guest.
-    if (!rateLimitOk(`guest-restore:${clientIp(req)}`, 30, 5 * 60 * 1000)) {
+    const preCaptchaLimit = captchaEnabled ? 300 : 30;
+    if (!rateLimitOk(`guest-restore-circuit:${peer}`, preCaptchaLimit, 5 * 60 * 1000)) {
       return json(res, 429, { error: "too many requests — please wait a moment and try again" });
     }
     // One body read carries both the recovery code and the Turnstile token.
@@ -1233,11 +1335,14 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     );
     // Same CAPTCHA gate as signup (ship-dark, fails closed) — restore is equally
     // anonymous and equally worth shielding from automated code-guessing.
-    if (turnstileConfigured()) {
+    if (captchaEnabled) {
       const verdict = await verifyTurnstile(body.captcha_token);
       if (!verdict.ok) {
         console.warn(`guest-restore: captcha rejected (${verdict.reason})`);
         return json(res, 403, { error: "captcha verification failed — please try again" });
+      }
+      if (!rateLimitOk(`guest-restore-valid:${peer}`, 30, 5 * 60 * 1000)) {
+        return json(res, 429, { error: "too many requests — please wait a moment and try again" });
       }
     }
     return await handleGuestRestore(res, body.recovery_code ?? "");
@@ -1281,6 +1386,10 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     json,
     readJsonBody,
     onProjectAuthorizationChanged: revokeUnauthorizedProjectActivity,
+    taskWorkerEnabled: process.env.UNIQUS_TASK_WORKER === "1",
+    onTaskCanceled: (taskId) => {
+      activeTaskRuns.get(taskId)?.controller.abort(new Error("durable task canceled"));
+    },
   })) return;
 
   // ── Saved-flow replay (P2.4) ───────────────────────────────────────────────
@@ -1306,6 +1415,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     try {
       const result = await runInteractPreview({
         sandboxRoot: sandboxDirFor(projectId),
+        projectId,
         serverId: typeof body.server_id === "string" ? body.server_id : undefined,
         url: typeof body.url === "string" ? body.url : undefined,
         pathSuffix: typeof body.path === "string" ? body.path : (flow.start_path ?? undefined),
@@ -1370,13 +1480,13 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         hydration_errors: result.hydration_errors,
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const failure = publicError("flow_run_failed", err);
       void setFlowRunResult(projectId, flow.id, {
         status: "error",
-        summary: message.slice(0, 200),
+        summary: `${failure.error} (request ${failure.request_id})`,
         ranAt: new Date().toISOString(),
       });
-      return json(res, 500, { error: message });
+      return json(res, 500, failure);
     }
   }
 
@@ -1406,7 +1516,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const provider = String(body.provider ?? "");
     const key = String(body.key ?? "").trim();
     if (!isProviderName(provider)) {
-      return json(res, 400, { error: "provider must be anthropic, openai, or google" });
+      return json(res, 400, { error: "provider must be anthropic, openai, google, or zai" });
     }
     if (!key || key.length > 1024) {
       return json(res, 400, { error: "key is required (≤1024 chars)" });
@@ -1419,7 +1529,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const body = await readJsonBody<{ provider?: string }>(req);
     const provider = String(body.provider ?? "");
     if (!isProviderName(provider)) {
-      return json(res, 400, { error: "provider must be anthropic, openai, or google" });
+      return json(res, 400, { error: "provider must be anthropic, openai, google, or zai" });
     }
     await deleteAccountProviderKey(user.id, provider);
     return json(res, 200, { ok: true, providers: await listAccountProviderKeys(user.id) });
@@ -1487,18 +1597,18 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const workspace = new URL(req.url ?? "", "http://x").searchParams.get("workspace");
     if (workspace === "personal") {
       const rows = await listPersonalProjects(user.id);
-      return json(res, 200, { projects: rows.map(toProjectSummary) });
+      return json(res, 200, { projects: await toProjectSummariesForUser(rows, user.id) });
     }
     if (workspace && workspace !== "all") {
       const role = await getOrgRole(workspace, user.id);
       if (!role) return json(res, 403, { error: "you are not a member of that organization" });
       const rows = await listOrgProjects(workspace);
-      return json(res, 200, { projects: rows.map(toProjectSummary) });
+      return json(res, 200, { projects: await toProjectSummariesForUser(rows, user.id) });
     }
     // Owned projects PLUS those shared with the user via membership (P3.2), so
     // an invited collaborator can actually discover and open shared projects.
     const rows = await listAccessibleProjects(user.id);
-    return json(res, 200, { projects: rows.map(toProjectSummary) });
+    return json(res, 200, { projects: await toProjectSummariesForUser(rows, user.id) });
   }
 
   if (req.url === "/api/projects" && req.method === "POST") {
@@ -1517,7 +1627,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     });
     const sandboxDir = sandboxDirFor(project.id);
     await fs.mkdir(sandboxDir, { recursive: true });
-    await seedDefaultSkills(user.id, sandboxDir);
+    await seedDefaultSkills(user.id, project.id, sandboxDir);
     return json(res, 201, { project: toProjectSummary(project) });
   }
 
@@ -1547,9 +1657,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     try {
       refined = await refineBrief(brief);
     } catch (err) {
-      return json(res, 502, {
-        error: `brief refinement failed: ${err instanceof Error ? err.message : String(err)}`,
-      });
+      return json(res, 502, publicError("brief_refinement_failed", err));
     }
     const project = await createProject({
       owner_id: user.id,
@@ -1561,7 +1669,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     });
     const sandboxDir = sandboxDirFor(project.id);
     await fs.mkdir(sandboxDir, { recursive: true });
-    await seedDefaultSkills(user.id, sandboxDir);
+    await seedDefaultSkills(user.id, project.id, sandboxDir);
     return json(res, 201, {
       project: toProjectSummary(project),
       first_message: refined.first_message,
@@ -1623,7 +1731,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       try {
         validateCredentialedGithubRepo(repoUrl, body.repo_full_name);
       } catch (err) {
-        return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        return json(res, 400, { error: githubValidationMessage(err) });
       }
     }
 
@@ -1641,7 +1749,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         { repo_url: repoUrl, branch: body.branch, pat: authToken, preserveGit: body.preserve_git === true },
         dest,
       );
-      await markImportedSkillsUntrustedIfPresent(project.id, dest, "github");
+      await markImportedSkillsUntrusted(project.id, "github");
       await getTracker(project.id, dest).syncChanges();
 
       // P1.1: persist the captured branch + remote so the workspace shows them.
@@ -1676,8 +1784,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       // cleanly. Best-effort: a deleteProject failure is logged but doesn't
       // mask the original import error the user actually needs to see.
       await rollbackImport(project.id, user.id, dest, "github");
-      const message = err instanceof Error ? err.message : String(err);
-      return json(res, 400, { error: `import failed: ${message}` });
+      return json(res, 400, publicError("import_failed", err));
     }
   }
 
@@ -1827,7 +1934,11 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (!project) return json(res, 404, { error: "project not found" });
     const dest = sandboxDirFor(projectId);
     const content = await readSkills(dest);
-    const trusted = projectSkillsAreTrusted(project.skills_trust);
+    const trusted = content !== null && projectSkillsContentIsTrusted(
+      project.skills_trust,
+      project.skills_trusted_sha256,
+      content,
+    );
     return json(res, 200, {
       content: content ?? "",
       path: skillsRelPath(),
@@ -1837,7 +1948,10 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   }
   if (skillsMatch && req.method === "PUT") {
     const projectId = skillsMatch[1];
-    const project = await getProjectForUser(projectId, user.id, "editor");
+    // Project skills become system-prompt guidance. Only an admin/owner can
+    // approve a new exact digest; ordinary editor writes invalidate the old
+    // digest and stay untrusted.
+    const project = await getProjectForUser(projectId, user.id, "admin");
     if (!project) return json(res, 404, { error: "project not found" });
     const body = await readJsonBody<{ content?: string }>(req);
     if (typeof body.content !== "string") {
@@ -1845,7 +1959,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     }
     const dest = sandboxDirFor(projectId);
     await writeSkills(dest, body.content);
-    await markProjectSkillsTrusted(projectId, "skills-api");
+    await markProjectSkillsTrusted(projectId, dest, "skills-api");
     const rel = skillsRelPath();
     getTracker(projectId, dest)
       .syncFile(rel)
@@ -1888,9 +2002,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       res.end(buf);
       return;
     } catch (err) {
-      return json(res, 500, {
-        error: err instanceof Error ? err.message : String(err),
-      });
+      return json(res, 500, publicError("export_failed", err));
     }
   }
 
@@ -1903,10 +2015,10 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   if (previewShareMatch && (req.method === "POST" || req.method === "DELETE")) {
     const projectId = previewShareMatch[1];
     const serverId = previewShareMatch[2];
-    const project = await getProjectForUser(projectId, user.id, "editor");
+    const project = await getProjectForUser(projectId, user.id, "admin");
     if (!project) return json(res, 404, { error: "project not found" });
-    const srv = getServer(serverId);
-    if (!srv || srv.project_id !== projectId) {
+    const srv = getServer(projectId, serverId);
+    if (!srv) {
       return json(res, 404, { error: "preview not found" });
     }
     if (req.method === "DELETE") {
@@ -1946,7 +2058,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const project = await getProjectForUser(projectId, user.id, "viewer");
     if (!project) return json(res, 404, { error: "project not found" });
     const result = await getCheckpointDiff(sandboxDirFor(projectId), projectId, sha);
-    if (!result.ok) return json(res, 400, { error: result.error });
+    if (!result.ok) return json(res, 400, publicError("checkpoint_diff_failed", result.error));
     return json(res, 200, result);
   }
   const checkpointRestoreMatch = req.url?.match(
@@ -1957,9 +2069,31 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const sha = checkpointRestoreMatch[2];
     const project = await getProjectForUser(projectId, user.id, "editor");
     if (!project) return json(res, 404, { error: "project not found" });
+    const mutationLease = projectMutationLanes.tryAcquire(
+      projectId,
+      `checkpoint:${projectId}`,
+    );
+    if (!mutationLease) {
+      return json(res, 409, { error: "stop active project work before rewinding files" });
+    }
+    try {
+    const hasInteractiveRun = [...runs.keys()].some((key) =>
+      key.startsWith(`${projectId}:`),
+    );
+    const hasTaskRun = [...activeTaskRuns.values()].some(
+      (run) => run.projectId === projectId,
+    );
+    if (hasInteractiveRun || hasTaskRun) {
+      return json(res, 409, {
+        error: "stop active project work before rewinding files",
+      });
+    }
     const sandbox = sandboxDirFor(projectId);
     const result = await restoreCheckpoint(sandbox, projectId, sha);
-    if (!result.ok) return json(res, 400, { error: result.error });
+    if (!result.ok) return json(res, 400, publicError("checkpoint_restore_failed", result.error));
+    // A restore changes provenance even if it resurrects bytes that happened
+    // to match an older approved digest. Require a fresh admin/owner review.
+    await setProjectSkillsTrust(projectId, "untrusted_import");
     // restoreCheckpoint only rewound the HOST mirror. In Firecracker mode the VM
     // owns the copy the agent reads, run_command runs against, and the dev server
     // serves — so realign the guest with the rewound mirror, or the restore is
@@ -1986,10 +2120,24 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       projectId,
       `The project files were just rolled back to an earlier checkpoint (rewind to ${sha.slice(0, 8)}). The files on disk may no longer match what you saw or wrote earlier in this conversation — any edits made after that checkpoint are gone. Re-read a file with read_file before relying on its contents or editing it; do not assume your previous changes are still present.`,
     );
-    // Push restored files to Storage so other sessions see them.
-    void getTracker(projectId, sandbox).syncChanges().catch(() => {});
-    broadcastToProject(projectId, { type: "session_reset" });
+    // A successful response is a durability boundary: do not acknowledge the
+    // rewind while Storage still holds the pre-restore tree. ProjectSync keeps
+    // failed paths dirty, so a retry can converge without losing the restore.
+    try {
+      await getTracker(projectId, sandbox).syncChanges();
+    } catch (err) {
+      console.error(`[checkpoints] restore storage sync failed for ${projectId}:`, err);
+      return json(res, 503, {
+        error: "files were rewound locally, but durable storage has not converged; retry rewind",
+        restored_to: result.restored_to,
+        storage_synced: false,
+      });
+    }
+    broadcastToProject(projectId, { type: "session_reset", reason: "checkpoint_restore" });
     return json(res, 200, { ok: true, restored_to: result.restored_to });
+    } finally {
+      mutationLease.release();
+    }
   }
 
   // ── Chat sessions (Phase 2.x — multi-thread per project) ───────────────
@@ -2058,8 +2206,32 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const sessionId = sessionItemMatch[2];
     const project = await getProjectForUser(projectId, user.id, "editor");
     if (!project) return json(res, 404, { error: "project not found" });
-    await deleteSession(projectId, sessionId);
-    return json(res, 200, { ok: true });
+    const mutationLease = projectMutationLanes.tryAcquire(
+      projectId,
+      `delete-session:${sessionId}`,
+    );
+    if (!mutationLease) {
+      return json(res, 409, {
+        error: "can't delete a chat while this project is being changed; stop the run first",
+      });
+    }
+    try {
+      await deleteSession(projectId, sessionId);
+      const fallback = await ensureDefaultSession(projectId);
+      // Revoke every socket bound to the deleted history. Clients reconnect to
+      // the fallback returned below instead of continuing with a dead FK.
+      for (const live of [...sessions]) {
+        if (live.projectId === projectId && live.sessionId === sessionId) live.close();
+      }
+      sessionHistoryRev.delete(runKey(projectId, sessionId));
+      clearTodos(projectId, sessionId);
+      return json(res, 200, {
+        ok: true,
+        fallback_session: { id: fallback.id, title: fallback.title },
+      });
+    } finally {
+      mutationLease.release();
+    }
   }
 
   // ── Secrets (Plan §6) ──────────────────────────────────────────────────
@@ -2080,7 +2252,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     try {
       rows = await listSecrets(projectId, envFilter);
     } catch (err) {
-      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      return json(res, 500, publicError("secrets_list_failed", err));
     }
     return json(res, 200, {
       secrets: rows.map((r) => ({
@@ -2142,7 +2314,9 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
           }
         }
       } catch (err) {
-        return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        const validation = secretHostValidationMessage(err);
+        if (validation) return json(res, 400, { error: validation });
+        return json(res, 500, publicError("secret_binding_check_failed", err));
       }
     }
     let row;
@@ -2156,7 +2330,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         allowed_hosts: allowedHosts,
       });
     } catch (err) {
-      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      return json(res, 500, publicError("secret_write_failed", err));
     }
     void audit({
       project_id: projectId,
@@ -2198,7 +2372,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     try {
       await deleteSecret(projectId, name, envParam);
     } catch (err) {
-      return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+      return json(res, 500, publicError("secret_delete_failed", err));
     }
     void audit({
       project_id: projectId,
@@ -2288,7 +2462,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       content = existing && existing.trim() ? `${existing.trimEnd()}\n\n${pack.body}` : pack.body;
     }
     await writeSkills(dest, content);
-    await markProjectSkillsTrusted(projectId, "skill-pack");
+    await markProjectSkillsTrusted(projectId, dest, "skill-pack");
     const rel = skillsRelPath();
     getTracker(projectId, dest)
       .syncFile(rel)
@@ -2319,11 +2493,10 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       const repos = await githubListRepos(user);
       return json(res, 200, { repos });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg === "github_not_connected") {
+      if (hasExactErrorMessage(err, "github_not_connected")) {
         return json(res, 409, { error: "github_not_connected" });
       }
-      return json(res, 502, { error: msg });
+      return json(res, 502, publicError("github_repositories_failed", err));
     }
   }
 
@@ -2386,11 +2559,10 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     try {
       repo = await githubCreateRepo(user, requestedName, project.description, isPrivate);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg === "github_not_connected") {
+      if (hasExactErrorMessage(err, "github_not_connected")) {
         return json(res, 409, { error: "github_not_connected" });
       }
-      return json(res, 502, { error: msg });
+      return json(res, 502, publicError("github_repository_create_failed", err));
     }
     await setGithubRepo(projectId, user.id, repo.html_url, repo.full_name);
     // Best-effort initial push from the host-side sandbox dir. If this
@@ -2411,7 +2583,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         pushedOk = true;
       }
     } catch (err) {
-      pushNote = err instanceof Error ? err.message : String(err);
+      pushNote = publicFailureText("github_initial_push_failed", err);
     }
     return json(res, 201, {
       repo_url: repo.html_url,
@@ -2479,9 +2651,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       // connected …") are user-actionable and safe to surface. Anything else
       // (a raw network failure like "fetch failed") gets a generic message so
       // we don't leak infra internals.
-      const raw = err instanceof Error ? err.message : String(err);
-      const msg = raw.startsWith("Supabase ") ? raw : "Failed to list Supabase projects.";
-      return json(res, 502, { error: msg });
+      return json(res, 502, publicError("supabase_projects_failed", err));
     }
   }
   // Operate on one of the user's Supabase databases from the Databases tab.
@@ -2498,10 +2668,23 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const [, ref, action] = sbActionMatch;
     try {
       if (action === "query") {
-        const body = await readJsonBody<{ query?: string }>(req);
+        const body = await readJsonBody<{ query?: string; confirmation_token?: string }>(req);
         const query = (body.query ?? "").trim();
         if (!query) return json(res, 400, { error: "query is required" });
         if (query.length > 20_000) return json(res, 400, { error: "query exceeds 20 KB cap" });
+        const classification = classifySqlSafety(query);
+        const confirmationScope = `console:${user.id}:${ref}`;
+        if (
+          classification.requiresConfirmation &&
+          !consumeSqlConfirmationToken(body.confirmation_token, confirmationScope, query)
+        ) {
+          return json(res, 200, {
+            rows: null,
+            requires_confirmation: true,
+            operation: classification.operation,
+            confirmation_token: issueSqlConfirmationToken(confirmationScope, query),
+          });
+        }
         const rows = await supabaseFetch(user.id, `/projects/${ref}/database/query`, {
           method: "POST",
           body: { query },
@@ -2511,9 +2694,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       await supabaseFetch(user.id, `/projects/${ref}/${action}`, { method: "POST" });
       return json(res, 200, { ok: true });
     } catch (err) {
-      const raw = err instanceof Error ? err.message : String(err);
-      const msg = raw.startsWith("Supabase ") ? raw : `Supabase ${action} failed.`;
-      return json(res, 502, { error: msg });
+      return json(res, 502, publicError("supabase_action_failed", err));
     }
   }
   // Delete a Supabase project (permanent — the UI requires a typed confirm).
@@ -2524,9 +2705,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       await supabaseFetch(user.id, `/projects/${sbDeleteMatch[1]}`, { method: "DELETE" });
       return json(res, 200, { ok: true });
     } catch (err) {
-      const raw = err instanceof Error ? err.message : String(err);
-      const msg = raw.startsWith("Supabase ") ? raw : "Supabase delete failed.";
-      return json(res, 502, { error: msg });
+      return json(res, 502, publicError("supabase_delete_failed", err));
     }
   }
 
@@ -2685,13 +2864,16 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (req.method === "DELETE") {
       if (guestForbidden(res, user)) return;
       const existing = await getKnowledgeDocument(user.id, id);
+      if (!existing) return json(res, 404, { error: "document not found" });
+      const cleanup = await ensureCleanupJob({
+        kind: "knowledge",
+        resourceId: id,
+        ownerId: user.id,
+        storagePaths: [existing.storage_path],
+      });
       await deleteKnowledgeDocument(user.id, id);
-      if (existing) {
-        await storageRemoveObjects([existing.storage_path]).catch((err) =>
-          console.error(`knowledge: storage cleanup failed for ${id}:`, err),
-        );
-      }
-      return json(res, 200, { ok: true });
+      const erased = await processCleanupJob(cleanup);
+      return json(res, erased ? 200 : 202, { ok: true, cleanup_pending: !erased });
     }
   }
 
@@ -2724,9 +2906,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       const draft = await generateSkillFromBrief(brief);
       return json(res, 200, { draft });
     } catch (err) {
-      return json(res, 502, {
-        error: `generate failed: ${err instanceof Error ? err.message : String(err)}`,
-      });
+      return json(res, 502, publicError("skill_generation_failed", err));
     }
   }
 
@@ -2760,7 +2940,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       try {
         validateCredentialedGithubRepo(repoUrl, body.repo_full_name);
       } catch (err) {
-        return json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        return json(res, 400, { error: githubValidationMessage(err) });
       }
     }
     const tmp = path.join(tmpdir(), `gate15-ds-${randomUUID()}`);
@@ -2770,7 +2950,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       const ds = await createDesignSystem(user.id, { name, tokens });
       return json(res, 201, { design_system: ds });
     } catch (err) {
-      return json(res, 400, { error: `infer failed: ${err instanceof Error ? err.message : String(err)}` });
+      return json(res, 400, publicError("design_inference_failed", err));
     } finally {
       await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
     }
@@ -2794,9 +2974,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       const ds = await createDesignSystem(user.id, { name, tokens });
       return json(res, 201, { design_system: ds });
     } catch (err) {
-      return json(res, 502, {
-        error: `generate failed: ${err instanceof Error ? err.message : String(err)}`,
-      });
+      return json(res, 502, publicError("design_generation_failed", err));
     }
   }
 
@@ -2818,7 +2996,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       const tokens = await tweakDesignTokens(baseTokens, instruction);
       return json(res, 200, { tokens });
     } catch (err) {
-      return json(res, 502, { error: `refine failed: ${err instanceof Error ? err.message : String(err)}` });
+      return json(res, 502, publicError("design_refinement_failed", err));
     }
   }
 
@@ -2857,7 +3035,12 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const project = await getProjectForUser(projectId, user.id, "viewer");
     if (!project) return json(res, 403, { error: "project not found or access denied" });
     const rows = await listDeployments(projectId);
-    return json(res, 200, { deployments: rows });
+    return json(res, 200, {
+      deployments: rows.map((row) => ({
+        ...row,
+        error_message: publicDeploymentError(row.error_message),
+      })),
+    });
   }
 
   // Kick off a deploy. Body: { env: {KEY: VAL, ...}, target: "production"|"preview" }
@@ -2871,6 +3054,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const projectId = deployStartMatch[1];
     const project = await getProjectForUser(projectId, user.id, "editor");
     if (!project) return json(res, 403, { error: "project not found or access denied" });
+    const actorRole = await getProjectRole(projectId, user.id);
 
     const auth2 = await getVercelAuth(user);
     if (!auth2) {
@@ -2910,12 +3094,12 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
           ownerId: user.id,
           vercelToken: auth2.token,
           vercelTeamId: auth2.teamId,
+          includeStoredSecrets: roleAtLeast(actorRole, "admin"),
         },
         { projectName, sandboxDir: dest, env, target },
       );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return json(res, 400, { error: `deploy failed: ${msg}` });
+      return json(res, 400, publicError("deploy_failed", err));
     }
 
     // Fire the initial event right away so the UI sees QUEUED before the
@@ -2931,6 +3115,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     // Background poll. Errors here can't reach the user via the response
     // (already returned), so we log and update the row to ERROR so the
     // UI's next refresh sees it.
+    deploymentReconciliations.add(result.deployment_id);
     void (async () => {
       try {
         await pollUntilTerminal(
@@ -2938,29 +3123,31 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
           result.deployment_id,
           result.vercel_deployment_id,
           (state, url, errMsg) => {
+            const safeError = errMsg ? publicFailureText("deployment_failed", errMsg) : null;
             broadcastToProject(projectId, {
               type: "deploy_state_changed",
               deployment_id: result.deployment_id,
               state,
               vercel_url: url,
-              error_message: errMsg,
+              error_message: safeError,
             });
           },
         );
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[poll ${result.vercel_deployment_id}] crashed:`, err);
+        const message = publicFailureText("deployment_status_failed", err);
         await updateDeploymentState(result.deployment_id, {
           state: "ERROR" as DeploymentState,
-          error_message: msg,
+          error_message: message,
         }).catch(() => {});
         broadcastToProject(projectId, {
           type: "deploy_state_changed",
           deployment_id: result.deployment_id,
           state: "ERROR",
           vercel_url: result.vercel_url ?? null,
-          error_message: msg,
+          error_message: message,
         });
+      } finally {
+        deploymentReconciliations.delete(result.deployment_id);
       }
     })();
 
@@ -2983,13 +3170,11 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const owned = listServers(projectId).some((s) => s.id === serverId);
     if (!owned) return json(res, 404, { error: "server not found in this project" });
     try {
-      sandboxStopServer(serverId);
+      await sandboxStopServer(projectId, serverId);
       broadcastToProject(projectId, { type: "server_stopped", id: serverId });
       return json(res, 200, { ok: true });
     } catch (err) {
-      return json(res, 400, {
-        error: err instanceof Error ? err.message : String(err),
-      });
+      return json(res, 400, publicError("server_stop_failed", err));
     }
   }
 
@@ -3029,7 +3214,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     // and previous manual ones. Restart-on-click is what users expect.
     for (const s of listServers(projectId)) {
       try {
-        sandboxStopServer(s.id);
+        await sandboxStopServer(projectId, s.id);
         broadcastToProject(projectId, { type: "server_stopped", id: s.id });
       } catch (err) {
         console.error(`failed to stop ${s.id}:`, err);
@@ -3053,9 +3238,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
       try {
         runVm = await ensureVm({ projectId, hostSandboxDir: dest });
       } catch (err) {
-        return json(res, 500, {
-          error: `Firecracker VM boot failed: ${err instanceof Error ? err.message : String(err)}`,
-        });
+        return json(res, 500, publicError("sandbox_boot_failed", err));
       }
     }
 
@@ -3133,9 +3316,7 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
         config_source: config.source ?? "user",
       });
     } catch (err) {
-      return json(res, 400, {
-        error: err instanceof Error ? err.message : String(err),
-      });
+      return json(res, 400, publicError("server_start_failed", err));
     }
   }
 
@@ -3156,9 +3337,10 @@ async function handleZipImport(
 
   try {
     await new Promise<void>((resolve, reject) => {
+      const maxZipBytes = 50 * 1024 * 1024;
       const bb = Busboy({
         headers: req.headers,
-        limits: { fileSize: 250 * 1024 * 1024, files: 1 },
+        limits: { fileSize: maxZipBytes, files: 1 },
       });
       const chunks: Buffer[] = [];
       bb.on("file", (_field, file, info) => {
@@ -3169,7 +3351,7 @@ async function handleZipImport(
         }
         file.on("data", (d: Buffer) => chunks.push(d));
         file.on("limit", () => {
-          parseError = "zip file exceeds 250 MB upload limit";
+          parseError = "zip file exceeds 50 MB upload limit";
         });
         file.on("end", () => {
           if (!parseError) zipBuffer = Buffer.concat(chunks);
@@ -3185,9 +3367,7 @@ async function handleZipImport(
       req.pipe(bb);
     });
   } catch (err) {
-    return json(res, 400, {
-      error: `multipart parse failed: ${err instanceof Error ? err.message : String(err)}`,
-    });
+    return json(res, 400, publicError("invalid_multipart", err));
   }
 
   if (parseError) return json(res, 400, { error: parseError });
@@ -3208,14 +3388,12 @@ async function handleZipImport(
 
   try {
     const result = await importZip(zipBuffer, dest);
-    await markImportedSkillsUntrustedIfPresent(project.id, dest, "zip");
+    await markImportedSkillsUntrusted(project.id, "zip");
     await getTracker(project.id, dest).syncChanges();
     return json(res, 201, { project: toProjectSummary(project), import: result });
   } catch (err) {
     await rollbackImport(project.id, ownerId, dest, "zip");
-    return json(res, 400, {
-      error: `import failed: ${err instanceof Error ? err.message : String(err)}`,
-    });
+    return json(res, 400, publicError("import_failed", err));
   }
 }
 
@@ -3224,8 +3402,18 @@ const MAX_UPLOAD_FILES = 10;
 const MAX_UPLOAD_FILE_SIZE = 5 * 1024 * 1024;
 
 interface PendingUpload {
+  inputIndex: number;
   summary: UploadedFileSummary;
   content: Buffer;
+}
+
+interface ProjectUploadFailure {
+  input_index: number;
+  name: string;
+  path: string;
+  failed_stage: UploadCommitStage;
+  error: string;
+  rollback_complete: boolean;
 }
 
 async function handleProjectUploads(
@@ -3239,6 +3427,7 @@ async function handleProjectUploads(
 
   const pending: PendingUpload[] = [];
   let parseError: string | null = null;
+  let inputIndex = 0;
 
   try {
     await new Promise<void>((resolve, reject) => {
@@ -3248,6 +3437,7 @@ async function handleProjectUploads(
       });
 
       bb.on("file", (_field, file, info) => {
+        const fileIndex = inputIndex++;
         if (isSensitiveProjectPath(info.filename || "upload")) {
           parseError = "secret-bearing files cannot be uploaded into model-accessible project assets";
           file.resume();
@@ -3270,6 +3460,7 @@ async function handleProjectUploads(
         file.on("end", () => {
           if (hitLimit || parseError) return;
           pending.push({
+            inputIndex: fileIndex,
             summary: {
               name: originalName,
               path: relPath,
@@ -3289,19 +3480,18 @@ async function handleProjectUploads(
       req.pipe(bb);
     });
   } catch (err) {
-    return json(res, 400, {
-      error: `multipart parse failed: ${err instanceof Error ? err.message : String(err)}`,
-    });
+    return json(res, 400, publicError("invalid_multipart", err));
   }
 
   if (parseError) return json(res, 400, { error: parseError });
   if (pending.length === 0) return json(res, 400, { error: "no files uploaded" });
+  pending.sort((a, b) => a.inputIndex - b.inputIndex);
 
   const dest = sandboxDirFor(projectId);
   await fs.mkdir(dest, { recursive: true });
 
   const saved: UploadedFileSummary[] = [];
-  try {
+  const failures: ProjectUploadFailure[] = [];
     // If Firecracker is enabled, boot/reuse the VM so we can mirror uploads
     // into it — otherwise read_file from the agent won't find them.
     let vm: VmHandle | undefined;
@@ -3309,40 +3499,71 @@ async function handleProjectUploads(
       try {
         vm = await ensureVm({ projectId, hostSandboxDir: dest });
       } catch (err) {
-        console.error(`upload: VM boot failed, uploads will be host-only:`, err);
+        console.error("upload: VM boot failed before commit:", err);
+        return json(res, 503, { error: "upload runtime is unavailable; no files were saved" });
       }
     }
 
-    for (const item of pending) {
-      const full = resolveSandboxChild(dest, item.summary.path);
-      await fs.mkdir(path.dirname(full), { recursive: true });
-      await fs.writeFile(full, item.content);
-      // Mirror text-safe uploads into the VM so read_file also works.
-      if (vm) {
-        try {
-          await fcAgent.writeFile(vm, item.summary.path, item.content.toString("utf-8"));
-        } catch {
-          // Binary files or encoding issues — host copy is still authoritative
-          // and read_asset (which runs on the orchestrator) will find it.
-        }
-      }
-      await getTracker(projectId, dest).syncFile(item.summary.path);
-      saved.push(item.summary);
-      broadcastToProject(projectId, { type: "file_changed", path: item.summary.path });
+  for (const item of pending) {
+    let full: string;
+    try {
+      full = await resolveSandboxChildReal(dest, item.summary.path);
+    } catch (err) {
+      console.error(`upload: unsafe destination for ${item.summary.path}:`, err);
+      failures.push({
+        input_index: item.inputIndex,
+        name: item.summary.name,
+        path: item.summary.path,
+        failed_stage: "host",
+        error: "host destination validation failed",
+        rollback_complete: true,
+      });
+      continue;
     }
+
+    const result = await commitProjectUpload({
+      writeHost: async () => {
+        await fs.mkdir(path.dirname(full), { recursive: true });
+        await fs.writeFile(full, item.content);
+      },
+      writeVm: vm ? () => fcAgent.pushFile(vm, item.summary.path, item.content) : undefined,
+      syncStorage: () => getTracker(projectId, dest).syncFile(item.summary.path),
+      removeStorage: () => storageRemove(projectId, [item.summary.path]),
+      removeVm: vm ? () => fcAgent.removePath(vm, item.summary.path) : undefined,
+      removeHost: () => fs.rm(full, { force: true }),
+    });
+
+    if (!result.ok) {
+      console.error(
+        `upload: ${item.summary.path} failed during ${result.failedStage}: ${result.error}`,
+        result.rollbackErrors,
+      );
+      failures.push({
+        input_index: item.inputIndex,
+        name: item.summary.name,
+        path: item.summary.path,
+        failed_stage: result.failedStage,
+        error: `${result.failedStage} persistence failed`,
+        rollback_complete: result.rollbackComplete,
+      });
+      continue;
+    }
+
+    saved.push(item.summary);
+    broadcastToProject(projectId, { type: "file_changed", path: item.summary.path });
+  }
+
+  if (saved.length > 0) {
     await touchProject(projectId);
     broadcastToProject(projectId, { type: "storage_synced", at: Date.now() });
-    return json(res, 201, { files: saved });
-  } catch (err) {
-    return json(res, 500, {
-      error: `upload failed: ${err instanceof Error ? err.message : String(err)}`,
-    });
   }
+  return json(res, failures.length > 0 ? 207 : 201, { files: saved, failures });
 }
 
 // ── Knowledge library uploads (account-level, object-storage backed) ─────────
 const KNOWLEDGE_MAX_FILES = 10;
 const KNOWLEDGE_MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 MB per document
+const KNOWLEDGE_MAX_TOTAL_SIZE = 50 * 1024 * 1024;
 
 interface PendingKnowledge {
   fileName: string;
@@ -3363,6 +3584,7 @@ async function handleKnowledgeUpload(
 ): Promise<void> {
   const pending: PendingKnowledge[] = [];
   let parseError: string | null = null;
+  let totalBytes = 0;
 
   try {
     await new Promise<void>((resolve, reject) => {
@@ -3379,7 +3601,14 @@ async function handleKnowledgeUpload(
         const fileName = sanitizeUploadFileName(info.filename || "document");
         const chunks: Buffer[] = [];
         let hitLimit = false;
-        file.on("data", (d: Buffer) => chunks.push(d));
+        file.on("data", (d: Buffer) => {
+          totalBytes += d.length;
+          if (totalBytes > KNOWLEDGE_MAX_TOTAL_SIZE) {
+            parseError = "knowledge upload exceeds 50 MB total limit";
+            return;
+          }
+          chunks.push(d);
+        });
         file.on("limit", () => {
           hitLimit = true;
           parseError = `${fileName} exceeds the 25 MB per-document limit`;
@@ -3401,9 +3630,7 @@ async function handleKnowledgeUpload(
       req.pipe(bb);
     });
   } catch (err) {
-    return json(res, 400, {
-      error: `multipart parse failed: ${err instanceof Error ? err.message : String(err)}`,
-    });
+    return json(res, 400, publicError("invalid_multipart", err));
   }
 
   if (parseError) return json(res, 400, { error: parseError });
@@ -3444,11 +3671,7 @@ async function handleKnowledgeUpload(
   }
 
   if (saved.length === 0) {
-    return json(res, 500, {
-      error: `knowledge upload failed: ${
-        lastError instanceof Error ? lastError.message : String(lastError ?? "unknown error")
-      }`,
-    });
+    return json(res, 500, publicError("knowledge_upload_failed", lastError));
   }
   return json(res, 201, { documents: saved });
 }
@@ -3606,55 +3829,106 @@ async function handleProjectDelete(
 ): Promise<void> {
   const project = await getProjectForUser(projectId, user.id, "owner");
   if (!project) return json(res, 404, { error: "project not found" });
-
-  // 1. Delete the DB row first. CASCADE handles messages + deployments.
-  //    If the row is gone, future WS connects can't reach it even if
-  //    sandbox-cleanup below fails.
+  const mutationLease = projectMutationLanes.tryAcquire(projectId, `project-delete:${user.id}`);
+  if (!mutationLease) {
+    return json(res, 409, { error: "project is busy; stop the active operation and retry deletion" });
+  }
   try {
-    await deleteProject(projectId, user.id);
-  } catch (err) {
-    console.error(`deleteProject(${projectId}) failed:`, err);
-    return json(res, 500, {
-      error: `deleteProject failed: ${err instanceof Error ? err.message : String(err)}`,
+    if (project.vercel_project_id) {
+      try {
+        await deleteVercelProject(user, {
+          id: project.vercel_project_id,
+          teamId: project.vercel_team_id ?? null,
+        });
+      } catch (err) {
+        return json(res, 409, publicError("vercel_project_delete_failed", err));
+      }
+    } else if (project.vercel_project_name) {
+      return json(res, 409, {
+        error:
+          "This legacy project has a published Vercel site without a safe remote id. Delete it in Vercel first, then retry.",
+      });
+    }
+    // Persist a minimal erasure key before removing the ownership row. Cleanup
+    // can now survive process restarts and transient Storage/host failures.
+    const cleanup = await ensureCleanupJob({
+      kind: "project",
+      resourceId: projectId,
+      ownerId: user.id,
     });
-  }
-  revokeAllProjectActivity(projectId);
-
-  // 2. Best-effort: clean up Storage + the local sandbox dir + any
-  //    in-memory tracker. Swallow errors here — the user's "project
-  //    deleted" expectation is met by the DB row being gone; orphaned
-  //    sandbox dirs cost a bit of disk but don't break correctness.
-  try {
-    const remoteFiles = await storageListAll(projectId);
-    if (remoteFiles.length > 0) await storageRemove(projectId, remoteFiles);
+    await deleteProject(projectId, user.id);
+    revokeAllProjectActivity(projectId);
+    broadcastToProject(projectId, { type: "session_reset" });
+    const erased = await processCleanupJob(cleanup);
+    return json(res, erased ? 200 : 202, { ok: true, cleanup_pending: !erased });
   } catch (err) {
-    console.error(`storage cleanup for ${projectId} failed:`, err);
+    return json(res, 500, publicError("project_delete_failed", err));
+  } finally {
+    mutationLease.release();
   }
-  // Tear down the project's Firecracker VM (no-op when disabled / not booted).
-  try {
-    await destroyVm(projectId);
-  } catch (err) {
-    console.error(`firecracker destroy for ${projectId} failed:`, err);
-  }
-  try {
-    await fs.rm(sandboxDirFor(projectId), { recursive: true, force: true });
-  } catch (err) {
-    console.error(`sandbox cleanup for ${projectId} failed:`, err);
-  }
-  // The per-project checkpoint shadow repo lives at the SIBLING path
-  // `<id>.checkpoints/` (so its .git never collides with the user's repo), which
-  // is OUTSIDE sandboxDirFor(projectId) — the fs.rm above never touched it.
-  // Without this every deleted project leaks its shadow git repo on disk forever.
-  await clearCheckpoints(sandboxDirFor(projectId), projectId);
-  clearTracker(projectId);
+}
 
-  // 3. Kick any live WS sessions on this project off so they don't
-  //    operate on a dead row. broadcastToProject only reaches sockets
-  //    open on this orchestrator instance — that's the single Phase 1.5
-  //    instance, so it's sufficient today.
-  broadcastToProject(projectId, { type: "session_reset" });
+const cleanupJobsInFlight = new Set<string>();
 
-  return json(res, 200, { ok: true });
+async function processCleanupJob(job: CleanupJob): Promise<boolean> {
+  if (cleanupJobsInFlight.has(job.id)) return false;
+  cleanupJobsInFlight.add(job.id);
+  try {
+    // A job is written before metadata deletion. If that deletion failed, do
+    // not erase bytes behind a still-visible resource; a later retry can reuse
+    // the same unique job and finish the transition.
+    if (job.kind === "knowledge") {
+      if (await knowledgeDocumentExists(job.resource_id)) {
+        throw new Error("knowledge metadata still exists; cleanup is not armed");
+      }
+      await storageRemoveObjects(job.storage_paths);
+    } else if (job.kind === "project") {
+      if (await projectExists(job.resource_id)) {
+        throw new Error("project metadata still exists; cleanup is not armed");
+      }
+      const remoteFiles = await storageListAll(job.resource_id);
+      if (remoteFiles.length > 0) await storageRemove(job.resource_id, remoteFiles);
+      const remainingRemote = await storageListAll(job.resource_id);
+      if (remainingRemote.length > 0) {
+        throw new Error(`${remainingRemote.length} project Storage objects remain`);
+      }
+      await destroyForDeletion(job.resource_id);
+      const sandbox = sandboxDirFor(job.resource_id);
+      await fs.rm(sandbox, { recursive: true, force: true });
+      await clearCheckpoints(sandbox, job.resource_id);
+      const checkpointDir = path.join(path.dirname(sandbox), `${job.resource_id}.checkpoints`);
+      for (const candidate of [sandbox, checkpointDir]) {
+        const remains = await fs.access(candidate).then(() => true, () => false);
+        if (remains) throw new Error(`local project data remains at ${candidate}`);
+      }
+      clearTracker(job.resource_id);
+      releaseNetworkAllocation(job.resource_id);
+    }
+    await completeCleanupJob(job.id);
+    return true;
+  } catch (error) {
+    console.error(`[cleanup ${job.kind}:${job.resource_id}] deferred:`, error);
+    await deferCleanupJob(job, error).catch((deferError) =>
+      console.error(`[cleanup ${job.id}] could not persist retry:`, deferError),
+    );
+    return false;
+  } finally {
+    cleanupJobsInFlight.delete(job.id);
+  }
+}
+
+function startCleanupSweeper(): void {
+  const run = async (): Promise<void> => {
+    try {
+      const jobs = await listDueCleanupJobs();
+      await Promise.all(jobs.map((job) => processCleanupJob(job)));
+    } catch (error) {
+      console.error("cleanup job sweep failed:", error);
+    }
+  };
+  void run();
+  const timer = setInterval(() => void run(), 30_000);
+  timer.unref();
 }
 
 interface FileOpRequest {
@@ -3662,6 +3936,26 @@ interface FileOpRequest {
   path?: string;
   from?: string;
   to?: string;
+}
+
+const fileOpTails = new Map<string, Promise<void>>();
+
+async function acquireFileOp(projectId: string): Promise<() => void> {
+  const previous = fileOpTails.get(projectId) ?? Promise.resolve();
+  let releaseCurrent!: () => void;
+  const current = new Promise<void>((resolve) => {
+    releaseCurrent = resolve;
+  });
+  const tail = previous.catch(() => {}).then(() => current);
+  fileOpTails.set(projectId, tail);
+  await previous.catch(() => {});
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    releaseCurrent();
+    if (fileOpTails.get(projectId) === tail) fileOpTails.delete(projectId);
+  };
 }
 
 async function handleFileOp(
@@ -3675,13 +3969,26 @@ async function handleFileOp(
 
   const body = await readJsonBody<FileOpRequest>(req);
   const sandboxDir = sandboxDirFor(projectId);
-  const tracker = getTracker(projectId, sandboxDir);
+  const mutationLease = projectMutationLanes.tryAcquire(projectId, `file-op:${body.op}`);
+  if (!mutationLease) {
+    return json(res, 409, { error: "stop active project work before changing file paths" });
+  }
+  const releaseFileOp = await acquireFileOp(projectId);
 
   try {
+    if (
+      [...runs.keys()].some((key) => key.startsWith(`${projectId}:`)) ||
+      [...activeTaskRuns.values()].some((run) => run.projectId === projectId)
+    ) {
+      return json(res, 409, { error: "stop active project work before changing file paths" });
+    }
+    const liveVm = getRunningVm(projectId);
+    if (liveVm) await pullVmChangesStrict(projectId, sandboxDir);
+
     if (body.op === "create_dir") {
       const rel = String(body.path ?? "").trim();
       if (!rel) return json(res, 400, { error: "path required" });
-      const full = resolveSandboxChild(sandboxDir, rel);
+      const full = await resolveSandboxChildReal(sandboxDir, rel);
       await fs.mkdir(full, { recursive: true });
       // Storage has no concept of empty dirs; we just write a placeholder
       // so hydrateFromStorage doesn't lose the dir on a fresh checkout.
@@ -3693,30 +4000,43 @@ async function handleFileOp(
         await fs.writeFile(keep, "");
       }
       const keepRel = `${rel.replace(/\/+$/, "")}/.gitkeep`;
-      await tracker.syncFile(keepRel).catch(() => {});
+      if (liveVm) await fcAgent.pushFile(liveVm, keepRel, Buffer.alloc(0));
+      await storageUpload(projectId, keepRel, Buffer.alloc(0));
+      if (!liveVm && isFirecrackerEnabled()) await reclaimVm(projectId);
       broadcastToProject(projectId, { type: "file_changed", path: keepRel });
-      return json(res, 200, { ok: true });
+      return json(res, 200, { ok: true, created_path: rel });
     }
 
     if (body.op === "rename") {
       const fromRel = String(body.from ?? "").trim();
       const toRel = String(body.to ?? "").trim();
       if (!fromRel || !toRel) return json(res, 400, { error: "from + to required" });
+      if (isSensitiveProjectPath(fromRel) || isSensitiveProjectPath(toRel)) {
+        return json(res, 403, { error: "sensitive paths cannot be renamed" });
+      }
       if (fromRel === toRel) return json(res, 200, { ok: true });
-      const fromFull = resolveSandboxChild(sandboxDir, fromRel);
-      const toFull = resolveSandboxChild(sandboxDir, toRel);
+      const fromFull = await resolveSandboxChildReal(sandboxDir, fromRel);
+      const toFull = await resolveSandboxChildReal(sandboxDir, toRel);
       await fs.mkdir(path.dirname(toFull), { recursive: true });
       const fromStat = await fs.stat(fromFull).catch(() => null);
-      if (!fromStat) return json(res, 404, { error: `not found: ${fromRel}` });
       // Refuse to overwrite an existing destination unless it's the same
       // file (case-insensitive renames on Windows can collide here).
       const existing = await fs.stat(toFull).catch(() => null);
-      if (existing && fromFull !== toFull) {
+      const resuming = !fromStat && existing !== null;
+      if (!fromStat && !existing) return json(res, 404, { error: `not found: ${fromRel}` });
+      if (fromStat && existing && fromFull !== toFull) {
         return json(res, 409, { error: `destination already exists: ${toRel}` });
       }
-      await fs.rename(fromFull, toFull);
+      const movedStat = fromStat ?? existing!;
+      if (!resuming) {
+        if (liveVm) await fcAgent.renamePath(liveVm, fromRel, toRel);
+        await fs.rename(fromFull, toFull);
+      }
       if (isSkillsRelPath(toRel)) {
-        await markProjectSkillsTrusted(projectId, "file-rename");
+        const role = await getProjectRole(projectId, user.id);
+        if (roleAtLeast(role, "admin")) {
+          await markProjectSkillsTrusted(projectId, sandboxDir, "file-rename");
+        }
       }
 
       // Storage doesn't have a true rename. Walk the moved subtree and
@@ -3724,7 +4044,7 @@ async function handleFileOp(
       // that we explicitly remove. For a single file this is two ops.
       const movedFiles: string[] = [];
       async function walk(currentRel: string): Promise<void> {
-        const full = resolveSandboxChild(sandboxDir, currentRel);
+        const full = await resolveSandboxChildReal(sandboxDir, currentRel);
         const stat = await fs.stat(full);
         if (stat.isDirectory()) {
           const entries = await fs.readdir(full);
@@ -3737,57 +4057,71 @@ async function handleFileOp(
       }
       await walk(toRel);
       for (const rel of movedFiles) {
-        await tracker.syncFile(rel).catch(() => {});
+        await storageUpload(
+          projectId,
+          rel,
+          await fs.readFile(await resolveSandboxChildReal(sandboxDir, rel)),
+        );
       }
 
-      // Discover everything under the OLD prefix and remove it from
-      // Storage so listings don't double-count. Best-effort.
+      // Discover everything under the OLD prefix and remove it only after all
+      // new keys uploaded. A failure is surfaced and the retry resumes from
+      // the already-moved destination while the old durable copy stays intact.
       try {
         const remote = await storageListAll(projectId);
-        const oldPrefix = fromStat.isDirectory() ? `${fromRel.replace(/\/+$/, "")}/` : fromRel;
-        const orphans = fromStat.isDirectory()
+        const oldPrefix = movedStat.isDirectory() ? `${fromRel.replace(/\/+$/, "")}/` : fromRel;
+        const orphans = movedStat.isDirectory()
           ? remote.filter((p) => p.startsWith(oldPrefix))
           : remote.filter((p) => p === oldPrefix);
         if (orphans.length > 0) await storageRemove(projectId, orphans);
       } catch (err) {
         console.error(`rename ${fromRel}→${toRel}: storage cleanup failed:`, err);
+        return json(res, 503, {
+          error: "file moved in the live project, but durable storage has not converged; retry rename",
+          path_mapping: { from: fromRel, to: toRel },
+        });
       }
+
+      if (!liveVm && isFirecrackerEnabled()) await reclaimVm(projectId);
 
       broadcastToProject(projectId, { type: "file_changed", path: toRel });
       broadcastToProject(projectId, { type: "file_changed", path: fromRel });
-      return json(res, 200, { ok: true });
+      return json(res, 200, {
+        ok: true,
+        path_mapping: { from: fromRel, to: toRel },
+        is_directory: movedStat.isDirectory(),
+      });
     }
 
     if (body.op === "delete") {
       const rel = String(body.path ?? "").trim();
       if (!rel) return json(res, 400, { error: "path required" });
-      const full = resolveSandboxChild(sandboxDir, rel);
+      const full = await resolveSandboxChildReal(sandboxDir, rel);
       const stat = await fs.stat(full).catch(() => null);
-      if (!stat) return json(res, 404, { error: `not found: ${rel}` });
-      await fs.rm(full, { recursive: true, force: true });
-
-      // Mirror the delete to Storage. listAll filters to the prefix when
-      // it's a directory; for a single file we just remove that key.
-      try {
-        const remote = await storageListAll(projectId);
-        const prefix = stat.isDirectory() ? `${rel.replace(/\/+$/, "")}/` : rel;
-        const targets = stat.isDirectory()
-          ? remote.filter((p) => p.startsWith(prefix))
-          : remote.filter((p) => p === prefix);
-        if (targets.length > 0) await storageRemove(projectId, targets);
-      } catch (err) {
-        console.error(`delete ${rel}: storage cleanup failed:`, err);
+      const remote = await storageListAll(projectId);
+      const prefix = `${rel.replace(/\/+$/, "")}/`;
+      const targets = remote.filter((p) => p === rel || p.startsWith(prefix));
+      if (!stat && targets.length === 0) return json(res, 404, { error: `not found: ${rel}` });
+      const isDirectory = stat?.isDirectory() ?? targets.some((p) => p.startsWith(prefix));
+      if (stat) {
+        if (liveVm) await fcAgent.removePath(liveVm, rel, isDirectory);
+        await fs.rm(full, { recursive: true, force: true });
       }
+      // A failed durable delete returns an error and remains idempotently
+      // retryable even though host/VM already removed the path.
+      if (targets.length > 0) await storageRemove(projectId, targets);
+      if (!liveVm && isFirecrackerEnabled()) await reclaimVm(projectId);
 
       broadcastToProject(projectId, { type: "file_changed", path: rel });
-      return json(res, 200, { ok: true });
+      return json(res, 200, { ok: true, removed_path: rel, is_directory: isDirectory });
     }
 
     return json(res, 400, { error: `unknown op: ${String(body.op)}` });
   } catch (err) {
-    return json(res, 500, {
-      error: err instanceof Error ? err.message : String(err),
-    });
+    return json(res, 500, publicError("file_operation_failed", err));
+  } finally {
+    releaseFileOp();
+    mutationLease.release();
   }
 }
 
@@ -3816,12 +4150,10 @@ async function rollbackImport(
 }
 
 /**
- * Reject clone URLs that aren't a public https:// git host. We don't try to
- * be cute about hostname allowlists — the practical risk is `file://`,
- * `git://localhost`, or other local schemes letting a user read the
- * orchestrator's filesystem or hit private network services. https-only
- * also means PAT-injection (which only runs for https URLs) covers every
- * code path that reaches `git clone`.
+ * Reject clone URLs outside the supported GitHub HTTPS surface. The exact host
+ * allowlist is load-bearing: validating an arbitrary hostname and then handing
+ * it to `git clone` would leave a second DNS/redirect path that can be rebound
+ * to private infrastructure.
  */
 async function validateCloneUrl(repoUrl: string): Promise<string | null> {
   let parsed: URL;
@@ -3835,6 +4167,13 @@ async function validateCloneUrl(repoUrl: string): Promise<string | null> {
   }
   if (!parsed.hostname) {
     return "repo_url is missing a hostname";
+  }
+  // This product surface is specifically a GitHub import. Allowing an
+  // attacker-controlled public hostname leaves `git clone` free to resolve it
+  // again after validation (DNS rebinding) and to follow redirects outside our
+  // HTTP pinning guard. An exact provider allowlist removes that second dial.
+  if (parsed.hostname.toLowerCase() !== "github.com") {
+    return "repo_url must point at github.com";
   }
   if (parsed.username || parsed.password) {
     return "repo_url must not contain embedded credentials; use the OAuth/PAT field instead";
@@ -4191,7 +4530,7 @@ function toProjectSummary(p: {
   skill_library_ids?: string[] | null;
   skills_trust?: ProjectSummary["skills_trust"];
   org_id?: string | null;
-}): ProjectSummary {
+}, effectiveRole?: Role | null): ProjectSummary {
   return {
     id: p.id,
     name: p.name,
@@ -4209,7 +4548,19 @@ function toProjectSummary(p: {
     skill_library_ids: p.skill_library_ids ?? [],
     skills_trust: p.skills_trust ?? "trusted",
     org_id: p.org_id ?? null,
+    ...(effectiveRole ? { effective_role: effectiveRole } : {}),
   };
+}
+
+async function toProjectSummariesForUser(
+  projects: Parameters<typeof toProjectSummary>[0][],
+  userId: string,
+): Promise<ProjectSummary[]> {
+  return Promise.all(
+    projects.map(async (project) =>
+      toProjectSummary(project, await getProjectRole(project.id, userId)),
+    ),
+  );
 }
 
 /**
@@ -4272,6 +4623,10 @@ async function handleUpgrade(
   if (!projectId) return reject(400, "Missing project query parameter");
   const runCapability = url.searchParams.get("run_capability");
 
+  const effectiveRole = await getProjectRole(projectId, auth.user.id);
+  if (!roleAtLeast(effectiveRole, "editor")) {
+    return reject(403, "Project not found or access denied");
+  }
   const project = await getProjectForUser(projectId, auth.user.id, "editor");
   if (!project) return reject(403, "Project not found or access denied");
 
@@ -4296,7 +4651,7 @@ async function handleUpgrade(
   await fs.mkdir(sandboxDirFor(projectId), { recursive: true });
 
   wss.handleUpgrade(req, socket as import("node:net").Socket, head, (ws) => {
-    handleConnection(ws, auth.user, project, session, runCapability).catch((err) => {
+    handleConnection(ws, auth.user, project, session, runCapability, effectiveRole!).catch((err) => {
       console.error("Connection handler crashed:", err);
       try {
         ws.close();
@@ -4319,6 +4674,7 @@ async function handleConnection(
   },
   session: ChatSessionRecord,
   presentedRunCapability: string | null,
+  effectiveRole: Role,
 ): Promise<void> {
   const sessionId = session.id;
   const apiKey = process.env.ANTHROPIC_API_KEY!;
@@ -4711,7 +5067,7 @@ async function handleConnection(
           );
         }
         if (content === null) content = await readSandboxFile(sandboxDir, event.path);
-        send({ type: "file_content", path: event.path, content });
+        send({ type: "file_content", path: event.path, content, request_id: event.request_id });
         return;
       }
 
@@ -4810,7 +5166,10 @@ async function handleConnection(
           }
           await sandboxWriteFile({ rootDir: sandboxDir, vm: vmHandle ?? undefined }, event.path, event.content);
           if (isSkillsRelPath(event.path)) {
-            await markProjectSkillsTrusted(project.id, "client-write-file");
+            const role = await getProjectRole(project.id, user.id);
+            if (roleAtLeast(role, "admin")) {
+              await markProjectSkillsTrusted(project.id, sandboxDir, "client-write-file");
+            }
           }
           send({ type: "client_write_ack", path: event.path, ok: true });
           // Tell other sessions on this project that the file changed (their
@@ -4830,7 +5189,7 @@ async function handleConnection(
             type: "client_write_ack",
             path: event.path,
             ok: false,
-            error: err instanceof Error ? err.message : String(err),
+            error: publicFailureText("client_write_failed", err),
           });
         }
         return;
@@ -4885,6 +5244,19 @@ async function handleConnection(
           send({ type: "error", message: "agent is already running" });
           return;
         }
+        const mutationLease = projectMutationLanes.tryAcquire(
+          project.id,
+          `interactive:${sessionId}`,
+        );
+        if (!mutationLease) {
+          send({
+            type: "error",
+            message:
+              "Another session or background task is changing this project. Try again when it finishes.",
+            retryable: true,
+          });
+          return;
+        }
         const correctionFollowup = markPreviousRunIfCorrection(runK, user.id, event.content);
         busy = true;
         startedTurn = true;
@@ -4893,7 +5265,14 @@ async function handleConnection(
         // (not orphans) it, and so every event routes through the registry —
         // following whichever socket is bound and buffering a replay log while
         // none is (A1).
-        const runHandle = registerRun(runK, currentAbort, event.content, send, user.id);
+        const runHandle = registerRun(
+          runK,
+          currentAbort,
+          event.content,
+          send,
+          user.id,
+          mutationLease,
+        );
         // The capability is intentionally sent only to the initiating socket;
         // it is never buffered, persisted, or broadcast to collaborators.
         send({
@@ -4974,9 +5353,10 @@ async function handleConnection(
             const { code, retryable } = classifyError(bootErr);
             runSend({
               type: "error",
-              message: `Couldn't start the sandbox: ${bootErr instanceof Error ? bootErr.message : String(bootErr)}`,
+              message: publicFailureText("sandbox_boot_failed", bootErr),
               code: code === "unknown" ? "boot_timeout" : code,
               retryable,
+              terminal: true,
             });
             busy = false;
             currentAbort = null;
@@ -5005,12 +5385,12 @@ async function handleConnection(
             vmHandle = await ensureVm({ projectId: project.id, hostSandboxDir: sandboxDir });
           } catch (err) {
             stopSandboxMetrics();
-            console.error(`[ws ${project.id}] resume of cached VM failed:`, err);
             runSend({
               type: "error",
-              message: `Couldn't resume the sandbox: ${err instanceof Error ? err.message : String(err)}`,
+              message: publicFailureText("sandbox_resume_failed", err),
               code: "boot_timeout",
               retryable: true,
+              terminal: true,
             });
             busy = false;
             currentAbort = null;
@@ -5294,9 +5674,9 @@ async function handleConnection(
         }
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
       const { code, retryable } = classifyError(err);
-      send({ type: "error", message, code, retryable });
+      const message = publicFailureText(code === "unknown" ? "agent_run_failed" : code, err);
+      send({ type: "error", message, code, retryable, terminal: startedTurn || undefined });
       // Only the turn-owning invocation may clear these (its own finally already
       // did on the normal error path); a bystander handler that threw must leave
       // an in-flight turn's flags untouched (B-13).
@@ -5336,10 +5716,9 @@ async function handleConnection(
     createSecretRedactor(secretValues).redactInPlace(loaded);
     history.push(...loaded);
   } catch (err) {
-    console.error("loadHistory failed:", err);
     send({
       type: "error",
-      message: `failed to load chat history: ${err instanceof Error ? err.message : String(err)}`,
+      message: publicFailureText("history_load_failed", err),
     });
   }
   send({
@@ -5347,7 +5726,7 @@ async function handleConnection(
     sandbox_dir: sandboxDir,
     shell: shellInfo().name,
     platform: process.platform,
-    project: toProjectSummary(project),
+    project: toProjectSummary(project, effectiveRole),
     user: {
       id: user.id,
       email: user.email,
@@ -5416,9 +5795,8 @@ async function handleConnection(
 
   // Replay any existing todos so the Tasks pane survives reconnects.
   const existingTodos = getTodos(project.id, sessionId);
-  if (existingTodos.length > 0) {
-    send({ type: "todos_updated", todos: existingTodos });
-  }
+  // Empty is authoritative state too; omitting it leaves stale client todos.
+  send({ type: "todos_updated", todos: existingTodos });
 
   try {
     const latestDeploy = await getLatestDeployment(project.id);
@@ -5428,7 +5806,7 @@ async function handleConnection(
         deployment_id: latestDeploy.id,
         state: latestDeploy.state,
         vercel_url: latestDeploy.vercel_url,
-        error_message: latestDeploy.error_message,
+        error_message: publicDeploymentError(latestDeploy.error_message),
       });
     }
   } catch (err) {
@@ -5785,10 +6163,11 @@ async function runSession(
   let toolCalls = 0;
   const runMetrics = metrics ?? createRunMetrics({ mode: mode === "plan-then-execute" ? "plan_execution" : "agent" });
   const stopPreflightMetrics = runMetrics.startPhase("preflight");
-  // Org budget enforcement (P3.5): if this project belongs to an org with a
-  // monthly spend cap that's ALREADY exceeded, abort the turn before the loop
-  // runs — emitted as the same pre-turn error shape the WS handler uses for boot
-  // failures. No org / no cap / under cap ⇒ checkOrgBudget returns null and the
+  // Org monthly soft guard (P3.5): once recorded spend reaches the configured
+  // target, stop admitting new turns. Already-admitted concurrent turns can
+  // finish, so this is deliberately not represented as a transactional cap.
+  // It is emitted as the same pre-turn error shape the WS handler uses for boot
+  // failures. No org / no target / under target ⇒ checkOrgBudget returns null and the
   // turn proceeds exactly as before. Best-effort: a DB error fails open inside
   // the helper, never blocking the paid path on a transient lookup failure.
   const budgetBlock = await checkOrgBudget(projectId);
@@ -5799,7 +6178,13 @@ async function runSession(
       completionReason: "budget_exceeded",
       errorCategory: "budget",
     });
-    send({ type: "error", message: budgetBlock, code: "budget_exceeded", retryable: false });
+    send({
+      type: "error",
+      message: budgetBlock,
+      code: "budget_exceeded",
+      retryable: false,
+      terminal: true,
+    });
     return { aborted: false };
   }
   // Default reasoning effort when the composer didn't specify one.
@@ -5819,18 +6204,22 @@ async function runSession(
   // @file enrichment. Trust checks and the existing fail-open fallbacks remain
   // identical to the former second-stage Promise.all.
   const skillsBodyPromise = projectRowPromise.then((projectRow) =>
-    projectSkillsAreTrusted(projectRow?.skills_trust)
-      ? readSkills(sandboxDir)
+    projectRow
+      ? readTrustedSkills(
+          sandboxDir,
+          projectRow.skills_trust,
+          projectRow.skills_trusted_sha256,
+        )
       : Promise.resolve(null),
   );
   const designSystemPromise = projectRowPromise.then((projectRow) =>
     projectRow?.design_system_id
-      ? getDesignSystemTokens(userId, projectRow.design_system_id).catch(() => null)
+      ? getDesignSystemTokens(projectRow.design_system_id).catch(() => null)
       : Promise.resolve(null),
   );
   const librarySkillsPromise = projectRowPromise.then((projectRow) =>
     projectRow?.skill_library_ids?.length
-      ? getAttachedSkillBodies(userId, projectRow.skill_library_ids).catch(() => [])
+      ? getAttachedSkillBodies(projectRow.skill_library_ids).catch(() => [])
       : Promise.resolve([]),
   );
   const knowledgeDocsPromise = userId
@@ -6436,7 +6825,7 @@ async function runSession(
         output_tokens: u.usage?.outputTokens,
         cache_read_tokens: u.usage?.cacheReadTokens,
         cache_creation_tokens: u.usage?.cacheCreationTokens,
-        error: u.error,
+        error: u.error ? "subagent_failed" : undefined,
       }),
     // A batch of sub-agents settled — pull their VM file writes to the host,
     // checkpoint, and Storage-sync (their edits bypass the per-tool handler).
@@ -6813,14 +7202,15 @@ function classifyError(err: unknown): { code: string; retryable: boolean } {
 }
 
 /**
- * Org budget gate (P3.5). Returns a user-facing message when the project's org
- * has a monthly spend cap that has ALREADY been exceeded this calendar month
+ * Org budget soft guard (P3.5). Returns a user-facing message when the project's
+ * recorded org spend has reached the configured monthly target
  * (so the turn must be aborted), or `null` when the turn may proceed — which is
  * the case for the common path: no org, no cap, or month-to-date spend under it.
  *
  * Reads the project's org_id directly (it isn't on the typed ProjectRecord) and
- * only does the spend rollup when there's actually a numeric cap to enforce, so
- * solo/un-orged projects pay one cheap column read and nothing more. Fails OPEN:
+ * only does the spend rollup when there's actually a numeric target, so
+ * solo/un-orged projects pay one cheap column read and nothing more. As a soft
+ * guard it fails open:
  * any lookup error returns null so a transient DB hiccup can't wall off a paying
  * org — orgMonthToDateSpendUsd already degrades to 0 internally, and an org/cap
  * lookup failure here is treated the same way.
@@ -6839,9 +7229,10 @@ async function checkOrgBudget(projectId: string): Promise<string | null> {
   const spent = await orgMonthToDateSpendUsd(orgId).catch(() => 0);
   if (spent < cap) return null;
   return (
-    `This team's monthly budget of $${cap.toFixed(2)} has been reached ` +
-    `($${spent.toFixed(2)} spent this month). New agent runs are paused until ` +
-    `the budget is raised or the month resets.`
+    `This team's monthly budget guard of $${cap.toFixed(2)} has been reached ` +
+    `($${spent.toFixed(2)} recorded this month). New agent runs are paused until ` +
+    `the target is raised or the month resets. In-flight runs may still finish, ` +
+    `so final spend can exceed this soft target.`
   );
 }
 
@@ -6849,6 +7240,76 @@ async function checkOrgBudget(projectId: string): Promise<string | null> {
 
 /** Poll interval for the queue when it was empty last tick. */
 const TASK_WORKER_IDLE_MS = 5_000;
+const TASK_WORKER_LEASE_SECONDS = 120;
+const TASK_WORKER_HEARTBEAT_MS = 30_000;
+
+const deploymentReconciliations = new Set<string>();
+
+async function reconcileDeployment(row: DeploymentRecord): Promise<void> {
+  if (deploymentReconciliations.has(row.id)) return;
+  deploymentReconciliations.add(row.id);
+  try {
+    const user = await getUserById(row.user_id);
+    if (!user) {
+      await updateDeploymentState(row.id, {
+        state: "ERROR",
+        error_message: "deployment owner no longer exists",
+      });
+      return;
+    }
+    const auth = await getVercelAuth(user);
+    if (!auth) return;
+    let remoteId = row.vercel_deployment_id;
+    if (!remoteId) {
+      const reconciled = await reconcileCreatingDeployment(
+        { vercelToken: auth.token, vercelTeamId: auth.teamId },
+        row,
+      );
+      if (!reconciled) return;
+      remoteId = reconciled.id;
+      broadcastToProject(row.project_id, {
+        type: "deploy_state_changed",
+        deployment_id: row.id,
+        state: reconciled.state,
+        vercel_url: reconciled.url,
+        error_message: null,
+      });
+    }
+    await pollUntilTerminal(
+      { vercelToken: auth.token, vercelTeamId: auth.teamId },
+      row.id,
+      remoteId,
+      (state, url, errorMessage) => {
+        const safeError = errorMessage ? publicFailureText("deployment_failed", errorMessage) : null;
+        broadcastToProject(row.project_id, {
+          type: "deploy_state_changed",
+          deployment_id: row.id,
+          state,
+          vercel_url: url,
+          error_message: safeError,
+        });
+      },
+    );
+  } catch (err) {
+    console.error(`[deploy-reconciler] ${row.id} failed:`, err);
+  } finally {
+    deploymentReconciliations.delete(row.id);
+  }
+}
+
+/** Resume provider create/status convergence after process restarts. */
+function startDeploymentReconciler(): void {
+  const scan = async (): Promise<void> => {
+    const rows = await listUnfinishedDeployments().catch((err) => {
+      console.error("[deploy-reconciler] scan failed:", err);
+      return [] as DeploymentRecord[];
+    });
+    for (const row of rows) void reconcileDeployment(row);
+  };
+  void scan();
+  const timer = setInterval(() => void scan(), 30_000);
+  timer.unref();
+}
 
 /**
  * Run ONE claimed agent_task end-to-end through the agent loop: hydrate the
@@ -6863,7 +7324,7 @@ const TASK_WORKER_IDLE_MS = 5_000;
 async function executeAgentTask(task: {
   id: string;
   project_id: string;
-  created_by: string | null;
+  created_by: string;
   title: string;
   prompt: string;
 }, signal: AbortSignal): Promise<string> {
@@ -6951,8 +7412,12 @@ async function executeAgentTask(task: {
   const [history, skillsBody] = await runMetrics.measure("preflight", () =>
     Promise.all([
       loadModelHistory(projectId, sessionId).catch(() => [] as Anthropic.MessageParam[]),
-      taskProject && projectSkillsAreTrusted(taskProject.skills_trust)
-        ? readSkills(sandboxDir).catch(() => null)
+      taskProject
+        ? readTrustedSkills(
+            sandboxDir,
+            taskProject.skills_trust,
+            taskProject.skills_trusted_sha256,
+          ).catch(() => null)
         : Promise.resolve(null),
     ]),
   );
@@ -7175,40 +7640,42 @@ async function executeAgentTask(task: {
 /**
  * Background loop that drains the durable agent_tasks queue one task at a time.
  *
- * GATED OFF by default — only starts when UNIQUS_TASK_WORKER === "1". This is a
- * real worker an operator turns on under controlled conditions, NOT a stub:
- * running a task concurrently with an interactive edit on the SAME project's
- * sandbox is unsafe today because there's no editing-lane lock yet (deferred
- * P3.3). The env gate is the safe-rollout switch until that lock lands; an
- * operator enables it only when no interactive editing is happening on the
- * orchestrator (e.g. a dedicated task-runner instance).
- *
- * Hard safety properties: ONE task at a time (claimNextQueuedTask + awaited
- * execution — no concurrency); every iteration is wrapped in try/catch so the
- * worker can NEVER crash the orchestrator; on any error the task is marked
- * `failed` with the message and the loop simply continues to the next one.
+ * GATED OFF by default — only starts when UNIQUS_TASK_WORKER === "1". Claims
+ * are database-atomic and leased for crash recovery. A process-local project
+ * lane prevents a task, interactive turn, restore, delete, or file operation
+ * from mutating the same project concurrently on this orchestrator instance.
  */
 function startTaskWorker(): void {
   const enabled = process.env.UNIQUS_TASK_WORKER === "1";
   console.log(
     enabled
-      ? "[task-worker] ENABLED (UNIQUS_TASK_WORKER=1) — draining agent_tasks one at a time"
-      : "[task-worker] disabled (set UNIQUS_TASK_WORKER=1 to enable; off by default — no editing-lane lock yet, P3.3)",
+      ? "[task-worker] ENABLED (UNIQUS_TASK_WORKER=1) — durable claims and project mutation lanes active"
+      : "[task-worker] disabled (set UNIQUS_TASK_WORKER=1 to enable)",
   );
   if (!enabled) return;
 
   let stopped = false;
+  const workerId = `${process.pid}:${randomUUID()}`;
   const loop = async (): Promise<void> => {
     while (!stopped) {
       let claimedId: string | null = null;
+      let mutationLease: ProjectMutationLease | null = null;
+      let heartbeat: ReturnType<typeof setInterval> | null = null;
       try {
-        const task = await claimNextQueuedTask();
+        const task = await claimNextQueuedTask(workerId, TASK_WORKER_LEASE_SECONDS);
         if (!task) {
           // Queue empty — back off before polling again.
           await new Promise((r) => setTimeout(r, TASK_WORKER_IDLE_MS));
           continue;
         }
         claimedId = task.id;
+        mutationLease = projectMutationLanes.tryAcquire(task.project_id, `task:${task.id}`);
+        if (!mutationLease) {
+          await requeueAgentTask(task.id, workerId);
+          claimedId = null;
+          await new Promise((r) => setTimeout(r, TASK_WORKER_IDLE_MS));
+          continue;
+        }
         console.log(`[task-worker] running task ${task.id} (project ${task.project_id.slice(0, 8)})`);
         const controller = new AbortController();
         activeTaskRuns.set(task.id, {
@@ -7216,34 +7683,53 @@ function startTaskWorker(): void {
           userId: task.created_by,
           controller,
         });
+        let heartbeatInFlight = false;
+        heartbeat = setInterval(() => {
+          if (heartbeatInFlight || controller.signal.aborted) return;
+          heartbeatInFlight = true;
+          void renewAgentTaskLease(task.id, workerId, TASK_WORKER_LEASE_SECONDS)
+            .then((renewed) => {
+              if (!renewed && !controller.signal.aborted) {
+                controller.abort(new Error("durable task lease lost or task canceled"));
+              }
+            })
+            .finally(() => {
+              heartbeatInFlight = false;
+            });
+        }, TASK_WORKER_HEARTBEAT_MS);
         let summary: string;
         try {
           summary = await executeAgentTask(task, controller.signal);
         } finally {
           activeTaskRuns.delete(task.id);
         }
-        const latest = await getAgentTask(task.id);
-        if (latest?.status !== "canceled") {
-          await updateAgentTask(task.id, { status: "done", result_summary: summary, error: null });
-        }
-        console.log(`[task-worker] task ${task.id} done`);
+        const finished = await finishAgentTask(task.id, workerId, {
+          status: "done",
+          result_summary: summary,
+          error: null,
+        });
+        if (finished) console.log(`[task-worker] task ${task.id} done`);
       } catch (err) {
         // A failure must never crash the worker. Mark the claimed task failed
         // (best-effort) and continue. If we crashed before claiming a task,
         // there's nothing to mark — just log and keep polling.
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`[task-worker] task ${claimedId ?? "(unclaimed)"} failed:`, message);
+        const message = publicFailureText("agent_task_failed", err);
         if (claimedId) {
-          const latest = await getAgentTask(claimedId);
-          if (latest?.status !== "canceled") {
-            await updateAgentTask(claimedId, { status: "failed", error: message }).catch((e) =>
-              console.error(`[task-worker] could not mark task ${claimedId} failed:`, e),
-            );
-          }
+          await finishAgentTask(claimedId, workerId, {
+            status: "failed",
+            result_summary: null,
+            error: message,
+          }).catch((e) =>
+            console.error(`[task-worker] could not mark task ${claimedId} failed:`, e),
+          );
         }
         // Brief pause so a tight, repeatedly-failing condition (e.g. DB down)
         // doesn't spin the CPU.
         await new Promise((r) => setTimeout(r, TASK_WORKER_IDLE_MS));
+      } finally {
+        if (heartbeat) clearInterval(heartbeat);
+        if (claimedId) activeTaskRuns.delete(claimedId);
+        mutationLease?.release();
       }
     }
   };
@@ -8085,7 +8571,7 @@ async function handleDesignSystemZipInfer(
       req.pipe(bb);
     });
   } catch (err) {
-    return json(res, 400, { error: `multipart parse failed: ${err instanceof Error ? err.message : String(err)}` });
+    return json(res, 400, publicError("invalid_multipart", err));
   }
   if (parseError) return json(res, 400, { error: parseError });
   if (!name) return json(res, 400, { error: "name is required" });
@@ -8097,7 +8583,7 @@ async function handleDesignSystemZipInfer(
     const ds = await createDesignSystem(ownerId, { name, tokens });
     return json(res, 201, { design_system: ds });
   } catch (err) {
-    return json(res, 400, { error: `infer failed: ${err instanceof Error ? err.message : String(err)}` });
+    return json(res, 400, publicError("design_inference_failed", err));
   } finally {
     await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
   }
@@ -8238,7 +8724,7 @@ async function fetchLiveSiteContext(rawUrl: string): Promise<string> {
     signal: AbortSignal.timeout(15_000),
   });
   if (!pageRes.ok) throw new Error(`couldn't fetch the page (${pageRes.status})`);
-  const html = (await pageRes.text()).slice(0, 400_000);
+  const html = (await readResponseTextLimited(pageRes, 400_000)).text;
 
   const styleBlocks = [...html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)]
     .map((m) => m[1])
@@ -8260,7 +8746,10 @@ async function fetchLiveSiteContext(rawUrl: string): Promise<string> {
         headers: { "User-Agent": "gate15" },
         signal: AbortSignal.timeout(10_000),
       });
-      if (cssRes.ok) cssText += `\n/* ${cssUrl.pathname} */\n${(await cssRes.text()).slice(0, 20_000)}`;
+      if (cssRes.ok) {
+        const css = await readResponseTextLimited(cssRes, 20_000);
+        cssText += `\n/* ${cssUrl.pathname} */\n${css.text}`;
+      }
       if (cssText.length > 60_000) break;
     } catch {
       /* skip unreachable/blocked stylesheet */
@@ -8359,7 +8848,7 @@ async function handleDesignSystemAnalyze(
       req.pipe(bb);
     });
   } catch (err) {
-    return json(res, 400, { error: `multipart parse failed: ${err instanceof Error ? err.message : String(err)}` });
+    return json(res, 400, publicError("invalid_multipart", err));
   }
   if (parseError) return json(res, 400, { error: parseError });
 
@@ -8388,6 +8877,15 @@ async function handleDesignSystemAnalyze(
       res.end();
     } else {
       json(res, status, { error });
+    }
+  };
+  const failPublic = (status: number, code: string, cause: unknown): void => {
+    const failure = publicError(code, cause);
+    if (sseStarted) {
+      res.write(`event: error\ndata: ${JSON.stringify(failure)}\n\n`);
+      res.end();
+    } else {
+      json(res, status, failure);
     }
   };
 
@@ -8451,7 +8949,7 @@ async function handleDesignSystemAnalyze(
         try {
           validateCredentialedGithubRepo(repoUrl, fields.repo_full_name);
         } catch (err) {
-          return fail(400, err instanceof Error ? err.message : String(err));
+          return fail(400, githubValidationMessage(err));
         }
       }
       phase(`Cloning ${fields.repo_full_name || repoUrl}…`);
@@ -8496,10 +8994,9 @@ async function handleDesignSystemAnalyze(
     res.write(`event: done\ndata: ${JSON.stringify({ draft })}\n\n`);
     res.end();
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg === "github_not_connected") return fail(409, "github_not_connected");
-    if (msg === "figma_not_connected") return fail(409, "figma_not_connected");
-    return fail(502, msg);
+    if (hasExactErrorMessage(err, "github_not_connected")) return fail(409, "github_not_connected");
+    if (hasExactErrorMessage(err, "figma_not_connected")) return fail(409, "figma_not_connected");
+    return failPublic(502, "design_analysis_failed", err);
   }
 }
 

@@ -25,6 +25,21 @@ const SITEVERIFY_URL =
   "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 // A hung siteverify must not hang guest signup. On timeout we fail closed.
 const VERIFY_TIMEOUT_MS = 5000;
+const EXPECTED_ACTION = "guest";
+
+function allowedHostnames(): ReadonlySet<string> {
+  const configured = process.env.TURNSTILE_ALLOWED_HOSTNAMES ?? process.env.WEB_ORIGIN ?? "";
+  const out = new Set<string>();
+  for (const value of configured.split(",").map((item) => item.trim()).filter(Boolean)) {
+    try {
+      const hostname = value.includes("://") ? new URL(value).hostname : value;
+      out.add(hostname.toLowerCase().replace(/\.$/, ""));
+    } catch {
+      // Invalid configuration is excluded; an empty set fails closed below.
+    }
+  }
+  return out;
+}
 
 export interface TurnstileResult {
   /** Whether TURNSTILE_SECRET_KEY is set. When false, callers skip the check. */
@@ -52,6 +67,11 @@ export async function verifyTurnstile(
   if (!secret) return { configured: false, ok: false, reason: "not configured" };
   const response = (token ?? "").trim();
   if (!response) return { configured: true, ok: false, reason: "missing token" };
+  if (response.length > 2048) return { configured: true, ok: false, reason: "token too long" };
+  const hostnames = allowedHostnames();
+  if (hostnames.size === 0) {
+    return { configured: true, ok: false, reason: "allowed hostname not configured" };
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), VERIFY_TIMEOUT_MS);
@@ -67,9 +87,20 @@ export async function verifyTurnstile(
     }
     const data = (await res.json().catch(() => ({}))) as {
       success?: boolean;
+      action?: string;
+      hostname?: string;
       "error-codes"?: string[];
     };
-    if (data.success) return { configured: true, ok: true };
+    if (data.success) {
+      if (data.action !== EXPECTED_ACTION) {
+        return { configured: true, ok: false, reason: "action mismatch" };
+      }
+      const hostname = (data.hostname ?? "").toLowerCase().replace(/\.$/, "");
+      if (!hostnames.has(hostname)) {
+        return { configured: true, ok: false, reason: "hostname mismatch" };
+      }
+      return { configured: true, ok: true };
+    }
     return {
       configured: true,
       ok: false,

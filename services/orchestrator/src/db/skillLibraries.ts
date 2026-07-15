@@ -94,19 +94,18 @@ export async function deleteSkillLibrary(userId: string, id: string): Promise<vo
 
 /**
  * Resolve a project's attached skill-library ids to their markdown bodies, for
- * per-turn prompt injection. Owner-scoped, so a stale/foreign id is silently
- * skipped. Order follows the input ids (the project's attach order). Returns the
+ * per-turn prompt injection. Project authorization is checked before this
+ * internal resolver is called; source ownership still controls library edits.
+ * Order follows the input ids (the project's attach order). Returns the
  * named bodies so the prompt can label each block.
  */
 export async function getAttachedSkillBodies(
-  userId: string | null,
   ids: string[] | null | undefined,
 ): Promise<AttachedLibrarySkill[]> {
-  if (!userId || !ids || ids.length === 0) return [];
+  if (!ids || ids.length === 0) return [];
   const { data, error } = await db()
     .from("skill_libraries")
     .select("id, name, description, body")
-    .eq("user_id", userId)
     .in("id", ids);
   if (error) throw new Error(`getAttachedSkillBodies failed: ${error.message}`);
   const byId = new Map<string, AttachedLibrarySkill>();

@@ -119,10 +119,9 @@ export function startOfMonthIso(): string {
  * 0 — this intentionally UNDER-counts legacy spend rather than re-pricing tokens
  * here; the guard only blocks once snapshotted spend alone exceeds the cap.
  *
- * Returns 0 on any DB error (missing table/column on an un-migrated DB, etc.)
- * so a transient analytics failure can never wrongly block the paid path — the
- * cap fails OPEN, matching the rest of the membership/usage code's degrade-to-
- * permissive posture.
+ * Returns 0 on any DB error (missing table/column on an un-migrated DB, etc.).
+ * The product labels this as a soft guard rather than a hard cap: transient
+ * accounting errors and concurrently admitted runs can delay enforcement.
  */
 export async function orgMonthToDateSpendUsd(orgId: string): Promise<number> {
   const since = startOfMonthIso();

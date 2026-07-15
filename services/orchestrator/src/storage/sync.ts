@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import * as storage from "./client.js";
+import { isSensitiveProjectPath } from "../security/sensitivePaths.js";
 
 const SKIP_DIRS = new Set([
   "node_modules",
@@ -32,6 +33,7 @@ const DELETE_BATCH_SIZE = 100;
 const HYDRATE_BATCH_SIZE = 8;
 
 function shouldSync(relPath: string): boolean {
+  if (isSensitiveProjectPath(relPath)) return false;
   const parts = relPath.split("/");
   for (const part of parts) {
     if (SKIP_DIRS.has(part)) return false;

@@ -1,6 +1,77 @@
-import { Client } from "pg";
+import net, { type LookupFunction } from "node:net";
+import type { LookupAddress, LookupOptions } from "node:dns";
+import { Client, Query, type QueryResult, type QueryResultRow } from "pg";
 import type { ConnectorDefinition } from "./index.js";
-import { assertPublicHost } from "./ssrfGuard.js";
+import { resolvePublicHost, type ResolvedPublicAddress } from "./ssrfGuard.js";
+
+type LookupCallback = (
+  error: NodeJS.ErrnoException | null,
+  address?: string | LookupAddress[],
+  family?: number,
+) => void;
+
+/** A dns.lookup-compatible function that can only return one pre-validated IP. */
+export function createPinnedPostgresLookup(target: ResolvedPublicAddress): LookupFunction {
+  return ((
+    _hostname: string,
+    options: LookupOptions | LookupCallback,
+    callback?: LookupCallback,
+  ) => {
+    const cb = typeof options === "function" ? options : callback;
+    if (!cb) return;
+    if (typeof options !== "function" && options.all) {
+      cb(null, [target]);
+      return;
+    }
+    cb(null, target.address, target.family);
+  }) as unknown as LookupFunction;
+}
+
+function pinnedSocket(target: ResolvedPublicAddress): net.Socket {
+  const socket = new net.Socket();
+  const connect = socket.connect.bind(socket);
+  const lookup = createPinnedPostgresLookup(target);
+  // node-postgres calls stream.connect(port, originalHostname). Preserve the
+  // hostname for TLS SNI/certificate verification, but force the kernel dial
+  // through a lookup function that can return only the address we validated.
+  socket.connect = ((port: number, host?: string, callback?: () => void) =>
+    connect({ port, host, lookup }, callback)) as typeof socket.connect;
+  return socket;
+}
+
+function samePeer(actual: string | undefined, expected: string): boolean {
+  if (!actual) return false;
+  if (actual === expected) return true;
+  return net.isIPv4(expected) && actual.toLowerCase() === `::ffff:${expected}`;
+}
+
+async function queryWithRowLimit(
+  client: Client,
+  text: string,
+  values: unknown[],
+  limit: number,
+): Promise<{ rowCount: number | null; truncated: boolean; fields: string[]; rows: QueryResultRow[] }> {
+  return new Promise((resolve, reject) => {
+    const rows: QueryResultRow[] = [];
+    let seen = 0;
+    const query = new Query({ text, values });
+    query.on("row", (row: QueryResultRow) => {
+      seen += 1;
+      if (rows.length < limit) rows.push(row);
+    });
+    query.once("error", reject);
+    query.once("end", (result: QueryResult | QueryResult[]) => {
+      const terminal = Array.isArray(result) ? result.at(-1) : result;
+      resolve({
+        rowCount: terminal?.rowCount ?? seen,
+        truncated: seen > limit,
+        fields: terminal?.fields.map((field) => field.name) ?? [],
+        rows,
+      });
+    });
+    client.query(query);
+  });
+}
 
 /**
  * Postgres connector. Read/write SQL against a connection string stored in
@@ -43,6 +114,7 @@ export const postgresConnector: ConnectorDefinition = {
         // metadata / fleet-bridge address — otherwise the connection
         // success/timeout is a blind internal port-scan oracle from the
         // orchestrator's network position (M-5).
+        let target: ResolvedPublicAddress;
         try {
           const parsedDsn = new URL(connStr);
           // An empty hostname is NOT safe to skip: pg then defaults to
@@ -51,7 +123,8 @@ export const postgresConnector: ConnectorDefinition = {
           // while keeping url.hostname === "". Validate whichever pg will use.
           const queryHost = parsedDsn.searchParams.get("host");
           const dbHost = queryHost || parsedDsn.hostname || "localhost";
-          await assertPublicHost(dbHost);
+          const addresses = await resolvePublicHost(dbHost);
+          target = addresses[0];
         } catch (err) {
           throw new Error(
             `refusing to connect: ${err instanceof Error ? err.message : "invalid connection string"}`,
@@ -60,26 +133,29 @@ export const postgresConnector: ConnectorDefinition = {
         const sql = String(args.sql ?? "");
         if (!sql.trim()) throw new Error("sql is required");
         const params = Array.isArray(args.params) ? args.params : [];
-        const limit = typeof args.row_limit === "number" ? Math.min(args.row_limit, 5000) : 200;
+        const limit = typeof args.row_limit === "number"
+          ? Math.max(1, Math.min(Math.floor(args.row_limit), 5000))
+          : 200;
 
         // Bound connect + per-statement time so a reachable-but-unresponsive
         // (firewalled/slow) host can't hang the agent turn indefinitely (C-93).
+        let socket: net.Socket | undefined;
         const client = new Client({
           connectionString: connStr,
           connectionTimeoutMillis: 10_000,
           statement_timeout: 30_000,
           query_timeout: 30_000,
+          stream: () => {
+            socket = pinnedSocket(target);
+            return socket;
+          },
         });
         await client.connect();
         try {
-          const result = await client.query(sql, params);
-          const rows = result.rows.slice(0, limit);
-          return {
-            rowCount: result.rowCount,
-            truncated: result.rows.length > limit,
-            fields: result.fields?.map((f) => f.name) ?? [],
-            rows,
-          };
+          if (!samePeer(socket?.remoteAddress, target.address)) {
+            throw new Error("refusing to connect: PostgreSQL peer did not match the validated address");
+          }
+          return await queryWithRowLimit(client, sql, params, limit);
         } finally {
           await client.end().catch(() => {});
         }

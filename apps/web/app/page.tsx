@@ -1,9 +1,8 @@
 import Link from "next/link";
 import { withAuth } from "@workos-inc/authkit-nextjs";
-import BrandLockup from "@/components/BrandLockup";
 import GuestBanner from "@/components/GuestBanner";
 import LandingPrompt from "@/components/LandingPrompt";
-import NavExploreMenu from "@/components/NavExploreMenu";
+import MarketingNav from "@/components/MarketingNav";
 import SiteFooter from "@/components/SiteFooter";
 import { getGuestSession } from "@/lib/guest-server";
 
@@ -28,32 +27,15 @@ export default async function MarketingPage() {
   return (
     <div className="marketing-shell landing-v3">
       {guest && <GuestBanner />}
-      <nav className="topnav marketing-nav">
-        <Link href="/" className="brand-link">
-          <BrandLockup />
-        </Link>
-        <div className="links">
-          <a href="#workflow">How it works</a>
-          <a href="#models">AI models</a>
-          <a href="#workspaces">Private workspaces</a>
-          <a href="#trust">Trust</a>
-          <Link href="/pricing">Pricing</Link>
-          <Link href="/docs">Docs</Link>
-          <NavExploreMenu excludeHrefs={["/pricing", "/docs", "/models", "/workspaces"]} />
-        </div>
-        <div className="right">
-          {!user && (
-            <Link href="/login" className="btn-ghost">
-              Sign in
-            </Link>
-          )}
-          <Link href={ctaHref} className="btn-primary">
-            {ctaPrimary}
-          </Link>
-        </div>
-      </nav>
+      <MarketingNav
+        signedIn={signedIn}
+        ctaHref={ctaHref}
+        ctaLabel={ctaPrimary}
+        variant="landing"
+        showSignIn={!user}
+      />
 
-      <main>
+      <main id="main-content" tabIndex={-1}>
         <section className="lv3-hero">
           <div className="lv3-hero-inner">
             <h1>
@@ -203,7 +185,7 @@ function StageWindow() {
       role="img"
       aria-label="Gate 15 workspace window: the agent pane shows an approved three-step plan and live build activity, the preview pane shows the running Meridian Freight dispatch board"
     >
-      <div className="lv3w-bar">
+      <div className="lv3w-bar" aria-hidden="true">
         <span className="lv3w-dots" aria-hidden="true"><i /><i /><i /></span>
         <span className="lv3w-title">
           <b className="lv3w-mark">15</b>
@@ -212,7 +194,7 @@ function StageWindow() {
         <span className="lv3w-run"><i /> Running</span>
       </div>
 
-      <div className="lv3w-body">
+      <div className="lv3w-body" aria-hidden="true">
         <aside className="lv3w-chat">
           <div className="lv3w-brief">
             Build a dispatch board for our freight team — live loads, driver

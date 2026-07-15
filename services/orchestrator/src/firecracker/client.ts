@@ -206,16 +206,36 @@ export async function spawnFirecracker(opts: {
   // and the in-VM agent's stdout. Critical for diagnosing boot hangs.
   let stderrTail = "";
   const tag = `[fc:${proc.pid ?? "?"}]`;
+  const MAX_SERIAL_LINES = 2000;
+  const MAX_SERIAL_LINE_CHARS = 2000;
+  let serialLines = 0;
+  let serialSuppressionLogged = false;
+  const logSerial = (line: string, stderr: boolean): void => {
+    if (!line) return;
+    if (serialLines >= MAX_SERIAL_LINES) {
+      if (!serialSuppressionLogged) {
+        serialSuppressionLogged = true;
+        console.error(`${tag} serial output suppressed after ${MAX_SERIAL_LINES} lines`);
+      }
+      return;
+    }
+    serialLines += 1;
+    const bounded = line.length > MAX_SERIAL_LINE_CHARS
+      ? `${line.slice(0, MAX_SERIAL_LINE_CHARS)}...`
+      : line;
+    if (stderr) console.error(`${tag} ${bounded}`);
+    else console.log(`${tag} ${bounded}`);
+  };
   proc.stdout?.on("data", (chunk: Buffer) => {
     for (const line of chunk.toString().split(/\r?\n/)) {
-      if (line.length > 0) console.log(`${tag} ${line}`);
+      logSerial(line, false);
     }
   });
   proc.stderr?.on("data", (chunk: Buffer) => {
     const s = chunk.toString();
     stderrTail = (stderrTail + s).slice(-2000);
     for (const line of s.split(/\r?\n/)) {
-      if (line.length > 0) console.error(`${tag} ${line}`);
+      logSerial(line, true);
     }
   });
 

@@ -159,7 +159,8 @@ export default function AgentPreviewPanel() {
           )}
           {!following && active && (
             <button type="button" className="btn-secondary" style={jumpBtn} onClick={() => setPinned(null)}>
-              ● Jump to live
+              <span aria-hidden style={liveDot(true)} />
+              Jump to live
             </button>
           )}
         </div>
@@ -174,7 +175,19 @@ export default function AgentPreviewPanel() {
             />
           ) : (
             <div style={emptyState}>
-              <div style={{ fontSize: 28, marginBottom: 10 }}>🖱️</div>
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 24 24"
+                width="30"
+                height="30"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                style={{ marginBottom: 10, color: "var(--text-muted)" }}
+              >
+                <path d="m5 3 13 8-6 2-3 6L5 3Z" strokeLinejoin="round" />
+                <path d="m12 13 5 5" strokeLinecap="round" />
+              </svg>
               <h3 style={{ margin: "0 0 6px", fontSize: 15 }}>Watch the agent use your app</h3>
               <p style={{ margin: 0, fontSize: 13, color: "var(--text-dim)", lineHeight: 1.6, maxWidth: 360 }}>
                 When the agent tests a change — filling a form, signing in, clicking through a
@@ -187,7 +200,15 @@ export default function AgentPreviewPanel() {
 
         {shown && (
           <div style={caption}>
-            <span style={stepBadge(shown.ok)}>{shown.ok ? "✓" : "✗"}</span>
+            <span style={stepBadge(shown.ok)}>
+              <svg aria-hidden="true" viewBox="0 0 16 16" width="10" height="10" fill="none">
+                {shown.ok ? (
+                  <path d="m3.5 8 3 3 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                ) : (
+                  <path d="m4.5 4.5 7 7m0-7-7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                )}
+              </svg>
+            </span>
             <span style={{ fontSize: 12, fontWeight: 500 }}>{shown.label}</span>
             {shown.detail && (
               <span style={{ fontSize: 11, color: "var(--conf-low)" }}>— {shown.detail}</span>
@@ -236,7 +257,7 @@ export default function AgentPreviewPanel() {
             style={{ marginLeft: "auto", fontSize: 11, padding: "3px 9px" }}
             onClick={() => setComposing((v) => !v)}
           >
-            {composing ? "Cancel" : "+ Describe a flow"}
+            {composing ? "Cancel" : "Describe a flow"}
           </button>
         </div>
 
@@ -294,16 +315,16 @@ export default function AgentPreviewPanel() {
                   title={server ? "Replay this flow against the running app" : "Start the app first"}
                   onClick={() => replay(flow)}
                 >
-                  {runningFlowId === flow.id ? "Replaying…" : "▶ Replay"}
+                  {runningFlowId === flow.id ? "Replaying…" : "Replay"}
                 </button>
                 <button
                   type="button"
                   className="btn-secondary"
                   style={{ fontSize: 11, padding: "4px 8px" }}
-                  title="Delete flow"
+                  aria-label={`Delete ${flow.name}`}
                   onClick={() => remove(flow)}
                 >
-                  ✕
+                  Delete
                 </button>
               </div>
             ))}
@@ -335,14 +356,18 @@ function FlowComposer({
   const valid = name.trim().length > 0 && steps.length > 0;
 
   return (
-    <div style={composer}>
+    <div className="agent-flow-composer" style={composer}>
+      <label className="sr-only" htmlFor="agent-flow-name">Flow name</label>
       <input
+        id="agent-flow-name"
         style={input}
         placeholder="Flow name (e.g. “sign up + log in”)"
         value={name}
         onChange={(e) => setName(e.target.value)}
       />
+      <label className="sr-only" htmlFor="agent-flow-start-path">Start path</label>
       <input
+        id="agent-flow-start-path"
         style={input}
         placeholder="Start path (optional, e.g. /login)"
         value={startPath}
@@ -350,11 +375,14 @@ function FlowComposer({
       />
       <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 2 }}>
         {steps.map((st, i) => (
-          <div key={i} style={{ display: "flex", gap: 5, alignItems: "center" }}>
+          <fieldset key={i} className="agent-flow-step" style={{ display: "flex", gap: 5, alignItems: "center", margin: 0, padding: 0, border: 0 }}>
+            <legend className="sr-only">Step {i + 1}</legend>
             <span style={{ fontSize: 11, color: "var(--text-muted)", width: 16, textAlign: "right" }}>
               {i + 1}
             </span>
             <select
+              className="agent-flow-step-type"
+              aria-label={`Step ${i + 1} type`}
               style={{ ...input, width: 120, flex: "none" }}
               value={st.type}
               onChange={(e) => update(i, { type: e.target.value as FlowStep["type"] })}
@@ -367,6 +395,7 @@ function FlowComposer({
             </select>
             {st.type === "navigate" ? (
               <input
+                aria-label={`Step ${i + 1} destination path`}
                 style={input}
                 placeholder="url or /path"
                 value={st.url ?? ""}
@@ -376,6 +405,7 @@ function FlowComposer({
               <>
                 {needsSelector(st.type) && (
                   <input
+                    aria-label={`Step ${i + 1} element selector`}
                     style={input}
                     placeholder="CSS selector"
                     value={st.selector ?? ""}
@@ -384,6 +414,7 @@ function FlowComposer({
                 )}
                 {needsValue(st.type) && (
                   <input
+                    aria-label={`Step ${i + 1} ${st.type === "press" ? "key" : "value"}`}
                     style={input}
                     placeholder={st.type === "press" ? "key (Enter)" : "value / text"}
                     value={st.value ?? ""}
@@ -397,16 +428,16 @@ function FlowComposer({
               className="btn-secondary"
               style={{ fontSize: 11, padding: "3px 7px", flex: "none" }}
               onClick={() => removeStep(i)}
-              title="Remove step"
+              aria-label={`Remove step ${i + 1}`}
             >
-              ✕
+              Remove
             </button>
-          </div>
+          </fieldset>
         ))}
       </div>
       <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
         <button type="button" className="btn-secondary" style={{ fontSize: 11, padding: "4px 10px" }} onClick={addStep}>
-          + Step
+          Add step
         </button>
         <button
           type="button"
@@ -462,6 +493,9 @@ const urlPill: CSSProperties = {
 };
 const jumpBtn: CSSProperties = {
   marginLeft: "auto",
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
   fontSize: 11,
   padding: "3px 9px",
   color: "var(--conf-low)",

@@ -148,6 +148,17 @@ export async function deleteKnowledgeDocument(userId: string, id: string): Promi
   if (error) throw new Error(`deleteKnowledgeDocument failed: ${error.message}`);
 }
 
+/** Service-side lifecycle probe used by the durable erasure outbox. */
+export async function knowledgeDocumentExists(id: string): Promise<boolean> {
+  const { data, error } = await db()
+    .from("knowledge_documents")
+    .select("id")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw new Error(`knowledgeDocumentExists failed: ${error.message}`);
+  return Boolean(data);
+}
+
 // ── Search (powers the knowledge_search agent tool) ──────────────────────────
 
 export interface KnowledgeSearchHit {

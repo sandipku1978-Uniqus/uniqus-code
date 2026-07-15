@@ -4,8 +4,30 @@ import {
   isBlockedIp,
   assertPublicHost,
   pinningLookup,
+  readResponseTextLimited,
   validatePathComponent,
 } from "./ssrfGuard.js";
+
+describe("readResponseTextLimited", () => {
+  it("cancels a response stream as soon as the byte limit is crossed", async () => {
+    let canceled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(8).fill(65));
+        controller.enqueue(new Uint8Array(8).fill(66));
+      },
+      cancel() {
+        canceled = true;
+      },
+    });
+    const result = await readResponseTextLimited(
+      new Response(body) as unknown as Parameters<typeof readResponseTextLimited>[0],
+      10,
+    );
+    expect(result).toEqual({ text: "AAAAAAAABB", truncated: true });
+    expect(canceled).toBe(true);
+  });
+});
 
 function pinnedLookup(options: LookupOptions): Promise<{ address: unknown; family?: number }> {
   return new Promise((resolve, reject) => {

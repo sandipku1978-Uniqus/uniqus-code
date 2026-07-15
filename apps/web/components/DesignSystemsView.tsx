@@ -486,7 +486,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
   function actionLabel(): string {
     if (createMode === "blank") return "+ Create";
     if (analyzing) return "Analyzing…";
-    return createMode === "describe" ? "✨ Generate" : "Analyze";
+    return createMode === "describe" ? "Generate" : "Analyze";
   }
   function actionDisabled(): boolean {
     if (busy || analyzing) return true;
@@ -546,7 +546,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
               />
               <div className="ds-attach-row">
                 <button type="button" className="btn-secondary" style={smallBtn} onClick={() => imageRef.current?.click()}>
-                  + Attach image / PDF
+                  Attach image / PDF
                 </button>
                 {images.map((f, i) => (
                   <span key={`${f.name}-${i}`} className="ds-chip">
@@ -736,7 +736,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
           disabled={refining}
         />
         <button type="button" className="btn-secondary" style={smallBtn} onClick={refine} disabled={refining || !refineText.trim()}>
-          {refining ? "Refining…" : "✨ Refine"}
+          {refining ? "Refining…" : "Refine"}
         </button>
       </div>
     );
@@ -755,7 +755,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
     return (
       <>
         <Field label="Buttons">
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
+          <div className="ds-responsive-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
             <LabeledInput label="Radius" small value={b.radius ?? ""} onChange={(v) => patchButton({ radius: v })} />
             <LabeledInput label="Pad X" small value={b.paddingX ?? ""} onChange={(v) => patchButton({ paddingX: v })} />
             <LabeledInput label="Pad Y" small value={b.paddingY ?? ""} onChange={(v) => patchButton({ paddingY: v })} />
@@ -768,7 +768,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
             {variants.map((v, i) => (
-              <div key={i} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <div key={i} className="ds-variant-row" style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 <input value={v.name} onChange={(e) => setVariant(i, { name: e.target.value })} placeholder="name" style={{ ...inputStyle, width: 92 }} />
                 <input value={v.background ?? ""} onChange={(e) => setVariant(i, { background: e.target.value })} placeholder="bg" style={{ ...inputStyle, minWidth: 0 }} />
                 <input value={v.foreground ?? ""} onChange={(e) => setVariant(i, { foreground: e.target.value })} placeholder="text" style={{ ...inputStyle, minWidth: 0 }} />
@@ -776,14 +776,14 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
                 <button type="button" className="btn-ghost" style={iconBtn} onClick={() => removeVariant(i)} aria-label="Remove variant">×</button>
               </div>
             ))}
-            <button type="button" className="btn-secondary" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={addVariant}>+ Add variant</button>
+            <button type="button" className="btn-secondary" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={addVariant}>Add variant</button>
           </div>
           <p className="ds-hint" style={{ marginTop: 6 }}>
             bg / text / border take a color token name (e.g. <code>primary</code>) or a CSS color (<code>transparent</code> for ghost).
           </p>
         </Field>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+        <div className="ds-responsive-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
           <Field label="Input radius">
             <input value={inp.radius ?? ""} onChange={(e) => setComp("input", { ...inp, radius: e.target.value })} style={inputStyle} />
           </Field>
@@ -803,7 +803,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
           </Field>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div className="ds-responsive-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <Field label="Card padding">
             <input value={card.padding ?? ""} onChange={(e) => setComp("card", { ...card, padding: e.target.value })} style={inputStyle} />
           </Field>
@@ -812,7 +812,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
           </Field>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div className="ds-responsive-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <Field label="Navigation">
             <LabeledInput label="Height" value={navigation.height ?? ""} onChange={(v) => setComp("navigation", { ...navigation, height: v })} />
             <RuleTextarea label="Active" value={navigation.active ?? ""} onChange={(v) => setComp("navigation", { ...navigation, active: v })} />
@@ -890,7 +890,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
                       <button
                         type="button"
                         className="btn-ghost"
-                        style={{ ...smallBtn, color: "var(--conf-high, #e5484d)" }}
+                        style={{ ...smallBtn, color: "var(--conf-low)" }}
                         onClick={() => {
                           setConfirmDeleteId(null);
                           void remove(d.id);
@@ -932,7 +932,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
                     <button type="button" className="btn-ghost" style={iconBtn} onClick={() => removeRow(row.id)} aria-label="Remove color">×</button>
                   </div>
                 ))}
-                <button type="button" className="btn-secondary" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={addRow}>+ Add color</button>
+                <button type="button" className="btn-secondary" style={{ ...smallBtn, alignSelf: "flex-start" }} onClick={addRow}>Add color</button>
               </div>
             </Collapsible>
 
@@ -945,7 +945,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
             </Collapsible>
 
             <Collapsible title="Scale, radius & spacing">
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+              <div className="ds-responsive-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
                 <Field label="Type scale">
                   <input value={d.tokens.typeScale ?? ""} onChange={(e) => patchTokens({ typeScale: e.target.value })} style={inputStyle} />
                 </Field>
@@ -965,7 +965,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
                 <TokenMapInput value={typography.weights} onChange={(value) => patchFoundations({ typography: { ...typography, weights: value } })} ariaLabel="Typography weights" />
                 <TokenMapInput value={typography.measures} onChange={(value) => patchFoundations({ typography: { ...typography, measures: value } })} ariaLabel="Text measures" />
               </Field>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <div className="ds-responsive-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                 <Field label="Spacing scale">
                   <TokenMapInput value={foundations.spacingScale} onChange={(value) => patchFoundations({ spacingScale: value })} ariaLabel="Spacing scale" />
                 </Field>
@@ -1093,7 +1093,7 @@ export default function DesignSystemsView({ isGuest }: { isGuest: boolean }) {
             setReviewFindings(null);
           }}
         >
-          + New
+          New
         </button>
       </div>
       <div className="ds-list-items">
@@ -1291,7 +1291,7 @@ function RuleTextarea({
   onChange: (value: string) => void;
 }) {
   return (
-    <label style={{ display: "grid", gridTemplateColumns: "92px minmax(0, 1fr)", gap: 8, alignItems: "start", marginBottom: 6 }}>
+    <label className="ds-rule-row" style={{ display: "grid", gridTemplateColumns: "92px minmax(0, 1fr)", gap: 8, alignItems: "start", marginBottom: 6 }}>
       <span style={{ fontSize: 10, color: "var(--text-muted)", paddingTop: 7 }}>{label}</span>
       <textarea
         value={value}
@@ -1320,9 +1320,9 @@ const inputStyle: CSSProperties = {
   borderRadius: "var(--radius-sm)",
   color: "var(--text-primary)",
   padding: "6px 8px",
-  fontSize: 12.5,
+  fontSize: 13,
   fontFamily: "inherit",
 };
 const smallBtn: CSSProperties = { fontSize: 12, padding: "6px 12px", whiteSpace: "nowrap" };
 const iconBtn: CSSProperties = { fontSize: 16, lineHeight: 1, padding: "0 8px", color: "var(--text-muted)" };
-const mutedSmall: CSSProperties = { margin: 0, fontSize: 12.5, color: "var(--text-muted)", lineHeight: 1.6 };
+const mutedSmall: CSSProperties = { margin: 0, fontSize: 13, color: "var(--text-muted)", lineHeight: 1.6 };

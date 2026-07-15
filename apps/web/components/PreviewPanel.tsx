@@ -354,26 +354,6 @@ const reloadBtnStyle: CSSProperties = {
   fontFamily: "inherit",
   cursor: "pointer",
 };
-// Floating panel listing captured runtime errors. Anchored to .preview-wrap
-// (position:relative), just under the 32px toolbar. Inline-styled off the design
-// tokens like the overlays above, since the panel can't reach the cross-origin
-// iframe's CSS.
-const errPanelStyle: CSSProperties = {
-  position: "absolute",
-  top: 36,
-  right: 8,
-  zIndex: 7,
-  width: 380,
-  maxWidth: "calc(100% - 16px)",
-  maxHeight: "60%",
-  display: "flex",
-  flexDirection: "column",
-  background: "var(--bg-surface)",
-  border: "1px solid var(--border-default)",
-  borderRadius: "var(--radius-md)",
-  boxShadow: "0 8px 28px rgba(0,0,0,0.35)",
-  overflow: "hidden",
-};
 const errStackStyle: CSSProperties = {
   margin: "4px 0 0",
   padding: "6px 8px",
@@ -422,7 +402,7 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
 
   const openShare = async () => {
     setShareOpen(true);
-    if (shareUrl || !projectId) return;
+    if (shareUrl || shareBusy || !projectId) return;
     setShareBusy(true);
     try {
       const { createPreviewShareApi } = await import("@/lib/api");
@@ -439,21 +419,26 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
   };
 
   const revokeShare = async () => {
+    if (shareBusy) return;
     if (!projectId || !shareToken) {
       setShareOpen(false);
       return;
     }
+    setShareBusy(true);
     try {
       const { revokePreviewShareApi } = await import("@/lib/api");
       await revokePreviewShareApi(projectId, server.id, shareToken);
       toast.success("Share link revoked");
-    } catch {
-      /* best-effort — it also expires on its own */
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't revoke share link");
+      setShareBusy(false);
+      return;
     }
     setShareUrl(null);
     setShareToken(null);
     setShareExpires(null);
     setShareOpen(false);
+    setShareBusy(false);
   };
 
   // Runtime errors captured from inside the preview iframe (see RuntimeError).
@@ -1042,33 +1027,33 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
       {/* Runtime-error panel — lists what the preview threw, with a one-click
           hand-off that stages a fix prompt into the composer. */}
       {errPanelOpen && totalErrorCount > 0 && (
-        <div style={errPanelStyle} role="dialog" aria-label="Preview runtime errors">
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              padding: "8px 10px",
-              borderBottom: "1px solid var(--border-default)",
-            }}
-          >
-            <strong style={{ fontSize: 12.5, color: "var(--text-primary)" }}>
-              Runtime error{totalErrorCount === 1 ? "" : "s"} · {totalErrorCount}
-            </strong>
-            <button
-              type="button"
-              onClick={() => setErrPanelOpen(false)}
-              className="icon-btn-sm"
-              aria-label="Close errors panel"
-              title="Close"
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="18" y1="6" x2="6" y2="18" />
-                <line x1="6" y1="6" x2="18" y2="18" />
-              </svg>
-            </button>
-          </div>
-          <div style={{ overflow: "auto", padding: "8px 10px", display: "flex", flexDirection: "column", gap: 10 }}>
+        <Modal
+          title={`Preview runtime error${totalErrorCount === 1 ? "" : "s"}`}
+          subtitle={`${totalErrorCount} occurrence${totalErrorCount === 1 ? "" : "s"}`}
+          width={720}
+          onClose={() => setErrPanelOpen(false)}
+          footer={
+            <>
+              <span />
+              <div className="modal-actions">
+                <button type="button" className="btn-primary" onClick={sendErrorsToAgent}>
+                  Send to agent
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => {
+                    setRuntimeErrors([]);
+                    setErrPanelOpen(false);
+                  }}
+                >
+                  Clear
+                </button>
+              </div>
+            </>
+          }
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {runtimeErrors.map((e, i) => (
               <div key={i} style={{ fontSize: 12 }}>
                 <div style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
@@ -1101,47 +1086,7 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
               </div>
             )}
           </div>
-          <div style={{ display: "flex", gap: 8, padding: "8px 10px", borderTop: "1px solid var(--border-default)" }}>
-            <button
-              type="button"
-              onClick={sendErrorsToAgent}
-              style={{
-                flex: 1,
-                padding: "6px 12px",
-                fontSize: 12.5,
-                fontFamily: "inherit",
-                cursor: "pointer",
-                border: "none",
-                borderRadius: "var(--radius-sm)",
-                background: "var(--brand-gradient, var(--brand-ember, #FF7700))",
-                // Ink on ember is near-black, never white (white fails AA).
-                color: "#140D07",
-                fontWeight: 600,
-              }}
-            >
-              Send to agent
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setRuntimeErrors([]);
-                setErrPanelOpen(false);
-              }}
-              style={{
-                padding: "6px 12px",
-                fontSize: 12.5,
-                fontFamily: "inherit",
-                cursor: "pointer",
-                border: "1px solid var(--border-default)",
-                borderRadius: "var(--radius-sm)",
-                background: "transparent",
-                color: "var(--text-primary)",
-              }}
-            >
-              Clear
-            </button>
-          </div>
-        </div>
+        </Modal>
       )}
 
       {/* Pick-mode hint + confirm card float over the preview area (not the
@@ -1154,42 +1099,60 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
         </div>
       )}
       {candidate && (
-        <div className="picker-confirm" role="dialog" aria-label="Confirm selected element">
+        <Modal
+          title="Confirm selected element"
+          subtitle={<code className="picker-confirm-sel">{describeElement(candidate)}</code>}
+          width={560}
+          onClose={() => {
+            setCandidate(null);
+            setInspectorOpen(false);
+          }}
+          footer={
+            <>
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => {
+                  setCandidate(null);
+                  setInspectorOpen(false);
+                }}
+              >
+                Cancel
+              </button>
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => {
+                    setCandidate(null);
+                    setInspectorOpen(false);
+                    startPicking();
+                  }}
+                >
+                  Re-pick
+                </button>
+                <button type="button" className="btn-primary" onClick={attachCandidate}>
+                  Attach to chat
+                </button>
+              </div>
+            </>
+          }
+        >
           <div className="picker-confirm-info">
-            <code className="picker-confirm-sel">{describeElement(candidate)}</code>
             {candidate.text && <span className="picker-confirm-text">“{candidate.text.slice(0, 60)}”</span>}
           </div>
           {inspectorOpen && candidate.computedStyles && <StyleInspector styles={candidate.computedStyles} />}
-          <div className="picker-confirm-actions">
-            <button type="button" className="picker-btn primary" onClick={attachCandidate}>
-              Attach to chat
-            </button>
-            {candidate.computedStyles && (
-              <button
-                type="button"
-                className="picker-btn"
-                aria-pressed={inspectorOpen}
-                onClick={() => setInspectorOpen((o) => !o)}
-              >
-                {inspectorOpen ? "Hide styles" : "Inspect styles"}
-              </button>
-            )}
+          {candidate.computedStyles && (
             <button
               type="button"
-              className="picker-btn"
-              onClick={() => {
-                setCandidate(null);
-                setInspectorOpen(false);
-                startPicking();
-              }}
+              className="btn-secondary"
+              aria-pressed={inspectorOpen}
+              onClick={() => setInspectorOpen((open) => !open)}
             >
-              Re-pick
+              {inspectorOpen ? "Hide styles" : "Inspect styles"}
             </button>
-            <button type="button" className="picker-btn ghost" onClick={() => { setCandidate(null); setInspectorOpen(false); }}>
-              Cancel
-            </button>
-          </div>
-        </div>
+          )}
+        </Modal>
       )}
       {justAttached && (
         <div className="picker-toast" role="status">
@@ -1253,13 +1216,13 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
           {status === "loading" && (
             <div style={overlayStyle} aria-live="polite">
               <span style={dotStyle} aria-hidden />
-              <p style={{ margin: 0, fontSize: 12.5, color: "var(--text-muted)" }}>Loading preview…</p>
+              <p style={{ margin: 0, fontSize: 13, color: "var(--text-muted)" }}>Loading preview…</p>
             </div>
           )}
           {status === "slow" && (
             <div style={overlayStyle} aria-live="polite">
               <span style={dotStyle} aria-hidden />
-              <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6, maxWidth: "34ch", color: "var(--text-muted)" }}>
+              <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, maxWidth: "34ch", color: "var(--text-muted)" }}>
                 Still starting — the first build can take a little while. It'll appear as soon as it's ready.
               </p>
               <button type="button" onClick={() => setReloadKey((k) => k + 1)} style={reloadBtnStyle}>
@@ -1275,7 +1238,7 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
                 <line x1="12" y1="17" x2="12.01" y2="17" />
               </svg>
               <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "var(--text-primary)" }}>Preview unavailable</h3>
-              <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6, maxWidth: "34ch", color: "var(--text-muted)" }}>
+              <p style={{ margin: 0, fontSize: 13, lineHeight: 1.6, maxWidth: "34ch", color: "var(--text-muted)" }}>
                 The dev server may be starting or stopped. Click Run to start it.
               </p>
               <button type="button" onClick={() => setReloadKey((k) => k + 1)} style={reloadBtnStyle}>
@@ -1301,8 +1264,13 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
           onClose={() => setShareOpen(false)}
           footer={
             <>
-              <button type="button" className="btn-ghost" onClick={() => void revokeShare()}>
-                Revoke link
+              <button
+                type="button"
+                className="btn-ghost"
+                disabled={shareBusy}
+                onClick={() => void revokeShare()}
+              >
+                {shareBusy ? "Workingâ€¦" : "Revoke link"}
               </button>
               <div className="modal-actions">
                 <button type="button" className="btn-secondary" onClick={() => setShareOpen(false)}>
@@ -1320,7 +1288,7 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
                 <code
                   style={{
                     flex: 1,
-                    fontSize: 11.5,
+                    fontSize: 12,
                     padding: "8px 10px",
                     background: "var(--bg-code)",
                     borderRadius: 4,
@@ -1362,9 +1330,9 @@ export default function PreviewPanel({ server }: { server: PreviewServer }) {
                 </button>
               </div>
               <p style={{ margin: 0, fontSize: 12, color: "var(--conf-medium, #d98a3d)" }}>
-                ⚠ Anyone with this link can view your running preview — no sign-in needed.
+                Warning: anyone with this link can view your running preview — no sign-in needed.
               </p>
-              <p style={{ margin: 0, fontSize: 11.5, color: "var(--text-dim)" }}>
+              <p style={{ margin: 0, fontSize: 12, color: "var(--text-dim)" }}>
                 The link expires automatically
                 {shareExpires ? ` (${new Date(shareExpires).toLocaleString()})` : " in ~2 hours"} and
                 stops working when the preview server stops. Revoke it anytime with the button below.

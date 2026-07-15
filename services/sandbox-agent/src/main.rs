@@ -17,25 +17,29 @@
 //                                       text responses include total/returned bytes + truncated)
 //   PUT  /fs/file                    body: { path, content, encoding? }
 //   GET  /fs/manifest                → { files: [{ path, size, mtime_ms }] } (storage-sync exclusions applied)
+//   DELETE /fs/file                  body: { path, recursive? }
+//   POST /fs/rename                  body: { from, to }
 //   POST /fs/edit                    body: { path, old_string, new_string }
 //   GET  /fs/dir?path=…              → { entries }
 //   POST /fs/grep                    body: { pattern, path?, case_insensitive?, literal? } → { matches }
-//   POST /exec/run                   body: { command, timeout_ms } → { stdout, stderr, exitCode }
+//   POST /exec/run                   body: { id, command, timeout_ms } → { stdout, stderr, exitCode }
+//   POST /exec/kill                  body: { id }
 //   POST /exec/start-server          body: { command, port, ready_timeout_ms } → { id, pid, port }
 //   POST /exec/stop-server           body: { id }
 //   GET  /exec/server-log?id=…       → { log }
 
 use regex::{Regex, RegexBuilder};
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{Shutdown, TcpStream};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, Server};
@@ -57,9 +61,13 @@ const MAX_GREP_LINE_BYTES: usize = 7 * 1024;
 /// in the dependency-free production rootfs while still preferring rg when a
 /// custom image provides it.
 static RG_AVAILABILITY: AtomicU8 = AtomicU8::new(0);
+static RUNNING_COMMANDS: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+static CANCELED_COMMANDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 fn sandbox_dir() -> PathBuf {
-    PathBuf::from(std::env::var("UNIQUS_SANDBOX_DIR").unwrap_or_else(|_| SANDBOX_DIR_DEFAULT.into()))
+    PathBuf::from(
+        std::env::var("UNIQUS_SANDBOX_DIR").unwrap_or_else(|_| SANDBOX_DIR_DEFAULT.into()),
+    )
 }
 
 fn agent_port() -> u16 {
@@ -190,7 +198,10 @@ fn configure_network() {
     // Cold boot: Firecracker already assigned the per-VM MAC via guest_mac, so
     // keep it (pass None) and just bring the link up with the cmdline address.
     apply_network(&ip, &gw, None);
-    eprintln!("[uniqus-agent] eth0 configured from cmdline: ip={} gw={}", ip, gw);
+    eprintln!(
+        "[uniqus-agent] eth0 configured from cmdline: ip={} gw={}",
+        ip, gw
+    );
 }
 
 /// F1: the per-VM bearer token the orchestrator must present on every request,
@@ -199,7 +210,9 @@ fn configure_network() {
 /// (provisioned + sent but not enforced) until it's validated on the host.
 fn read_required_token() -> Option<String> {
     let cmdline = fs::read_to_string("/proc/cmdline").ok()?;
-    let enforced = cmdline.split_ascii_whitespace().any(|t| t == "uniqus_auth=1");
+    let enforced = cmdline
+        .split_ascii_whitespace()
+        .any(|t| t == "uniqus_auth=1");
     if !enforced {
         return None;
     }
@@ -269,7 +282,10 @@ fn reseed_urandom(seed: &str) {
     match fs::OpenOptions::new().write(true).open("/dev/urandom") {
         Ok(mut f) => {
             let _ = f.write_all(&bytes);
-            eprintln!("[uniqus-agent] reseeded /dev/urandom with {} bytes", bytes.len());
+            eprintln!(
+                "[uniqus-agent] reseeded /dev/urandom with {} bytes",
+                bytes.len()
+            );
         }
         Err(e) => eprintln!("[uniqus-agent] reseed /dev/urandom failed: {}", e),
     }
@@ -288,11 +304,45 @@ fn set_clock_ms(ms: u64) {
 /// mount reads the correct superblock — no stale page-cache from the golden's
 /// placeholder disk. Idempotent enough: if something is already mounted there a
 /// second mount just fails harmlessly and we keep serving the existing one.
-fn mount_sandbox() {
+fn sandbox_mounted_from_vdb() -> bool {
+    let target = sandbox_dir().to_string_lossy().to_string();
+    let Ok(contents) = fs::read_to_string("/proc/self/mountinfo") else {
+        return false;
+    };
+    contents.lines().any(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let Some(separator) = fields.iter().position(|field| *field == "-") else {
+            return false;
+        };
+        fields.get(4) == Some(&target.as_str())
+            && fields.get(separator + 1) == Some(&"ext4")
+            && fields.get(separator + 2) == Some(&"/dev/vdb")
+    })
+}
+
+fn mount_sandbox() -> Result<(), AgentError> {
     let dir = sandbox_dir();
     let dir = dir.to_string_lossy();
-    let _ = fs::create_dir_all(&*dir);
-    run_cmd("mount", &["-t", "ext4", "/dev/vdb", &*dir]);
+    fs::create_dir_all(&*dir).map_err(|e| AgentError::Io(e.to_string()))?;
+    if !sandbox_mounted_from_vdb() {
+        let status = Command::new("mount")
+            .args(["-t", "ext4", "/dev/vdb", &*dir])
+            .status()
+            .map_err(|e| AgentError::Io(format!("mount /dev/vdb: {}", e)))?;
+        if !status.success() {
+            return Err(AgentError::Io(format!(
+                "mount /dev/vdb at {} failed with {}",
+                dir, status
+            )));
+        }
+    }
+    if !sandbox_mounted_from_vdb() {
+        return Err(AgentError::Io(format!(
+            "/dev/vdb is not mounted at {} after mount",
+            dir
+        )));
+    }
+    Ok(())
 }
 
 fn handle(
@@ -329,7 +379,9 @@ fn handle(
 
     let result: Result<Response<std::io::Cursor<Vec<u8>>>, AgentError> = (|| {
         match (&method, path.as_str()) {
-            (Method::Get, "/health") => Ok(json_response(200, &json!({ "ok": true, "kind": "rust" }))),
+            (Method::Get, "/health") => {
+                Ok(json_response(200, &json!({ "ok": true, "kind": "rust" })))
+            }
             (Method::Post, "/net/configure") => {
                 // Used on a base-snapshot restore: the golden snapshot freezes
                 // eth0 DOWN with a placeholder MAC, identical across every clone.
@@ -348,7 +400,11 @@ fn handle(
                 // same token a cold-booted VM would have had from boot. After
                 // this, every later request — including a retry of THIS call —
                 // must present the token (finalizeRestore sends it as a Bearer).
-                if body.get("uniqus_auth").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if body
+                    .get("uniqus_auth")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
                     if let Some(token) = body.get("auth_token").and_then(|v| v.as_str()) {
                         if let Ok(mut g) = auth.lock() {
                             *g = Some(token.to_string());
@@ -363,8 +419,12 @@ fn handle(
                 // drive was repointed at this project's image via the relative path
                 // resolved against this firecracker's cwd before resume), then
                 // de-correlate clock + RNG.
-                if body.get("mount_sandbox").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    mount_sandbox();
+                if body
+                    .get("mount_sandbox")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    mount_sandbox()?;
                 }
                 if let Some(seed) = body.get("seed").and_then(|v| v.as_str()) {
                     reseed_urandom(seed);
@@ -384,7 +444,10 @@ fn handle(
                     thread::sleep(Duration::from_millis(50));
                     apply_network(&ip, &gw, mac.as_deref());
                 });
-                Ok(json_response(200, &json!({ "ok": true, "restamp": "scheduled" })))
+                Ok(json_response(
+                    200,
+                    &json!({ "ok": true, "restamp": "scheduled" }),
+                ))
             }
             (Method::Get, "/fs/file") => {
                 let p = require_query(&query, "path")?;
@@ -402,7 +465,9 @@ fn handle(
                     ))
                 } else {
                     if query.get("allow_sensitive").map(String::as_str) != Some("1") {
-                        let root = sandbox_dir().canonicalize().unwrap_or_else(|_| sandbox_dir());
+                        let root = sandbox_dir()
+                            .canonicalize()
+                            .unwrap_or_else(|_| sandbox_dir());
                         let rel = full.strip_prefix(&root).unwrap_or(&full);
                         if is_sensitive_project_path(rel) {
                             return Err(AgentError::Bad(
@@ -427,13 +492,7 @@ fn handle(
                         // the host exactly what was selected and returned.
                         let start = offset.unwrap_or(1).max(1);
                         let count = limit.unwrap_or(2000).max(1);
-                        let range = read_bounded_line_range(
-                            &full,
-                            &p,
-                            start,
-                            count,
-                            response_cap,
-                        )?;
+                        let range = read_bounded_line_range(&full, &p, start, count, response_cap)?;
                         Ok(json_response(
                             200,
                             &json!({
@@ -488,7 +547,47 @@ fn handle(
                 } else {
                     raw.as_bytes().to_vec()
                 };
-                fs::write(&full, &bytes).map_err(|e| AgentError::Io(e.to_string()))?;
+                write_no_follow(&full, &bytes)?;
+                Ok(json_response(200, &json!({ "ok": true })))
+            }
+            (Method::Delete, "/fs/file") => {
+                let body = read_body(&mut req)?;
+                let p = require_str(&body, "path")?;
+                let full = resolve_sandbox(&p)?;
+                let recursive = body
+                    .get("recursive")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let metadata = fs::symlink_metadata(&full)
+                    .map_err(|e| AgentError::Io(format!("stat {}: {}", p, e)))?;
+                if metadata.is_dir() {
+                    if !recursive {
+                        return Err(AgentError::Bad(format!("{} is a directory", p)));
+                    }
+                    fs::remove_dir_all(&full).map_err(|e| AgentError::Io(e.to_string()))?;
+                } else {
+                    fs::remove_file(&full).map_err(|e| AgentError::Io(e.to_string()))?;
+                }
+                Ok(json_response(200, &json!({ "ok": true })))
+            }
+            (Method::Post, "/fs/rename") => {
+                let body = read_body(&mut req)?;
+                let from = require_str(&body, "from")?;
+                let to = require_str(&body, "to")?;
+                let from_full = resolve_sandbox(&from)?;
+                let to_full = resolve_sandbox(&to)?;
+                fs::symlink_metadata(&from_full)
+                    .map_err(|e| AgentError::Io(format!("stat {}: {}", from, e)))?;
+                if fs::symlink_metadata(&to_full).is_ok() {
+                    return Err(AgentError::Bad(format!(
+                        "destination already exists: {}",
+                        to
+                    )));
+                }
+                if let Some(parent) = to_full.parent() {
+                    fs::create_dir_all(parent).map_err(|e| AgentError::Io(e.to_string()))?;
+                }
+                fs::rename(&from_full, &to_full).map_err(|e| AgentError::Io(e.to_string()))?;
                 Ok(json_response(200, &json!({ "ok": true })))
             }
             (Method::Post, "/fs/edit") => {
@@ -510,7 +609,7 @@ fn handle(
                     )));
                 }
                 let updated = content.replacen(&old_s, &new_s, 1);
-                fs::write(&full, updated).map_err(|e| AgentError::Io(e.to_string()))?;
+                write_no_follow(&full, updated.as_bytes())?;
                 Ok(json_response(200, &json!({ "ok": true })))
             }
             (Method::Get, "/fs/dir") => {
@@ -519,48 +618,66 @@ fn handle(
                     _ => sandbox_dir(),
                 };
                 let mut entries = Vec::new();
-                for entry in
-                    fs::read_dir(&dir).map_err(|e| AgentError::Io(e.to_string()))?
-                {
+                for entry in fs::read_dir(&dir).map_err(|e| AgentError::Io(e.to_string()))? {
                     let entry = entry.map_err(|e| AgentError::Io(e.to_string()))?;
                     let name = entry.file_name().to_string_lossy().to_string();
                     let kind = entry
                         .file_type()
                         .map_err(|e| AgentError::Io(e.to_string()))?;
-                    entries.push(if kind.is_dir() { format!("{}/", name) } else { name });
+                    entries.push(if kind.is_dir() {
+                        format!("{}/", name)
+                    } else {
+                        name
+                    });
                 }
                 Ok(json_response(200, &json!({ "entries": entries })))
             }
             (Method::Post, "/fs/grep") => {
                 let body = read_body(&mut req)?;
                 let pattern = require_str(&body, "pattern")?;
-                let sub = body.get("path").and_then(|v| v.as_str()).map(str::to_string);
+                let sub = body
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
                 let ci = body
                     .get("case_insensitive")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let literal = body.get("literal").and_then(|v| v.as_bool()).unwrap_or(false);
+                let literal = body
+                    .get("literal")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let matches = grep_walk(&pattern, sub.as_deref(), ci, literal)?;
-                Ok(json_response(200, &json!({
-                    "matches": matches.matches,
-                    "total_matches": matches.total_matches,
-                    "returned_matches": matches.returned_matches,
-                    "omitted_matches": matches.omitted_matches,
-                    "head_matches": matches.head_matches,
-                    "tail_matches": matches.tail_matches,
-                    "truncated": matches.truncated,
-                    "line_truncations": matches.line_truncations,
-                })))
+                Ok(json_response(
+                    200,
+                    &json!({
+                        "matches": matches.matches,
+                        "total_matches": matches.total_matches,
+                        "returned_matches": matches.returned_matches,
+                        "omitted_matches": matches.omitted_matches,
+                        "head_matches": matches.head_matches,
+                        "tail_matches": matches.tail_matches,
+                        "truncated": matches.truncated,
+                        "line_truncations": matches.line_truncations,
+                    }),
+                ))
             }
             (Method::Post, "/exec/run") => {
                 let body = read_body(&mut req)?;
+                let id = require_str(&body, "id")?;
                 let command = require_str(&body, "command")?;
                 let timeout_ms = body
                     .get("timeout_ms")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(60_000);
-                let result = run_command(&command, timeout_ms);
+                let result = run_command(&id, &command, timeout_ms);
                 Ok(json_response(200, &result))
+            }
+            (Method::Post, "/exec/kill") => {
+                let body = read_body(&mut req)?;
+                let id = require_str(&body, "id")?;
+                kill_command(&id)?;
+                Ok(json_response(200, &json!({ "ok": true })))
             }
             (Method::Post, "/exec/start-server") => {
                 let body = read_body(&mut req)?;
@@ -764,11 +881,43 @@ fn resolve_sandbox(rel: &str) -> Result<PathBuf, AgentError> {
         }
     }
     let root_canon = root.canonicalize().unwrap_or(root.clone());
-    let resolved = normalized.canonicalize().unwrap_or(normalized);
-    if resolved != root_canon && !resolved.starts_with(&root_canon) {
+    let mut ancestor = normalized.clone();
+    let mut missing = Vec::new();
+    let canonical_ancestor = loop {
+        match ancestor.canonicalize() {
+            Ok(canonical) => break canonical,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = ancestor.file_name().map(|name| name.to_os_string()) else {
+                    return Err(AgentError::Bad(format!("path escapes sandbox: {}", rel)));
+                };
+                missing.push(name);
+                if !ancestor.pop() {
+                    return Err(AgentError::Bad(format!("path escapes sandbox: {}", rel)));
+                }
+            }
+            Err(err) => return Err(AgentError::Io(format!("resolve {}: {}", rel, err))),
+        }
+    };
+    if canonical_ancestor != root_canon && !canonical_ancestor.starts_with(&root_canon) {
         return Err(AgentError::Bad(format!("path escapes sandbox: {}", rel)));
     }
+    let mut resolved = canonical_ancestor;
+    for component in missing.iter().rev() {
+        resolved.push(component);
+    }
     Ok(resolved)
+}
+
+fn write_no_follow(target: &Path, content: &[u8]) -> Result<(), AgentError> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(target)
+        .map_err(|e| AgentError::Io(format!("write {}: {}", target.display(), e)))?;
+    file.write_all(content)
+        .map_err(|e| AgentError::Io(format!("write {}: {}", target.display(), e)))
 }
 
 /// Largest char boundary <= `i` (i clamped to s.len()). Walks down at most 3
@@ -842,9 +991,8 @@ fn read_text_window(
     let total_bytes = fs::metadata(full)
         .map_err(|e| AgentError::Io(format!("stat {}: {}", display_path, e)))?
         .len();
-    let use_head_tail = head_tail
-        && total_bytes > cap as u64
-        && cap >= READ_GAP_RESERVE_BYTES.saturating_mul(2);
+    let use_head_tail =
+        head_tail && total_bytes > cap as u64 && cap >= READ_GAP_RESERVE_BYTES.saturating_mul(2);
     let data_budget = if use_head_tail {
         cap - READ_GAP_RESERVE_BYTES
     } else {
@@ -861,8 +1009,8 @@ fn read_text_window(
         0
     };
 
-    let mut file = File::open(full)
-        .map_err(|e| AgentError::Io(format!("read {}: {}", display_path, e)))?;
+    let mut file =
+        File::open(full).map_err(|e| AgentError::Io(format!("read {}: {}", display_path, e)))?;
     let head_request = (head_budget + 3).min(total_bytes as usize);
     let mut head_buffer = Vec::with_capacity(head_request);
     Read::by_ref(&mut file)
@@ -907,9 +1055,7 @@ fn read_text_window(
         .read_to_end(&mut tail_buffer)
         .map_err(|e| AgentError::Io(format!("read {}: {}", display_path, e)))?;
     let mut tail_start = 0usize;
-    while tail_start < tail_buffer.len()
-        && (tail_buffer[tail_start] & 0b1100_0000) == 0b1000_0000
-    {
+    while tail_start < tail_buffer.len() && (tail_buffer[tail_start] & 0b1100_0000) == 0b1000_0000 {
         tail_start += 1;
     }
     let tail_source = &tail_buffer[tail_start..];
@@ -970,8 +1116,8 @@ fn read_bounded_line_range(
     let total_bytes = fs::metadata(full)
         .map_err(|e| AgentError::Io(format!("stat {}: {}", display_path, e)))?
         .len();
-    let file = File::open(full)
-        .map_err(|e| AgentError::Io(format!("read {}: {}", display_path, e)))?;
+    let file =
+        File::open(full).map_err(|e| AgentError::Io(format!("read {}: {}", display_path, e)))?;
     let mut reader = BufReader::new(file);
     let mut out: Vec<u8> = Vec::with_capacity(store_limit);
     let mut selected_bytes = 0usize;
@@ -1043,9 +1189,7 @@ fn read_bounded_line_range(
         Some(desired_end_line.min(known_lines))
     };
     let mut source_end = cap.min(out.len());
-    while source_end > 0
-        && source_end < out.len()
-        && (out[source_end] & 0b1100_0000) == 0b1000_0000
+    while source_end > 0 && source_end < out.len() && (out[source_end] & 0b1100_0000) == 0b1000_0000
     {
         source_end -= 1;
     }
@@ -1098,8 +1242,21 @@ fn append_range_bytes(
 /// pull diff and the Storage push agree on what counts as project state.
 /// Mirrors buildManifest in agent.mjs — wire format must stay identical.
 const MANIFEST_SKIP_DIRS: [&str; 15] = [
-    "node_modules", ".git", ".next", ".turbo", ".cache", "dist", "build", "out",
-    "coverage", "__pycache__", ".pytest_cache", "target", "vendor", ".venv", "venv",
+    "node_modules",
+    ".git",
+    ".next",
+    ".turbo",
+    ".cache",
+    "dist",
+    "build",
+    "out",
+    "coverage",
+    "__pycache__",
+    ".pytest_cache",
+    "target",
+    "vendor",
+    ".venv",
+    "venv",
 ];
 const MANIFEST_MAX_FILES: usize = 20_000;
 
@@ -1184,7 +1341,11 @@ impl Matcher {
 
 fn literal_matcher(pattern: &str, ci: bool) -> Matcher {
     Matcher::Literal {
-        needle: if ci { pattern.to_lowercase() } else { pattern.to_string() },
+        needle: if ci {
+            pattern.to_lowercase()
+        } else {
+            pattern.to_string()
+        },
         ci,
     }
 }
@@ -1216,8 +1377,8 @@ fn grep_walk(
     // assume that dependency exists. Spawn/parse/regex incompatibilities fall
     // back to the equivalent built-in walker below.
     let effective_literal = matches!(matcher, Matcher::Literal { .. });
-    let results = grep_with_ripgrep(pattern, &target, &root, ci, effective_literal)
-        .unwrap_or_else(|| {
+    let results =
+        grep_with_ripgrep(pattern, &target, &root, ci, effective_literal).unwrap_or_else(|| {
             let mut bounded = BoundedMatches::new();
             walk(&target, &root, &matcher, &mut bounded);
             bounded
@@ -1266,9 +1427,7 @@ impl BoundedMatches {
             self.line_truncations = self.line_truncations.saturating_add(1);
         }
         let stored_bytes = line.len().saturating_add(1);
-        if self.collecting_head
-            && self.head_bytes.saturating_add(stored_bytes) <= GREP_HEAD_BYTES
-        {
+        if self.collecting_head && self.head_bytes.saturating_add(stored_bytes) <= GREP_HEAD_BYTES {
             self.head_bytes += stored_bytes;
             self.head.push(line);
             return;
@@ -1279,7 +1438,9 @@ impl BoundedMatches {
             let Some(dropped) = self.tail.pop_front() else {
                 break;
             };
-            self.tail_bytes = self.tail_bytes.saturating_sub(dropped.len().saturating_add(1));
+            self.tail_bytes = self
+                .tail_bytes
+                .saturating_sub(dropped.len().saturating_add(1));
         }
         if stored_bytes <= GREP_TAIL_BYTES {
             self.tail_bytes += stored_bytes;
@@ -1475,7 +1636,10 @@ fn grep_with_ripgrep(
 }
 
 fn walk(dir: &Path, root: &Path, re: &Matcher, out: &mut BoundedMatches) {
-    if fs::metadata(dir).map(|meta| meta.is_file()).unwrap_or(false) {
+    if fs::metadata(dir)
+        .map(|meta| meta.is_file())
+        .unwrap_or(false)
+    {
         scan_grep_file(dir, root, re, out);
         return;
     }
@@ -1524,12 +1688,7 @@ fn scan_grep_file(full: &Path, root: &Path, re: &Matcher, out: &mut BoundedMatch
             break; // invalid UTF-8 or unreadable: preserve old skip behavior
         };
         if re.is_match(&line) {
-            out.push(format!(
-                "{}:{}: {}",
-                rel.display(),
-                i + 1,
-                line.trim()
-            ));
+            out.push(format!("{}:{}: {}", rel.display(), i + 1, line.trim()));
         }
     }
 }
@@ -1549,9 +1708,7 @@ fn is_sensitive_project_path(path: &Path) -> bool {
     if parts.iter().any(|part| part == ".aws") && base == "credentials" {
         return true;
     }
-    if parts.iter().any(|part| part == ".config")
-        && parts.iter().any(|part| part == "gcloud")
-    {
+    if parts.iter().any(|part| part == ".config") && parts.iter().any(|part| part == "gcloud") {
         return true;
     }
     if base == ".env" || base.starts_with(".env.") {
@@ -1560,7 +1717,18 @@ fn is_sensitive_project_path(path: &Path) -> bool {
     if [".npmrc", ".pypirc", ".netrc", ".git-credentials"].contains(&base) {
         return true;
     }
-    if ["id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa.pub", "id_dsa.pub", "id_ecdsa.pub", "id_ed25519.pub"].contains(&base) {
+    if [
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "id_rsa.pub",
+        "id_dsa.pub",
+        "id_ecdsa.pub",
+        "id_ed25519.pub",
+    ]
+    .contains(&base)
+    {
         return true;
     }
     ["key", "pem", "p12", "pfx", "crt", "cer"]
@@ -1575,7 +1743,60 @@ fn is_sensitive_project_path(path: &Path) -> bool {
 /// further for the wire; this just bounds peak memory.
 const RUN_OUTPUT_CAP: usize = 4 * 1024 * 1024;
 
-fn run_command(command: &str, timeout_ms: u64) -> Value {
+fn kill_command(id: &str) -> Result<(), AgentError> {
+    CANCELED_COMMANDS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(id.to_string());
+    if let Some(pid) = RUNNING_COMMANDS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .get(id)
+        .copied()
+    {
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while RUNNING_COMMANDS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .contains_key(id)
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if RUNNING_COMMANDS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .contains_key(id)
+    {
+        return Err(AgentError::Io(format!(
+            "command {id} did not exit after SIGKILL"
+        )));
+    }
+    Ok(())
+}
+
+fn finish_command(id: &str) {
+    RUNNING_COMMANDS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .remove(id);
+    CANCELED_COMMANDS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap()
+        .remove(id);
+}
+
+fn run_command(id: &str, command: &str, timeout_ms: u64) -> Value {
     let mut child = match Command::new("/bin/sh")
         .arg("-c")
         .arg(command)
@@ -1592,6 +1813,7 @@ fn run_command(command: &str, timeout_ms: u64) -> Value {
     {
         Ok(c) => c,
         Err(e) => {
+            finish_command(id);
             return json!({
                 "stdout": "",
                 "stderr": format!("[spawn error] {}", e),
@@ -1601,6 +1823,21 @@ fn run_command(command: &str, timeout_ms: u64) -> Value {
     };
 
     let pid = child.id();
+    RUNNING_COMMANDS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(id.to_string(), pid);
+    if CANCELED_COMMANDS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap()
+        .contains(id)
+    {
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
     let stdout_handle = child.stdout.take();
     let stderr_handle = child.stderr.take();
     let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
@@ -1652,6 +1889,7 @@ fn run_command(command: &str, timeout_ms: u64) -> Value {
     stdout_str = truncate_for_response(&stdout_str);
     stderr_str = truncate_for_response(&stderr_str);
     let exit_code = status.code();
+    finish_command(id);
     json!({
         "stdout": stdout_str,
         "stderr": stderr_str,
@@ -1831,10 +2069,9 @@ fn spawn_log_pump(reader: Option<impl Read + Send + 'static>, sink: Arc<Mutex<St
 fn wait_for_port(port: u16, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if let Ok(stream) = TcpStream::connect_timeout(
-            &([127, 0, 0, 1], port).into(),
-            Duration::from_millis(200),
-        ) {
+        if let Ok(stream) =
+            TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(200))
+        {
             let _ = stream.shutdown(Shutdown::Both);
             return true;
         }
@@ -1898,8 +2135,7 @@ fn random_hex(bytes: usize) -> String {
 /// Std-only base64 encoder (no padding-free variants needed) — pairs with
 /// base64_decode below for the binary-safe GET /fs/file?encoding=base64.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHA: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as u32;
@@ -1980,10 +2216,7 @@ mod tests {
         // "uniqus" → "dW5pcXVz"
         assert_eq!(base64_decode("dW5pcXVz").unwrap(), b"uniqus");
         // "hello world!" → "aGVsbG8gd29ybGQh"
-        assert_eq!(
-            base64_decode("aGVsbG8gd29ybGQh").unwrap(),
-            b"hello world!"
-        );
+        assert_eq!(base64_decode("aGVsbG8gd29ybGQh").unwrap(), b"hello world!");
     }
 
     #[test]
@@ -1992,7 +2225,12 @@ mod tests {
         assert_eq!(base64_encode(b"hello world!"), "aGVsbG8gd29ybGQh");
         // Padding variants (1 and 2 trailing bytes) + binary bytes survive a
         // full encode→decode loop — this is the path a pulled PNG rides.
-        for input in [&b"a"[..], &b"ab"[..], &b"abc"[..], &[0u8, 255, 128, 7, 9][..]] {
+        for input in [
+            &b"a"[..],
+            &b"ab"[..],
+            &b"abc"[..],
+            &[0u8, 255, 128, 7, 9][..],
+        ] {
             assert_eq!(base64_decode(&base64_encode(input)).unwrap(), input);
         }
     }
@@ -2020,8 +2258,8 @@ mod tests {
     #[test]
     fn tail_str_is_char_safe() {
         let s = "→".repeat(100); // 300 bytes
-        // 100 is not a multiple of 3, so a raw byte slice at len-100 would split
-        // a "→". tail_str must snap to a boundary and stay valid.
+                                 // 100 is not a multiple of 3, so a raw byte slice at len-100 would split
+                                 // a "→". tail_str must snap to a boundary and stay valid.
         let t = tail_str(&s, 100);
         assert!(t.len() <= 100);
         assert!(s.ends_with(t));
@@ -2040,10 +2278,8 @@ mod tests {
 
     #[test]
     fn bounded_full_read_keeps_utf8_head_and_true_tail() {
-        let file = std::env::temp_dir().join(format!(
-            "uniqus-read-window-test-{}",
-            std::process::id()
-        ));
+        let file =
+            std::env::temp_dir().join(format!("uniqus-read-window-test-{}", std::process::id()));
         let content = format!("HEAD→\n{}\nTAIL→", "x".repeat(40 * 1024));
         fs::write(&file, content).unwrap();
 
@@ -2069,10 +2305,8 @@ mod tests {
             .map(|n| format!("line-{n}-{}", "x".repeat(20)))
             .collect::<Vec<_>>()
             .join("\n");
-        let file = std::env::temp_dir().join(format!(
-            "uniqus-range-window-test-{}",
-            std::process::id()
-        ));
+        let file =
+            std::env::temp_dir().join(format!("uniqus-range-window-test-{}", std::process::id()));
         fs::write(&file, &content).unwrap();
         let range = read_bounded_line_range(&file, "range.txt", 3, 10, 80).unwrap();
         assert_eq!(range.total_lines, None);
@@ -2099,7 +2333,11 @@ mod tests {
     fn bounded_matches_keep_first_and_tail_with_explicit_counts() {
         let mut bounded = BoundedMatches::new();
         for n in 0..120 {
-            bounded.push(format!("file.txt:{}: hit-{n:03}-{}", n + 1, "x".repeat(300)));
+            bounded.push(format!(
+                "file.txt:{}: hit-{n:03}-{}",
+                n + 1,
+                "x".repeat(300)
+            ));
         }
         let result = bounded.finish(false);
         assert_eq!(result.total_matches, 120);
@@ -2151,18 +2389,20 @@ mod tests {
         assert!(result.matches.contains("pattern is not a valid regex"));
 
         let mut explicit_file = BoundedMatches::new();
-        walk(&root.join("visible.txt"), &root, &matcher, &mut explicit_file);
-        let explicit_file = explicit_file.finish(false);
-        assert_eq!(explicit_file.total_matches, 1);
-        assert!(explicit_file.matches.contains("visible.txt:1: literal [ marker"));
-
-        let mut explicit_hidden = BoundedMatches::new();
         walk(
-            &root.join(".hidden"),
+            &root.join("visible.txt"),
             &root,
             &matcher,
-            &mut explicit_hidden,
+            &mut explicit_file,
         );
+        let explicit_file = explicit_file.finish(false);
+        assert_eq!(explicit_file.total_matches, 1);
+        assert!(explicit_file
+            .matches
+            .contains("visible.txt:1: literal [ marker"));
+
+        let mut explicit_hidden = BoundedMatches::new();
+        walk(&root.join(".hidden"), &root, &matcher, &mut explicit_hidden);
         let explicit_hidden = explicit_hidden.finish(false);
         assert_eq!(explicit_hidden.total_matches, 1);
         assert!(explicit_hidden.matches.contains(".hidden/ignored.txt"));

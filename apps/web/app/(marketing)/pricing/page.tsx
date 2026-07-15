@@ -15,7 +15,8 @@ const TIERS = [
     cta: { label: "Start building", href: "/login", primary: true },
     features: [
       { label: "Unlimited public-idea projects", on: true },
-      { label: "Auto model routing (Claude, GPT, Gemini, GLM)", on: true },
+      { label: "Auto routing across Claude and Gemini", on: true },
+      { label: "GPT and GLM available as manual choices", on: true },
       { label: "Bring your own model API keys", on: true },
       { label: "One private workspace at a time", on: true },
       { label: "Live preview + plan mode", on: true },
@@ -30,7 +31,7 @@ const TIERS = [
     desc: "For teams building real products together, with room to scale.",
     badge: "Most popular",
     featured: true,
-    cta: { label: "Start a Team trial", href: "/login", primary: true },
+    cta: { label: "Talk to us about Team", href: "/contact", primary: true },
     features: [
       { label: "Everything in Free", on: true },
       { label: "Concurrent private workspaces", on: true },
@@ -94,8 +95,8 @@ const FAQ = [
     a: "Yes. Solo builders can plan, build, preview, and iterate on projects without a credit card. Auto mode routes to the best AI for each step at no cost on Free.",
   },
   {
-    q: "How does per-seat billing work on Team?",
-    a: "You pay $20 per active member per month. Add or remove seats anytime — we prorate the difference on your next invoice.",
+    q: "How do I get Team access?",
+    a: "Team access is currently opened through assisted onboarding. Contact us and we’ll help confirm seats, billing, and workspace setup before anything is charged.",
   },
   {
     q: "Can I use my own model API keys?",

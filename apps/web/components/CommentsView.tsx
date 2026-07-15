@@ -13,7 +13,10 @@ import { toast } from "@/lib/toast";
  * carried by a labelled pill, loading + empty states like MembersView.
  */
 
-const TARGET_KINDS: CommentTargetKind[] = ["element", "file", "checkpoint", "pr", "general"];
+// Checkpoint/PR comments need immutable artifact IDs, which the current API
+// does not accept. Do not create ambiguous threads until that contract exists;
+// existing stored threads still render below for compatibility.
+const TARGET_KINDS: CommentTargetKind[] = ["element", "file", "general"];
 
 /** Which kinds take a freeform reference (selector / file path). */
 const KINDS_WITH_REF: ReadonlySet<CommentTargetKind> = new Set<CommentTargetKind>(["element", "file"]);
@@ -45,14 +48,15 @@ export default function CommentsView({ projectId }: { projectId: string }) {
   const [targetRef, setTargetRef] = useState("");
   const [body, setBody] = useState("");
   const [busy, setBusy] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    setLoadError(null);
     try {
       const { comments } = await fetchCommentsApi(projectId);
       setComments(comments);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Couldn't load comments");
-      setComments([]);
+      setLoadError(e instanceof Error ? e.message : "Couldn't load comments");
     }
   }, [projectId]);
 
@@ -200,9 +204,18 @@ export default function CommentsView({ projectId }: { projectId: string }) {
       </div>
 
       {/* Comment list — hairline-divided editorial rows, newest first */}
-      {sorted === null ? (
+      {loadError && (
+        <div className="async-error" role="alert">
+          <p>We couldn&rsquo;t load comments. Existing comments may still be there.</p>
+          <code>{loadError}</code>
+          <button type="button" className="btn-secondary" onClick={() => void load()}>
+            Retry
+          </button>
+        </div>
+      )}
+      {sorted === null && !loadError ? (
         <div style={{ ...eyebrow }}>Loading…</div>
-      ) : sorted.length === 0 ? (
+      ) : sorted !== null && sorted.length === 0 ? (
         <div
           style={{
             border: "1px dashed var(--border-default)",
@@ -215,7 +228,7 @@ export default function CommentsView({ projectId }: { projectId: string }) {
         >
           No comments yet. Start a thread above.
         </div>
-      ) : (
+      ) : sorted !== null ? (
         <div
           style={{
             border: "1px solid var(--border-default)",
@@ -340,7 +353,7 @@ export default function CommentsView({ projectId }: { projectId: string }) {
             );
           })}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

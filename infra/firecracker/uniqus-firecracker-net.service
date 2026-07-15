@@ -13,6 +13,9 @@ Before=uniqus-orchestrator.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# Shared with the orchestrator drop-in installed by host-setup.sh. Operators
+# configure a custom FIRECRACKER_CIDR once in this root-owned file.
+EnvironmentFile=-/etc/default/uniqus-firecracker
 # Installed by host-setup.sh from infra/firecracker/host-net.sh. Lives outside
 # the git checkout so re-cloning / moving the repo can't break the boot path.
 ExecStart=/usr/local/sbin/uniqus-firecracker-net.sh

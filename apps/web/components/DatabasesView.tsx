@@ -201,10 +201,10 @@ function DatabaseModal({
   const [sql, setSql] = useState("");
   const [sqlRows, setSqlRows] = useState<Row[] | null>(null);
   const [sqlError, setSqlError] = useState<string | null>(null);
-  // P5.2: when the typed SQL is destructive, hold the detected operation and
-  // require an explicit "Run anyway" before executing (the console runs as
-  // postgres, bypassing RLS — there is no undo).
+  // The server classifies every statement. A risky/unknown query returns a
+  // short-lived token bound to this exact SQL and waits for explicit approval.
   const [pendingDestructive, setPendingDestructive] = useState<string | null>(null);
+  const [pendingSqlToken, setPendingSqlToken] = useState<string | null>(null);
   const [sqlBusy, setSqlBusy] = useState(false);
   const [sqlMs, setSqlMs] = useState<number | null>(null);
 
@@ -257,36 +257,24 @@ function DatabaseModal({
     }
   }
 
-  /** P5.2: classify a statement as destructive (mirrors the agent run_sql gate). */
-  function classifyDestructive(query: string): string | null {
-    const s = query.trim();
-    if (/\btruncate\s+(?:table\s+)?[a-zA-Z0-9_."]+/i.test(s)) return "TRUNCATE";
-    if (/\bdrop\s+(table|schema|database|view|materialized\s+view)\b/i.test(s)) return "DROP";
-    if (/\bdelete\s+from\s+[a-zA-Z0-9_."]+/i.test(s)) return "DELETE";
-    if (/\balter\s+table\b[\s\S]*\bdrop\b/i.test(s)) return "ALTER … DROP";
-    if (/\brevoke\b/i.test(s)) return "REVOKE";
-    return null;
-  }
-
-  async function runSql(force = false) {
+  async function runSql(confirmationToken?: string) {
     const q = sql.trim();
     if (!q || sqlBusy) return;
-    const op = classifyDestructive(q);
-    if (op && !force) {
-      // Don't run yet — surface a confirmation banner the user must accept.
-      setPendingDestructive(op);
-      setSqlError(null);
-      return;
-    }
     setPendingDestructive(null);
+    setPendingSqlToken(null);
     setSqlBusy(true);
     setSqlError(null);
     setSqlRows(null);
     const t0 = performance.now();
     try {
-      const { rows } = await supabaseQueryApi(ref, q);
+      const result = await supabaseQueryApi(ref, q, confirmationToken);
+      if (result.requires_confirmation && result.confirmation_token) {
+        setPendingDestructive(result.operation ?? "UNKNOWN SQL");
+        setPendingSqlToken(result.confirmation_token);
+        return;
+      }
       setSqlMs(Math.round(performance.now() - t0));
-      setSqlRows(asRows(rows));
+      setSqlRows(asRows(result.rows));
     } catch (e) {
       setSqlError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -397,15 +385,51 @@ function DatabaseModal({
           </p>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 12, minHeight: 360 }}>
-            <div className="dash-tabs" role="tablist" style={{ margin: 0, alignSelf: "flex-start" }}>
-              <button type="button" role="tab" aria-selected={tab === "tables"} onClick={() => setTab("tables")}>
+            <div
+              className="dash-tabs"
+              role="tablist"
+              aria-label="Database view"
+              style={{ margin: 0, alignSelf: "flex-start" }}
+              onKeyDown={(event) => {
+                if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+                event.preventDefault();
+                const next = event.key === "ArrowLeft" || event.key === "Home" ? "tables" : "sql";
+                setTab(next);
+                requestAnimationFrame(() =>
+                  document.getElementById(`database-tab-${next}`)?.focus(),
+                );
+              }}
+            >
+              <button
+                id="database-tab-tables"
+                type="button"
+                role="tab"
+                aria-selected={tab === "tables"}
+                aria-controls="database-panel-tables"
+                tabIndex={tab === "tables" ? 0 : -1}
+                onClick={() => setTab("tables")}
+              >
                 Tables
               </button>
-              <button type="button" role="tab" aria-selected={tab === "sql"} onClick={() => setTab("sql")}>
+              <button
+                id="database-tab-sql"
+                type="button"
+                role="tab"
+                aria-selected={tab === "sql"}
+                aria-controls="database-panel-sql"
+                tabIndex={tab === "sql" ? 0 : -1}
+                onClick={() => setTab("sql")}
+              >
                 SQL console
               </button>
             </div>
 
+            <div
+              id={`database-panel-${tab}`}
+              role="tabpanel"
+              aria-labelledby={`database-tab-${tab}`}
+              tabIndex={0}
+            >
             {tab === "tables" ? (
               selected ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -426,7 +450,7 @@ function DatabaseModal({
                           <div className="db-subhead">Columns</div>
                           <ResultsTable
                             rows={columns.map((c) => ({
-                              column: `${c.is_pk === true || c.is_pk === "true" ? "🔑 " : ""}${String(c.column_name ?? "")}`,
+                              column: `${String(c.column_name ?? "")}${c.is_pk === true || c.is_pk === "true" ? " (primary key)" : ""}`,
                               type: c.data_type,
                               nullable: c.is_nullable,
                               default: c.column_default,
@@ -466,12 +490,19 @@ function DatabaseModal({
               )
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <label className="sr-only" htmlFor="database-sql-query">
+                  SQL query
+                </label>
                 <textarea
+                  id="database-sql-query"
                   className="db-sql-input"
                   value={sql}
                   onChange={(e) => {
                     setSql(e.target.value);
-                    if (pendingDestructive) setPendingDestructive(null);
+                    if (pendingDestructive) {
+                      setPendingDestructive(null);
+                      setPendingSqlToken(null);
+                    }
                   }}
                   spellCheck={false}
                   placeholder={"select * from users limit 10;"}
@@ -484,7 +515,7 @@ function DatabaseModal({
                     {sqlBusy ? "Running…" : "Run"}
                   </button>
                   <span className="db-empty-note" style={{ margin: 0 }}>
-                    ⌘⏎ to run · executes as <code>postgres</code> — destructive statements are real
+                    Ctrl or Command + Enter to run · executes as <code>postgres</code> — destructive statements are real
                   </span>
                   {sqlRows !== null && sqlMs !== null && (
                     <span className="db-empty-note" style={{ margin: "0 0 0 auto" }}>
@@ -506,21 +537,26 @@ function DatabaseModal({
                       background: "rgba(239,68,68,0.10)",
                     }}
                   >
-                    <span style={{ color: "var(--conf-low)", fontSize: "var(--fs-md)" }} aria-hidden>
-                      ⚠
-                    </span>
                     <span style={{ fontSize: "var(--fs-sm)", color: "var(--text-primary)", flex: 1 }}>
                       This is a destructive <strong>{pendingDestructive}</strong> statement. It runs as{" "}
                       <code>postgres</code> and <strong>cannot be undone</strong>. Run it anyway?
                     </span>
-                    <button type="button" className="btn-ghost" onClick={() => setPendingDestructive(null)}>
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      onClick={() => {
+                        setPendingDestructive(null);
+                        setPendingSqlToken(null);
+                      }}
+                    >
                       Cancel
                     </button>
                     <button
                       type="button"
                       className="btn-primary"
                       style={{ background: "var(--conf-low)" }}
-                      onClick={() => void runSql(true)}
+                      onClick={() => pendingSqlToken && void runSql(pendingSqlToken)}
+                      disabled={!pendingSqlToken || sqlBusy}
                     >
                       Run anyway
                     </button>
@@ -532,6 +568,7 @@ function DatabaseModal({
                 {sqlRows !== null && <ResultsTable rows={sqlRows} />}
               </div>
             )}
+            </div>
           </div>
         )}
       </Modal>
@@ -571,10 +608,11 @@ function DatabaseModal({
                 </>
               ) : null}
             </p>
-            <label style={{ fontSize: 12, color: "var(--text-muted)" }}>
+            <label htmlFor="database-delete-confirmation" style={{ fontSize: 12, color: "var(--text-muted)" }}>
               Type <code>{db.name ?? ref}</code> to confirm:
             </label>
             <input
+              id="database-delete-confirmation"
               className="ds-name"
               value={deleteText}
               onChange={(e) => setDeleteText(e.target.value)}
@@ -736,10 +774,10 @@ export default function DatabasesView({ isGuest }: { isGuest: boolean }) {
                   {projects.length} database{projects.length === 1 ? "" : "s"}
                 </span>
               )}
-              <button type="button" onClick={loadProjects} disabled={loading} className="btn-ghost" style={{ fontSize: 11.5, padding: "2px 8px" }}>
+              <button type="button" onClick={loadProjects} disabled={loading} className="btn-ghost" style={{ fontSize: 12, padding: "2px 8px" }}>
                 {loading ? "Refreshing…" : "Refresh"}
               </button>
-              <button type="button" onClick={() => setConfirmDisconnect(true)} className="btn-ghost" style={{ fontSize: 11.5, padding: "2px 8px" }}>
+              <button type="button" onClick={() => setConfirmDisconnect(true)} className="btn-ghost" style={{ fontSize: 12, padding: "2px 8px" }}>
                 Disconnect
               </button>
             </span>

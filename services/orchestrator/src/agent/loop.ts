@@ -102,7 +102,7 @@ import { approvalScopeKey, classifyToolRisk, decidePermission } from "./permissi
 import { setTodos, type TodoItem } from "./todos.js";
 import { listProjectSecrets, removeLegacyMaterializedSecret } from "../secrets.js";
 import { getProjectSecretPlaintexts } from "../db/secrets.js";
-import { createSecretRedactor } from "./secretRedaction.js";
+import { createSecretRedactor, redactSensitiveShellOutput } from "./secretRedaction.js";
 import { isSensitiveProjectPath } from "../security/sensitivePaths.js";
 import { callConnector, listProjectConnectors } from "../connectors/index.js";
 import {
@@ -2329,11 +2329,20 @@ export async function runAgentLoop(
           };
         } else {
           const sandboxText = sb.isSandboxTextResult(result) ? result : null;
-          const raw = secretRedactor.text(
+          const serialized =
             (sandboxText?.text ??
               (typeof result === "string" ? result : JSON.stringify(result))) ||
-              "(no output)",
-          );
+            "(no output)";
+          const shellSafe = new Set([
+            "run_command",
+            "run_in_background",
+            "read_background_log",
+            "read_server_log",
+            "start_server",
+          ]).has(call.name)
+            ? redactSensitiveShellOutput(serialized)
+            : serialized;
+          const raw = secretRedactor.text(shellSafe);
           // Cap any single tool result so one huge read_file/grep/log can't
           // blow past the context window or get re-sent at full size every
           // iteration. Not every tool truncates at the source (run_command
@@ -2375,7 +2384,12 @@ export async function runAgentLoop(
           };
         }
       } catch (err) {
-        const msg = secretRedactor.text(err instanceof Error ? err.message : String(err));
+        const errorText = err instanceof Error ? err.message : String(err);
+        const msg = secretRedactor.text(
+          new Set(["run_command", "run_in_background", "start_server"]).has(call.name)
+            ? redactSensitiveShellOutput(errorText)
+            : errorText,
+        );
         reportToolResult(msg, true);
         return {
           type: "tool_result",
@@ -3013,7 +3027,8 @@ export async function executeTool(
       });
     }
     case "stop_server":
-      sb.stopServer(args.server_id);
+      if (!projectId) throw new Error("stop_server requires a project");
+      await sb.stopServer(projectId, args.server_id);
       return `stopped ${args.server_id}`;
     case "list_servers": {
       const list = sb.listServers(projectId);
@@ -3023,7 +3038,8 @@ export async function executeTool(
       // Async variant RPCs into the VM. The sync readServerLog reads a host-side
       // buffer that is always empty for Firecracker VM-backed servers (the prod
       // path), so the agent got "" and retried blind when diagnosing crashes (B-7).
-      return await sb.readServerLogAsync(args.server_id, args.max_bytes);
+      if (!projectId) throw new Error("read_server_log requires a project");
+      return await sb.readServerLogAsync(projectId, args.server_id, args.max_bytes);
     case "todo_write": {
       if (!Array.isArray(args.todos)) {
         throw new Error("todo_write requires 'todos' as an array");
@@ -3043,6 +3059,7 @@ export async function executeTool(
           : undefined;
       const result = await takeScreenshot({
         sandboxRoot: sandbox.rootDir,
+        projectId: projectId ?? undefined,
         serverId: typeof args.server_id === "string" ? args.server_id : undefined,
         url: typeof args.url === "string" ? args.url : undefined,
         pathSuffix: typeof args.path === "string" ? args.path : undefined,
@@ -3084,6 +3101,7 @@ export async function executeTool(
           : undefined;
       const result = await runInteractPreview({
         sandboxRoot: sandbox.rootDir,
+        projectId: projectId ?? undefined,
         serverId: typeof args.server_id === "string" ? args.server_id : undefined,
         url: typeof args.url === "string" ? args.url : undefined,
         pathSuffix: typeof args.path === "string" ? args.path : undefined,
@@ -3297,6 +3315,7 @@ export async function executeTool(
           : undefined;
       const result = await runInteractPreview({
         sandboxRoot: sandbox.rootDir,
+        projectId,
         serverId: typeof args.server_id === "string" ? args.server_id : undefined,
         url: typeof args.url === "string" ? args.url : undefined,
         pathSuffix: typeof args.path === "string" ? args.path : (flow.start_path ?? undefined),
@@ -3369,7 +3388,7 @@ export async function executeTool(
       if (typeof args.job_id !== "string") {
         throw new Error("kill_background requires 'job_id' as a string");
       }
-      killJob(args.job_id);
+      await killJob(args.job_id);
       return `killed ${args.job_id}`;
     }
     case "list_connectors": {

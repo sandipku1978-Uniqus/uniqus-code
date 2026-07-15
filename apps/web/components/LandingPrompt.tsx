@@ -7,6 +7,7 @@ import { useStore } from "@/lib/store";
 import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
 import ModelPicker from "./ModelPicker";
 import MicButton from "./MicButton";
+import { createFirstTurnIntent } from "@/lib/first-turn-intent";
 
 /**
  * Where a logged-out visitor's typed idea is parked while they sign in. The
@@ -17,14 +18,19 @@ import MicButton from "./MicButton";
  */
 export const PENDING_BRIEF_KEY = "gate15.pendingBrief";
 
-/** ChatPanel hydrates its composer from this localStorage key per project.
+/** ChatPanel hydrates its composer from this localStorage key per chat session.
  * Shared with the dashboard composer (ProjectPicker) so a brief started there
  * with attachments lands as a ready-to-send draft in the workspace.
  *
  * This helper is the single source of truth for the key — every reader/writer
  * must call it rather than re-deriving the string, or the two sides silently
  * drift apart and drafts vanish. */
-export function draftKeyFor(projectId: string): string {
+export function draftKeyFor(projectId: string, sessionId: string | null = null): string {
+  return `gate15.draft.${projectId}.${sessionId ?? "default"}`;
+}
+
+/** Pre-session-scoping key, read once to migrate existing default-chat drafts. */
+export function legacyDraftKeyFor(projectId: string): string {
   return `gate15.draft.${projectId}`;
 }
 
@@ -139,9 +145,15 @@ export default function LandingPrompt({
         router.push(`/projects/${project.id}?${planQ}`);
       } else {
         // No attachments → fire the brief as the first turn automatically.
-        router.push(
-          `/projects/${project.id}?brief=${encodeURIComponent(first_message)}&${planQ}`,
-        );
+        try {
+          const intent = createFirstTurnIntent(project.id, first_message);
+          router.push(`/projects/${project.id}?intent=${encodeURIComponent(intent)}&${planQ}`);
+        } catch {
+          // Hardened/private browsers can disable sessionStorage. Preserve the
+          // text as a reviewable draft instead of falling back to a leaky URL.
+          try { localStorage.setItem(draftKeyFor(project.id), first_message); } catch {}
+          router.push(`/projects/${project.id}?${planQ}`);
+        }
       }
     } catch {
       // Don't dead-end on a transient error — hand the idea to the dashboard,

@@ -64,6 +64,8 @@ export default function TasksView({ projectId }: { projectId: string }) {
   const [branch, setBranch] = useState("");
   const [acceptance, setAcceptance] = useState("");
   const [busy, setBusy] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [workerEnabled, setWorkerEnabled] = useState<boolean | null>(null);
   // Per-task cancel-in-flight set so canceling one task doesn't block canceling
   // another (a single id would silently no-op the second click).
   const [cancelingIds, setCancelingIds] = useState<Set<string>>(() => new Set());
@@ -73,12 +75,13 @@ export default function TasksView({ projectId }: { projectId: string }) {
   const loadRef = useRef<() => Promise<void>>(async () => {});
 
   const load = useCallback(async () => {
+    setLoadError(null);
     try {
-      const { tasks } = await fetchAgentTasksApi(projectId);
+      const { tasks, task_worker_enabled } = await fetchAgentTasksApi(projectId);
       setTasks(tasks);
+      setWorkerEnabled(task_worker_enabled);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Couldn't load tasks");
-      setTasks((prev) => prev ?? []);
+      setLoadError(e instanceof Error ? e.message : "Couldn't load tasks");
     }
   }, [projectId]);
 
@@ -172,7 +175,7 @@ export default function TasksView({ projectId }: { projectId: string }) {
     fontSize: "var(--fs-md)",
   };
 
-  const canCreate = !!title.trim() && !!prompt.trim() && !busy;
+  const canCreate = workerEnabled === true && !!title.trim() && !!prompt.trim() && !busy;
   const queuedCount = (tasks ?? []).filter((t) => t.status === "queued").length;
 
   return (
@@ -207,6 +210,7 @@ export default function TasksView({ projectId }: { projectId: string }) {
             className="ui-input"
             placeholder="Short, descriptive task name"
             value={title}
+            disabled={workerEnabled !== true}
             onChange={(e) => setTitle(e.target.value)}
             style={fieldStyle}
           />
@@ -221,6 +225,7 @@ export default function TasksView({ projectId }: { projectId: string }) {
             className="ui-input"
             placeholder="What should the agent do?"
             value={prompt}
+            disabled={workerEnabled !== true}
             onChange={(e) => setPrompt(e.target.value)}
             rows={4}
             style={{ ...fieldStyle, resize: "vertical", lineHeight: 1.5 }}
@@ -237,6 +242,7 @@ export default function TasksView({ projectId }: { projectId: string }) {
               className="ui-input"
               placeholder="feature/my-branch"
               value={branch}
+              disabled={workerEnabled !== true}
               onChange={(e) => setBranch(e.target.value)}
               style={{ ...fieldStyle, fontFamily: "var(--font-mono)" }}
             />
@@ -252,6 +258,7 @@ export default function TasksView({ projectId }: { projectId: string }) {
             className="ui-input"
             placeholder="How do we know the task is done?"
             value={acceptance}
+            disabled={workerEnabled !== true}
             onChange={(e) => setAcceptance(e.target.value)}
             rows={3}
             style={{ ...fieldStyle, resize: "vertical", lineHeight: 1.5 }}
@@ -270,17 +277,30 @@ export default function TasksView({ projectId }: { projectId: string }) {
         </div>
       </div>
 
-      {/* Honesty note about the async runner */}
-      {queuedCount > 0 && (
-        <div style={{ ...eyebrow, color: "var(--text-dim)", textTransform: "none", letterSpacing: "normal" }}>
-          Queued tasks run when the async task runner is enabled.
+      {workerEnabled === false ? (
+        <div className="async-error" role="status">
+          <p>New agent tasks are unavailable because this workspace&rsquo;s task worker is off.</p>
+          <span>Existing tasks remain visible; ask an administrator to enable the worker.</span>
         </div>
-      )}
+      ) : queuedCount > 0 ? (
+        <div style={{ ...eyebrow, color: "var(--text-dim)", textTransform: "none", letterSpacing: "normal" }}>
+          Queued tasks are waiting for the task worker.
+        </div>
+      ) : null}
 
       {/* Task list — hairline-divided editorial rows */}
-      {tasks === null ? (
+      {loadError && (
+        <div className="async-error" role="alert">
+          <p>We couldn&rsquo;t load tasks. Existing tasks may still be there.</p>
+          <code>{loadError}</code>
+          <button type="button" className="btn-secondary" onClick={() => void load()}>
+            Retry
+          </button>
+        </div>
+      )}
+      {tasks === null && !loadError ? (
         <div style={eyebrow}>Loading…</div>
-      ) : tasks.length === 0 ? (
+      ) : tasks !== null && tasks.length === 0 ? (
         <div
           style={{
             border: "1px dashed var(--border-default)",
@@ -293,7 +313,7 @@ export default function TasksView({ projectId }: { projectId: string }) {
         >
           No tasks yet. Queue one with the form above.
         </div>
-      ) : (
+      ) : tasks !== null ? (
         <div
           style={{
             border: "1px solid var(--border-default)",
@@ -421,7 +441,7 @@ export default function TasksView({ projectId }: { projectId: string }) {
             );
           })}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

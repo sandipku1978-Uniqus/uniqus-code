@@ -148,7 +148,7 @@ const FAQ = [
   },
   {
     q: "Is there an audit trail?",
-    a: "Yes. We record an audit event for secret reads and writes, connector invocations, and checkpoint create/restore — each scoped to a project. You can review the trail per project today. An organization-wide audit view and a dedicated UI viewer are on the roadmap.",
+    a: "Yes. Project-scoped audit events are recorded for secret reads and writes, connector invocations, and checkpoint create/restore. A dedicated in-product audit viewer is not yet available; project activity remains visible in the workspace while the audit viewer is being built.",
   },
   {
     q: "Are you SOC 2 or ISO 27001 certified?",

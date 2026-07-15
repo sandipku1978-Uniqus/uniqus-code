@@ -12,10 +12,19 @@
     "agent": "npm --workspace=@gate15/orchestrator run cli --",
     "typecheck": "turbo run typecheck"
   },
+  "dependencies": {
+    "next": "^15.5.20"
+  },
   "devDependencies": {
     "monaco-editor": "0.53.0",
-    "turbo": "^2.3.3",
+    "postcss": "8.5.19",
+    "turbo": "^2.9.14",
     "typescript": "^5.7.2"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "$postcss"
+    }
   },
   "packageManager": "npm@11.11.0"
 }

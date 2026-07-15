@@ -83,8 +83,8 @@ export default function GuestBanner({
           </svg>
           <span>
             {compact
-              ? "Guest account — saved on this device. Sign in to keep it across devices and unlock GitHub + publishing."
-              : "You're on a free guest account. Your work is saved on this device — sign in with Google to keep it permanently across devices and to unlock GitHub and publishing."}
+              ? "Guest session tied to this browser. Projects are stored securely; save your recovery code for access elsewhere."
+              : "This guest session is tied to this browser. Your projects are stored securely; save your recovery code to access them elsewhere, or sign in to keep access across devices."}
           </span>
         </span>
         <span style={{ display: "inline-flex", gap: 8, marginLeft: "auto" }}>
@@ -96,6 +96,7 @@ export default function GuestBanner({
               padding: compact ? "3px 9px" : "5px 11px",
               textDecoration: "none",
               whiteSpace: "nowrap",
+              minHeight: compact ? 32 : 36,
             }}
           >
             Sign in with Google
@@ -108,6 +109,7 @@ export default function GuestBanner({
               fontSize: compact ? 11 : 12,
               padding: compact ? "3px 9px" : "5px 11px",
               whiteSpace: "nowrap",
+              minHeight: compact ? 32 : 36,
             }}
           >
             Show recovery code
@@ -142,7 +144,8 @@ export default function GuestBanner({
           }
         >
           <p style={{ fontSize: 13, color: "var(--text-muted)", margin: "0 0 14px", lineHeight: 1.6 }}>
-            Save this somewhere safe — it&apos;s the only way back into this guest account
+            Your projects are stored on Gate 15&apos;s servers, while this guest session is
+            tied to your current browser. Save this code somewhere safe to restore access
             on another device or after browser data is cleared.
           </p>
           {loadingCode ? (

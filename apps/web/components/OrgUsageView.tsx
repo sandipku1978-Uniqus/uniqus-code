@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { OrgUsageSummary } from "@gate15/api-types";
 import { fetchOrgUsageApi } from "@/lib/api";
 import { OrgMetric, OrgMetricRail, OrgPageHeader, OrgStatePanel } from "./OrgPageChrome";
@@ -18,20 +18,29 @@ function monthLabel(iso: string): string {
 export default function OrgUsageView({ orgId }: { orgId: string }) {
   const [usage, setUsage] = useState<OrgUsageSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const loadGenerationRef = useRef(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
+    const generation = ++loadGenerationRef.current;
     setUsage(null);
     setError(null);
     try {
-      const response = await fetchOrgUsageApi(orgId);
+      const response = await fetchOrgUsageApi(orgId, signal);
+      if (signal?.aborted || generation !== loadGenerationRef.current) return;
       setUsage(response.usage);
     } catch (e) {
+      if (signal?.aborted || generation !== loadGenerationRef.current) return;
       setError(e instanceof Error ? e.message : "Couldn't load usage");
     }
   }, [orgId]);
 
   useEffect(() => {
-    void load();
+    const controller = new AbortController();
+    void load(controller.signal);
+    return () => {
+      controller.abort();
+      loadGenerationRef.current += 1;
+    };
   }, [load]);
 
   const pct =
@@ -66,7 +75,7 @@ export default function OrgUsageView({ orgId }: { orgId: string }) {
         lede={
           <>
             Track agent spend across every project in this organization and see how the
-            workspace is pacing against its monthly limit.
+            workspace is pacing against its monthly spending guard.
           </>
         }
       />
@@ -89,8 +98,8 @@ export default function OrgUsageView({ orgId }: { orgId: string }) {
           <OrgMetricRail>
             <OrgMetric value={money(usage.spend_usd)} label="Spent this month" />
             <OrgMetric
-              value={usage.budget_usd == null ? "No cap" : money(usage.budget_usd)}
-              label="Monthly cap"
+              value={usage.budget_usd == null ? "No guard" : money(usage.budget_usd)}
+              label="Monthly guard"
             />
             <OrgMetric value={usage.project_count} label="Projects" />
             <OrgMetric
@@ -118,7 +127,7 @@ export default function OrgUsageView({ orgId }: { orgId: string }) {
 
               <div className="org-budget-reading">
                 <strong>{pct == null ? "∞" : `${Math.round(pct)}%`}</strong>
-                <span>{pct == null ? "No enforced ceiling" : "of the monthly cap used"}</span>
+                <span>{pct == null ? "Monitoring only" : "of the monthly guard used"}</span>
               </div>
 
               {pct != null ? (
@@ -135,19 +144,20 @@ export default function OrgUsageView({ orgId }: { orgId: string }) {
                   </div>
                   <div className="org-budget-scale">
                     <span>{money(usage.spend_usd)} spent</span>
-                    <span>{money(usage.budget_usd ?? 0)} cap</span>
+                    <span>{money(usage.budget_usd ?? 0)} guard</span>
                   </div>
                 </>
               ) : (
                 <p className="org-budget-copy">
-                  Agent runs remain available regardless of monthly spend. Add a cap in
-                  organization settings if the team needs a hard limit.
+                  Agent runs remain available regardless of monthly spend. Add a guard in
+                  organization settings to stop most new runs near a chosen target.
                 </p>
               )}
 
               {over && (
                 <p className="org-budget-alert">
-                  New agent runs are paused until the cap is raised or the month resets.
+                  Most new runs are paused until the guard is raised or the month resets.
+                  Concurrent work can finish over the target, and recorded spend can lag.
                 </p>
               )}
             </section>
@@ -169,7 +179,7 @@ export default function OrgUsageView({ orgId }: { orgId: string }) {
                 </div>
                 <div>
                   <dt>Enforcement</dt>
-                  <dd>{usage.budget_usd == null ? "Monitoring only" : "Runs pause at cap"}</dd>
+                  <dd>{usage.budget_usd == null ? "Monitoring only" : "Best-effort run guard"}</dd>
                 </div>
               </dl>
             </aside>

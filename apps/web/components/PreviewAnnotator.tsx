@@ -78,6 +78,7 @@ export default function PreviewAnnotator({
   const [saving, setSaving] = useState(false);
   // Inline text entry: where the user clicked (canvas coords + on-screen coords).
   const [textEntry, setTextEntry] = useState<{ cx: number; cy: number; dx: number; dy: number; value: string } | null>(null);
+  const [keyboardNote, setKeyboardNote] = useState("");
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -372,6 +373,28 @@ export default function PreviewAnnotator({
   const undo = () => setShapes((s) => s.slice(0, -1));
   const clearShapes = () => setShapes([]);
 
+  const addKeyboardNote = (): void => {
+    const text = keyboardNote.trim();
+    const canvas = canvasRef.current;
+    if (!text || !canvas) return;
+    const existingNotes = shapes.filter((shape) => shape.kind === "text").length;
+    setShapes((current) => [
+      ...current,
+      {
+        kind: "text",
+        color,
+        x: Math.min(24, Math.max(0, canvas.width - 20)),
+        y: Math.min(24 + existingNotes * 32, Math.max(0, canvas.height - 24)),
+        text,
+        size: Math.max(14, strokeWidth * 6),
+      },
+    ]);
+    setKeyboardNote("");
+  };
+
+  const removeShape = (index: number): void =>
+    setShapes((current) => current.filter((_, shapeIndex) => shapeIndex !== index));
+
   const attach = () => {
     const canvas = canvasRef.current;
     if (!canvas || !image) return;
@@ -418,13 +441,35 @@ export default function PreviewAnnotator({
       <div className="annotator">
         {/* Toolbar */}
         <div className="annotator-tools">
-          <div className="annotator-tool-group" role="radiogroup" aria-label="Drawing tool">
+          <div
+            className="annotator-tool-group"
+            role="radiogroup"
+            aria-label="Drawing tool"
+            onKeyDown={(event) => {
+              if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+              event.preventDefault();
+              const current = TOOLS.findIndex((candidate) => candidate.key === tool);
+              const index = event.key === "Home"
+                ? 0
+                : event.key === "End"
+                  ? TOOLS.length - 1
+                  : event.key === "ArrowLeft" || event.key === "ArrowUp"
+                    ? (current - 1 + TOOLS.length) % TOOLS.length
+                    : (current + 1) % TOOLS.length;
+              setTool(TOOLS[index].key);
+              requestAnimationFrame(() =>
+                document.getElementById(`annotation-tool-${TOOLS[index].key}`)?.focus(),
+              );
+            }}
+          >
             {TOOLS.map((t) => (
               <button
                 key={t.key}
                 type="button"
+                id={`annotation-tool-${t.key}`}
                 role="radio"
                 aria-checked={tool === t.key}
+                tabIndex={tool === t.key ? 0 : -1}
                 className={`annotator-tool${tool === t.key ? " active" : ""}`}
                 onClick={() => setTool(t.key)}
                 title={t.hint}
@@ -435,7 +480,7 @@ export default function PreviewAnnotator({
             ))}
           </div>
 
-          <div className="annotator-tool-group" aria-label="Color">
+          <div className="annotator-tool-group" role="group" aria-label="Annotation color">
             {COLORS.map((c) => (
               <button
                 key={c}
@@ -450,7 +495,7 @@ export default function PreviewAnnotator({
             ))}
           </div>
 
-          <div className="annotator-tool-group" aria-label="Thickness">
+          <div className="annotator-tool-group" role="group" aria-label="Annotation thickness">
             {WIDTHS.map((wpx) => (
               <button
                 key={wpx}
@@ -498,6 +543,8 @@ export default function PreviewAnnotator({
               <canvas
                 ref={canvasRef}
                 className="annotator-canvas"
+                role="img"
+                aria-label="Screenshot annotation canvas. Pointer drawing is available; use the text-note field and annotation list below for a keyboard alternative."
                 style={{ cursor: tool === "text" ? "text" : "crosshair" }}
                 onPointerDown={onPointerDown}
                 onPointerMove={onPointerMove}
@@ -550,6 +597,74 @@ export default function PreviewAnnotator({
             </div>
           )}
         </div>
+
+        {hasImage && (
+          <div className="annotator-accessible-notes">
+            <div>
+              <label htmlFor="annotation-text-note">Add a text annotation</label>
+              <div>
+                <input
+                  id="annotation-text-note"
+                  value={keyboardNote}
+                  onChange={(event) => setKeyboardNote(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      addKeyboardNote();
+                    }
+                  }}
+                  placeholder="Describe the issue or requested change"
+                />
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={!keyboardNote.trim()}
+                  onClick={addKeyboardNote}
+                >
+                  Add note
+                </button>
+              </div>
+            </div>
+            {shapes.length > 0 && (
+              <ol aria-label="Annotations">
+                {shapes.map((shape, index) => (
+                  <li key={`${shape.kind}-${index}`}>
+                    {shape.kind === "text" ? (
+                      <>
+                        <label className="sr-only" htmlFor={`annotation-${index}`}>
+                          Text annotation {index + 1}
+                        </label>
+                        <input
+                          id={`annotation-${index}`}
+                          value={shape.text}
+                          onChange={(event) =>
+                            setShapes((current) =>
+                              current.map((candidate, shapeIndex) =>
+                                shapeIndex === index && candidate.kind === "text"
+                                  ? { ...candidate, text: event.target.value }
+                                  : candidate,
+                              ),
+                            )
+                          }
+                        />
+                      </>
+                    ) : (
+                      <span>{shape.kind === "pen" ? "Freehand" : shape.kind} annotation {index + 1}</span>
+                    )}
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      aria-label={`Remove annotation ${index + 1}`}
+                      onClick={() => removeShape(index)}
+                    >
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+        )}
 
         {error && (
           <div className="annotator-error" role="alert">

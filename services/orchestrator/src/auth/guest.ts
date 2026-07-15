@@ -27,18 +27,21 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { randomInt, createHash } from "node:crypto";
+import { randomInt, createHash, randomUUID } from "node:crypto";
 import { parse as parseCookie } from "cookie";
 import { sealData, unsealData } from "iron-session";
-import { encryptToken } from "./encrypt.js";
 import {
   createGuestUser,
   getGuestByRecoveryHash,
   getGuestRecoveryCode,
   getUserById,
+  claimGuestForConversion,
+  releaseGuestLifecycleClaim,
   markGuestConverted,
+  touchUserActivity,
   type UserRecord,
 } from "../db/users.js";
+import { publicError } from "../security/publicError.js";
 import { reassignProjectsOwner } from "../db/projects.js";
 
 export const GUEST_COOKIE = "gate15-guest";
@@ -164,10 +167,6 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
-function errMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /**
@@ -184,10 +183,10 @@ export async function handleGuestCreate(res: ServerResponse): Promise<void> {
     user = await createGuestUser({
       display_name: displayName,
       recovery_hash: hashRecoveryCode(code),
-      recovery_code_enc: encryptToken(code),
+      recovery_code: code,
     });
   } catch (err) {
-    return json(res, 500, { error: `guest signup failed: ${errMessage(err)}` });
+    return json(res, 500, publicError("guest_signup_failed", err));
   }
   // The web app sets the actual cookie (it has WORKOS_COOKIE_DOMAIN) — we just
   // hand back the sealed value for its route handler to relay.
@@ -211,9 +210,11 @@ export async function handleGuestRestore(
   try {
     user = await getGuestByRecoveryHash(hashRecoveryCode(code));
   } catch (err) {
-    return json(res, 500, { error: `guest restore failed: ${errMessage(err)}` });
+    return json(res, 500, publicError("guest_restore_failed", err));
   }
-  if (!user) return json(res, 404, { error: "recovery code not recognised" });
+  if (!user || user.guest_lifecycle_claim || !(await touchUserActivity(user.id))) {
+    return json(res, 404, { error: "recovery code not recognised" });
+  }
   const displayName = user.display_name ?? "Guest";
   const sealed_cookie = await sealGuestCookie(user.id, displayName);
   json(res, 200, { display_name: displayName, sealed_cookie });
@@ -238,12 +239,19 @@ export async function handleGuestMerge(
   const guestCookie = await unsealGuestFromCookieHeader(req.headers.cookie);
   if (!guestCookie) return { moved: 0 };
   const guest = await getUserById(guestCookie.userId);
-  if (!guest || guest.account_type !== "guest" || guest.converted_at) {
+  if (!guest || guest.account_type !== "guest" || guest.converted_at || guest.guest_lifecycle_claim) {
     return { moved: 0 };
   }
-  const moved = await reassignProjectsOwner(guest.id, workosUser.id);
-  await markGuestConverted(guest.id);
-  return { moved };
+  const claim = randomUUID();
+  if (!(await claimGuestForConversion(guest.id, claim))) return { moved: 0 };
+  try {
+    const moved = await reassignProjectsOwner(guest.id, workosUser.id);
+    await markGuestConverted(guest.id, claim);
+    return { moved };
+  } catch (err) {
+    await releaseGuestLifecycleClaim(guest.id, claim).catch(() => {});
+    throw err;
+  }
 }
 
 /**

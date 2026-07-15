@@ -161,7 +161,7 @@ export default function PlanDocument({
                 aria-label="Move step up"
                 style={{ opacity: i === 0 ? 0.4 : 1 }}
               >
-                ↑
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m18 15-6-6-6 6" /></svg>
               </button>
               <button
                 type="button"
@@ -172,7 +172,7 @@ export default function PlanDocument({
                 aria-label="Move step down"
                 style={{ opacity: i === draft.steps.length - 1 ? 0.4 : 1 }}
               >
-                ↓
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
               </button>
               <button
                 type="button"
@@ -182,7 +182,7 @@ export default function PlanDocument({
                 aria-label="Remove step"
                 style={{ color: "var(--conf-low)" }}
               >
-                ×
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M3 6h18" /><path d="M8 6V4h8v2M19 6l-1 14H6L5 6" /></svg>
               </button>
             </div>
           ) : (
@@ -253,7 +253,7 @@ export default function PlanDocument({
               className="btn-secondary"
               style={{ fontSize: 12, padding: "4px 10px", margin: "6px 0 8px" }}
             >
-              + Add step
+              Add step
             </button>
           </>
         ) : (
@@ -262,7 +262,11 @@ export default function PlanDocument({
             {isPending && (
               /* Hard-coded, model-independent safety line (B2). */
               <p className="plan-safety">
-                🔒 Nothing runs until you click <strong>Approve &amp; run</strong> — your files
+                <svg aria-hidden="true" viewBox="0 0 16 16" width="13" height="13" fill="none" style={{ marginRight: 5, verticalAlign: "-2px" }}>
+                  <rect x="3" y="7" width="10" height="7" rx="2" stroke="currentColor" strokeWidth="1.5" />
+                  <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+                Nothing runs until you click <strong>Approve &amp; run</strong> — your files
                 won&apos;t change before then.
               </p>
             )}

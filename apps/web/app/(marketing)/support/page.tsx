@@ -38,9 +38,9 @@ const TOPICS: Topic[] = [
         q: "Do I need an account to try it?",
         a: (
           <>
-            No. You can start as a guest and your work is saved on your device —
-            grab the one-time recovery code from the guest banner if you ever need to
-            pick that account back up on another device or browser. When you create
+            No. You can start as a guest and the session is tied to this browser while
+            your projects are stored securely — save the one-time recovery code from
+            the guest banner to reopen them on another device or browser. When you create
             an account you can carry that guest project forward, so nothing is lost.
             Signing in also unlocks reopening projects across devices and multiple
             concurrent workspaces.
@@ -83,12 +83,12 @@ const TOPICS: Topic[] = [
       "How billing works, what happens when you add teammates, and how to bring your own model API keys.",
     faqs: [
       {
-        q: "How does per-seat billing work on Team?",
+        q: "How do I get Team access?",
         a: (
           <>
-            Team is $20 per active member per month. You can add or remove seats at
-            any time, and we prorate the difference on your next invoice. Manage your
-            plan and seats from Settings.
+            Team access is currently opened through assisted onboarding at $20 per
+            active member per month. Contact us through the Enterprise page and
+            we&rsquo;ll confirm seats, billing, and workspace setup with you.
           </>
         ),
       },
@@ -108,8 +108,9 @@ const TOPICS: Topic[] = [
         q: "What happens to my guest work if I sign up?",
         a: (
           <>
-            Guest projects live on your device. When you create an account, you can
-            bring that work forward into your account so you can reopen it anywhere and
+            Guest projects are stored securely, while access to the guest session is
+            tied to this browser or your recovery code. When you create an account, you can
+            bring that work forward so you can reopen it anywhere and
             keep iterating. Nothing is thrown away when you upgrade from guest to a full
             account.
           </>

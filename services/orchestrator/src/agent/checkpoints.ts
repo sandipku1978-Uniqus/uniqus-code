@@ -2,6 +2,7 @@ import { promises as fs, existsSync } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { safeChildEnv } from "../safeEnv.js";
+import { isSensitiveProjectPath } from "../security/sensitivePaths.js";
 
 /**
  * Per-tool-call checkpoints (Plan §3.5).
@@ -53,6 +54,23 @@ const CHECKPOINT_EXCLUDES = [
   "__pycache__/",
   ".env",
   ".env.*",
+  ".ssh/",
+  ".aws/credentials",
+  ".config/gcloud/",
+  ".npmrc",
+  ".pypirc",
+  ".netrc",
+  ".git-credentials",
+  "id_rsa",
+  "id_dsa",
+  "id_ecdsa",
+  "id_ed25519",
+  "*.key",
+  "*.pem",
+  "*.p12",
+  "*.pfx",
+  "*.crt",
+  "*.cer",
   "*.log",
 ];
 
@@ -87,6 +105,20 @@ async function ensureShadow(sandboxDir: string, projectId: string): Promise<{ sh
   if (!existsSync(sandboxDir)) return null;
   const shadow = shadowDir(sandboxDir, projectId);
   const gitDir = path.join(shadow, ".git");
+  if (existsSync(gitDir)) {
+    const tracked = await exec("git", ["--git-dir", gitDir, "ls-files", "-z"], shadow);
+    const containsSensitiveHistory = tracked.ok && tracked.stdout
+      .split("\0")
+      .filter(Boolean)
+      .some(isSensitiveProjectPath);
+    if (containsSensitiveHistory) {
+      // Exclude rules do not untrack files already committed by older builds.
+      // Recreate the local-only checkpoint repository so credential blobs are
+      // not retained in reachable historical objects.
+      console.warn(`[checkpoints] purging legacy sensitive history for ${projectId}`);
+      await fs.rm(shadow, { recursive: true, force: true });
+    }
+  }
   if (!existsSync(gitDir)) {
     await fs.mkdir(shadow, { recursive: true });
     const init = await exec("git", ["init", "--quiet", "--initial-branch=checkpoints"], shadow);
@@ -155,6 +187,11 @@ export async function commitCheckpoint(
     return null;
   });
   commitQueues.set(projectId, next);
+  void next.finally(() => {
+    // A newer commit may already have chained onto this tail; only the current
+    // tail owns the map entry.
+    if (commitQueues.get(projectId) === next) commitQueues.delete(projectId);
+  });
   return next as Promise<CheckpointMeta | null>;
 }
 
@@ -357,6 +394,9 @@ export async function getCheckpointDiff(
 }
 
 export async function clearCheckpoints(sandboxDir: string, projectId: string): Promise<void> {
+  const pending = commitQueues.get(projectId);
+  if (pending) await pending.catch(() => {});
+  if (commitQueues.get(projectId) === pending) commitQueues.delete(projectId);
   const shadow = shadowDir(sandboxDir, projectId);
   await fs.rm(shadow, { recursive: true, force: true }).catch(() => {});
 }

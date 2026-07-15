@@ -159,6 +159,7 @@ export default function SecretsModal({
               <input
                 type="text"
                 value={name}
+                disabled={saving}
                 aria-label="Secret name"
                 onChange={(e) => {
                   const raw = e.target.value;
@@ -172,6 +173,7 @@ export default function SecretsModal({
               <input
                 type="text"
                 value={env}
+                disabled={saving}
                 aria-label="Environment slot"
                 onChange={(e) =>
                   setEnv(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))
@@ -197,6 +199,7 @@ export default function SecretsModal({
               ref={valueInputRef}
               type="password"
               value={value}
+              disabled={saving}
               aria-label="Secret value"
               onChange={(e) => setValue(e.target.value)}
               placeholder="value (write-only — won't be shown again)"
@@ -205,6 +208,7 @@ export default function SecretsModal({
             <input
               type="text"
               value={description}
+              disabled={saving}
               aria-label="Secret description"
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Optional description (visible to the agent in list_secrets)"
@@ -213,6 +217,7 @@ export default function SecretsModal({
             <input
               type="text"
               value={allowedHosts}
+              disabled={saving}
               aria-label="Approved HTTP destination hosts"
               onChange={(e) => {
                 setAllowedHosts(e.target.value);
@@ -290,6 +295,7 @@ export default function SecretsModal({
                     <div style={{ display: "flex", gap: 6 }}>
                       <button
                         onClick={() => rotate(s)}
+                        disabled={saving}
                         className="icon-btn-sm"
                         style={{ width: "auto", padding: "2px 8px", fontSize: 11 }}
                         title={`Replace the value of ${s.name} (env=${s.env})`}
@@ -299,6 +305,7 @@ export default function SecretsModal({
                       </button>
                       <button
                         onClick={() => setPendingDelete(s)}
+                        disabled={saving}
                         className="icon-btn-sm"
                         style={{ width: "auto", padding: "2px 8px", fontSize: 11 }}
                         title={`Delete ${s.name} (env=${s.env})`}

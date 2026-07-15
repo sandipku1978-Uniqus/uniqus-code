@@ -1,6 +1,7 @@
 import http from "node:http";
+import { randomUUID } from "node:crypto";
 import type { VmHandle } from "./types.js";
-import { touch as touchVm } from "./fleet.js";
+import { acquireOperation } from "./fleet.js";
 
 /**
  * Orchestrator → in-VM sandbox-agent RPC client.
@@ -145,6 +146,18 @@ export async function writeFile(
   await rpc(vm, "PUT", "/fs/file", { path: p, content });
 }
 
+export async function removePath(
+  vm: VmHandle,
+  p: string,
+  recursive = false,
+): Promise<void> {
+  await rpc(vm, "DELETE", "/fs/file", { path: p, recursive });
+}
+
+export async function renamePath(vm: VmHandle, from: string, to: string): Promise<void> {
+  await rpc(vm, "POST", "/fs/rename", { from, to });
+}
+
 export async function editFile(
   vm: VmHandle,
   p: string,
@@ -209,13 +222,32 @@ export async function runCommand(
   // The in-VM agent honors the timeout itself; we set our HTTP read deadline
   // a touch higher so a clean timeout returns CommandResult instead of an
   // exception. AbortSignal short-circuits the request.
-  return await rpc<CommandResult>(
-    vm,
-    "POST",
-    "/exec/run",
-    { command, timeout_ms: timeoutMs },
-    { signal, readTimeoutMs: timeoutMs + 5_000 },
-  );
+  const id = `exec_${randomUUID()}`;
+  try {
+    return await rpc<CommandResult>(
+      vm,
+      "POST",
+      "/exec/run",
+      { id, command, timeout_ms: timeoutMs },
+      { signal, readTimeoutMs: timeoutMs + 5_000 },
+    );
+  } catch (err) {
+    if (signal?.aborted) {
+      // Destroying the HTTP request does not stop the guest process. Issue a
+      // separate authenticated kill and wait for acknowledgement before the
+      // caller is told cancellation completed.
+      await killCommand(vm, id).catch((killErr) => {
+        throw new Error(
+          `${err instanceof Error ? err.message : String(err)}; guest kill failed: ${killErr instanceof Error ? killErr.message : String(killErr)}`,
+        );
+      });
+    }
+    throw err;
+  }
+}
+
+export async function killCommand(vm: VmHandle, id: string): Promise<void> {
+  await rpc(vm, "POST", "/exec/kill", { id });
 }
 
 export async function startServer(
@@ -526,12 +558,9 @@ function rpc<T = void>(
   body?: unknown,
   opts: RpcOpts = {},
 ): Promise<T> {
-  // Mark this VM as recently active so the idle sweeper can't pause it
-  // mid-tool-call. Without this, only `user_message` arrival counted as
-  // "active", so a long npm install (which is many run_command RPCs but
-  // a single user message) would lose its VM at the 5-min mark and
-  // every subsequent RPC would EHOSTUNREACH.
-  touchVm(vm.projectId);
+  // Hold an exact operation lease for the whole request. A one-time activity
+  // touch cannot protect a legitimate RPC whose duration exceeds idle timeout.
+  const releaseOperation = acquireOperation(vm.projectId);
   return new Promise<T>((resolve, reject) => {
     const readTimeout = opts.readTimeoutMs ?? 30_000;
     const payload =
@@ -609,5 +638,5 @@ function rpc<T = void>(
 
     if (payload) req.write(payload);
     req.end();
-  });
+  }).finally(releaseOperation);
 }

@@ -17,8 +17,6 @@ describe("classifyToolRisk", () => {
       "list_dir",
       "grep",
       "list_servers",
-      "screenshot_preview",
-      "interact_preview",
       "analyze_image",
       "knowledge_search",
       "ask_user",
@@ -54,11 +52,29 @@ describe("classifyToolRisk", () => {
     expect(cat("run_flow", { name: "checkout" })).toBe("dangerous");
   });
 
-  it("never permission-gates interact_preview verification actions", () => {
-    const risk = cat("interact_preview", { actions: [{ type: "click", selector: "#delete" }] });
-    expect(risk).toBe("read");
-    for (const mode of ["plan", "default", "acceptEdits", "bypass"] as const) {
-      expect(decidePermission(mode, risk)).toBe("allow");
+  it("keeps project-bound preview observations read-only", () => {
+    expect(cat("screenshot_preview", { server_id: "preview-a" })).toBe("read");
+    expect(cat("interact_preview", {
+      server_id: "preview-a",
+      actions: [
+        { type: "assert_text", value: "Ready" },
+        { type: "screenshot" },
+      ],
+    })).toBe("read");
+  });
+
+  it("gates arbitrary browser egress and mutating interactions", () => {
+    for (const input of [
+      { url: "https://example.com/collect?data=secret" },
+      { server_id: "preview-a", actions: [{ type: "click", selector: "#delete" }] },
+      { server_id: "preview-a", actions: [{ type: "fill", selector: "#email", value: "x" }] },
+      { server_id: "preview-a", actions: [{ type: "press", selector: "form", value: "Enter" }] },
+      { url: "https://example.com", actions: [{ type: "assert_text", value: "Example" }] },
+    ]) {
+      const tool = "actions" in input ? "interact_preview" : "screenshot_preview";
+      const risk = cat(tool, input);
+      expect(risk).toBe("dangerous");
+      expect(decidePermission("acceptEdits", risk)).toBe("ask");
     }
   });
 

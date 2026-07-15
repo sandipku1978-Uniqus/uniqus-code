@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type KeyboardEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -12,7 +12,7 @@ import {
   flushSave,
   flushAllPendingEdits,
 } from "@/lib/store";
-import { send } from "@/lib/ws-client";
+import { requestFile } from "@/lib/ws-client";
 import { stopServerApi, getApiBase } from "@/lib/api";
 import Modal from "./Modal";
 import CodeEditor from "./CodeEditor";
@@ -21,6 +21,10 @@ import AgentPreviewPanel from "./AgentPreviewPanel";
 import ActivityMonitor from "./ActivityMonitor";
 
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico"]);
+
+function editorTabDomId(tabId: string): string {
+  return `editor-tab-${encodeURIComponent(tabId)}`;
+}
 
 function isImageFile(filePath: string): boolean {
   const ext = filePath.lastIndexOf(".") >= 0 ? filePath.slice(filePath.lastIndexOf(".")).toLowerCase() : "";
@@ -36,26 +40,32 @@ function ImageViewer({ path, projectId }: { path: string; projectId: string | nu
   const [dims, setDims] = useState<{ w: number; h: number } | null>(null);
 
   useEffect(() => {
-    if (!projectId) return;
-    let cancelled = false;
+    const controller = new AbortController();
+    setUrl(null);
     setError(null);
-    fetch(`${getApiBase()}/api/projects/${projectId}/raw/${encodeURIComponent(path)}`, { credentials: "include" })
+    if (!projectId) return () => controller.abort();
+    fetch(`${getApiBase()}/api/projects/${projectId}/raw/${encodeURIComponent(path)}`, {
+      credentials: "include",
+      signal: controller.signal,
+    })
       .then((res) => {
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
         return res.blob();
       })
       .then((blob) => {
-        if (cancelled) return;
-        setUrl(URL.createObjectURL(blob));
+        const nextUrl = URL.createObjectURL(blob);
+        if (controller.signal.aborted) {
+          URL.revokeObjectURL(nextUrl);
+          return;
+        }
+        setUrl(nextUrl);
         setError(null);
       })
       .catch((err) => {
-        if (cancelled) return;
+        if (controller.signal.aborted) return;
         setError(err instanceof Error ? err.message : String(err));
       });
-    return () => {
-      cancelled = true;
-    };
+    return () => controller.abort();
   }, [path, projectId, reloadKey]);
 
   // Reset zoom when switching files
@@ -238,6 +248,8 @@ export default function EditorPreviewArea() {
   const removePreview = useStore((s) => s.removePreview);
   const saveStatus = useStore((s) => s.saveStatus);
   const selectedFile = useStore((s) => s.selectedFile);
+  const fileContentPath = useStore((s) => s.fileContentPath);
+  const fileRequest = useStore((s) => s.fileRequest);
   const fileContent = useStore((s) => s.fileContent);
   const projectId = useStore((s) => s.project?.id ?? null);
   const [mdPreview, setMdPreview] = useState(false);
@@ -274,112 +286,148 @@ export default function EditorPreviewArea() {
   // most recently loaded rather than the one the tab points at.
   useEffect(() => {
     if (!activeFilePath) return;
-    if (selectedFile === activeFilePath) return;
-    send({ type: "request_file", path: activeFilePath });
-  }, [activeFilePath, selectedFile]);
+    if (
+      selectedFile === activeFilePath &&
+      (fileContentPath === activeFilePath || fileRequest?.path === activeFilePath)
+    ) {
+      return;
+    }
+    requestFile(activeFilePath);
+  }, [activeFilePath, selectedFile, fileContentPath, fileRequest]);
+
+  const tabIds = [
+    ...openFiles.map(fileTabId),
+    ...previews.map((preview) => previewTabId(preview.id)),
+    ...(showAgentTab ? [AGENT_PREVIEW_TAB] : []),
+    ACTIVITY_TAB,
+  ];
+  const activateTab = (tabId: string): void => {
+    setEditorTab(tabId);
+    if (tabId.startsWith("file:")) requestFile(tabId.slice(5));
+  };
+  const onTabKeyDown = (currentTab: string, event: KeyboardEvent<HTMLButtonElement>): void => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const currentIndex = Math.max(0, tabIds.indexOf(currentTab));
+    const nextIndex =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? tabIds.length - 1
+          : event.key === "ArrowRight"
+            ? (currentIndex + 1) % tabIds.length
+            : (currentIndex - 1 + tabIds.length) % tabIds.length;
+    const nextTab = tabIds[nextIndex];
+    if (!nextTab) return;
+    activateTab(nextTab);
+    requestAnimationFrame(() => document.getElementById(editorTabDomId(nextTab))?.focus());
+  };
 
   return (
     <div className="editor-area">
       {hasAnyTabs && (
         <div className="tab-strip">
+          <div className="editor-tab-list" role="tablist" aria-label="Open editor views">
           {openFiles.map((path) => {
             const tabId = fileTabId(path);
             const status = saveStatus[path]?.kind;
             const isDirty = status === "dirty" || status === "saving";
+            const fileName = path.split("/").pop() ?? path;
             return (
-              <button
-                key={tabId}
-                type="button"
-                onClick={() => setEditorTab(tabId)}
-                className={`tab ${activeTab === tabId ? "active" : ""}`}
-              >
-                <span style={{ fontFamily: "var(--font-mono-stack)" }}>
-                  {path.split("/").pop() ?? path}
-                </span>
+              <div className="editor-tab-item" key={tabId} role="presentation">
+                <button
+                  id={editorTabDomId(tabId)}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === tabId}
+                  aria-controls="editor-active-panel"
+                  tabIndex={activeTab === tabId ? 0 : -1}
+                  onClick={() => activateTab(tabId)}
+                  onKeyDown={(event) => onTabKeyDown(tabId, event)}
+                  className={`tab ${activeTab === tabId ? "active" : ""}`}
+                >
+                  <span style={{ fontFamily: "var(--font-mono-stack)" }}>{fileName}</span>
+                  {isDirty && <span className="sr-only">, unsaved changes</span>}
+                </button>
                 {isDirty ? (
-                  <span
-                    className="x"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      // Fire-and-forget; flushSave handles dedup + agent-busy backoff.
-                      flushSave(path).catch(() => {});
-                    }}
-                    title={status === "saving" ? "saving…" : "Save now (⌘S)"}
-                    style={{
-                      color:
-                        status === "saving"
-                          ? "var(--text-muted)"
-                          : "var(--accent-primary, #fbbf24)",
-                      fontSize: 14,
-                      lineHeight: 1,
-                    }}
+                  <button
+                    type="button"
+                    className="tab-action"
+                    onClick={() => flushSave(path).catch(() => {})}
+                    disabled={status === "saving"}
+                    aria-label={status === "saving" ? `${fileName} is saving` : `Save ${fileName}`}
+                    title={status === "saving" ? "Saving" : "Save now"}
                   >
-                    •
-                  </span>
+                    <span aria-hidden="true">•</span>
+                  </button>
                 ) : (
-                  <span
-                    className="x"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      closeOpenFile(path);
-                    }}
-                    title="Close"
+                  <button
+                    type="button"
+                    className="tab-action"
+                    onClick={() => closeOpenFile(path)}
+                    aria-label={`Close ${fileName}`}
+                    title={`Close ${fileName}`}
                   >
-                    ×
-                  </span>
+                    <span aria-hidden="true">×</span>
+                  </button>
                 )}
-              </button>
+              </div>
             );
           })}
           {previews.map((p) => {
             const tabId = previewTabId(p.id);
             return (
-              <button
-                key={tabId}
-                type="button"
-                onClick={() => setEditorTab(tabId)}
-                className={`tab ${activeTab === tabId ? "active" : ""}`}
-                title={`Live dev server · port ${p.port}`}
-              >
-                <svg
-                  width="11"
-                  height="11"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
+              <div className="editor-tab-item" key={tabId} role="presentation">
+                <button
+                  id={editorTabDomId(tabId)}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeTab === tabId}
+                  aria-controls="editor-active-panel"
+                  tabIndex={activeTab === tabId ? 0 : -1}
+                  onClick={() => activateTab(tabId)}
+                  onKeyDown={(event) => onTabKeyDown(tabId, event)}
+                  className={`tab ${activeTab === tabId ? "active" : ""}`}
+                  title={`Live dev server on port ${p.port}`}
                 >
-                  <circle cx="12" cy="12" r="10" />
-                  <line x1="2" y1="12" x2="22" y2="12" />
-                  <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-                </svg>
-                <span>Live preview</span>
-                <span
-                  className="x"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    // Closing stops the dev server — confirm first so a stray
-                    // click doesn't tear down a running preview (§C).
-                    setConfirmStop({ id: p.id, port: p.port });
-                  }}
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="2" y1="12" x2="22" y2="12" />
+                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                  </svg>
+                  <span>Live preview</span>
+                </button>
+                <button
+                  type="button"
+                  className="tab-action"
+                  onClick={() => setConfirmStop({ id: p.id, port: p.port })}
+                  aria-label={`Close live preview on port ${p.port} and stop its server`}
                   title="Close tab and stop the dev server"
                 >
-                  ×
-                </span>
-              </button>
+                  <span aria-hidden="true">×</span>
+                </button>
+              </div>
             );
           })}
           {showAgentTab && (
             <button
+              id={editorTabDomId(AGENT_PREVIEW_TAB)}
               type="button"
-              onClick={() => setEditorTab(AGENT_PREVIEW_TAB)}
+              role="tab"
+              aria-selected={activeTab === AGENT_PREVIEW_TAB}
+              aria-controls="editor-active-panel"
+              tabIndex={activeTab === AGENT_PREVIEW_TAB ? 0 : -1}
+              onClick={() => activateTab(AGENT_PREVIEW_TAB)}
+              onKeyDown={(event) => onTabKeyDown(AGENT_PREVIEW_TAB, event)}
               className={`tab ${activeTab === AGENT_PREVIEW_TAB ? "active" : ""}`}
               title="Watch the agent interact with your app, and replay saved flows"
             >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                 <path d="M3 3l7 17 2-7 7-2z" />
               </svg>
               <span>Agent preview</span>
+              {agentActive && <span className="sr-only">, live</span>}
+              {!agentActive && agentUnseen && <span className="sr-only">, new activity</span>}
               {agentActive ? (
                 <span
                   style={{
@@ -389,7 +437,7 @@ export default function EditorPreviewArea() {
                     background: "var(--danger, #d9534f)",
                     animation: "pulse-dot 1.4s ease-in-out infinite",
                   }}
-                  title="Live"
+                  aria-hidden="true"
                 />
               ) : (
                 agentUnseen && (
@@ -400,7 +448,7 @@ export default function EditorPreviewArea() {
                       borderRadius: "50%",
                       background: "var(--accent-primary, #7c5cff)",
                     }}
-                    title="New activity"
+                    aria-hidden="true"
                   />
                 )
               )}
@@ -409,17 +457,24 @@ export default function EditorPreviewArea() {
           {/* Activity Monitor tab (item 2) — a real editor tab so the live build
               dashboard is reachable in Code view without the ⋯ menu. */}
           <button
+            id={editorTabDomId(ACTIVITY_TAB)}
             type="button"
-            onClick={() => setEditorTab(ACTIVITY_TAB)}
+            role="tab"
+            aria-selected={activeTab === ACTIVITY_TAB}
+            aria-controls="editor-active-panel"
+            tabIndex={activeTab === ACTIVITY_TAB ? 0 : -1}
+            onClick={() => activateTab(ACTIVITY_TAB)}
+            onKeyDown={(event) => onTabKeyDown(ACTIVITY_TAB, event)}
             className={`tab ${activeTab === ACTIVITY_TAB ? "active" : ""}`}
             title="Live tokens, cost, tasks, sub-agents, and file diffs"
           >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <path d="M3 12h4l2 6 4-16 2 8h6" />
             </svg>
             <span>Activity</span>
           </button>
-          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4 }}>
+          </div>
+          <div className="editor-tab-actions">
             {dirtyCount > 1 && (
               <button
                 type="button"
@@ -451,16 +506,34 @@ export default function EditorPreviewArea() {
         </div>
       )}
 
-      <div className="editor-content">
+      <div
+        id="editor-active-panel"
+        className="editor-content"
+        role="tabpanel"
+        aria-labelledby={activeTab ? editorTabDomId(activeTab) : undefined}
+        tabIndex={0}
+      >
         {activeTab === ACTIVITY_TAB && <ActivityMonitor />}
         {activeTab === AGENT_PREVIEW_TAB && <AgentPreviewPanel />}
-        {activePreview && <PreviewPanel server={activePreview} />}
+        {activePreview && (
+          <PreviewPanel
+            key={`${projectId ?? "none"}:${activePreview.id}`}
+            server={activePreview}
+          />
+        )}
         {activeFilePath && isImageFile(activeFilePath) ? (
-          <ImageViewer path={activeFilePath} projectId={projectId} />
-        ) : activeFilePath && isMarkdownFile(activeFilePath) && mdPreview ? (
+          <ImageViewer
+            key={`${projectId ?? "none"}:${activeFilePath}`}
+            path={activeFilePath}
+            projectId={projectId}
+          />
+        ) : activeFilePath &&
+          isMarkdownFile(activeFilePath) &&
+          mdPreview &&
+          fileContentPath === activeFilePath ? (
           <MarkdownPreview content={fileContent} />
         ) : activeFilePath ? (
-          <CodeEditor />
+          <CodeEditor path={activeFilePath} />
         ) : null}
         {!hasAnyTabs && activeTab !== ACTIVITY_TAB && (
           <div className="editor-empty">

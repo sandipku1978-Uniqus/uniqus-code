@@ -44,7 +44,9 @@ export default async function MarketingLayout({
         ctaLabel={signedIn ? "Open dashboard" : "Get started"}
       />
 
-      <main className="mk-main">{children}</main>
+      <main id="main-content" tabIndex={-1} className="mk-main">
+        {children}
+      </main>
 
       <section className="bottom-build" aria-label="Start a project">
         <div className="bottom-build-inner">

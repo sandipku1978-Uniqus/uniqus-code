@@ -135,7 +135,7 @@ export default function DesignSystemPreview({
         >
           {name?.trim() || "Preview"}
         </span>
-        <span style={{ marginLeft: "auto", fontSize: 10.5, color: muted, textTransform: "uppercase", letterSpacing: 0.5 }}>
+        <span style={{ marginLeft: "auto", fontSize: 11, color: muted, textTransform: "uppercase", letterSpacing: 0.5 }}>
           {tokens.mode}
         </span>
       </div>
@@ -160,8 +160,8 @@ export default function DesignSystemPreview({
                       </div>
                     )}
                     <div style={{ padding: "7px 9px" }}>
-                      <div style={{ fontSize: 11.5, fontWeight: 600, textTransform: "capitalize" }}>{key}</div>
-                      <div style={{ fontSize: 10.5, color: muted, fontFamily: fonts.mono || "ui-monospace, monospace" }}>{value}</div>
+                      <div style={{ fontSize: 12, fontWeight: 600, textTransform: "capitalize" }}>{key}</div>
+                      <div style={{ fontSize: 11, color: muted, fontFamily: fonts.mono || "ui-monospace, monospace" }}>{value}</div>
                     </div>
                   </div>
                 );
@@ -179,7 +179,7 @@ export default function DesignSystemPreview({
                 {familyName(fonts.heading)}
                 <span style={{ fontSize: 11, color: muted, fontWeight: 400 }}> · Heading</span>
               </div>
-              <div style={{ fontFamily: fonts.body, fontSize: 13.5, color: muted, lineHeight: 1.5 }}>
+              <div style={{ fontFamily: fonts.body, fontSize: 14, color: muted, lineHeight: 1.5 }}>
                 The quick brown fox jumps over the lazy dog — {familyName(fonts.body)} body.
               </div>
               {fonts.mono ? (
@@ -210,7 +210,7 @@ export default function DesignSystemPreview({
                       border: vborder,
                       borderRadius: btnRadius,
                       padding: btnPad,
-                      fontSize: 12.5,
+                      fontSize: 13,
                       fontWeight: btnWeight,
                       lineHeight: 1.2,
                       whiteSpace: "nowrap",
@@ -236,7 +236,7 @@ export default function DesignSystemPreview({
                   border: `1px solid ${inBorder}`,
                   background: inBg,
                   color: muted,
-                  fontSize: 12.5,
+                  fontSize: 13,
                 }}
               >
                 <SearchIcon color={muted} />
@@ -261,7 +261,7 @@ export default function DesignSystemPreview({
             <div style={{ fontFamily: fonts.heading || fonts.body, fontSize: 15, fontWeight: 700, marginBottom: 4 }}>
               Card title
             </div>
-            <div style={{ fontSize: 12.5, color: muted, lineHeight: 1.55, marginBottom: 12 }}>
+            <div style={{ fontSize: 13, color: muted, lineHeight: 1.55, marginBottom: 12 }}>
               Surfaces, borders and shadow come straight from the card spec — components stay on-system.
             </div>
             <span
@@ -270,7 +270,7 @@ export default function DesignSystemPreview({
                 color: variants[0]?.foreground ? tok(variants[0].foreground, c, readableOn(primary)) : readableOn(primary),
                 borderRadius: btnRadius,
                 padding: btnPad,
-                fontSize: 12.5,
+                fontSize: 13,
                 fontWeight: btnWeight,
               }}
             >
@@ -287,7 +287,7 @@ export default function DesignSystemPreview({
                 <div key={i} style={{ border: `1px solid ${border}`, borderRadius: 10, overflow: "hidden", background: surface }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", gap: 8 }}>
                     <span style={{ fontSize: 12, fontWeight: 600 }}>{cmp.name}</span>
-                    <span style={{ fontSize: 10.5, color: muted, fontFamily: fonts.mono || "ui-monospace, monospace" }}>{cmp.type}</span>
+                    <span style={{ fontSize: 11, color: muted, fontFamily: fonts.mono || "ui-monospace, monospace" }}>{cmp.type}</span>
                   </div>
                   {cmp.html ? (
                     <iframe
@@ -297,7 +297,7 @@ export default function DesignSystemPreview({
                       style={{ width: "100%", height: 132, border: 0, borderTop: `1px solid ${border}`, background: bg, display: "block" }}
                     />
                   ) : cmp.description ? (
-                    <div style={{ padding: "0 10px 10px", fontSize: 11.5, color: muted }}>{cmp.description}</div>
+                    <div style={{ padding: "0 10px 10px", fontSize: 12, color: muted }}>{cmp.description}</div>
                   ) : null}
                 </div>
               ))}
@@ -312,7 +312,7 @@ export default function DesignSystemPreview({
 function Section({ label, muted, children }: { label: string; muted: string; children: React.ReactNode }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: 0.6, textTransform: "uppercase", color: muted }}>{label}</div>
+      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.6, textTransform: "uppercase", color: muted }}>{label}</div>
       {children}
     </div>
   );

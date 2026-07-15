@@ -22,6 +22,10 @@ import { isModelVisibleProjectConfig } from "../security/projectSecretPolicy.js"
 /** What env name to use when the caller doesn't supply one. Matches the DB default. */
 export const DEFAULT_ENV = "default";
 
+function projectSecretContext(projectId: string, name: string, env: string): string {
+  return `project-secret:${projectId}:${env}:${name}`;
+}
+
 /** Tightened on env names so we don't end up with "Production" vs "production" duplicates. */
 const ENV_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
@@ -112,7 +116,10 @@ export async function upsertSecret(input: {
   allowed_hosts?: string[];
 }): Promise<SecretRecord> {
   const env = normalizeEnv(input.env);
-  const encrypted = encryptToken(input.value);
+  const encrypted = encryptToken(
+    input.value,
+    projectSecretContext(input.project_id, input.name, env),
+  );
   const allowedHosts = input.allowed_hosts === undefined
     ? undefined
     : normalizeAllowedSecretHosts(input.allowed_hosts);
@@ -192,7 +199,10 @@ export async function getSecretWithBinding(
   if (error) throw new Error(`getSecretWithBinding failed: ${error.message}`);
   if (!data) return null;
   return {
-    value: decryptToken((data as unknown as { encrypted_value: string }).encrypted_value),
+    value: decryptToken(
+      (data as unknown as { encrypted_value: string }).encrypted_value,
+      projectSecretContext(projectId, name, e),
+    ),
     allowedHosts: normalizeAllowedSecretHosts(
       ((data as unknown as { allowed_hosts?: string[] }).allowed_hosts ?? []),
     ),
@@ -203,13 +213,16 @@ export async function getSecretWithBinding(
 export async function getProjectSecretPlaintexts(projectId: string): Promise<string[]> {
   const { data, error } = await db()
     .from("project_secrets")
-    .select("name, encrypted_value")
+    .select("name, env, encrypted_value")
     .eq("project_id", projectId);
   if (error) throw new Error(`getProjectSecretPlaintexts failed: ${error.message}`);
   const values = new Set<string>();
-  for (const row of (data ?? []) as { name: string; encrypted_value: string }[]) {
+  for (const row of (data ?? []) as { name: string; env: string; encrypted_value: string }[]) {
     if (isModelVisibleProjectConfig(row.name)) continue;
-    const value = decryptToken(row.encrypted_value);
+    const value = decryptToken(
+      row.encrypted_value,
+      projectSecretContext(projectId, row.name, normalizeEnv(row.env)),
+    );
     if (value) values.add(value);
   }
   return [...values].sort((a, b) => b.length - a.length);
@@ -231,7 +244,10 @@ export async function getSecretValue(
   if (error) throw new Error(`getSecretValue failed: ${error.message}`);
   if (!data) return null;
   try {
-    return decryptToken((data as { encrypted_value: string }).encrypted_value);
+    return decryptToken(
+      (data as { encrypted_value: string }).encrypted_value,
+      projectSecretContext(projectId, name, e),
+    );
   } catch (err) {
     throw new Error(
       `secret '${name}' (env '${e}') could not be decrypted (key changed?): ${err instanceof Error ? err.message : String(err)}`,
@@ -259,7 +275,10 @@ export async function getProjectSecretsAsEnv(
   const out: Record<string, string> = {};
   for (const row of (data ?? []) as { name: string; encrypted_value: string }[]) {
     try {
-      out[row.name] = decryptToken(row.encrypted_value);
+      out[row.name] = decryptToken(
+        row.encrypted_value,
+        projectSecretContext(projectId, row.name, e),
+      );
     } catch (err) {
       console.error(`getProjectSecretsAsEnv: skipping secret '${row.name}' (decrypt failed):`, err);
     }

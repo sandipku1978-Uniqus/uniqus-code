@@ -97,7 +97,10 @@ export function renderAnswer(text: string, citations?: Citation[]): RenderedAnsw
   // GLM path: the model wrote its own markers. Linkify them where the number
   // maps to a source; leave unknown numbers alone rather than inventing a link.
   if (anchored.length === 0) {
-    const markdown = text.replace(/\[(\d{1,2})\]/g, (whole, digits: string) => {
+    const skip = codeRanges(text);
+    const inCode = (i: number): boolean => skip.some(([s, e]) => i >= s && i < e);
+    const markdown = text.replace(/\[(\d{1,2})\]/g, (whole, digits: string, at: number) => {
+      if (inCode(at)) return whole;
       const src = sources[Number(digits) - 1];
       return src ? marker(src.n, src.url) : whole;
     });

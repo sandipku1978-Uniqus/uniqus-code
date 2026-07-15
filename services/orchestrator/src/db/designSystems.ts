@@ -45,14 +45,26 @@ export async function getDesignSystem(userId: string, id: string): Promise<Desig
   return data ? rowToDesignSystem(data as Record<string, unknown>) : null;
 }
 
-/** Tokens-only accessor for prompt injection. Null when not found / not the owner. */
-export async function getDesignSystemTokens(
-  userId: string | null,
-  id: string,
-): Promise<DesignTokens | null> {
-  if (!userId) return null;
-  const ds = await getDesignSystem(userId, id);
-  return ds ? ds.tokens : null;
+/**
+ * Resolve an attachment after the caller has authorized the project itself.
+ * Library ownership controls editing; it must not make the attached project
+ * behave differently for collaborators.
+ */
+export async function getDesignSystemTokens(id: string): Promise<DesignTokens | null> {
+  const { data, error } = await db()
+    .from("design_systems")
+    .select("tokens")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw new Error(`getDesignSystemTokens failed: ${error.message}`);
+  if (!data) return null;
+  return rowToDesignSystem({
+    id,
+    name: "Attached design system",
+    tokens: data.tokens,
+    created_at: "",
+    updated_at: "",
+  }).tokens;
 }
 
 export async function createDesignSystem(

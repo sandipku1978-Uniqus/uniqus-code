@@ -215,7 +215,7 @@ export default function CommunityPage() {
                     style={{
                       color: "var(--accent-text)",
                       fontWeight: 600,
-                      fontSize: 13.5,
+                      fontSize: 14,
                       textDecoration: "none",
                     }}
                   >
@@ -227,7 +227,7 @@ export default function CommunityPage() {
                     style={{
                       color: "var(--accent-text)",
                       fontWeight: 600,
-                      fontSize: 13.5,
+                      fontSize: 14,
                       textDecoration: "none",
                     }}
                   >

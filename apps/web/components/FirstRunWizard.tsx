@@ -104,7 +104,7 @@ export default function FirstRunWizard({
             }
           }}
         />
-        <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{cur.hint}</div>
+        <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{cur.hint}</div>
       </div>
     </Modal>
   );

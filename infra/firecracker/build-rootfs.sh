@@ -17,6 +17,7 @@
 # Run on the same host as host-setup.sh, after that script. Idempotent: re-run
 # any time you update the agent.
 set -euo pipefail
+umask 0077
 
 STATE_DIR="${STATE_DIR:-/var/lib/uniqus/firecracker}"
 ROOTFS="${STATE_DIR}/rootfs.ext4"
@@ -25,7 +26,9 @@ ROOTFS_SIZE_MB="${ROOTFS_SIZE_MB:-2048}"
 # satisfies current Vite (20.19+ or 22.12+); Alpine 3.20 pinned production to
 # Node 20.15, so npm accepted Vite 8 with EBADENGINE and it crashed at runtime.
 ALPINE_VERSION="${ALPINE_VERSION:-3.22}"
+ALPINE_PATCH_VERSION="${ALPINE_PATCH_VERSION:-3.22.3}"
 ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
+ALPINE_MINIROOT_SHA256="${ALPINE_MINIROOT_SHA256:-3b82169293fd705eb709f56eaf23cc1da75ba1e6fdd00985cf5b1357c4af38b5}"
 
 if [[ "$(id -u)" != "0" ]]; then echo "must run as root" >&2; exit 1; fi
 if ! command -v debootstrap >/dev/null 2>&1; then
@@ -58,8 +61,13 @@ mkfs.ext4 -F -q "${ROOTFS}.new"
 mount -o loop "${ROOTFS}.new" "${MNT}"
 
 echo "[2/5] Bootstrapping Alpine ${ALPINE_VERSION} miniroot…"
-MINIROOT_URL="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/x86_64/alpine-minirootfs-${ALPINE_VERSION}.0-x86_64.tar.gz"
+MINIROOT_URL="${ALPINE_MIRROR}/v${ALPINE_VERSION}/releases/x86_64/alpine-minirootfs-${ALPINE_PATCH_VERSION}-x86_64.tar.gz"
 curl -fSL "${MINIROOT_URL}" -o "${WORK}/miniroot.tgz"
+if [[ ! "${ALPINE_MINIROOT_SHA256}" =~ ^[0-9a-fA-F]{64}$ ]] \
+  || ! echo "${ALPINE_MINIROOT_SHA256,,}  ${WORK}/miniroot.tgz" | sha256sum --check --status; then
+  echo "Alpine minirootfs SHA-256 verification failed" >&2
+  exit 1
+fi
 tar -xzf "${WORK}/miniroot.tgz" -C "${MNT}"
 
 echo "[3/5] Adding packages…"
@@ -106,7 +114,9 @@ mkdir -p "${MNT}/opt/sandbox-agent" "${MNT}/sandbox"
 RUST_TARGET="x86_64-unknown-linux-musl"
 if command -v cargo >/dev/null 2>&1; then
   echo "  → cargo build --release --target ${RUST_TARGET}"
-  ( cd "${AGENT_SRC}" && cargo build --release --target "${RUST_TARGET}" )
+  ( cd "${AGENT_SRC}" \
+    && cargo fetch --locked --target "${RUST_TARGET}" \
+    && cargo build --release --locked --offline --target "${RUST_TARGET}" )
   install -m 0755 \
     "${AGENT_SRC}/target/${RUST_TARGET}/release/uniqus-agent" \
     "${MNT}/opt/sandbox-agent/uniqus-agent"
@@ -257,6 +267,7 @@ umount -lR "${MNT}/sys"     2>/dev/null || true
 umount -lR "${MNT}/proc"    2>/dev/null || true
 umount "${MNT}"
 mv "${ROOTFS}.new" "${ROOTFS}"
+chown root:root "${ROOTFS}"
 chmod 0644 "${ROOTFS}"
 
 echo "Done. Base rootfs at: ${ROOTFS}"

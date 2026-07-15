@@ -21,10 +21,12 @@
 #     images, `enp8s0` / `enp0s31f6` on some AX boxes). Override with
 #     EXT_IFACE=... if the box has an unusual routing setup.
 set -euo pipefail
+umask 0077
 
 EXT_IFACE="${EXT_IFACE:-$(ip -o -4 route show default | awk '{print $5; exit}')}"
 STATE_DIR="/var/lib/uniqus/firecracker"
-KERNEL_URL="${KERNEL_URL:-}"
+KERNEL_URL="${KERNEL_URL:-https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/x86_64/vmlinux-5.10.223}"
+KERNEL_SHA256="${KERNEL_SHA256:-22847375721aceea63d934c28f2dfce4670b6f52ec904fae19f5145a970c1e65}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Golden base snapshots restore with `network_overrides` on PUT /snapshot/load,
 # which Firecracker only added in v1.12.0. On anything older (we shipped v1.10.1
@@ -32,6 +34,19 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # so this MUST stay >= v1.12.0. v1.12.1 is the latest v1.12 patch.
 FIRECRACKER_VERSION="${FIRECRACKER_VERSION:-v1.12.1}"
 FIRECRACKER_URL="https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-x86_64.tgz"
+FIRECRACKER_SHA256="${FIRECRACKER_SHA256:-0a75e67ef6e4c540a2cf248b06822b0be9820cbba9fe19f9e0321200fe76ff6b}"
+
+verify_sha256() {
+  local file="$1" expected="$2"
+  if [[ ! "${expected}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo "Refusing unverified artifact: invalid SHA-256 for ${file}" >&2
+    exit 1
+  fi
+  echo "${expected,,}  ${file}" | sha256sum --check --status || {
+    echo "SHA-256 verification failed for ${file}" >&2
+    exit 1
+  }
+}
 
 if [[ "$(id -u)" != "0" ]]; then
   echo "must run as root" >&2
@@ -62,6 +77,7 @@ if [[ "${installed_fc_version}" != "${FIRECRACKER_VERSION}" ]]; then
   echo "  installing ${FIRECRACKER_VERSION} (current: ${installed_fc_version:-none})"
   tmp="$(mktemp -d)"
   curl -fSL "${FIRECRACKER_URL}" -o "${tmp}/firecracker.tgz"
+  verify_sha256 "${tmp}/firecracker.tgz" "${FIRECRACKER_SHA256}"
   tar -xf "${tmp}/firecracker.tgz" -C "${tmp}"
   install -m 0755 "${tmp}"/release-*/firecracker-*-x86_64 /usr/local/bin/firecracker
   install -m 0755 "${tmp}"/release-*/jailer-*-x86_64    /usr/local/bin/jailer
@@ -75,26 +91,15 @@ echo "[3/7] Rust + musl build toolchain…"
 SKIP_APT_UPDATE=1 bash "${HERE}/install-rust-toolchain.sh"
 
 echo "[4/7] State dir + kernel…"
-mkdir -p "${STATE_DIR}"
+install -d -m 0700 "${STATE_DIR}"
 if [[ ! -f "${STATE_DIR}/vmlinux" ]]; then
-  if [[ -z "${KERNEL_URL}" ]]; then
-    # The Firecracker CI bucket prunes old kernels, so we resolve the
-    # latest 5.10.x available at run time instead of hardcoding a patch
-    # level that may have aged out.
-    KERNEL_URL="$(curl -s 'https://s3.amazonaws.com/spec.ccfc.min/?list-type=2&prefix=firecracker-ci/v1.10/x86_64/' \
-      | grep -oE 'firecracker-ci/v1\.10/x86_64/vmlinux-5\.10\.[0-9]+' \
-      | sort -t. -k3,3n \
-      | tail -1 \
-      | sed 's|^|https://s3.amazonaws.com/spec.ccfc.min/|')"
-    if [[ -z "${KERNEL_URL}" ]]; then
-      echo "Could not auto-discover a kernel from the Firecracker CI bucket." >&2
-      echo "Set KERNEL_URL=... manually and re-run." >&2
-      exit 1
-    fi
-    echo "  resolved kernel: ${KERNEL_URL}"
-  fi
-  curl -fSL "${KERNEL_URL}" -o "${STATE_DIR}/vmlinux"
+  kernel_tmp="$(mktemp)"
+  curl -fSL "${KERNEL_URL}" -o "${kernel_tmp}"
+  verify_sha256 "${kernel_tmp}" "${KERNEL_SHA256}"
+  install -o root -g root -m 0644 "${kernel_tmp}" "${STATE_DIR}/vmlinux"
+  rm -f "${kernel_tmp}"
 fi
+chown root:root "${STATE_DIR}/vmlinux"
 chmod 0644 "${STATE_DIR}/vmlinux"
 
 echo "[5/7] Firecracker host networking (bridge fcbr0 + masquerade, reboot-persistent)…"
@@ -118,6 +123,9 @@ netfilter-persistent save || iptables-save > /etc/iptables/rules.v4
 # Install + enable the boot unit so reboots self-heal (recreates the bridge
 # before uniqus-orchestrator.service starts).
 install -m 0644 "${HERE}/uniqus-firecracker-net.service" /etc/systemd/system/uniqus-firecracker-net.service
+install -d -m 0755 /etc/systemd/system/uniqus-orchestrator.service.d
+install -m 0644 "${HERE}/uniqus-orchestrator-hardening.conf" \
+  /etc/systemd/system/uniqus-orchestrator.service.d/10-hardening.conf
 systemctl daemon-reload
 systemctl enable uniqus-firecracker-net.service
 

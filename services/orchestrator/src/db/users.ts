@@ -3,7 +3,11 @@ import { db } from "./client.js";
 import { decryptToken, encryptToken } from "../auth/encrypt.js";
 
 /** Columns that make up a UserRecord — shared by every query that returns one. */
-const USER_COLUMNS = "id, workos_id, email, display_name, account_type, converted_at";
+const USER_COLUMNS = "id, workos_id, email, display_name, account_type, converted_at, guest_lifecycle_claim";
+
+function userCredentialContext(userId: string, purpose: string): string {
+  return `user-credential:${userId}:${purpose}`;
+}
 
 export interface UserRecord {
   id: string;
@@ -14,6 +18,8 @@ export interface UserRecord {
   account_type: "standard" | "guest";
   /** Set when a guest signs in with Google and their projects move across. */
   converted_at: string | null;
+  /** Non-null while conversion or irreversible cleanup exclusively owns the row. */
+  guest_lifecycle_claim: string | null;
 }
 
 export interface GithubLink {
@@ -68,7 +74,7 @@ export async function setGithubToken(
   token: string,
   login: string,
 ): Promise<void> {
-  const ciphertext = encryptToken(token);
+  const ciphertext = encryptToken(token, userCredentialContext(userId, "github-access"));
   const { error } = await db()
     .from("users")
     .update({
@@ -114,7 +120,7 @@ export async function setVercelToken(
   vercelUser: { id: string; username: string },
   teamId: string | null,
 ): Promise<void> {
-  const ciphertext = encryptToken(token);
+  const ciphertext = encryptToken(token, userCredentialContext(userId, "vercel-access"));
   const { error } = await db()
     .from("users")
     .update({
@@ -168,7 +174,10 @@ export async function getVercelToken(userId: string): Promise<string | null> {
     .single();
   if (error || !data?.vercel_access_token) return null;
   try {
-    return decryptToken(data.vercel_access_token as string);
+    return decryptToken(
+      data.vercel_access_token as string,
+      userCredentialContext(userId, "vercel-access"),
+    );
   } catch (err) {
     console.error(`getVercelToken decrypt failed for user ${userId}:`, err);
     return null;
@@ -190,6 +199,8 @@ export interface SupabaseTokens {
   refresh_token: string;
   /** Epoch ms at which the access token expires. */
   expires_at: number;
+  /** Opaque compare-and-swap generation for rotated refresh credentials. */
+  generation: string;
 }
 
 /** Persist the full token set after the initial OAuth exchange (sets org + connected_at). */
@@ -202,9 +213,16 @@ export async function setSupabaseToken(
   const { error } = await db()
     .from("users")
     .update({
-      supabase_access_token: encryptToken(tokens.access_token),
-      supabase_refresh_token: encryptToken(tokens.refresh_token),
+      supabase_access_token: encryptToken(
+        tokens.access_token,
+        userCredentialContext(userId, "supabase-access"),
+      ),
+      supabase_refresh_token: encryptToken(
+        tokens.refresh_token,
+        userCredentialContext(userId, "supabase-refresh"),
+      ),
       supabase_token_expires_at: expiresAt,
+      supabase_token_generation: randomUUID(),
       supabase_org_id: org.id,
       supabase_org_name: org.name,
       supabase_connected_at: new Date().toISOString(),
@@ -217,17 +235,29 @@ export async function setSupabaseToken(
 export async function updateSupabaseTokens(
   userId: string,
   tokens: { access_token: string; refresh_token: string; expires_in: number },
-): Promise<void> {
+  expectedGeneration: string,
+): Promise<boolean> {
   const expiresAt = new Date(Date.now() + tokens.expires_in * 1000).toISOString();
-  const { error } = await db()
+  const { data, error } = await db()
     .from("users")
     .update({
-      supabase_access_token: encryptToken(tokens.access_token),
-      supabase_refresh_token: encryptToken(tokens.refresh_token),
+      supabase_access_token: encryptToken(
+        tokens.access_token,
+        userCredentialContext(userId, "supabase-access"),
+      ),
+      supabase_refresh_token: encryptToken(
+        tokens.refresh_token,
+        userCredentialContext(userId, "supabase-refresh"),
+      ),
       supabase_token_expires_at: expiresAt,
+      supabase_token_generation: randomUUID(),
     })
-    .eq("id", userId);
+    .eq("id", userId)
+    .eq("supabase_token_generation", expectedGeneration)
+    .select("id")
+    .maybeSingle();
   if (error) throw new Error(`updateSupabaseTokens failed: ${error.message}`);
+  return Boolean(data);
 }
 
 export async function clearSupabaseToken(userId: string): Promise<void> {
@@ -237,6 +267,7 @@ export async function clearSupabaseToken(userId: string): Promise<void> {
       supabase_access_token: null,
       supabase_refresh_token: null,
       supabase_token_expires_at: null,
+      supabase_token_generation: randomUUID(),
       supabase_org_id: null,
       supabase_org_name: null,
       supabase_connected_at: null,
@@ -267,18 +298,25 @@ export async function getSupabaseTokens(userId: string): Promise<SupabaseTokens 
   const { data, error } = await db()
     .from("users")
     .select(
-      "supabase_access_token, supabase_refresh_token, supabase_token_expires_at",
+      "supabase_access_token, supabase_refresh_token, supabase_token_expires_at, supabase_token_generation",
     )
     .eq("id", userId)
     .single();
   if (error || !data?.supabase_access_token || !data?.supabase_refresh_token) return null;
   try {
     return {
-      access_token: decryptToken(data.supabase_access_token as string),
-      refresh_token: decryptToken(data.supabase_refresh_token as string),
+      access_token: decryptToken(
+        data.supabase_access_token as string,
+        userCredentialContext(userId, "supabase-access"),
+      ),
+      refresh_token: decryptToken(
+        data.supabase_refresh_token as string,
+        userCredentialContext(userId, "supabase-refresh"),
+      ),
       expires_at: data.supabase_token_expires_at
         ? new Date(data.supabase_token_expires_at as string).getTime()
         : 0,
+      generation: data.supabase_token_generation as string,
     };
   } catch (err) {
     console.error(`getSupabaseTokens decrypt failed for user ${userId}:`, err);
@@ -300,6 +338,8 @@ export interface FigmaTokens {
   refresh_token: string;
   /** Epoch ms at which the access token expires. */
   expires_at: number;
+  /** Opaque compare-and-swap generation for rotated refresh credentials. */
+  generation: string;
 }
 
 export async function setFigmaToken(
@@ -311,9 +351,16 @@ export async function setFigmaToken(
   const { error } = await db()
     .from("users")
     .update({
-      figma_access_token: encryptToken(tokens.access_token),
-      figma_refresh_token: encryptToken(tokens.refresh_token),
+      figma_access_token: encryptToken(
+        tokens.access_token,
+        userCredentialContext(userId, "figma-access"),
+      ),
+      figma_refresh_token: encryptToken(
+        tokens.refresh_token,
+        userCredentialContext(userId, "figma-refresh"),
+      ),
       figma_token_expires_at: expiresAt,
+      figma_token_generation: randomUUID(),
       figma_handle: handle,
       figma_connected_at: new Date().toISOString(),
     })
@@ -324,17 +371,29 @@ export async function setFigmaToken(
 export async function updateFigmaTokens(
   userId: string,
   tokens: { access_token: string; refresh_token: string; expires_in: number },
-): Promise<void> {
+  expectedGeneration: string,
+): Promise<boolean> {
   const expiresAt = new Date(Date.now() + tokens.expires_in * 1000).toISOString();
-  const { error } = await db()
+  const { data, error } = await db()
     .from("users")
     .update({
-      figma_access_token: encryptToken(tokens.access_token),
-      figma_refresh_token: encryptToken(tokens.refresh_token),
+      figma_access_token: encryptToken(
+        tokens.access_token,
+        userCredentialContext(userId, "figma-access"),
+      ),
+      figma_refresh_token: encryptToken(
+        tokens.refresh_token,
+        userCredentialContext(userId, "figma-refresh"),
+      ),
       figma_token_expires_at: expiresAt,
+      figma_token_generation: randomUUID(),
     })
-    .eq("id", userId);
+    .eq("id", userId)
+    .eq("figma_token_generation", expectedGeneration)
+    .select("id")
+    .maybeSingle();
   if (error) throw new Error(`updateFigmaTokens failed: ${error.message}`);
+  return Boolean(data);
 }
 
 export async function clearFigmaToken(userId: string): Promise<void> {
@@ -344,6 +403,7 @@ export async function clearFigmaToken(userId: string): Promise<void> {
       figma_access_token: null,
       figma_refresh_token: null,
       figma_token_expires_at: null,
+      figma_token_generation: randomUUID(),
       figma_handle: null,
       figma_connected_at: null,
     })
@@ -367,17 +427,24 @@ export async function getFigmaLink(userId: string): Promise<FigmaLink | null> {
 export async function getFigmaTokens(userId: string): Promise<FigmaTokens | null> {
   const { data, error } = await db()
     .from("users")
-    .select("figma_access_token, figma_refresh_token, figma_token_expires_at")
+    .select("figma_access_token, figma_refresh_token, figma_token_expires_at, figma_token_generation")
     .eq("id", userId)
     .single();
   if (error || !data?.figma_access_token || !data?.figma_refresh_token) return null;
   try {
     return {
-      access_token: decryptToken(data.figma_access_token as string),
-      refresh_token: decryptToken(data.figma_refresh_token as string),
+      access_token: decryptToken(
+        data.figma_access_token as string,
+        userCredentialContext(userId, "figma-access"),
+      ),
+      refresh_token: decryptToken(
+        data.figma_refresh_token as string,
+        userCredentialContext(userId, "figma-refresh"),
+      ),
       expires_at: data.figma_token_expires_at
         ? new Date(data.figma_token_expires_at as string).getTime()
         : 0,
+      generation: data.figma_token_generation as string,
     };
   } catch (err) {
     console.error(`getFigmaTokens decrypt failed for user ${userId}:`, err);
@@ -397,7 +464,10 @@ export async function getGithubToken(userId: string): Promise<string | null> {
     .single();
   if (error || !data?.github_access_token) return null;
   try {
-    return decryptToken(data.github_access_token as string);
+    return decryptToken(
+      data.github_access_token as string,
+      userCredentialContext(userId, "github-access"),
+    );
   } catch (err) {
     // A decrypt failure typically means the encryption key was rotated
     // without re-encrypting old rows. Treat as "not connected" so the user
@@ -500,7 +570,7 @@ export async function getUserById(id: string): Promise<UserRecord | null> {
 export async function createGuestUser(input: {
   display_name: string;
   recovery_hash: string;
-  recovery_code_enc: string;
+  recovery_code: string;
 }): Promise<UserRecord> {
   const id = randomUUID();
   const { data, error } = await db()
@@ -512,7 +582,10 @@ export async function createGuestUser(input: {
       display_name: input.display_name,
       account_type: "guest",
       guest_recovery_hash: input.recovery_hash,
-      guest_recovery_code_enc: input.recovery_code_enc,
+      guest_recovery_code_enc: encryptToken(
+        input.recovery_code,
+        userCredentialContext(id, "guest-recovery"),
+      ),
       last_active_at: new Date().toISOString(),
     })
     .select(USER_COLUMNS)
@@ -547,12 +620,17 @@ export async function getGuestByRecoveryHash(
  * request. Also clears grace_started_at so a guest who returns during the
  * grace window is pulled back out of the deletion queue.
  */
-export async function touchUserActivity(id: string): Promise<void> {
-  const { error } = await db()
+export async function touchUserActivity(id: string): Promise<boolean> {
+  const { data, error } = await db()
     .from("users")
     .update({ last_active_at: new Date().toISOString(), grace_started_at: null })
-    .eq("id", id);
+    .eq("id", id)
+    .eq("account_type", "guest")
+    .is("converted_at", null)
+    .is("guest_lifecycle_claim", null)
+    .select("id");
   if (error) throw new Error(`touchUserActivity failed: ${error.message}`);
+  return Array.isArray(data) && data.length === 1;
 }
 
 /**
@@ -560,17 +638,62 @@ export async function touchUserActivity(id: string): Promise<void> {
  * WorkOS account. Null the recovery columns so the dead account can never be
  * re-claimed with the old code.
  */
-export async function markGuestConverted(guestId: string): Promise<void> {
+export async function claimGuestForConversion(guestId: string, claim: string): Promise<boolean> {
+  const { data, error } = await db()
+    .from("users")
+    .update({ guest_lifecycle_claim: claim, guest_lifecycle_claimed_at: new Date().toISOString() })
+    .eq("id", guestId)
+    .eq("account_type", "guest")
+    .is("converted_at", null)
+    .is("guest_lifecycle_claim", null)
+    .select("id");
+  if (error) throw new Error(`claimGuestForConversion failed: ${error.message}`);
+  return Array.isArray(data) && data.length === 1;
+}
+
+export async function releaseGuestLifecycleClaim(guestId: string, claim: string): Promise<void> {
   const { error } = await db()
+    .from("users")
+    .update({ guest_lifecycle_claim: null, guest_lifecycle_claimed_at: null })
+    .eq("id", guestId)
+    .eq("guest_lifecycle_claim", claim);
+  if (error) throw new Error(`releaseGuestLifecycleClaim failed: ${error.message}`);
+}
+
+export async function markGuestConverted(guestId: string, claim: string): Promise<void> {
+  const { data, error } = await db()
     .from("users")
     .update({
       converted_at: new Date().toISOString(),
       guest_recovery_hash: null,
       guest_recovery_code_enc: null,
+      guest_lifecycle_claim: null,
+      guest_lifecycle_claimed_at: null,
     })
     .eq("id", guestId)
-    .eq("account_type", "guest");
+    .eq("account_type", "guest")
+    .eq("guest_lifecycle_claim", claim)
+    .select("id");
   if (error) throw new Error(`markGuestConverted failed: ${error.message}`);
+  if (!Array.isArray(data) || data.length !== 1) {
+    throw new Error("markGuestConverted failed: guest lifecycle claim was lost");
+  }
+}
+
+/** Atomically win the right to perform irreversible guest cleanup. */
+export async function claimGuestForDeletion(
+  guestId: string,
+  graceDays: number,
+  claim: string,
+): Promise<boolean> {
+  const graceCutoff = new Date(Date.now() - graceDays * 86_400_000).toISOString();
+  const { data, error } = await db().rpc("claim_guest_for_deletion", {
+    p_guest_id: guestId,
+    p_grace_cutoff: graceCutoff,
+    p_claim: claim,
+  });
+  if (error) throw new Error(`claimGuestForDeletion failed: ${error.message}`);
+  return data === true;
 }
 
 /**
@@ -586,7 +709,10 @@ export async function getGuestRecoveryCode(id: string): Promise<string | null> {
     .maybeSingle();
   if (error || !data?.guest_recovery_code_enc) return null;
   try {
-    return decryptToken(data.guest_recovery_code_enc as string);
+    return decryptToken(
+      data.guest_recovery_code_enc as string,
+      userCredentialContext(id, "guest-recovery"),
+    );
   } catch (err) {
     console.error(`getGuestRecoveryCode decrypt failed for ${id}:`, err);
     return null;
@@ -637,7 +763,7 @@ export async function listGuestsToDelete(graceDays: number): Promise<string[]> {
  * organization projects remain intact. Used by the guest sweeper after
  * per-project Storage/VM teardown has run.
  */
-export async function deleteUser(id: string): Promise<void> {
+export async function deleteUser(id: string, lifecycleClaim: string): Promise<void> {
   const { error: projectsError } = await db()
     .from("projects")
     .delete()
@@ -646,6 +772,14 @@ export async function deleteUser(id: string): Promise<void> {
   if (projectsError) {
     throw new Error(`deleteUser personal-project cleanup failed: ${projectsError.message}`);
   }
-  const { error } = await db().from("users").delete().eq("id", id);
+  const { data, error } = await db()
+    .from("users")
+    .delete()
+    .eq("id", id)
+    .eq("guest_lifecycle_claim", lifecycleClaim)
+    .select("id");
   if (error) throw new Error(`deleteUser failed: ${error.message}`);
+  if (!Array.isArray(data) || data.length !== 1) {
+    throw new Error("deleteUser failed: guest lifecycle claim was lost");
+  }
 }

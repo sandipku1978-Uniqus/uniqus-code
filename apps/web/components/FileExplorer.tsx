@@ -2,11 +2,12 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TreeEntry } from "@gate15/api-types";
-import { useStore } from "@/lib/store";
-import { send } from "@/lib/ws-client";
+import { applyFilePathMapping, applyFilePathRemoval, useStore } from "@/lib/store";
+import { requestFile, send } from "@/lib/ws-client";
 import { fileOpApi } from "@/lib/api";
 import { toast } from "@/lib/toast";
 import { resolveSetiIcon } from "@/lib/seti-icons";
+import Modal from "./Modal";
 
 interface TreeNode {
   name: string;
@@ -70,6 +71,8 @@ export default function FileExplorer({
     type: "file" | "dir";
   } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [moveTarget, setMoveTarget] = useState<TreeNode | null>(null);
+  const [focusedPath, setFocusedPath] = useState<string | null>(null);
   const [actionsBusy, setActionsBusy] = useState(false);
   // Right-click / ⋯ context menu (UI/UX audit gap #6).
   const [menu, setMenu] = useState<{ node: TreeNode; x: number; y: number } | null>(null);
@@ -96,7 +99,11 @@ export default function FileExplorer({
         : e.key === "Home"
         ? 0
         : rows.length - 1;
-    rows[next]?.focus();
+    const nextRow = rows[next];
+    if (nextRow) {
+      setFocusedPath(nextRow.dataset.path ?? null);
+      nextRow.focus();
+    }
   };
 
   const toggle = (path: string): void =>
@@ -122,10 +129,11 @@ export default function FileExplorer({
     matches.sort((a, b) => a.path.localeCompare(b.path));
     return matches;
   }, [tree, query]);
+  const rovingPath = focusedPath ?? selected ?? filtered?.[0]?.path ?? nodes[0]?.path ?? null;
 
   const reqOpen = (path: string): void => {
     openFile(path);
-    send({ type: "request_file", path });
+    requestFile(path);
     onFileOpened?.();
   };
 
@@ -209,31 +217,39 @@ export default function FileExplorer({
       target = parent ? `${parent}/${trimmed}` : trimmed;
     }
     if (target === oldPath) return;
-    await wrapAction(() =>
-      fileOpApi(project.id, { op: "rename", from: oldPath, to: target }).then(() => {}),
-    );
+    await wrapAction(async () => {
+      const result = await fileOpApi(project.id, { op: "rename", from: oldPath, to: target });
+      const mapping = result.path_mapping ?? { from: oldPath, to: target };
+      applyFilePathMapping(mapping.from, mapping.to, result.is_directory ?? false);
+    });
   };
 
   // Move a node into a target folder ("" = project root) by reusing the rename
   // op — drives drag-and-drop and the context menu's move affordances.
-  const moveInto = async (fromPath: string, destDir: string): Promise<void> => {
-    if (!project) return;
+  const moveInto = async (fromPath: string, destDir: string): Promise<boolean> => {
+    if (!project) return false;
     const base = fromPath.includes("/") ? fromPath.slice(fromPath.lastIndexOf("/") + 1) : fromPath;
     const to = destDir ? `${destDir}/${base}` : base;
-    if (to === fromPath) return;
+    if (to === fromPath) return true;
     // Guard against dropping a folder into itself or a descendant.
-    if (destDir === fromPath || destDir.startsWith(`${fromPath}/`)) return;
-    await wrapAction(() =>
-      fileOpApi(project.id, { op: "rename", from: fromPath, to }).then(() => {}),
-    );
+    if (destDir === fromPath || destDir.startsWith(`${fromPath}/`)) return false;
+    let moved = false;
+    await wrapAction(async () => {
+      const result = await fileOpApi(project.id, { op: "rename", from: fromPath, to });
+      const mapping = result.path_mapping ?? { from: fromPath, to };
+      applyFilePathMapping(mapping.from, mapping.to, result.is_directory ?? false);
+      moved = true;
+    });
+    return moved;
   };
 
   const submitDelete = async (path: string): Promise<void> => {
     if (!project) return;
-    setConfirmDelete(null);
-    await wrapAction(() =>
-      fileOpApi(project.id, { op: "delete", path }).then(() => {}),
-    );
+    await wrapAction(async () => {
+      const result = await fileOpApi(project.id, { op: "delete", path });
+      applyFilePathRemoval(result.removed_path ?? path, result.is_directory ?? false);
+      setConfirmDelete(null);
+    });
   };
 
   return (
@@ -299,6 +315,7 @@ export default function FileExplorer({
       <div className="tree-search">
         <input
           type="search"
+          aria-label="Filter project files"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Filter files…"
@@ -307,8 +324,8 @@ export default function FileExplorer({
       <div
         className="tree-list"
         ref={treeListRef}
-        role="tree"
-        aria-label="Files"
+        role="list"
+        aria-label="Project files"
         onKeyDown={onTreeKeyDown}
         // Drop onto empty space = move to project root.
         onDragOver={(e) => {
@@ -327,18 +344,22 @@ export default function FileExplorer({
             <div className="tree-empty">No matches.</div>
           ) : (
             filtered.map((entry) => (
-              <button
-                key={entry.path}
-                type="button"
-                onClick={() => reqOpen(entry.path)}
-                className={`tree-row ${selected === entry.path ? "active" : ""}`}
-                style={{ paddingLeft: "8px" }}
-              >
-                <FileGlyph name={entry.path.split("/").pop() ?? entry.path} />
-                <span className="name" title={entry.path}>
-                  {highlightMatch(entry.path, query)}
-                </span>
-              </button>
+              <div role="listitem" key={entry.path}>
+                <button
+                  type="button"
+                  data-path={entry.path}
+                  tabIndex={rovingPath === entry.path ? 0 : -1}
+                  onFocus={() => setFocusedPath(entry.path)}
+                  onClick={() => reqOpen(entry.path)}
+                  className={`tree-row ${selected === entry.path ? "active" : ""}`}
+                  style={{ paddingLeft: "8px" }}
+                >
+                  <FileGlyph name={entry.path.split("/").pop() ?? entry.path} />
+                  <span className="name" title={entry.path}>
+                    {highlightMatch(entry.path, query)}
+                  </span>
+                </button>
+              </div>
             ))
           )
         ) : !treeLoaded ? (
@@ -398,6 +419,8 @@ export default function FileExplorer({
                 onCancelCreate={() => setCreating(null)}
                 onContextMenu={(n, x, y) => setMenu({ node: n, x, y })}
                 onMoveNode={(from, destDir) => void moveInto(from, destDir)}
+                rovingPath={rovingPath}
+                onRowFocus={setFocusedPath}
               />
             ))}
           </>
@@ -415,6 +438,10 @@ export default function FileExplorer({
           }}
           onDelete={() => {
             setConfirmDelete(menu.node.path);
+            setMenu(null);
+          }}
+          onMove={() => {
+            setMoveTarget(menu.node);
             setMenu(null);
           }}
           onNewFile={() => {
@@ -436,6 +463,19 @@ export default function FileExplorer({
           path={confirmDelete}
           onCancel={() => setConfirmDelete(null)}
           onConfirm={() => void submitDelete(confirmDelete)}
+        />
+      )}
+      {moveTarget && (
+        <MoveDialog
+          node={moveTarget}
+          tree={tree}
+          busy={actionsBusy}
+          onCancel={() => setMoveTarget(null)}
+          onMove={async (destination) => {
+            const moved = await moveInto(moveTarget.path, destination);
+            if (moved) setMoveTarget(null);
+            return moved;
+          }}
         />
       )}
       <QuickOpen tree={tree} onOpen={reqOpen} />
@@ -531,6 +571,8 @@ function Row({
   onCancelCreate,
   onContextMenu,
   onMoveNode,
+  rovingPath,
+  onRowFocus,
 }: {
   node: TreeNode;
   depth: number;
@@ -549,6 +591,8 @@ function Row({
   onCancelCreate: () => void;
   onContextMenu: (node: TreeNode, x: number, y: number) => void;
   onMoveNode: (from: string, destDir: string) => void;
+  rovingPath: string | null;
+  onRowFocus: (path: string) => void;
 }) {
   const isOpen = expanded.has(node.path);
   const isSelected = !node.isDir && selected === node.path;
@@ -569,14 +613,10 @@ function Row({
   }
 
   return (
-    <>
+    <div role="listitem">
       <div
         className={`tree-row-wrap ${isSelected ? "active" : ""}${dropTarget ? " drop-target" : ""}`}
         style={{ paddingLeft: `${4 + depth * 12}px` }}
-        role="treeitem"
-        aria-level={depth + 1}
-        aria-selected={isSelected}
-        aria-expanded={node.isDir ? isOpen : undefined}
         onContextMenu={(e) => {
           e.preventDefault();
           onContextMenu(node, e.clientX, e.clientY);
@@ -610,6 +650,11 @@ function Row({
       >
         <button
           type="button"
+          data-path={node.path}
+          tabIndex={rovingPath === node.path ? 0 : -1}
+          aria-current={isSelected ? "true" : undefined}
+          aria-expanded={node.isDir ? isOpen : undefined}
+          onFocus={() => onRowFocus(node.path)}
           draggable
           onDragStart={(e) => {
             e.dataTransfer.setData("text/gate15-path", node.path);
@@ -654,7 +699,7 @@ function Row({
         />
       </div>
       {node.isDir && isOpen && (
-        <div role="group">
+        <div role="list" aria-label={`${node.name} contents`}>
           {creating && creating.parent === node.path && (
             <InlineRow
               depth={depth + 1}
@@ -684,11 +729,13 @@ function Row({
               onCancelCreate={onCancelCreate}
               onContextMenu={onContextMenu}
               onMoveNode={onMoveNode}
+              rovingPath={rovingPath}
+              onRowFocus={onRowFocus}
             />
           ))}
         </div>
       )}
-    </>
+    </div>
   );
 }
 
@@ -748,7 +795,10 @@ function RowActions({
         aria-label="Rename"
         className="icon-btn-xs"
       >
-        ✎
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+          <path d="M12 20h9" />
+          <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+        </svg>
       </button>
       <button
         type="button"
@@ -760,7 +810,10 @@ function RowActions({
         aria-label="Delete"
         className="icon-btn-xs danger"
       >
-        ×
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+          <path d="M3 6h18" />
+          <path d="M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5" />
+        </svg>
       </button>
       <button
         type="button"
@@ -774,7 +827,9 @@ function RowActions({
         aria-haspopup="menu"
         className="icon-btn-xs"
       >
-        ⋯
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <circle cx="5" cy="12" r="1.8" /><circle cx="12" cy="12" r="1.8" /><circle cx="19" cy="12" r="1.8" />
+        </svg>
       </button>
     </div>
   );
@@ -788,6 +843,7 @@ function RowContextMenu({
   onClose,
   onRename,
   onDelete,
+  onMove,
   onNewFile,
   onNewFolder,
   onCopyPath,
@@ -798,6 +854,7 @@ function RowContextMenu({
   onClose: () => void;
   onRename: () => void;
   onDelete: () => void;
+  onMove: () => void;
   onNewFile: () => void;
   onNewFolder: () => void;
   onCopyPath: () => void;
@@ -826,6 +883,9 @@ function RowContextMenu({
     <div ref={ref} className="ctx-menu" role="menu" style={{ left, top }}>
       <button type="button" role="menuitem" onClick={onRename}>
         Rename
+      </button>
+      <button type="button" role="menuitem" onClick={onMove}>
+        Move to…
       </button>
       <button type="button" role="menuitem" className="danger" onClick={onDelete}>
         Delete
@@ -914,23 +974,100 @@ function DeleteConfirm({
   onConfirm: () => void;
 }) {
   return (
-    <div className="proj-dialog-overlay" onClick={onCancel}>
-      <div className="proj-dialog" onClick={(e) => e.stopPropagation()}>
-        <h3>Delete "{path}"?</h3>
-        <p className="proj-dialog-warn">
-          Removes the file (or folder + everything inside) from the sandbox
-          and from Storage. The agent's history is unaffected.
-        </p>
-        <div className="proj-dialog-actions">
+    <Modal
+      title={`Delete “${path}”?`}
+      width={460}
+      onClose={onCancel}
+      footer={
+        <>
+          <span />
+          <div className="modal-actions">
           <button type="button" onClick={onCancel} className="btn-ghost">
             Cancel
           </button>
           <button type="button" onClick={onConfirm} className="btn-danger">
             Delete
           </button>
-        </div>
-      </div>
-    </div>
+          </div>
+        </>
+      }
+    >
+      <p className="proj-dialog-warn" style={{ margin: 0 }}>
+        Removes the file (or folder and everything inside) from the sandbox and
+        Storage. The agent&apos;s history is unaffected.
+      </p>
+    </Modal>
+  );
+}
+
+function MoveDialog({
+  node,
+  tree,
+  busy,
+  onCancel,
+  onMove,
+}: {
+  node: TreeNode;
+  tree: TreeEntry[];
+  busy: boolean;
+  onCancel: () => void;
+  onMove: (destination: string) => Promise<boolean>;
+}) {
+  const currentParent = node.path.includes("/")
+    ? node.path.slice(0, node.path.lastIndexOf("/"))
+    : "";
+  const [destination, setDestination] = useState(currentParent);
+  const [error, setError] = useState<string | null>(null);
+  const folders = tree
+    .filter((entry) => entry.is_dir)
+    .filter((entry) => entry.path !== node.path && !entry.path.startsWith(`${node.path}/`))
+    .sort((a, b) => a.path.localeCompare(b.path));
+
+  const submit = async (): Promise<void> => {
+    setError(null);
+    if (!(await onMove(destination))) {
+      setError("The file could not be moved. Check the activity message and try again.");
+    }
+  };
+
+  return (
+    <Modal
+      title={`Move “${node.name}”`}
+      subtitle="Choose a destination folder."
+      width={480}
+      onClose={onCancel}
+      footer={
+        <>
+          <span />
+          <div className="modal-actions">
+            <button type="button" className="btn-secondary" onClick={onCancel} disabled={busy}>
+              Cancel
+            </button>
+            <button type="button" className="btn-primary" onClick={() => void submit()} disabled={busy}>
+              {busy ? "Moving…" : "Move"}
+            </button>
+          </div>
+        </>
+      }
+    >
+      <label htmlFor="file-move-destination" className="field-label">
+        Destination folder
+      </label>
+      <select
+        id="file-move-destination"
+        value={destination}
+        onChange={(event) => setDestination(event.target.value)}
+        style={{ width: "100%", marginTop: 6 }}
+      >
+        <option value="">Project root</option>
+        {folders.map((folder) => (
+          <option key={folder.path} value={folder.path}>
+            {folder.path}
+          </option>
+        ))}
+      </select>
+      {error && <div className="async-error" role="alert">{error}</div>}
+    </Modal>
   );
 }
 
@@ -992,11 +1129,18 @@ function QuickOpen({
 
   if (!open) return null;
   return (
-    <div className="quick-open-overlay" onClick={() => setOpen(false)}>
-      <div className="quick-open" onClick={(e) => e.stopPropagation()}>
+    <Modal title="Quick open" onClose={() => setOpen(false)} width={640}>
+      <div className="quick-open" style={{ position: "static", width: "100%" }}>
+        <label className="sr-only" htmlFor="quick-open-input">Search project files</label>
         <input
+          id="quick-open-input"
           ref={inputRef}
           value={query}
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded="true"
+          aria-controls="quick-open-results"
+          aria-activedescendant={matches[activeIdx] ? `quick-open-option-${activeIdx}` : undefined}
           onChange={(e) => {
             setQuery(e.target.value);
             setActiveIdx(0);
@@ -1021,12 +1165,16 @@ function QuickOpen({
             }
           }}
         />
-        <div className="quick-open-list">
+        <div className="quick-open-list" id="quick-open-results" role="listbox" aria-label="Matching files">
           {matches.length === 0 && <div className="quick-open-empty">No files match.</div>}
           {matches.map((entry, i) => (
             <button
               key={entry.path}
+              id={`quick-open-option-${i}`}
               type="button"
+              role="option"
+              aria-selected={i === activeIdx}
+              tabIndex={-1}
               onClick={() => {
                 onOpen(entry.path);
                 setOpen(false);
@@ -1050,7 +1198,7 @@ function QuickOpen({
           ↑ ↓ navigate · enter open · esc close
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }
 

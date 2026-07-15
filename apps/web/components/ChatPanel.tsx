@@ -10,16 +10,29 @@ import {
   fetchSlashCommandsApi,
   getApiBase,
   uploadProjectFilesApi,
+  type ProjectUploadFailure,
   type SlashCommandSummary,
 } from "@/lib/api";
 import { renderAnswer, sourceHost, type Source } from "@/lib/citations";
-import { useStore, AGENT_PREVIEW_TAB, type ChatItem, type SelectedElement } from "@/lib/store";
+import {
+  useStore,
+  selectHasUnsavedWork,
+  AGENT_PREVIEW_TAB,
+  type ChatItem,
+  type SelectedElement,
+} from "@/lib/store";
 import { useAutoGrowTextarea } from "@/lib/useAutoGrowTextarea";
 import { useIsMobile } from "@/lib/use-is-mobile";
 import { errorCopyFor } from "@/lib/errorCopy";
 import { lineDiffStats } from "@/lib/lineDiff";
-import { connect, send } from "@/lib/ws-client";
-import { draftKeyFor } from "./LandingPrompt";
+import {
+  captureSocketContext,
+  connect,
+  isSocketContextCurrent,
+  send,
+  sendInSocketContext,
+} from "@/lib/ws-client";
+import { draftKeyFor, legacyDraftKeyFor } from "./LandingPrompt";
 import PlanReview from "./PlanReview";
 import ChatSessionDropdown from "./ChatSessionDropdown";
 import ModelPicker from "./ModelPicker";
@@ -42,6 +55,25 @@ const EXAMPLE_PROMPTS = [
   "Make a SOX control register: a table of controls with owner, test status, and an audit-ready evidence note.",
   "Create a budget vs. actuals dashboard by department with variance highlights and a month filter.",
 ];
+
+function CloseIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+
+interface ComposerAttachmentDraft {
+  local: File[];
+  uploaded: UploadedFileSummary[];
+}
+
+// File objects cannot be serialized to localStorage. Keep attachment drafts in
+// memory per project/session so SPA navigation during an upload cannot leak the
+// files into the destination chat or discard the origin's completed upload.
+const composerAttachmentDrafts = new Map<string, ComposerAttachmentDraft>();
 
 function ContextGauge() {
   const usage = useStore((s) => s.contextUsage);
@@ -146,6 +178,7 @@ export default function ChatPanel() {
   const clearSubAgents = useStore((s) => s.clearSubAgents);
   const project = useStore((s) => s.project);
   const connected = useStore((s) => s.connected);
+  const hasUnsavedWork = useStore(selectHasUnsavedWork);
   const connectionFailed = useStore((s) => s.connectionFailed);
   const expandedTurns = useStore((s) => s.expandedTurns);
   const toggleTurn = useStore((s) => s.toggleTurn);
@@ -177,17 +210,25 @@ export default function ChatPanel() {
   const searchParams = useSearchParams();
   const sessionParam = searchParams?.get("session") ?? null;
   const [input, setInput] = useState("");
-  // Persist the composer draft per-project so a reload or a client-side crash
-  // doesn't lose typed-but-unsent text. Cleared on successful send. The key
+  const wasBusyRef = useRef(busy);
+  const [agentStatus, setAgentStatus] = useState("");
+  // Persist the composer draft per chat session so switching threads cannot
+  // overwrite or send another thread's text. Cleared on successful send. The key
   // comes from the shared `draftKeyFor` helper (the same one LandingPrompt and
   // ProjectPicker write with) — re-deriving the string here would let the two
   // sides drift apart and silently orphan every handed-off draft.
-  const draftKey = project ? draftKeyFor(project.id) : null;
+  const draftProjectId = project?.id ?? null;
+  const draftKey = draftProjectId ? draftKeyFor(draftProjectId, sessionParam) : null;
   // The key the current `input` value belongs to. Set synchronously when we
   // (re)hydrate for a new key so the persist effect can never write one
   // project's text under another project's key during a switch.
   const draftKeyRef = useRef<string | null>(null);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [pendingUploadedFiles, setPendingUploadedFiles] = useState<UploadedFileSummary[]>([]);
+  const pendingFilesRef = useRef<File[]>([]);
+  const pendingUploadedFilesRef = useRef<UploadedFileSummary[]>([]);
+  const attachmentDraftInitializedRef = useRef(false);
+  const uploadAbortRef = useRef<AbortController | null>(null);
   const [uploading, setUploading] = useState(false);
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -250,6 +291,7 @@ export default function ChatPanel() {
         );
         if (!duplicate) next.push(file);
       }
+      pendingFilesRef.current = next;
       return next;
     });
     clearQueuedComposerFiles(drained);
@@ -271,6 +313,7 @@ export default function ChatPanel() {
         );
         if (!duplicate) next.push(file);
       }
+      pendingFilesRef.current = next;
       return next;
     });
     clearBriefFiles();
@@ -334,14 +377,26 @@ export default function ChatPanel() {
     if (!draftKey) return;
     let saved = "";
     try {
-      saved = localStorage.getItem(draftKey) ?? "";
+      const current = localStorage.getItem(draftKey);
+      if (current !== null) {
+        saved = current;
+      } else if (draftProjectId && sessionParam === null) {
+        // One-time migration for drafts written before session-scoped keys.
+        const legacyKey = legacyDraftKeyFor(draftProjectId);
+        const legacy = localStorage.getItem(legacyKey);
+        if (legacy !== null) {
+          saved = legacy;
+          localStorage.setItem(draftKey, legacy);
+          localStorage.removeItem(legacyKey);
+        }
+      }
     } catch {
       // localStorage can throw in private mode / when disabled — drafts are a
       // nicety, never block the composer over it.
     }
     draftKeyRef.current = draftKey;
     setInput(saved);
-  }, [draftKey]);
+  }, [draftKey, draftProjectId, sessionParam]);
 
   // Persist on input change only — NOT on draftKey change. This runs after the
   // hydrate effect above has settled `input` for the current key, so it always
@@ -358,6 +413,47 @@ export default function ChatPanel() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [input]);
+
+  useEffect(() => {
+    pendingFilesRef.current = pendingFiles;
+  }, [pendingFiles]);
+
+  useEffect(() => {
+    pendingUploadedFilesRef.current = pendingUploadedFiles;
+  }, [pendingUploadedFiles]);
+
+  // Scope attachment drafts to the same project/session key as text. On a
+  // route switch abort the old request, retain its source Files (or completed
+  // uploaded summaries), and restore only the destination chat's own draft.
+  useEffect(() => {
+    if (!draftKey) return;
+    const restored = composerAttachmentDrafts.get(draftKey);
+    if (attachmentDraftInitializedRef.current) {
+      const local = restored?.local ?? [];
+      const uploaded = restored?.uploaded ?? [];
+      pendingFilesRef.current = local;
+      pendingUploadedFilesRef.current = uploaded;
+      setPendingFiles(local);
+      setPendingUploadedFiles(uploaded);
+    } else if (restored) {
+      pendingFilesRef.current = restored.local;
+      pendingUploadedFilesRef.current = restored.uploaded;
+      setPendingFiles(restored.local);
+      setPendingUploadedFiles(restored.uploaded);
+    }
+    attachmentDraftInitializedRef.current = true;
+
+    return () => {
+      uploadAbortRef.current?.abort();
+      const local = pendingFilesRef.current;
+      const uploaded = pendingUploadedFilesRef.current;
+      if (local.length > 0 || uploaded.length > 0) {
+        composerAttachmentDrafts.set(draftKey, { local: [...local], uploaded: [...uploaded] });
+      } else {
+        composerAttachmentDrafts.delete(draftKey);
+      }
+    };
+  }, [draftKey]);
 
   // Drag-and-drop handlers
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -518,19 +614,36 @@ export default function ChatPanel() {
     !showAllTurns && turns.length > TURN_WINDOW ? turns.length - TURN_WINDOW : 0;
   const visibleTurns = hiddenTurnCount > 0 ? turns.slice(hiddenTurnCount) : turns;
 
-  // beforeunload guard (A4): warn before a refresh/close while the agent is
-  // working or installing deps — the instinctive refresh is what loses the
-  // not-yet-written tail of a run. (Once the run-registry lands the run also
-  // survives the refresh, but the warning still spares users the scare.)
+  // Warn for every volatile workspace state: active work, dirty/saving/error
+  // editor buffers, and pending/in-flight attachments. Text drafts are already
+  // synchronously localStorage-backed and do not need the unload prompt.
   useEffect(() => {
-    if (!busy && !installInProgress) return;
+    if (
+      !busy &&
+      !installInProgress &&
+      !hasUnsavedWork &&
+      !uploading &&
+      pendingFiles.length === 0 &&
+      pendingUploadedFiles.length === 0
+    ) {
+      return;
+    }
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
       e.preventDefault();
       e.returnValue = "";
     };
     window.addEventListener("beforeunload", onBeforeUnload);
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
-  }, [busy, installInProgress]);
+  }, [busy, installInProgress, hasUnsavedWork, uploading, pendingFiles.length, pendingUploadedFiles.length]);
+
+  useEffect(() => {
+    if (busy) {
+      setAgentStatus("Gate 15 is working.");
+    } else if (wasBusyRef.current) {
+      setAgentStatus("Gate 15 finished responding.");
+    }
+    wasBusyRef.current = busy;
+  }, [busy]);
 
   const tree = useStore((s) => s.tree);
   const validFilePaths = useMemo(() => {
@@ -599,60 +712,93 @@ export default function ChatPanel() {
     if (ta) setCursor(ta.selectionStart ?? 0);
   }, []);
 
-  /**
-   * Send a plain-text turn without going through the composer's upload path.
-   * Shared by message Resend, the CompleteRow Regenerate control, and the tool
-   * "Fix this" action so they all assemble the same payload and echo a bubble.
-   * Returns true if it actually went out.
-   */
-  const sendText = useCallback(
-    (content: string): boolean => {
-      const trimmed = content.trim();
-      if (!trimmed || busy || uploading || !project || !connected) return false;
-      const fileRefs = extractFileRefs(trimmed, validFilePaths);
-      const payload: ClientEvent = {
+  const sendUserItem = useCallback(
+    (item: UserChatItem): boolean => {
+      const content = item.content.trim();
+      if (!content || busy || uploading || !project || !connected) return false;
+      const missingAttachments = (item.attachments ?? []).filter(
+        (attachment) => !validFilePaths.has(attachment.path),
+      );
+      const missingFileRefs = (item.fileRefs ?? []).filter((filePath) => !validFilePaths.has(filePath));
+      if (missingAttachments.length > 0 || missingFileRefs.length > 0) {
+        const missing = [...missingAttachments.map((file) => file.path), ...missingFileRefs];
+        addSystem(`Can't replay this request because ${missing.join(", ")} no longer exists. Reattach it first.`);
+        return false;
+      }
+      const fileRefs = Array.from(
+        new Set([...(item.fileRefs ?? []), ...extractFileRefs(content, validFilePaths)]),
+      );
+      const payload: ClientEvent & { selected_element?: SelectedElement } = {
         type: "user_message",
-        content: trimmed,
+        content,
         mode,
         permission_mode: permissionMode,
         model: model !== "auto" ? model : undefined,
         thinking: thinking !== "medium" ? thinking : undefined,
-        // Only send when OFF — omitted defaults to on server-side.
         thinking_enabled: thinkingEnabled ? undefined : false,
+        attachments: item.attachments,
         file_refs: fileRefs.length > 0 ? fileRefs : undefined,
       };
-      const ok = send(payload);
-      if (!ok) {
-        addSystem(
-          "disconnected — message not sent. We'll reconnect automatically; try again in a moment.",
-        );
+      if (item.selectedElement) payload.selected_element = item.selectedElement;
+      if (!send(payload)) {
+        addSystem("disconnected — message not sent. We'll reconnect automatically; try again in a moment.");
         return false;
       }
-      addUserMessage(trimmed, undefined, fileRefs, undefined, Date.now());
-      // Fresh turn (sendText only runs when not busy) — clear the previous turn's
-      // sub-agents so the Activity Monitor / mobile strip don't show stale rows.
+      addUserMessage(content, item.attachments, fileRefs, item.selectedElement, Date.now());
       clearSubAgents();
       setBusy(true);
       return true;
     },
-    [busy, uploading, project, connected, mode, permissionMode, model, thinking, thinkingEnabled, validFilePaths, addSystem, addUserMessage, clearSubAgents, setBusy],
+    [
+      busy,
+      uploading,
+      project,
+      connected,
+      validFilePaths,
+      mode,
+      permissionMode,
+      model,
+      thinking,
+      thinkingEnabled,
+      addSystem,
+      addUserMessage,
+      clearSubAgents,
+      setBusy,
+    ],
   );
 
-  // Load a previous user message back into the composer for editing.
-  const handleEditMessage = useCallback((text: string) => {
-    setInput(text);
-    requestAnimationFrame(() => textareaRef.current?.focus());
-  }, []);
+  // Load a previous envelope back into the composer. Structured attachments
+  // and selected-element context stay staged while the user edits the text.
+  const handleEditMessage = useCallback(
+    (item: UserChatItem | string) => {
+      if (typeof item === "string") {
+        setInput(item);
+      } else {
+        const available = (item.attachments ?? []).filter((file) => validFilePaths.has(file.path));
+        const missing = (item.attachments ?? []).filter((file) => !validFilePaths.has(file.path));
+        if (missing.length > 0) {
+          addSystem(`Can't edit and replay this request until you reattach ${missing.map((file) => file.path).join(", ")}.`);
+          return;
+        }
+        setInput(item.content);
+        pendingUploadedFilesRef.current = available;
+        setPendingUploadedFiles(available);
+        setPendingSelectedElement(item.selectedElement ?? null);
+      }
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    },
+    [validFilePaths, setPendingSelectedElement, addSystem],
+  );
 
-  // Re-send a previous user message verbatim (or regenerate a turn's answer).
-  const handleResend = useCallback((text: string) => void sendText(text), [sendText]);
+  // Re-send the complete original envelope (or regenerate its answer).
+  const handleResend = useCallback((item: UserChatItem) => void sendUserItem(item), [sendUserItem]);
 
   // Retry the run after a failure (C7): resend the most recent user message.
   // Reads the live store so it isn't tied to a stale closure of `chat`.
   const handleRetryRun = useCallback(() => {
     const last = [...useStore.getState().chat].reverse().find((i) => i.kind === "user");
-    if (last && last.kind === "user") void sendText(last.content);
-  }, [sendText]);
+    if (last && last.kind === "user") void sendUserItem(last);
+  }, [sendUserItem]);
 
   const chatHandlers = useMemo<ChatHandlers>(
     () => ({
@@ -674,7 +820,7 @@ export default function ChatPanel() {
     // running main agent to pick up at its next step (see the orchestrator's
     // user_message handler). Stop stays available as the separate kill switch.
     if (
-      (!trimmed && pendingFiles.length === 0 && !selectedElement) ||
+      (!trimmed && pendingFiles.length === 0 && pendingUploadedFiles.length === 0 && !selectedElement) ||
       uploading ||
       !project ||
       !connected
@@ -683,36 +829,93 @@ export default function ChatPanel() {
     }
 
     setUploading(true);
-    let attachments: UploadedFileSummary[] = [];
+    const originDraftKey = draftKey;
+    const originSocket = captureSocketContext();
+    const abortController = new AbortController();
+    uploadAbortRef.current = abortController;
+    let attachments: UploadedFileSummary[] = [...pendingUploadedFiles];
+    let failedUploads: File[] = [];
+    let uploadFailures: ProjectUploadFailure[] = [];
     try {
       if (pendingFiles.length > 0) {
         const result = await uploadProjectFilesApi({
           projectId: project.id,
           files: pendingFiles,
+          signal: abortController.signal,
         });
-        attachments = result.files;
+        attachments = [...attachments, ...result.files];
+        uploadFailures = result.failures;
+        if (uploadFailures.length > 0) {
+          const failedIndexes = new Set(uploadFailures.map((failure) => failure.input_index));
+          failedUploads = pendingFiles.filter((_file, index) => failedIndexes.has(index));
+        }
       }
     } catch (err) {
-      addSystem(`upload failed: ${err instanceof Error ? err.message : String(err)}`);
+      const contextChanged =
+        !originDraftKey ||
+        draftKeyRef.current !== originDraftKey ||
+        !isSocketContextCurrent(originSocket);
+      if (!contextChanged && !abortController.signal.aborted) {
+        addSystem(`upload failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
       setUploading(false);
+      if (uploadAbortRef.current === abortController) uploadAbortRef.current = null;
       return;
     }
 
-    // The upload await above could have spanned a disconnect. Re-check
-    // connectivity before send() so we don't echo a bubble and clear the
-    // composer against a closed socket. `busy` is NOT re-checked: a send while
-    // busy is a deliberate steering message (see the guard above).
-    if (!connected) {
+    // The upload await may span project/session navigation or a reconnect. Do
+    // not look up the global socket late: retain the completed upload under the
+    // origin draft and require the user to send it from that chat.
+    if (
+      !originDraftKey ||
+      draftKeyRef.current !== originDraftKey ||
+      !isSocketContextCurrent(originSocket)
+    ) {
+      if (originDraftKey) {
+        composerAttachmentDrafts.set(originDraftKey, {
+          local: failedUploads,
+          uploaded: attachments,
+        });
+        if (draftKeyRef.current === originDraftKey) {
+          pendingFilesRef.current = failedUploads;
+          pendingUploadedFilesRef.current = attachments;
+          setPendingFiles(failedUploads);
+          setPendingUploadedFiles(attachments);
+        }
+      }
+      setUploading(false);
+      if (uploadAbortRef.current === abortController) uploadAbortRef.current = null;
+      return;
+    }
+
+    if (uploadFailures.length > 0) {
+      composerAttachmentDrafts.set(originDraftKey, {
+        local: failedUploads,
+        uploaded: attachments,
+      });
+      pendingFilesRef.current = failedUploads;
+      pendingUploadedFilesRef.current = attachments;
+      setPendingFiles(failedUploads);
+      setPendingUploadedFiles(attachments);
+      const details = uploadFailures
+        .map((failure) => `${failure.name}: ${failure.error}`)
+        .join("; ");
+      const incompleteRollback = uploadFailures.some((failure) => !failure.rollback_complete);
       addSystem(
-        "disconnected — message not sent. We'll reconnect automatically; try again in a moment.",
+        `Some files were not uploaded (${details}). ${Math.max(0, attachments.length - pendingUploadedFiles.length)} successful new file(s) remain attached; retry to upload only the failed files.${
+          incompleteRollback
+            ? " Cleanup of at least one failed copy could not be verified; contact support if an orphaned asset remains."
+            : ""
+        }`,
       );
       setUploading(false);
+      if (uploadAbortRef.current === abortController) uploadAbortRef.current = null;
       return;
     }
 
     const content =
       trimmed ||
-      (pendingFiles.length > 0 ? "Use the attached file(s)." : "Use the selected element.");
+      (attachments.length > 0 ? "Use the attached file(s)." : "Use the selected element.");
     const fileRefs = extractFileRefs(content, validFilePaths);
     // The `selected_element` block rides on the user_message. The shared
     // contract (C) puts it there; the orchestrator's ClientEvent type gains the
@@ -738,8 +941,13 @@ export default function ChatPanel() {
     // The finally guarantees `uploading` is reset even if send()/echo throws,
     // so a failed send can never wedge the composer disabled.
     try {
-      const ok = send(payload);
+      const ok = sendInSocketContext(originSocket, payload);
       if (!ok) {
+        composerAttachmentDrafts.set(originDraftKey, { local: [], uploaded: attachments });
+        pendingFilesRef.current = [];
+        pendingUploadedFilesRef.current = attachments;
+        setPendingFiles([]);
+        setPendingUploadedFiles(attachments);
         addSystem(
           "disconnected — message not sent. We'll reconnect automatically; try again in a moment.",
         );
@@ -753,27 +961,39 @@ export default function ChatPanel() {
       if (!busy) clearSubAgents();
       setBusy(true);
       setInput("");
+      composerAttachmentDrafts.delete(originDraftKey);
+      pendingFilesRef.current = [];
+      pendingUploadedFilesRef.current = [];
       setPendingFiles([]);
+      setPendingUploadedFiles([]);
       if (selectedElement) setPendingSelectedElement(null);
     } finally {
       setUploading(false);
+      if (uploadAbortRef.current === abortController) uploadAbortRef.current = null;
     }
   };
 
   const handleStop = () => {
     if (!busy) return;
-    // Second click once the escalation kicked in: give up waiting on the server
-    // and unwedge the UI locally so the kill switch never dead-ends (§C).
+    // A second click repeats the abort request but never invents a local idle
+    // state. The server's terminal complete/error event (or reconnect truth)
+    // is the only authority that may clear busy.
     if (forceStop) {
       if (stopTimerRef.current) {
         clearTimeout(stopTimerRef.current);
         stopTimerRef.current = null;
       }
-      send({ type: "abort" });
-      setBusy(false);
-      setStopping(false);
+      const ok = send({ type: "abort" });
+      if (!ok) {
+        setBusy(false);
+        setStopping(false);
+        setForceStop(false);
+        addSystem("Connection dropped while stopping. Reconnecting to confirm the run state.");
+        return;
+      }
+      setStopping(true);
       setForceStop(false);
-      addSystem("Stopped. The agent may still be finishing its current step.");
+      addSystem("Stop requested again. Waiting for the current step to terminate…");
       return;
     }
     setStopping(true);
@@ -816,17 +1036,33 @@ export default function ChatPanel() {
         );
         if (!duplicate) next.push(file);
       }
+      pendingFilesRef.current = next;
       return next;
     });
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   const removePendingFile = (index: number) => {
-    setPendingFiles((current) => current.filter((_, i) => i !== index));
+    setPendingFiles((current) => {
+      const next = current.filter((_, i) => i !== index);
+      pendingFilesRef.current = next;
+      return next;
+    });
+  };
+
+  const removePendingUploadedFile = (index: number) => {
+    setPendingUploadedFiles((current) => {
+      const next = current.filter((_, i) => i !== index);
+      pendingUploadedFilesRef.current = next;
+      return next;
+    });
   };
 
   return (
     <div className="pane">
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {agentStatus}
+      </div>
       <div className="pane-header">
         <span className="label-micro">Chat</span>
         <div className="actions">
@@ -843,7 +1079,15 @@ export default function ChatPanel() {
         </div>
       </div>
 
-      <div ref={scrollRef} className="chat-scroll" onScroll={onChatScroll}>
+      <div
+        ref={scrollRef}
+        className="chat-scroll"
+        onScroll={onChatScroll}
+        role="log"
+        aria-label="Conversation with Gate 15"
+        aria-live="off"
+        aria-busy={busy}
+      >
         {chat.length === 0 && (
           <div style={{ color: "var(--text-dim)", fontSize: 12 }}>
             <div style={{ fontStyle: "italic" }}>
@@ -858,7 +1102,7 @@ export default function ChatPanel() {
                 href="/docs"
                 target="_blank"
                 rel="noreferrer"
-                style={{ color: "var(--accent, #a78bfa)", textDecoration: "none" }}
+                style={{ color: "var(--accent-text)", textDecoration: "none" }}
               >
                 Read the docs
               </a>
@@ -1075,7 +1319,7 @@ export default function ChatPanel() {
               opacity: 0.7,
             }}
           >
-            ×
+            <CloseIcon />
           </button>
         </div>
       )}
@@ -1102,7 +1346,8 @@ export default function ChatPanel() {
         <div className="composer-field">
           {slashMatches.length > 0 && (
             <div
-              role="menu"
+              id="composer-slash-options"
+              role="listbox"
               aria-label="Slash commands"
               style={{
                 marginBottom: 6,
@@ -1116,8 +1361,10 @@ export default function ChatPanel() {
                 <button
                   key={c.name}
                   type="button"
-                  role="menuitem"
+                  id={`composer-slash-option-${i}`}
+                  role="option"
                   aria-selected={i === slashIndex}
+                  tabIndex={-1}
                   onClick={() => {
                     setInput(`/${c.name} `);
                   }}
@@ -1135,7 +1382,7 @@ export default function ChatPanel() {
                     cursor: "pointer",
                   }}
                 >
-                  <code style={{ color: "var(--accent, #a78bfa)" }}>/{c.name}</code>
+                  <code style={{ color: "var(--accent-text)" }}>/{c.name}</code>
                   <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{c.summary}</span>
                   <span style={{ fontSize: 10, color: "var(--text-dim)" }}>
                     {c.source === "project" ? "project" : "built-in"}
@@ -1146,7 +1393,8 @@ export default function ChatPanel() {
           )}
           {atMatches.length > 0 && (
             <div
-              role="menu"
+              id="composer-file-options"
+              role="listbox"
               aria-label="File references"
               style={{
                 marginBottom: 6,
@@ -1162,8 +1410,10 @@ export default function ChatPanel() {
                 <button
                   key={p}
                   type="button"
-                  role="menuitem"
+                  id={`composer-file-option-${i}`}
+                  role="option"
                   aria-selected={i === atIndex}
+                  tabIndex={-1}
                   onClick={() => applyAtPick(p)}
                   style={{
                     display: "flex",
@@ -1178,14 +1428,36 @@ export default function ChatPanel() {
                     cursor: "pointer",
                   }}
                 >
-                  <code style={{ color: "var(--accent, #a78bfa)", fontSize: 11 }}>@{p}</code>
+                  <code style={{ color: "var(--accent-text)", fontSize: 11 }}>@{p}</code>
                 </button>
               ))}
             </div>
           )}
           <div className="composer-input-wrap">
+          <label className="sr-only" htmlFor="gate15-message-composer">
+            Message Gate 15
+          </label>
           <textarea
+            id="gate15-message-composer"
             ref={textareaRef}
+            role="combobox"
+            aria-autocomplete="list"
+            aria-haspopup="listbox"
+            aria-expanded={slashMatches.length > 0 || atMatches.length > 0}
+            aria-controls={
+              atMatches.length > 0
+                ? "composer-file-options"
+                : slashMatches.length > 0
+                  ? "composer-slash-options"
+                  : undefined
+            }
+            aria-activedescendant={
+              atMatches.length > 0
+                ? `composer-file-option-${atIndex}`
+                : slashMatches.length > 0
+                  ? `composer-slash-option-${slashIndex}`
+                  : undefined
+            }
             value={input}
             onChange={(e) => {
               setInput(e.target.value);
@@ -1311,7 +1583,7 @@ export default function ChatPanel() {
                   title="Dismiss this suggestion"
                   aria-label="Dismiss this suggestion"
                 >
-                  ✕
+                  <CloseIcon />
                 </button>
               </span>
             </div>
@@ -1343,13 +1615,29 @@ export default function ChatPanel() {
                   title="Remove selected element"
                   aria-label="Remove selected element"
                 >
-                  ×
+                  <CloseIcon />
                 </button>
               </span>
             </div>
           )}
-          {pendingFiles.length > 0 && (
+          {(pendingFiles.length > 0 || pendingUploadedFiles.length > 0) && (
             <div className="composer-attachments">
+              {pendingUploadedFiles.map((file, index) => (
+                <span key={file.path} className="attachment-chip">
+                  <span className="attachment-name" title={file.path}>
+                    {file.name}
+                  </span>
+                  <span className="attachment-size">{formatFileSize(file.size)}</span>
+                  <button
+                    type="button"
+                    onClick={() => removePendingUploadedFile(index)}
+                    disabled={uploading}
+                    title={`Remove ${file.name}`}
+                  >
+                    x
+                  </button>
+                </span>
+              ))}
               {pendingFiles.map((file, index) => (
                 <span
                   key={`${file.name}-${file.size}-${file.lastModified}`}
@@ -1432,11 +1720,11 @@ export default function ChatPanel() {
                 disabled={stopping && !forceStop}
                 className="send-btn stop"
                 aria-label={
-                  forceStop ? "Force stop the agent" : stopping ? "Stopping" : "Stop the agent"
+                  forceStop ? "Repeat stop request" : stopping ? "Stopping" : "Stop the agent"
                 }
                 title={
                   forceStop
-                    ? "Force stop — the server is slow to respond; click to stop locally"
+                    ? "The server is slow to respond; click to repeat the stop request"
                     : stopping
                     ? "Stopping… (waiting for the agent to finish its current step)"
                     : "Stop the agent (cancels current turn)"
@@ -1452,7 +1740,10 @@ export default function ChatPanel() {
                 onClick={() => void handleSubmit()}
                 disabled={
                   uploading ||
-                  (!input.trim() && pendingFiles.length === 0 && !pendingSelectedElement) ||
+                  (!input.trim() &&
+                    pendingFiles.length === 0 &&
+                    pendingUploadedFiles.length === 0 &&
+                    !pendingSelectedElement) ||
                   !project ||
                   !connected
                 }
@@ -1507,11 +1798,13 @@ export default function ChatPanel() {
 }
 
 /** Per-message action callbacks, threaded from ChatPanel down to each row. */
+type UserChatItem = Extract<ChatItem, { kind: "user" }>;
+
 interface ChatHandlers {
   /** Load a previous user message back into the composer. */
-  onEdit: (text: string) => void;
+  onEdit: (item: UserChatItem | string) => void;
   /** Re-send a user message / regenerate a turn's answer. */
-  onResend: (text: string) => void;
+  onResend: (item: UserChatItem) => void;
   /** Retry the last run after a failure (C7). */
   onRetryRun: () => void;
   /** Whether send-style actions are currently possible (connected + idle). */
@@ -1655,9 +1948,7 @@ const Turn = memo(function Turn({
   const finalText = [...turn.body].reverse().find((i) => i.kind === "assistant_text") as
     | Extract<ChatItem, { kind: "assistant_text" }>
     | undefined;
-  const userContent = (
-    turn.head.find((i) => i.kind === "user") as Extract<ChatItem, { kind: "user" }> | undefined
-  )?.content;
+  const userItem = turn.head.find((i) => i.kind === "user") as UserChatItem | undefined;
 
   return (
     <>
@@ -1696,8 +1987,8 @@ const Turn = memo(function Turn({
           expanded={expanded}
           onToggle={onToggle}
           onRegenerate={
-            isLastTurn && userContent && handlers.canAct
-              ? () => handlers.onResend(userContent)
+            isLastTurn && userItem && handlers.canAct
+              ? () => handlers.onResend(userItem)
               : undefined
           }
         />
@@ -1902,7 +2193,7 @@ const ChatItemView = memo(function ChatItemView({
               className="msg-action-btn"
               title="Edit in the composer"
               aria-label="Edit this message"
-              onClick={() => handlers.onEdit(item.content)}
+              onClick={() => handlers.onEdit(item)}
             >
               Edit
             </button>
@@ -1912,7 +2203,7 @@ const ChatItemView = memo(function ChatItemView({
               title="Send this message again"
               aria-label="Resend this message"
               disabled={!handlers.canAct}
-              onClick={() => handlers.onResend(item.content)}
+              onClick={() => handlers.onResend(item)}
             >
               Resend
             </button>
@@ -2031,7 +2322,7 @@ function RoutingChip({ item }: { item: Extract<ChatItem, { kind: "routing" }> })
         display: "inline-flex",
         alignItems: "center",
         gap: 6,
-        fontSize: 11.5,
+        fontSize: 12,
         color: "var(--text-dim)",
         fontFamily: "var(--font-mono, ui-monospace, Menlo, Consolas, monospace)",
         padding: "1px 0 3px",
@@ -2039,7 +2330,6 @@ function RoutingChip({ item }: { item: Extract<ChatItem, { kind: "routing" }> })
       }}
       title={`Auto routed this turn to ${label}${item.tier ? ` (${item.tier} task)` : ""}`}
     >
-      <span aria-hidden style={{ color: "var(--accent-text)" }}>⚡</span>
       <span>
         Auto → <strong style={{ color: "var(--text-muted)", fontWeight: 600 }}>{label}</strong>
       </span>
@@ -2064,9 +2354,7 @@ function ErrorCard({
   return (
     <div className="error-card" role="alert">
       <div className="error-card-head">
-        <span className="error-card-icon" aria-hidden="true">
-          ⚠
-        </span>
+        <span className="error-card-icon" aria-hidden="true">!</span>
         <span className="error-card-title">{copy.title}</span>
       </div>
       <p className="error-card-plain">{copy.plain}</p>
@@ -2085,7 +2373,7 @@ function ErrorCard({
           disabled={!canAct}
           title={canAct ? "Run the last request again" : "Available once the agent is idle and connected"}
         >
-          ↻ Retry run
+          Retry run
         </button>
         <button
           type="button"
@@ -2183,6 +2471,7 @@ function UserQuestionCard({
                     type="text"
                     value={freeText}
                     onChange={(e) => setFreeText(e.target.value)}
+                    aria-label="Answer Gate 15"
                     placeholder={
                       item.options && item.options.length > 0
                         ? "Or type your own answer…"
@@ -2410,7 +2699,7 @@ function CompleteRow({
             aria-label="Regenerate this response"
             style={{ flex: "0 0 auto" }}
           >
-            ↻ Regenerate
+            Regenerate
           </button>
         )}
       </div>
@@ -2919,4 +3208,3 @@ function ToolShot({ projectId, path }: { projectId: string; path: string }) {
     </a>
   );
 }
-

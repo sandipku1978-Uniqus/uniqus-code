@@ -43,6 +43,7 @@ export const SUPABASE_API_BASE = "https://api.supabase.com/v1";
 
 /** Refresh the access token when it's within this many ms of expiry. */
 const REFRESH_SKEW_MS = 60_000;
+const refreshInFlight = new Map<string, Promise<string | null>>();
 
 interface StatePayload {
   state: string;
@@ -316,6 +317,24 @@ export async function getSupabaseAccessToken(userId: string | null): Promise<str
   if (!tokens) return null;
   if (tokens.expires_at - Date.now() > REFRESH_SKEW_MS) return tokens.access_token;
 
+  const existing = refreshInFlight.get(userId);
+  if (existing) return existing;
+  const pending = refreshSupabaseAccessToken(userId);
+  refreshInFlight.set(userId, pending);
+  try {
+    return await pending;
+  } finally {
+    if (refreshInFlight.get(userId) === pending) refreshInFlight.delete(userId);
+  }
+}
+
+async function refreshSupabaseAccessToken(userId: string): Promise<string | null> {
+  // Re-read after entering the single-flight: an earlier caller/process may
+  // already have replaced this rotated credential pair.
+  const tokens = await getSupabaseTokens(userId);
+  if (!tokens) return null;
+  if (tokens.expires_at - Date.now() > REFRESH_SKEW_MS) return tokens.access_token;
+
   let tok: TokenResponse;
   try {
     tok = await postToken({ grant_type: "refresh_token", refresh_token: tokens.refresh_token });
@@ -325,14 +344,21 @@ export async function getSupabaseAccessToken(userId: string | null): Promise<str
   }
   if (!tok.access_token || !tok.refresh_token) {
     console.error("supabase token refresh failed:", tok.error ?? tok.error_description ?? "no_token");
+    const winner = await getSupabaseTokens(userId);
+    if (winner && winner.generation !== tokens.generation) return winner.access_token;
     return null;
   }
-  await updateSupabaseTokens(userId, {
+  const won = await updateSupabaseTokens(userId, {
     access_token: tok.access_token,
     refresh_token: tok.refresh_token,
     expires_in: Number(tok.expires_in) || 3600,
-  });
-  return tok.access_token;
+  }, tokens.generation);
+  if (won) return tok.access_token;
+
+  // Another orchestrator instance refreshed the same row first. Never
+  // overwrite it with this stale response; return the winner's token instead.
+  const winner = await getSupabaseTokens(userId);
+  return winner?.access_token ?? null;
 }
 
 /**

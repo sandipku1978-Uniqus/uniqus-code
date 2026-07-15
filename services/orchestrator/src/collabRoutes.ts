@@ -10,6 +10,18 @@ import { orgMonthToDateSpendUsd, startOfMonthIso } from "./db/usage.js";
 import type { FlowStep, OrgUsageSummary } from "@gate15/api-types";
 
 const MAX_ORG_NAME = 60;
+const MAX_EMAIL = 320;
+const MAX_COMMENT_BODY = 20_000;
+const MAX_COMMENT_TARGET = 2_000;
+const MAX_TASK_TITLE = 200;
+const MAX_TASK_PROMPT = 100_000;
+const MAX_TASK_BRANCH = 255;
+const MAX_TASK_ACCEPTANCE = 20_000;
+const MAX_FLOW_NAME = 120;
+const MAX_FLOW_DESCRIPTION = 2_000;
+const MAX_FLOW_START_PATH = 2_000;
+const MAX_FLOW_STEPS = 100;
+const MAX_FLOW_STEPS_JSON = 100_000;
 
 /**
  * Collaboration, org/RBAC, comments, and durable-task routes (P3.1/P3.2/P3.4/
@@ -27,6 +39,9 @@ export interface CollabDeps {
   json: (res: ServerResponse, status: number, body: unknown) => void;
   readJsonBody: <T>(req: IncomingMessage) => Promise<T>;
   onProjectAuthorizationChanged?: (projectId: string, userId: string) => void | Promise<void>;
+  /** Explicitly false when this instance cannot drain newly queued tasks. */
+  taskWorkerEnabled?: boolean;
+  onTaskCanceled?: (taskId: string) => void | Promise<void>;
 }
 
 interface SessionUser {
@@ -86,6 +101,9 @@ export async function handleCollabRoute(
       }
       const email = (body.email ?? "").trim();
       if (!email) return (json(res, 400, { error: "email is required" }), true);
+      if (email.length > MAX_EMAIL) {
+        return (json(res, 400, { error: `email must be ${MAX_EMAIL} chars or fewer` }), true);
+      }
       const r = await members.addProjectMemberByEmail(projectId, email, role);
       if (!r.ok) {
         return (
@@ -113,6 +131,18 @@ export async function handleCollabRoute(
       if (!roleAtLeast(callerRole, role)) {
         return (json(res, 403, { error: `cannot grant a role higher than your own (${callerRole})` }), true);
       }
+      const targetRole = await members.getDirectProjectMemberRole(projectId, targetUserId);
+      if (!targetRole) return (json(res, 404, { error: "project member not found" }), true);
+      if (targetRole === "owner" && callerRole !== "owner") {
+        return (json(res, 403, { error: "only an owner can change an owner's role" }), true);
+      }
+      if (
+        targetRole === "owner" &&
+        role !== "owner" &&
+        (await members.countDirectProjectOwners(projectId)) <= 1
+      ) {
+        return (json(res, 409, { error: "cannot demote the project's last owner" }), true);
+      }
       await members.setProjectMemberRole(projectId, targetUserId, role);
       await notifyProjectAuthorizationChanged(projectId, targetUserId);
       void audit({ project_id: projectId, user_id: user.id, kind: "role_change", target: targetUserId, metadata: { role } });
@@ -120,7 +150,16 @@ export async function handleCollabRoute(
       return true;
     }
     if (method === "DELETE" && targetUserId) {
-      if (!(await requireProjectRole(projectId, "admin"))) return true;
+      const callerRole = await requireProjectRole(projectId, "admin");
+      if (!callerRole) return true;
+      const targetRole = await members.getDirectProjectMemberRole(projectId, targetUserId);
+      if (!targetRole) return (json(res, 404, { error: "project member not found" }), true);
+      if (targetRole === "owner" && callerRole !== "owner") {
+        return (json(res, 403, { error: "only an owner can remove an owner" }), true);
+      }
+      if (targetRole === "owner" && (await members.countDirectProjectOwners(projectId)) <= 1) {
+        return (json(res, 409, { error: "cannot remove the project's last owner" }), true);
+      }
       await members.removeProjectMember(projectId, targetUserId);
       await notifyProjectAuthorizationChanged(projectId, targetUserId);
       void audit({ project_id: projectId, user_id: user.id, kind: "member_remove", target: targetUserId, metadata: null });
@@ -146,6 +185,12 @@ export async function handleCollabRoute(
       const targetKind = kinds.includes(body.target_kind ?? "") ? (body.target_kind as never) : "general";
       const text = (body.body ?? "").trim();
       if (!text) return (json(res, 400, { error: "body is required" }), true);
+      if (text.length > MAX_COMMENT_BODY) {
+        return (json(res, 400, { error: `body must be ${MAX_COMMENT_BODY} chars or fewer` }), true);
+      }
+      if (typeof body.target_ref === "string" && body.target_ref.length > MAX_COMMENT_TARGET) {
+        return (json(res, 400, { error: `target_ref must be ${MAX_COMMENT_TARGET} chars or fewer` }), true);
+      }
       const comment = await comments.createComment({
         projectId,
         userId: user.id,
@@ -172,15 +217,44 @@ export async function handleCollabRoute(
     const taskId = tm[2];
     if (method === "GET" && !taskId) {
       if (!(await requireProjectRole(projectId, "viewer"))) return true;
-      json(res, 200, { tasks: await tasks.listAgentTasks(projectId) });
+      json(res, 200, {
+        tasks: await tasks.listAgentTasks(projectId),
+        task_worker_enabled: deps.taskWorkerEnabled !== false,
+      });
       return true;
     }
     if (method === "POST" && !taskId) {
       if (!(await requireProjectRole(projectId, "editor"))) return true;
+      if (deps.taskWorkerEnabled === false) {
+        return (
+          json(res, 503, {
+            error: "agent tasks are unavailable until the task worker is enabled",
+          }),
+          true
+        );
+      }
       const body = await readJsonBody<{ title?: string; prompt?: string; branch?: string; acceptance_criteria?: string }>(req);
       const title = (body.title ?? "").trim();
       const prompt = (body.prompt ?? "").trim();
       if (!title || !prompt) return (json(res, 400, { error: "title and prompt are required" }), true);
+      if (title.length > MAX_TASK_TITLE) {
+        return (json(res, 400, { error: `title must be ${MAX_TASK_TITLE} chars or fewer` }), true);
+      }
+      if (prompt.length > MAX_TASK_PROMPT) {
+        return (json(res, 400, { error: `prompt must be ${MAX_TASK_PROMPT} chars or fewer` }), true);
+      }
+      if (typeof body.branch === "string" && body.branch.length > MAX_TASK_BRANCH) {
+        return (json(res, 400, { error: `branch must be ${MAX_TASK_BRANCH} chars or fewer` }), true);
+      }
+      if (
+        typeof body.acceptance_criteria === "string" &&
+        body.acceptance_criteria.length > MAX_TASK_ACCEPTANCE
+      ) {
+        return (
+          json(res, 400, { error: `acceptance_criteria must be ${MAX_TASK_ACCEPTANCE} chars or fewer` }),
+          true
+        );
+      }
       const task = await tasks.createAgentTask({
         projectId,
         createdBy: user.id,
@@ -203,7 +277,11 @@ export async function handleCollabRoute(
         if (!task || task.project_id !== projectId) {
           return (json(res, 404, { error: "task not found" }), true);
         }
-        await tasks.updateAgentTask(taskId, { status: "canceled" });
+        const canceled = await tasks.cancelAgentTask(taskId, projectId);
+        if (!canceled) {
+          return (json(res, 409, { error: "task has already finished" }), true);
+        }
+        await deps.onTaskCanceled?.(taskId);
         return (json(res, 200, { ok: true }), true);
       }
       return (json(res, 400, { error: "only status:canceled is accepted here" }), true);
@@ -233,8 +311,25 @@ export async function handleCollabRoute(
       }>(req);
       const name = (body.name ?? "").trim();
       if (!name) return (json(res, 400, { error: "name is required" }), true);
+      if (name.length > MAX_FLOW_NAME) {
+        return (json(res, 400, { error: `name must be ${MAX_FLOW_NAME} chars or fewer` }), true);
+      }
       if (!Array.isArray(body.steps) || body.steps.length === 0) {
         return (json(res, 400, { error: "steps must be a non-empty array" }), true);
+      }
+      if (body.steps.length > MAX_FLOW_STEPS || JSON.stringify(body.steps).length > MAX_FLOW_STEPS_JSON) {
+        return (
+          json(res, 400, {
+            error: `steps must contain at most ${MAX_FLOW_STEPS} entries and ${MAX_FLOW_STEPS_JSON} serialized chars`,
+          }),
+          true
+        );
+      }
+      if (typeof body.description === "string" && body.description.length > MAX_FLOW_DESCRIPTION) {
+        return (json(res, 400, { error: `description must be ${MAX_FLOW_DESCRIPTION} chars or fewer` }), true);
+      }
+      if (typeof body.start_path === "string" && body.start_path.length > MAX_FLOW_START_PATH) {
+        return (json(res, 400, { error: `start_path must be ${MAX_FLOW_START_PATH} chars or fewer` }), true);
       }
       const flow = await flows.upsertFlow({
         projectId,
@@ -389,7 +484,12 @@ export async function handleCollabRoute(
       if (!roleAtLeast(callerRole, role)) {
         return (json(res, 403, { error: `cannot grant a role higher than your own (${callerRole})` }), true);
       }
-      const r = await members.addOrgMemberByEmail(orgId, (body.email ?? "").trim(), role);
+      const email = (body.email ?? "").trim();
+      if (!email) return (json(res, 400, { error: "email is required" }), true);
+      if (email.length > MAX_EMAIL) {
+        return (json(res, 400, { error: `email must be ${MAX_EMAIL} chars or fewer` }), true);
+      }
+      const r = await members.addOrgMemberByEmail(orgId, email, role);
       if (!r.ok) {
         return (
           json(res, r.reason === "no_user" ? 404 : r.reason === "exists" ? 409 : 500, {

@@ -43,38 +43,54 @@ export default function DeployButton({
   // is discoverable BEFORE the modal opens — the user shouldn't have to open
   // the dialog and click "Deploy" only to be told "Connect Vercel first".
   const [vercel, setVercel] = useState<VercelStatus | null>(null);
+  const [vercelError, setVercelError] = useState<string | null>(null);
 
-  useEffect(() => {
+  function loadVercelStatus(): () => void {
     let cancel = false;
+    setVercel(null);
+    setVercelError(null);
     fetchVercelStatus()
       .then((s) => {
         if (!cancel) setVercel(s);
       })
-      .catch(() => {
-        if (!cancel)
-          setVercel({ connected: false, user_login: null, team_id: null, connected_at: null });
+      .catch((statusError) => {
+        if (!cancel) {
+          setVercelError(
+            statusError instanceof Error ? statusError.message : "Couldn't check Vercel",
+          );
+        }
       });
     return () => {
       cancel = true;
     };
+  }
+
+  useEffect(() => {
+    const cancel = loadVercelStatus();
+    return cancel;
   }, []);
 
   const needsVercel = vercel !== null && !vercel.connected;
 
   const label = useMemo(() => {
+    if (vercelError) return "Retry Vercel status";
     if (needsVercel) return "Connect Vercel";
     if (!live) return restingLabel;
     if (live.state === "READY") return "Redeploy";
     if (live.state === "ERROR") return "Failed";
     if (live.state === "CANCELED") return "Canceled";
     return "Deploying…";
-  }, [needsVercel, live, restingLabel]);
+  }, [vercelError, needsVercel, live, restingLabel]);
 
   return (
     <>
       <button
         type="button"
         onClick={() => {
+          if (vercelError) {
+            loadVercelStatus();
+            return;
+          }
           setRedeploySuggested(false);
           setOpen(true);
         }}
@@ -82,6 +98,8 @@ export default function DeployButton({
         title={
           needsVercel
             ? "Connect Vercel to deploy this project"
+            : vercelError
+              ? "Connection status unavailable. Your Vercel connection may still be active."
             : "Deploy this project to Vercel"
         }
         data-on={live?.state === "READY"}
@@ -103,6 +121,7 @@ export default function DeployButton({
         <DeployModal
           projectId={projectId}
           initialVercel={vercel}
+          initialVercelError={vercelError}
           onVercelChange={setVercel}
           onClose={() => setOpen(false)}
         />
@@ -114,11 +133,13 @@ export default function DeployButton({
 function DeployModal({
   projectId,
   initialVercel,
+  initialVercelError,
   onVercelChange,
   onClose,
 }: {
   projectId: string;
   initialVercel: VercelStatus | null;
+  initialVercelError: string | null;
   onVercelChange: (status: VercelStatus) => void;
   onClose: () => void;
 }) {
@@ -131,6 +152,7 @@ function DeployModal({
   // Seed from the status the button already fetched so the modal opens without
   // a "checking…" flash; still re-fetch on the post-OAuth flag below.
   const [vercel, setVercelState] = useState<VercelStatus | null>(initialVercel);
+  const [vercelError, setVercelError] = useState<string | null>(initialVercelError);
   const [history, setHistory] = useState<DeploymentSummary[] | null>(null);
   const [envRows, setEnvRows] = useState<EnvRow[]>([
     { id: envIdSeq++, key: "", value: "" },
@@ -185,10 +207,13 @@ function DeployModal({
   const vercelFlag = searchParams?.get("vercel") ?? null;
 
   useEffect(() => {
+    setVercelError(null);
     fetchVercelStatus()
       .then(setVercel)
-      .catch(() =>
-        setVercel({ connected: false, user_login: null, team_id: null, connected_at: null }),
+      .catch((statusError) =>
+        setVercelError(
+          statusError instanceof Error ? statusError.message : "Couldn't check Vercel",
+        ),
       );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vercelFlag]);
@@ -324,7 +349,30 @@ function DeployModal({
       }
     >
       {/* Vercel connection */}
-      {vercel === null ? (
+      {vercelError ? (
+        <div className="async-error" role="alert" style={{ marginBottom: 12 }}>
+          <p>
+            Vercel connection status is unavailable. An existing connection may
+            still be active, so deploy and disconnect actions are paused.
+          </p>
+          <code>{vercelError}</code>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => {
+              setVercelState(null);
+              setVercelError(null);
+              fetchVercelStatus().then(setVercel).catch((statusError) =>
+                setVercelError(
+                  statusError instanceof Error ? statusError.message : "Couldn't check Vercel",
+                ),
+              );
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      ) : vercel === null ? (
         <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
           checking Vercel connection…
         </div>
@@ -769,6 +817,8 @@ function DeployModal({
 
 function stateLabel(state: DeploymentState): string {
   switch (state) {
+    case "CREATING":
+      return "Starting";
     case "READY":
       return "Live";
     case "ERROR":
