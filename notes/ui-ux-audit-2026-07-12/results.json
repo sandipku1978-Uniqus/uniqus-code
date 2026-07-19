@@ -1,0 +1,2379 @@
+{
+  "home": {
+    "url": "https://app.uniqus-code.com/",
+    "probe": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "innerWidth": 1440,
+      "horizontalOverflow": 0,
+      "overflowers": [],
+      "imgsNoAlt": [],
+      "imgCount": 2,
+      "controlsNoAccessibleName": [],
+      "headings": [
+        {
+          "level": 1,
+          "text": "Build with the AI you trust."
+        },
+        {
+          "level": 2,
+          "text": "Pick the right AI for the job, step by step."
+        },
+        {
+          "level": 2,
+          "text": "Real machines for real builds."
+        },
+        {
+          "level": 2,
+          "text": "Everything you need in one workspace."
+        },
+        {
+          "level": 3,
+          "text": "It plans before it changes anything"
+        },
+        {
+          "level": 3,
+          "text": "Chat, files, and an editor in one place"
+        },
+        {
+          "level": 3,
+          "text": "See your app come to life"
+        },
+        {
+          "level": 3,
+          "text": "Built-in web search"
+        },
+        {
+          "level": 3,
+          "text": "Skills and design packs"
+        },
+        {
+          "level": 3,
+          "text": "Publish, save, and rewind"
+        },
+        {
+          "level": 2,
+          "text": "From idea to a live app without ever leaving the page."
+        },
+        {
+          "level": 3,
+          "text": "Describe what you want"
+        },
+        {
+          "level": 3,
+          "text": "Choose your AI"
+        },
+        {
+          "level": 3,
+          "text": "Run it in a private workspace"
+        },
+        {
+          "level": 3,
+          "text": "Review and go live"
+        },
+        {
+          "level": 2,
+          "text": "Fast does not have to mean reckless."
+        },
+        {
+          "level": 2,
+          "text": "Ready to build?"
+        },
+        {
+          "level": 3,
+          "text": "Product"
+        },
+        {
+          "level": 3,
+          "text": "Company"
+        },
+        {
+          "level": 3,
+          "text": "Resources"
+        },
+        {
+          "level": 3,
+          "text": "Legal"
+        }
+      ],
+      "h1Count": 1,
+      "unlabeledFields": [
+        {
+          "type": "file",
+          "placeholder": null,
+          "name": null
+        },
+        {
+          "type": "file",
+          "placeholder": null,
+          "name": null
+        }
+      ],
+      "htmlLang": "en",
+      "title": "Uniqus Code — Build real apps with AI."
+    },
+    "focus": {
+      "total": 24,
+      "noVisibleFocus": 4,
+      "samples": [
+        {
+          "tag": "textarea",
+          "label": "Ask Uniqus to build an internal tool tha",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "button",
+          "label": "Attach files",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "textarea",
+          "label": "Ask Uniqus to create a production-ready ",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "button",
+          "label": "Attach files",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        }
+      ]
+    },
+    "axe": [
+      {
+        "id": "color-contrast",
+        "impact": "serious",
+        "help": "Elements must meet minimum color contrast ratio thresholds",
+        "helpUrl": "https://dequeuniversity.com/rules/axe/4.10/color-contrast?application=axeAPI",
+        "count": 2,
+        "samples": [
+          {
+            "target": [
+              ".console-head > strong"
+            ],
+            "html": "<strong>thinking: high</strong>",
+            "failureSummary": "Fix any of the following:\n  Element has insufficient color contrast of 3.21 (foreground color: #b21e7d, background color: #07080d, font size: 8.3pt (11px), font weight: normal). Expected contrast ratio of 4.5:1"
+          },
+          {
+            "target": [
+              "#trust > .section-head > .label-eyebrow"
+            ],
+            "html": "<span class=\"label-eyebrow\">Trust and control</span>",
+            "failureSummary": "Fix any of the following:\n  Element has insufficient color contrast of 3.88 (foreground color: #716d66, background color: #07080d, font size: 8.3pt (11px), font weight: normal). Expected contrast ratio of 4.5:1"
+          }
+        ]
+      }
+    ],
+    "mobileProbe": {
+      "horizontalOverflow": 0,
+      "overflowers": []
+    }
+  },
+  "pricing": {
+    "url": "https://app.uniqus-code.com/pricing",
+    "probe": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "innerWidth": 1440,
+      "horizontalOverflow": 0,
+      "overflowers": [],
+      "imgsNoAlt": [],
+      "imgCount": 2,
+      "controlsNoAccessibleName": [],
+      "headings": [
+        {
+          "level": 1,
+          "text": "Pricing that scales with your ideas."
+        },
+        {
+          "level": 2,
+          "text": "Every detail, side by side."
+        },
+        {
+          "level": 2,
+          "text": "Questions, answered."
+        },
+        {
+          "level": 2,
+          "text": "Ready to build?"
+        },
+        {
+          "level": 3,
+          "text": "Product"
+        },
+        {
+          "level": 3,
+          "text": "Company"
+        },
+        {
+          "level": 3,
+          "text": "Resources"
+        },
+        {
+          "level": 3,
+          "text": "Legal"
+        }
+      ],
+      "h1Count": 1,
+      "unlabeledFields": [
+        {
+          "type": "file",
+          "placeholder": null,
+          "name": null
+        }
+      ],
+      "htmlLang": "en",
+      "title": "Pricing — Uniqus Code"
+    },
+    "focus": {
+      "total": 24,
+      "noVisibleFocus": 2,
+      "samples": [
+        {
+          "tag": "textarea",
+          "label": "Ask Uniqus to build an app for…",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "button",
+          "label": "Attach files",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        }
+      ]
+    },
+    "axe": [
+      {
+        "id": "color-contrast",
+        "impact": "serious",
+        "help": "Elements must meet minimum color contrast ratio thresholds",
+        "helpUrl": "https://dequeuniversity.com/rules/axe/4.10/color-contrast?application=axeAPI",
+        "count": 2,
+        "samples": [
+          {
+            "target": [
+              ".price-card:nth-child(1) > .price-amount > .per"
+            ],
+            "html": "<span class=\"per\">forever</span>",
+            "failureSummary": "Fix any of the following:\n  Element has insufficient color contrast of 3.88 (foreground color: #716d66, background color: #07080d, font size: 9.8pt (13px), font weight: normal). Expected contrast ratio of 4.5:1"
+          },
+          {
+            "target": [
+              ".price-card:nth-child(3) > .price-amount > .per"
+            ],
+            "html": "<span class=\"per\">talk to us</span>",
+            "failureSummary": "Fix any of the following:\n  Element has insufficient color contrast of 3.88 (foreground color: #716d66, background color: #07080d, font size: 9.8pt (13px), font weight: normal). Expected contrast ratio of 4.5:1"
+          }
+        ]
+      }
+    ],
+    "mobileProbe": {
+      "horizontalOverflow": 0,
+      "overflowers": [
+        {
+          "tag": "table",
+          "cls": "compare-table",
+          "right": 431
+        },
+        {
+          "tag": "thead",
+          "cls": "",
+          "right": 431
+        },
+        {
+          "tag": "tr",
+          "cls": "",
+          "right": 431
+        },
+        {
+          "tag": "th",
+          "cls": "",
+          "right": 431
+        },
+        {
+          "tag": "tbody",
+          "cls": "",
+          "right": 431
+        },
+        {
+          "tag": "tr",
+          "cls": "",
+          "right": 431
+        }
+      ]
+    }
+  },
+  "models": {
+    "url": "https://app.uniqus-code.com/models",
+    "probe": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "innerWidth": 1440,
+      "horizontalOverflow": 0,
+      "overflowers": [],
+      "imgsNoAlt": [],
+      "imgCount": 2,
+      "controlsNoAccessibleName": [],
+      "headings": [
+        {
+          "level": 1,
+          "text": "Pick the AI you trust for each step."
+        },
+        {
+          "level": 3,
+          "text": "Auto mode picks the right AI for you"
+        },
+        {
+          "level": 2,
+          "text": "Four strong models, each great at something."
+        },
+        {
+          "level": 3,
+          "text": "Claude (Opus / Sonnet)"
+        },
+        {
+          "level": 3,
+          "text": "GLM-5.2"
+        },
+        {
+          "level": 3,
+          "text": "GPT-5.5 / GPT-5.3 Codex"
+        },
+        {
+          "level": 3,
+          "text": "Gemini"
+        },
+        {
+          "level": 3,
+          "text": "Dial in how hard it thinks"
+        },
+        {
+          "level": 3,
+          "text": "Built-in web search, on every provider"
+        },
+        {
+          "level": 2,
+          "text": "How the providers compare."
+        },
+        {
+          "level": 2,
+          "text": "A curated list, not a menu of trade-offs"
+        },
+        {
+          "level": 2,
+          "text": "Ready to build?"
+        },
+        {
+          "level": 3,
+          "text": "Product"
+        },
+        {
+          "level": 3,
+          "text": "Company"
+        },
+        {
+          "level": 3,
+          "text": "Resources"
+        },
+        {
+          "level": 3,
+          "text": "Legal"
+        }
+      ],
+      "h1Count": 1,
+      "unlabeledFields": [
+        {
+          "type": "file",
+          "placeholder": null,
+          "name": null
+        }
+      ],
+      "htmlLang": "en",
+      "title": "AI models — Uniqus Code"
+    },
+    "focus": {
+      "total": 24,
+      "noVisibleFocus": 2,
+      "samples": [
+        {
+          "tag": "textarea",
+          "label": "Ask Uniqus to build an app for…",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "button",
+          "label": "Attach files",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        }
+      ]
+    },
+    "axe": [
+      {
+        "id": "heading-order",
+        "impact": "moderate",
+        "help": "Heading levels should only increase by one",
+        "helpUrl": "https://dequeuniversity.com/rules/axe/4.10/heading-order?application=axeAPI",
+        "count": 1,
+        "samples": [
+          {
+            "target": [
+              ".narrow.mk-page:nth-child(2) > article > h3"
+            ],
+            "html": "<h3 style=\"font-size:22px\">Auto mode picks the right AI for you</h3>",
+            "failureSummary": "Fix any of the following:\n  Heading order invalid"
+          }
+        ]
+      }
+    ],
+    "mobileProbe": {
+      "horizontalOverflow": 0,
+      "overflowers": [
+        {
+          "tag": "table",
+          "cls": "compare-table",
+          "right": 482
+        },
+        {
+          "tag": "thead",
+          "cls": "",
+          "right": 482
+        },
+        {
+          "tag": "tr",
+          "cls": "",
+          "right": 482
+        },
+        {
+          "tag": "th",
+          "cls": "",
+          "right": 482
+        },
+        {
+          "tag": "tbody",
+          "cls": "",
+          "right": 482
+        },
+        {
+          "tag": "tr",
+          "cls": "",
+          "right": 482
+        }
+      ]
+    }
+  },
+  "workspaces": {
+    "url": "https://app.uniqus-code.com/workspaces",
+    "probe": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "innerWidth": 1440,
+      "horizontalOverflow": 0,
+      "overflowers": [],
+      "imgsNoAlt": [],
+      "imgCount": 2,
+      "controlsNoAccessibleName": [],
+      "headings": [
+        {
+          "level": 1,
+          "text": "Real machines for real builds."
+        },
+        {
+          "level": 2,
+          "text": "A computer per project, ready when you are."
+        },
+        {
+          "level": 3,
+          "text": "Your project, walled off from everything else."
+        },
+        {
+          "level": 3,
+          "text": "Install software. Run a database. Start your app."
+        },
+        {
+          "level": 3,
+          "text": "Your app, running, right next to the code."
+        },
+        {
+          "level": 3,
+          "text": "Close the tab. Come back. Nothing’s gone."
+        },
+        {
+          "level": 3,
+          "text": "Try the bold idea. Rewind if it doesn’t land."
+        },
+        {
+          "level": 2,
+          "text": "Everything the build needs, in one place."
+        },
+        {
+          "level": 3,
+          "text": "Files & editor"
+        },
+        {
+          "level": 3,
+          "text": "Chat + plan mode"
+        },
+        {
+          "level": 3,
+          "text": "Logs & terminal output"
+        },
+        {
+          "level": 3,
+          "text": "Secrets (encrypted)"
+        },
+        {
+          "level": 3,
+          "text": "Skills & design packs"
+        },
+        {
+          "level": 3,
+          "text": "Deploy & GitHub"
+        },
+        {
+          "level": 2,
+          "text": "Why a whole machine?"
+        },
+        {
+          "level": 2,
+          "text": "Ready to build?"
+        },
+        {
+          "level": 3,
+          "text": "Product"
+        },
+        {
+          "level": 3,
+          "text": "Company"
+        },
+        {
+          "level": 3,
+          "text": "Resources"
+        },
+        {
+          "level": 3,
+          "text": "Legal"
+        }
+      ],
+      "h1Count": 1,
+      "unlabeledFields": [
+        {
+          "type": "file",
+          "placeholder": null,
+          "name": null
+        }
+      ],
+      "htmlLang": "en",
+      "title": "Workspaces — Uniqus Code"
+    },
+    "focus": {
+      "total": 24,
+      "noVisibleFocus": 2,
+      "samples": [
+        {
+          "tag": "textarea",
+          "label": "Ask Uniqus to build an app for…",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "button",
+          "label": "Attach files",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        }
+      ]
+    },
+    "axe": [],
+    "mobileProbe": {
+      "horizontalOverflow": 0,
+      "overflowers": []
+    }
+  },
+  "templates": {
+    "url": "https://app.uniqus-code.com/templates",
+    "probe": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "innerWidth": 1440,
+      "horizontalOverflow": 0,
+      "overflowers": [],
+      "imgsNoAlt": [],
+      "imgCount": 2,
+      "controlsNoAccessibleName": [],
+      "headings": [
+        {
+          "level": 1,
+          "text": "Start from a governed template."
+        },
+        {
+          "level": 2,
+          "text": "Governed tools finance & risk teams actually run on."
+        },
+        {
+          "level": 3,
+          "text": "SOX control register"
+        },
+        {
+          "level": 3,
+          "text": "Expense approval workflow"
+        },
+        {
+          "level": 3,
+          "text": "Audit evidence log"
+        },
+        {
+          "level": 3,
+          "text": "Budget vs. actuals dashboard"
+        },
+        {
+          "level": 2,
+          "text": "Tools your team actually uses."
+        },
+        {
+          "level": 3,
+          "text": "Internal admin tool"
+        },
+        {
+          "level": 3,
+          "text": "Customer CRM"
+        },
+        {
+          "level": 3,
+          "text": "Analytics dashboard"
+        },
+        {
+          "level": 3,
+          "text": "Team wiki"
+        },
+        {
+          "level": 2,
+          "text": "Pages that turn visitors into users."
+        },
+        {
+          "level": 3,
+          "text": "Landing page"
+        },
+        {
+          "level": 3,
+          "text": "Waitlist + email capture"
+        },
+        {
+          "level": 3,
+          "text": "Blog / changelog"
+        },
+        {
+          "level": 3,
+          "text": "Pricing page"
+        },
+        {
+          "level": 2,
+          "text": "Take payments without the plumbing."
+        },
+        {
+          "level": 3,
+          "text": "Stripe billing flow"
+        },
+        {
+          "level": 3,
+          "text": "E-commerce storefront"
+        },
+        {
+          "level": 3,
+          "text": "Subscription dashboard"
+        },
+        {
+          "level": 3,
+          "text": "Booking / scheduling"
+        },
+        {
+          "level": 2,
+          "text": "Templates are a head start, not a cage"
+        },
+        {
+          "level": 2,
+          "text": "Ready to build?"
+        },
+        {
+          "level": 3,
+          "text": "Product"
+        },
+        {
+          "level": 3,
+          "text": "Company"
+        },
+        {
+          "level": 3,
+          "text": "Resources"
+        },
+        {
+          "level": 3,
+          "text": "Legal"
+        }
+      ],
+      "h1Count": 1,
+      "unlabeledFields": [
+        {
+          "type": "file",
+          "placeholder": null,
+          "name": null
+        }
+      ],
+      "htmlLang": "en",
+      "title": "Templates — Uniqus Code"
+    },
+    "focus": {
+      "total": 24,
+      "noVisibleFocus": 0,
+      "samples": []
+    },
+    "axe": [],
+    "mobileProbe": {
+      "horizontalOverflow": 0,
+      "overflowers": []
+    }
+  },
+  "changelog": {
+    "url": "https://app.uniqus-code.com/changelog",
+    "probe": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "innerWidth": 1440,
+      "horizontalOverflow": 0,
+      "overflowers": [],
+      "imgsNoAlt": [],
+      "imgCount": 2,
+      "controlsNoAccessibleName": [],
+      "headings": [
+        {
+          "level": 1,
+          "text": "What’s new."
+        },
+        {
+          "level": 3,
+          "text": "A more consistent finish"
+        },
+        {
+          "level": 3,
+          "text": "Cleaner workspaces, more reliable previews"
+        },
+        {
+          "level": 3,
+          "text": "A faster, steadier agent"
+        },
+        {
+          "level": 3,
+          "text": "Sources you can follow"
+        },
+        {
+          "level": 3,
+          "text": "The numbers add up"
+        },
+        {
+          "level": 3,
+          "text": "Numbers that move in real time"
+        },
+        {
+          "level": 3,
+          "text": "Plans, changes, and costs you can read"
+        },
+        {
+          "level": 3,
+          "text": "Watch the agent work"
+        },
+        {
+          "level": 3,
+          "text": "Guardrails you control"
+        },
+        {
+          "level": 3,
+          "text": "GLM joins the lineup"
+        },
+        {
+          "level": 3,
+          "text": "Generate images, watch the agent drive the preview"
+        },
+        {
+          "level": 3,
+          "text": "Built for teams"
+        },
+        {
+          "level": 3,
+          "text": "Bring your keys, take your code"
+        },
+        {
+          "level": 3,
+          "text": "Bring your own data, bring your own design"
+        },
+        {
+          "level": 3,
+          "text": "A hardening pass"
+        },
+        {
+          "level": 3,
+          "text": "A workspace that holds up"
+        },
+        {
+          "level": 3,
+          "text": "The agent can read the live web"
+        },
+        {
+          "level": 3,
+          "text": "Make it yours"
+        },
+        {
+          "level": 3,
+          "text": "A workspace that feels considered"
+        },
+        {
+          "level": 3,
+          "text": "Every project gets its own machine"
+        },
+        {
+          "level": 3,
+          "text": "Locking the front door"
+        },
+        {
+          "level": 3,
+          "text": "A browser workspace that runs your code"
+        },
+        {
+          "level": 2,
+          "text": "Ready to build?"
+        },
+        {
+          "level": 3,
+          "text": "Product"
+        },
+        {
+          "level": 3,
+          "text": "Company"
+        },
+        {
+          "level": 3,
+          "text": "Resources"
+        },
+        {
+          "level": 3,
+          "text": "Legal"
+        }
+      ],
+      "h1Count": 1,
+      "unlabeledFields": [
+        {
+          "type": "file",
+          "placeholder": null,
+          "name": null
+        }
+      ],
+      "htmlLang": "en",
+      "title": "Changelog — Uniqus Code"
+    },
+    "focus": {
+      "total": 24,
+      "noVisibleFocus": 0,
+      "samples": []
+    },
+    "axe": [
+      {
+        "id": "heading-order",
+        "impact": "moderate",
+        "help": "Heading levels should only increase by one",
+        "helpUrl": "https://dequeuniversity.com/rules/axe/4.10/heading-order?application=axeAPI",
+        "count": 1,
+        "samples": [
+          {
+            "target": [
+              "#v0-22 > .changelog-body > h3"
+            ],
+            "html": "<h3>A more consistent finish</h3>",
+            "failureSummary": "Fix any of the following:\n  Heading order invalid"
+          }
+        ]
+      }
+    ],
+    "mobileProbe": {
+      "horizontalOverflow": 0,
+      "overflowers": []
+    }
+  },
+  "about": {
+    "url": "https://app.uniqus-code.com/about",
+    "probe": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "innerWidth": 1440,
+      "horizontalOverflow": 0,
+      "overflowers": [],
+      "imgsNoAlt": [],
+      "imgCount": 2,
+      "controlsNoAccessibleName": [],
+      "headings": [
+        {
+          "level": 1,
+          "text": "Software should be buildable by anyone with an idea."
+        },
+        {
+          "level": 2,
+          "text": "Why we built it"
+        },
+        {
+          "level": 2,
+          "text": "The principles we build on."
+        },
+        {
+          "level": 3,
+          "text": "Show your work"
+        },
+        {
+          "level": 3,
+          "text": "Trust by default"
+        },
+        {
+          "level": 3,
+          "text": "Build in the open"
+        },
+        {
+          "level": 3,
+          "text": "Craft over hype"
+        },
+        {
+          "level": 3,
+          "text": "Your choice of AI"
+        },
+        {
+          "level": 3,
+          "text": "Ship, don't stall"
+        },
+        {
+          "level": 2,
+          "text": "Real machines, in the open, your way."
+        },
+        {
+          "level": 3,
+          "text": "Come build with us"
+        },
+        {
+          "level": 3,
+          "text": "Want to talk?"
+        },
+        {
+          "level": 2,
+          "text": "Ready to build?"
+        },
+        {
+          "level": 3,
+          "text": "Product"
+        },
+        {
+          "level": 3,
+          "text": "Company"
+        },
+        {
+          "level": 3,
+          "text": "Resources"
+        },
+        {
+          "level": 3,
+          "text": "Legal"
+        }
+      ],
+      "h1Count": 1,
+      "unlabeledFields": [
+        {
+          "type": "file",
+          "placeholder": null,
+          "name": null
+        }
+      ],
+      "htmlLang": "en",
+      "title": "About — Uniqus Code"
+    },
+    "focus": {
+      "total": 24,
+      "noVisibleFocus": 2,
+      "samples": [
+        {
+          "tag": "textarea",
+          "label": "Ask Uniqus to build an app for…",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "button",
+          "label": "Attach files",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        }
+      ]
+    },
+    "axe": [],
+    "mobileProbe": {
+      "horizontalOverflow": 0,
+      "overflowers": []
+    }
+  },
+  "enterprise": {
+    "url": "https://app.uniqus-code.com/enterprise",
+    "probe": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "innerWidth": 1440,
+      "horizontalOverflow": 0,
+      "overflowers": [],
+      "imgsNoAlt": [],
+      "imgCount": 2,
+      "controlsNoAccessibleName": [],
+      "headings": [
+        {
+          "level": 1,
+          "text": "Ship internal tools at the speed of your roadmap."
+        },
+        {
+          "level": 2,
+          "text": "Controls your organization can stand behind."
+        },
+        {
+          "level": 3,
+          "text": "SSO / SAML & SCIM"
+        },
+        {
+          "level": 3,
+          "text": "Audit logs & role-based access"
+        },
+        {
+          "level": 3,
+          "text": "Dedicated VM capacity & SLAs"
+        },
+        {
+          "level": 3,
+          "text": "DPA & security review"
+        },
+        {
+          "level": 3,
+          "text": "Volume billing & invoicing"
+        },
+        {
+          "level": 3,
+          "text": "Dedicated success manager"
+        },
+        {
+          "level": 2,
+          "text": "Built for how your teams actually work."
+        },
+        {
+          "level": 3,
+          "text": "Plan before change, approve before ship"
+        },
+        {
+          "level": 3,
+          "text": "A private machine for every project"
+        },
+        {
+          "level": 3,
+          "text": "Bring your own model keys"
+        },
+        {
+          "level": 3,
+          "text": "Deploy to the targets you already use"
+        },
+        {
+          "level": 2,
+          "text": "See Uniqus Code on your toughest internal project."
+        },
+        {
+          "level": 2,
+          "text": "Ready to build?"
+        },
+        {
+          "level": 3,
+          "text": "Product"
+        },
+        {
+          "level": 3,
+          "text": "Company"
+        },
+        {
+          "level": 3,
+          "text": "Resources"
+        },
+        {
+          "level": 3,
+          "text": "Legal"
+        }
+      ],
+      "h1Count": 1,
+      "unlabeledFields": [
+        {
+          "type": "file",
+          "placeholder": null,
+          "name": null
+        }
+      ],
+      "htmlLang": "en",
+      "title": "Enterprise — Uniqus Code"
+    },
+    "focus": {
+      "total": 24,
+      "noVisibleFocus": 2,
+      "samples": [
+        {
+          "tag": "textarea",
+          "label": "Ask Uniqus to build an app for…",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "button",
+          "label": "Attach files",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        }
+      ]
+    },
+    "axe": [],
+    "mobileProbe": {
+      "horizontalOverflow": 0,
+      "overflowers": []
+    }
+  },
+  "careers": {
+    "url": "https://app.uniqus-code.com/careers",
+    "probe": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "innerWidth": 1440,
+      "horizontalOverflow": 0,
+      "overflowers": [],
+      "imgsNoAlt": [],
+      "imgCount": 2,
+      "controlsNoAccessibleName": [],
+      "headings": [
+        {
+          "level": 1,
+          "text": "Help build the future of software."
+        },
+        {
+          "level": 2,
+          "text": "A rare seat at a rare moment."
+        },
+        {
+          "level": 3,
+          "text": "Work on a frontier AI product"
+        },
+        {
+          "level": 3,
+          "text": "A small, senior team"
+        },
+        {
+          "level": 3,
+          "text": "Real ownership"
+        },
+        {
+          "level": 3,
+          "text": "Remote-friendly"
+        },
+        {
+          "level": 3,
+          "text": "Use the tools you build"
+        },
+        {
+          "level": 3,
+          "text": "Grow fast, with the company"
+        },
+        {
+          "level": 2,
+          "text": "The basics, done right."
+        },
+        {
+          "level": 3,
+          "text": "Remote-first"
+        },
+        {
+          "level": 3,
+          "text": "Competitive equity"
+        },
+        {
+          "level": 3,
+          "text": "Learning budget"
+        },
+        {
+          "level": 3,
+          "text": "Top-tier hardware"
+        },
+        {
+          "level": 3,
+          "text": "Flexible time off"
+        },
+        {
+          "level": 3,
+          "text": "Latest AI tools"
+        },
+        {
+          "level": 2,
+          "text": "Where we’d love your help."
+        },
+        {
+          "level": 3,
+          "text": "Founding Frontend Engineer"
+        },
+        {
+          "level": 3,
+          "text": "Backend / Infrastructure Engineer"
+        },
+        {
+          "level": 3,
+          "text": "Product Designer"
+        },
+        {
+          "level": 3,
+          "text": "Developer Advocate"
+        },
+        {
+          "level": 3,
+          "text": "Member of Technical Staff"
+        },
+        {
+          "level": 2,
+          "text": "Ready to build?"
+        },
+        {
+          "level": 3,
+          "text": "Product"
+        },
+        {
+          "level": 3,
+          "text": "Company"
+        },
+        {
+          "level": 3,
+          "text": "Resources"
+        },
+        {
+          "level": 3,
+          "text": "Legal"
+        }
+      ],
+      "h1Count": 1,
+      "unlabeledFields": [
+        {
+          "type": "file",
+          "placeholder": null,
+          "name": null
+        }
+      ],
+      "htmlLang": "en",
+      "title": "Careers — Uniqus Code"
+    },
+    "focus": {
+      "total": 24,
+      "noVisibleFocus": 2,
+      "samples": [
+        {
+          "tag": "textarea",
+          "label": "Ask Uniqus to build an app for…",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "button",
+          "label": "Attach files",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        }
+      ]
+    },
+    "axe": [],
+    "mobileProbe": {
+      "horizontalOverflow": 0,
+      "overflowers": []
+    }
+  },
+  "blog": {
+    "url": "https://app.uniqus-code.com/blog",
+    "probe": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "innerWidth": 1440,
+      "horizontalOverflow": 0,
+      "overflowers": [],
+      "imgsNoAlt": [],
+      "imgCount": 2,
+      "controlsNoAccessibleName": [],
+      "headings": [
+        {
+          "level": 1,
+          "text": "Notes from the workshop."
+        },
+        {
+          "level": 3,
+          "text": "From idea to deployed app, without leaving the page"
+        },
+        {
+          "level": 3,
+          "text": "Built-in web search across Claude, GLM, GPT, and Gemini"
+        },
+        {
+          "level": 3,
+          "text": "A private machine for every project"
+        },
+        {
+          "level": 3,
+          "text": "Plan before you build: how plan mode works"
+        },
+        {
+          "level": 3,
+          "text": "Why we let you pick the AI for each step"
+        },
+        {
+          "level": 2,
+          "text": "Ready to build?"
+        },
+        {
+          "level": 3,
+          "text": "Product"
+        },
+        {
+          "level": 3,
+          "text": "Company"
+        },
+        {
+          "level": 3,
+          "text": "Resources"
+        },
+        {
+          "level": 3,
+          "text": "Legal"
+        }
+      ],
+      "h1Count": 1,
+      "unlabeledFields": [
+        {
+          "type": "file",
+          "placeholder": null,
+          "name": null
+        }
+      ],
+      "htmlLang": "en",
+      "title": "Blog — Uniqus Code"
+    },
+    "focus": {
+      "total": 24,
+      "noVisibleFocus": 2,
+      "samples": [
+        {
+          "tag": "textarea",
+          "label": "Ask Uniqus to build an app for…",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "button",
+          "label": "Attach files",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        }
+      ]
+    },
+    "axe": [
+      {
+        "id": "heading-order",
+        "impact": "moderate",
+        "help": "Heading levels should only increase by one",
+        "helpUrl": "https://dequeuniversity.com/rules/axe/4.10/heading-order?application=axeAPI",
+        "count": 1,
+        "samples": [
+          {
+            "target": [
+              ".lead > .post-body > h3"
+            ],
+            "html": "<h3>From idea to deployed app, without leaving the page</h3>",
+            "failureSummary": "Fix any of the following:\n  Heading order invalid"
+          }
+        ]
+      }
+    ],
+    "mobileProbe": {
+      "horizontalOverflow": 0,
+      "overflowers": []
+    }
+  },
+  "contact": {
+    "url": "https://app.uniqus-code.com/contact",
+    "probe": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "innerWidth": 1440,
+      "horizontalOverflow": 0,
+      "overflowers": [],
+      "imgsNoAlt": [],
+      "imgCount": 2,
+      "controlsNoAccessibleName": [],
+      "headings": [
+        {
+          "level": 1,
+          "text": "Let’s talk."
+        },
+        {
+          "level": 2,
+          "text": "Tell us what you need."
+        },
+        {
+          "level": 2,
+          "text": "Ready to build?"
+        },
+        {
+          "level": 3,
+          "text": "Product"
+        },
+        {
+          "level": 3,
+          "text": "Company"
+        },
+        {
+          "level": 3,
+          "text": "Resources"
+        },
+        {
+          "level": 3,
+          "text": "Legal"
+        }
+      ],
+      "h1Count": 1,
+      "unlabeledFields": [
+        {
+          "type": "file",
+          "placeholder": null,
+          "name": null
+        }
+      ],
+      "htmlLang": "en",
+      "title": "Contact — Uniqus Code"
+    },
+    "focus": {
+      "total": 24,
+      "noVisibleFocus": 7,
+      "samples": [
+        {
+          "tag": "input",
+          "label": "",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "input",
+          "label": "",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "input",
+          "label": "",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "select",
+          "label": "SalesSupportSecurityPartnershipsOther",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "textarea",
+          "label": "",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "textarea",
+          "label": "Ask Uniqus to build an app for…",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "button",
+          "label": "Attach files",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        }
+      ]
+    },
+    "axe": [],
+    "mobileProbe": {
+      "horizontalOverflow": 0,
+      "overflowers": []
+    }
+  },
+  "docs": {
+    "url": "https://app.uniqus-code.com/docs",
+    "probe": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "innerWidth": 1440,
+      "horizontalOverflow": 0,
+      "overflowers": [],
+      "imgsNoAlt": [],
+      "imgCount": 2,
+      "controlsNoAccessibleName": [],
+      "headings": [
+        {
+          "level": 1,
+          "text": "Build, inspect, run, and ship from one workspace."
+        },
+        {
+          "level": 2,
+          "text": "Start from an idea, or bring your code."
+        },
+        {
+          "level": 3,
+          "text": "Describe it"
+        },
+        {
+          "level": 3,
+          "text": "Upload or clone"
+        },
+        {
+          "level": 3,
+          "text": "Reopen a project"
+        },
+        {
+          "level": 2,
+          "text": "Create or import a project"
+        },
+        {
+          "level": 3,
+          "text": "Describe your idea"
+        },
+        {
+          "level": 3,
+          "text": "Upload .zip"
+        },
+        {
+          "level": 3,
+          "text": "Clone GitHub"
+        },
+        {
+          "level": 3,
+          "text": "Your dashboard has more than projects"
+        },
+        {
+          "level": 3,
+          "text": "Templates"
+        },
+        {
+          "level": 3,
+          "text": "Databases"
+        },
+        {
+          "level": 3,
+          "text": "Design Systems"
+        },
+        {
+          "level": 3,
+          "text": "Skills library"
+        },
+        {
+          "level": 3,
+          "text": "Knowledge"
+        },
+        {
+          "level": 3,
+          "text": "Teams"
+        },
+        {
+          "level": 2,
+          "text": "Know the workspace"
+        },
+        {
+          "level": 3,
+          "text": "Chat"
+        },
+        {
+          "level": 3,
+          "text": "Files"
+        },
+        {
+          "level": 3,
+          "text": "Editor & preview"
+        },
+        {
+          "level": 3,
+          "text": "Logs"
+        },
+        {
+          "level": 3,
+          "text": "Topbar tools"
+        },
+        {
+          "level": 3,
+          "text": "Status bar"
+        },
+        {
+          "level": 2,
+          "text": "Work with the agent"
+        },
+        {
+          "level": 3,
+          "text": "Chat sessions"
+        },
+        {
+          "level": 3,
+          "text": "Clearing chat"
+        },
+        {
+          "level": 3,
+          "text": "Sub-agents & Activity"
+        },
+        {
+          "level": 3,
+          "text": "Generate images"
+        },
+        {
+          "level": 2,
+          "text": "Run, preview, and verify"
+        },
+        {
+          "level": 2,
+          "text": "Use files, editor, and logs"
+        },
+        {
+          "level": 3,
+          "text": "When to edit yourself"
+        },
+        {
+          "level": 3,
+          "text": "When to point the agent"
+        },
+        {
+          "level": 2,
+          "text": "Configure how Uniqus works"
+        },
+        {
+          "level": 3,
+          "text": "Skills"
+        },
+        {
+          "level": 3,
+          "text": "Secrets"
+        },
+        {
+          "level": 3,
+          "text": "Default model"
+        },
+        {
+          "level": 3,
+          "text": "Custom prompts"
+        },
+        {
+          "level": 3,
+          "text": "Appearance"
+        },
+        {
+          "level": 2,
+          "text": "Ship with GitHub and deploys"
+        },
+        {
+          "level": 3,
+          "text": "Create a GitHub repo"
+        },
+        {
+          "level": 3,
+          "text": "Deploy"
+        },
+        {
+          "level": 3,
+          "text": "Take it with you"
+        },
+        {
+          "level": 2,
+          "text": "Recover safely"
+        },
+        {
+          "level": 3,
+          "text": "Stop"
+        },
+        {
+          "level": 3,
+          "text": "Rewind"
+        },
+        {
+          "level": 3,
+          "text": "Synced status"
+        },
+        {
+          "level": 2,
+          "text": "Prompt the agent well"
+        },
+        {
+          "level": 3,
+          "text": "How the agent works — so you can prompt for it"
+        },
+        {
+          "level": 3,
+          "text": "The agent verifies UI by interacting with it"
+        },
+        {
+          "level": 3,
+          "text": "Secrets stay server-side"
+        },
+        {
+          "level": 3,
+          "text": "Let Uniqus run things for you"
+        },
+        {
+          "level": 3,
+          "text": "Dev servers bind to 0.0.0.0, not localhost"
+        },
+        {
+          "level": 3,
+          "text": "Ask for current facts when they matter"
+        },
+        {
+          "level": 2,
+          "text": "Troubleshooting"
+        },
+        {
+          "level": 3,
+          "text": "Preview shows a 502 with an empty log"
+        },
+        {
+          "level": 3,
+          "text": "The preview won't start at all"
+        },
+        {
+          "level": 3,
+          "text": "Dependencies look corrupted or modules disappear"
+        },
+        {
+          "level": 3,
+          "text": "A long chat slows down or loses the thread"
+        },
+        {
+          "level": 3,
+          "text": "The connection drops or the workspace looks stale"
+        },
+        {
+          "level": 3,
+          "text": "The agent changed the wrong thing"
+        },
+        {
+          "level": 3,
+          "text": "A private repo won't import"
+        },
+        {
+          "level": 3,
+          "text": "The design is close but not right"
+        },
+        {
+          "level": 2,
+          "text": "Ready to build?"
+        },
+        {
+          "level": 3,
+          "text": "Product"
+        },
+        {
+          "level": 3,
+          "text": "Company"
+        },
+        {
+          "level": 3,
+          "text": "Resources"
+        },
+        {
+          "level": 3,
+          "text": "Legal"
+        }
+      ],
+      "h1Count": 1,
+      "unlabeledFields": [
+        {
+          "type": "file",
+          "placeholder": null,
+          "name": null
+        }
+      ],
+      "htmlLang": "en",
+      "title": "Documentation - Uniqus Code"
+    },
+    "focus": {
+      "total": 24,
+      "noVisibleFocus": 0,
+      "samples": []
+    },
+    "axe": [],
+    "mobileProbe": {
+      "horizontalOverflow": 0,
+      "overflowers": []
+    }
+  },
+  "security": {
+    "url": "https://app.uniqus-code.com/security",
+    "probe": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "innerWidth": 1440,
+      "horizontalOverflow": 0,
+      "overflowers": [],
+      "imgsNoAlt": [],
+      "imgCount": 2,
+      "controlsNoAccessibleName": [],
+      "headings": [
+        {
+          "level": 1,
+          "text": "Fast doesn’t have to mean reckless."
+        },
+        {
+          "level": 2,
+          "text": "Security built into the workflow."
+        },
+        {
+          "level": 3,
+          "text": "A private machine per project"
+        },
+        {
+          "level": 3,
+          "text": "Secrets stay encrypted"
+        },
+        {
+          "level": 3,
+          "text": "Guardrails on risky moves"
+        },
+        {
+          "level": 3,
+          "text": "A clear audit trail"
+        },
+        {
+          "level": 3,
+          "text": "Checkpoints & rewind"
+        },
+        {
+          "level": 3,
+          "text": "You decide when to publish"
+        },
+        {
+          "level": 2,
+          "text": "Our approach to your data"
+        },
+        {
+          "level": 3,
+          "text": "In transit and at rest"
+        },
+        {
+          "level": 3,
+          "text": "Isolation by design"
+        },
+        {
+          "level": 3,
+          "text": "Responsible disclosure"
+        },
+        {
+          "level": 2,
+          "text": "What happens to a request."
+        },
+        {
+          "level": 2,
+          "text": "Security questions."
+        },
+        {
+          "level": 2,
+          "text": "Ready to build?"
+        },
+        {
+          "level": 3,
+          "text": "Product"
+        },
+        {
+          "level": 3,
+          "text": "Company"
+        },
+        {
+          "level": 3,
+          "text": "Resources"
+        },
+        {
+          "level": 3,
+          "text": "Legal"
+        }
+      ],
+      "h1Count": 1,
+      "unlabeledFields": [
+        {
+          "type": "file",
+          "placeholder": null,
+          "name": null
+        }
+      ],
+      "htmlLang": "en",
+      "title": "Security — Uniqus Code"
+    },
+    "focus": {
+      "total": 24,
+      "noVisibleFocus": 2,
+      "samples": [
+        {
+          "tag": "textarea",
+          "label": "Ask Uniqus to build an app for…",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "button",
+          "label": "Attach files",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        }
+      ]
+    },
+    "axe": [],
+    "mobileProbe": {
+      "horizontalOverflow": 0,
+      "overflowers": []
+    }
+  },
+  "support": {
+    "url": "https://app.uniqus-code.com/support",
+    "probe": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "innerWidth": 1440,
+      "horizontalOverflow": 0,
+      "overflowers": [],
+      "imgsNoAlt": [],
+      "imgCount": 2,
+      "controlsNoAccessibleName": [],
+      "headings": [
+        {
+          "level": 1,
+          "text": "How can we help?"
+        },
+        {
+          "level": 2,
+          "text": "Your first project."
+        },
+        {
+          "level": 2,
+          "text": "Plans, seats, and keys."
+        },
+        {
+          "level": 2,
+          "text": "Running and previewing your app."
+        },
+        {
+          "level": 2,
+          "text": "Picking the right AI."
+        },
+        {
+          "level": 2,
+          "text": "Getting your app out the door."
+        },
+        {
+          "level": 2,
+          "text": "When something goes sideways."
+        },
+        {
+          "level": 3,
+          "text": "Still stuck?"
+        },
+        {
+          "level": 2,
+          "text": "Ready to build?"
+        },
+        {
+          "level": 3,
+          "text": "Product"
+        },
+        {
+          "level": 3,
+          "text": "Company"
+        },
+        {
+          "level": 3,
+          "text": "Resources"
+        },
+        {
+          "level": 3,
+          "text": "Legal"
+        }
+      ],
+      "h1Count": 1,
+      "unlabeledFields": [
+        {
+          "type": "file",
+          "placeholder": null,
+          "name": null
+        }
+      ],
+      "htmlLang": "en",
+      "title": "Support — Uniqus Code"
+    },
+    "focus": {
+      "total": 24,
+      "noVisibleFocus": 6,
+      "samples": [
+        {
+          "tag": "a",
+          "label": "docs",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "a",
+          "label": "pricing",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "a",
+          "label": "Enterprise page",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "a",
+          "label": "contact page",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "textarea",
+          "label": "Ask Uniqus to build an app for…",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "button",
+          "label": "Attach files",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        }
+      ]
+    },
+    "axe": [],
+    "mobileProbe": {
+      "horizontalOverflow": 0,
+      "overflowers": []
+    }
+  },
+  "community": {
+    "url": "https://app.uniqus-code.com/community",
+    "probe": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "innerWidth": 1440,
+      "horizontalOverflow": 0,
+      "overflowers": [],
+      "imgsNoAlt": [],
+      "imgCount": 2,
+      "controlsNoAccessibleName": [],
+      "headings": [
+        {
+          "level": 1,
+          "text": "Build together."
+        },
+        {
+          "level": 2,
+          "text": "Pick the room that fits."
+        },
+        {
+          "level": 3,
+          "text": "Community forum & Discord"
+        },
+        {
+          "level": 3,
+          "text": "GitHub discussions"
+        },
+        {
+          "level": 3,
+          "text": "X / Twitter"
+        },
+        {
+          "level": 3,
+          "text": "Templates & showcase"
+        },
+        {
+          "level": 3,
+          "text": "Office hours"
+        },
+        {
+          "level": 3,
+          "text": "Changelog"
+        },
+        {
+          "level": 2,
+          "text": "The community runs on small contributions."
+        },
+        {
+          "level": 3,
+          "text": "Share what you built"
+        },
+        {
+          "level": 3,
+          "text": "Help someone get unstuck"
+        },
+        {
+          "level": 3,
+          "text": "Request features & report bugs"
+        },
+        {
+          "level": 3,
+          "text": "Contribute templates & skills"
+        },
+        {
+          "level": 3,
+          "text": "Built something you’re proud of? Show it off."
+        },
+        {
+          "level": 2,
+          "text": "Ready to build?"
+        },
+        {
+          "level": 3,
+          "text": "Product"
+        },
+        {
+          "level": 3,
+          "text": "Company"
+        },
+        {
+          "level": 3,
+          "text": "Resources"
+        },
+        {
+          "level": 3,
+          "text": "Legal"
+        }
+      ],
+      "h1Count": 1,
+      "unlabeledFields": [
+        {
+          "type": "file",
+          "placeholder": null,
+          "name": null
+        }
+      ],
+      "htmlLang": "en",
+      "title": "Community — Uniqus Code"
+    },
+    "focus": {
+      "total": 24,
+      "noVisibleFocus": 2,
+      "samples": [
+        {
+          "tag": "textarea",
+          "label": "Ask Uniqus to build an app for…",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "button",
+          "label": "Attach files",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        }
+      ]
+    },
+    "axe": [],
+    "mobileProbe": {
+      "horizontalOverflow": 0,
+      "overflowers": []
+    }
+  },
+  "status": {
+    "url": "https://app.uniqus-code.com/status",
+    "probe": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "innerWidth": 1440,
+      "horizontalOverflow": 0,
+      "overflowers": [],
+      "imgsNoAlt": [],
+      "imgCount": 2,
+      "controlsNoAccessibleName": [],
+      "headings": [
+        {
+          "level": 2,
+          "text": "System status."
+        },
+        {
+          "level": 2,
+          "text": "Building our track record."
+        },
+        {
+          "level": 2,
+          "text": "Staying in the loop"
+        },
+        {
+          "level": 2,
+          "text": "Ready to build?"
+        },
+        {
+          "level": 3,
+          "text": "Product"
+        },
+        {
+          "level": 3,
+          "text": "Company"
+        },
+        {
+          "level": 3,
+          "text": "Resources"
+        },
+        {
+          "level": 3,
+          "text": "Legal"
+        }
+      ],
+      "h1Count": 0,
+      "unlabeledFields": [
+        {
+          "type": "file",
+          "placeholder": null,
+          "name": null
+        }
+      ],
+      "htmlLang": "en",
+      "title": "System status — Uniqus Code"
+    },
+    "focus": {
+      "total": 24,
+      "noVisibleFocus": 2,
+      "samples": [
+        {
+          "tag": "textarea",
+          "label": "Ask Uniqus to build an app for…",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        },
+        {
+          "tag": "button",
+          "label": "Attach files",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        }
+      ]
+    },
+    "axe": [
+      {
+        "id": "page-has-heading-one",
+        "impact": "moderate",
+        "help": "Page should contain a level-one heading",
+        "helpUrl": "https://dequeuniversity.com/rules/axe/4.10/page-has-heading-one?application=axeAPI",
+        "count": 1,
+        "samples": [
+          {
+            "target": [
+              "html"
+            ],
+            "html": "<html lang=\"en\" class=\"__variable_0eeb07 __variable_e896d9\" data-theme=\"dark\" data-density=\"comfortable\">",
+            "failureSummary": "Fix all of the following:\n  Page must have a level-one heading"
+          }
+        ]
+      }
+    ],
+    "mobileProbe": {
+      "horizontalOverflow": 0,
+      "overflowers": []
+    }
+  },
+  "login": {
+    "url": "https://app.uniqus-code.com/login",
+    "probe": {
+      "scrollWidth": 1440,
+      "clientWidth": 1440,
+      "innerWidth": 1440,
+      "horizontalOverflow": 0,
+      "overflowers": [],
+      "imgsNoAlt": [],
+      "imgCount": 0,
+      "controlsNoAccessibleName": [],
+      "headings": [
+        {
+          "level": 1,
+          "text": "Sign in"
+        }
+      ],
+      "h1Count": 1,
+      "unlabeledFields": [],
+      "htmlLang": "en",
+      "title": "Uniqus Code — Build real apps with AI."
+    },
+    "focus": {
+      "total": 4,
+      "noVisibleFocus": 1,
+      "samples": [
+        {
+          "tag": "button",
+          "label": "Verifying you're human…",
+          "outline": "none",
+          "boxShadow": "none",
+          "visibleFocus": false
+        }
+      ]
+    },
+    "axe": [
+      {
+        "id": "color-contrast",
+        "impact": "serious",
+        "help": "Elements must meet minimum color contrast ratio thresholds",
+        "helpUrl": "https://dequeuniversity.com/rules/axe/4.10/color-contrast?application=axeAPI",
+        "count": 1,
+        "samples": [
+          {
+            "target": [
+              ".footer"
+            ],
+            "html": "<div class=\"footer\">By signing in you agree to the terms and privacy policy.</div>",
+            "failureSummary": "Fix any of the following:\n  Element has insufficient color contrast of 4.18 (foreground color: #7c7a72, background color: #15161f, font size: 8.3pt (11px), font weight: normal). Expected contrast ratio of 4.5:1"
+          }
+        ]
+      }
+    ],
+    "mobileProbe": {
+      "horizontalOverflow": 0,
+      "overflowers": []
+    }
+  }
+}

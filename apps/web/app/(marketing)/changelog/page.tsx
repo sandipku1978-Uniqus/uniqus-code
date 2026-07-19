@@ -23,7 +23,7 @@ interface Entry {
 const COMMIT_URL = "https://github.com/sandipku1978-Uniqus/uniqus-code/commit/";
 
 /**
- * Complete substantive history through d329b29. Minor versions mark product
+ * Complete substantive history through 256a759. Minor versions mark product
  * generations; patch versions collect the work that completed or hardened
  * that generation. Pure diagnostics (5e17bb2 and de59091) are excluded.
  */
@@ -892,6 +892,29 @@ const ENTRIES: Entry[] = [
         tag: "improved",
         commit: "ab41aed",
         text: "Made background tasks, deploys, storage cleanup, connected-account refreshes, and sandbox networking more resilient to retries, concurrency, and restarts.",
+      },
+    ],
+  },
+  {
+    id: "v0-9-0",
+    date: "Jul 19, 2026",
+    ver: "v0.9.0",
+    title: "Clearer usage, stronger account controls, and a sharper product",
+    changes: [
+      {
+        tag: "new",
+        commit: "256a759",
+        text: "Added transparent plan, credit-balance, and subscription surfaces, with Free, bring-your-own-key, Plus, and configurable Max options ready for a controlled rollout.",
+      },
+      {
+        tag: "improved",
+        commit: "256a759",
+        text: "Applied consistent spend boundaries across model calls, supporting AI work, image generation, and retries, with clearer guidance when credits or account keys are needed.",
+      },
+      {
+        tag: "improved",
+        commit: "256a759",
+        text: "Refined the landing, pricing, support, login, projects, and settings experiences while making sign-out and guest-to-account transitions more dependable.",
       },
     ],
   },

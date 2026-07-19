@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sign in — Gate 15 (AuthKit split-view mock)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  /*
+    Local mock of the WorkOS AuthKit HOSTED sign-in page (split layout).
+    Purpose: preview the branding in notes/workos-authkit-branding.md without
+    round-tripping through the WorkOS dashboard. Open it directly in a browser.
+
+    LEFT panel  = our custom HTML + CSS (§2 and §3 of that note). Everything
+                  inside .g15-brand is verbatim what you paste into the editor.
+    RIGHT panel = WorkOS's OWN form. We do NOT control its markup — it is
+                  approximated here only so the left panel can be judged in
+                  context. Its colours / radius / font come from the dashboard
+                  settings in §1, which is why they are mirrored below.
+  */
+
+  /* ── §1 dashboard settings — the only knobs WorkOS gives us on the form ── */
+  :root {
+    color-scheme: dark;
+    --hak-page-bg:     #0A0B0C;   /* page background — dark */
+    --hak-button-bg:   #FF6A00;   /* button background */
+    --hak-button-text: #140D07;   /* button text — near-black, NOT white (AA) */
+    --hak-link:        #FF8124;   /* links — dark */
+    --hak-radius:      6px;       /* corner radius */
+    --hak-font:        Archivo, ui-sans-serif, system-ui, sans-serif;
+
+    --form-surface: #16181B;
+    --form-line:    rgba(255, 255, 255, 0.10);
+    --form-ink:     #EDEBE7;
+    --form-muted:   #9A9793;
+    --form-field:   #1E2125;
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --hak-page-bg:     #EFEEEC;
+    --hak-button-bg:   #FF6A00;
+    --hak-button-text: #140D07;
+    --hak-link:        #B23F0A;   /* rust — raw ember fails AA on near-white */
+
+    --form-surface: #FFFFFF;
+    --form-line:    #DDDCDA;
+    --form-ink:     #17181A;
+    --form-muted:   #52555A;
+    --form-field:   #FFFFFF;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    font-family: var(--hak-font);
+    background: var(--hak-page-bg);
+    color: var(--form-ink);
+    -webkit-font-smoothing: antialiased;
+  }
+  /* AuthKit's "hide on mobile" — phones land straight on the form. */
+  @media (max-width: 900px) {
+    body { grid-template-columns: 1fr; }
+    .g15-brand { display: none !important; }
+  }
+
+  .theme-toggle {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: 10;
+    padding: 7px 12px;
+    font: 600 10px/1 var(--hak-font);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--form-muted);
+    background: var(--form-surface);
+    border: 1px solid var(--form-line);
+    border-radius: var(--hak-radius);
+    cursor: pointer;
+  }
+  .theme-toggle:hover { color: var(--form-ink); }
+
+  /* ══════════════════════════════════════════════════════════════════════
+     LEFT — our custom panel. VERBATIM from workos-authkit-branding.md §3.
+     WorkOS scopes this to :where([data-hak-custom-html]); here the wrapper
+     div carries that attribute, so the selectors are identical.
+     ══════════════════════════════════════════════════════════════════════ */
+  .g15-brand {
+    --g15-ember: #FF7700;
+    --g15-signal: #FFCF3D;
+    --g15-ink: light-dark(#17181A, #EDEBE7);
+    --g15-muted: light-dark(#52555A, #9A9793);
+    --g15-dim: light-dark(#6B6E73, #7C7A76);
+    --g15-line: light-dark(rgba(23, 24, 26, 0.12), rgba(255, 255, 255, 0.10));
+    /* orange TEXT must darken to rust on a light page to clear WCAG AA */
+    --g15-accent-text: light-dark(#A04009, #FF8C24);
+
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 40px;
+    min-height: 100%;
+    padding: 56px 48px;
+    box-sizing: border-box;
+    font-family: Archivo, ui-sans-serif, system-ui, sans-serif;
+    color: var(--g15-ink);
+    background:
+      radial-gradient(120% 90% at 12% 100%, rgba(255, 119, 0, 0.14), transparent 62%),
+      linear-gradient(160deg, #16181B 0%, #0F1113 100%);
+  }
+  :root[data-theme="light"] .g15-brand {
+    background:
+      radial-gradient(120% 90% at 12% 100%, rgba(255, 119, 0, 0.10), transparent 62%),
+      linear-gradient(160deg, #F5F4F2 0%, #E7E5E2 100%);
+  }
+
+  /* Hazard rule — the one flourish. Keep it to this single edge. */
+  .g15-brand::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 3px;
+    background: repeating-linear-gradient(45deg,
+      var(--g15-ember) 0 8px, transparent 8px 16px);
+    opacity: 0.9;
+  }
+
+  .g15-lockup {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0;
+    font-size: 19px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+  }
+  .g15-mark { width: 26px; height: 26px; border-radius: 5px; display: block; }
+  .g15-name { color: var(--g15-ink); }
+  /* rust on light — raw ember at 19px/700 is only ~2.9:1 on the concrete panel */
+  .g15-num { color: var(--g15-accent-text); }
+
+  .g15-copy { display: flex; flex-direction: column; gap: 18px; }
+
+  .g15-eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    align-self: flex-start;
+    margin: 0;
+    padding: 5px 11px;
+    border: 1px solid var(--g15-line);
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--g15-muted);
+  }
+  .g15-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--g15-ember);
+    box-shadow: 0 0 0 3px rgba(255, 119, 0, 0.18);
+  }
+
+  .g15-headline {
+    margin: 0;
+    font-size: 40px;
+    line-height: 1.1;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  .g15-grad {
+    /* The signal-yellow stop is ~1.7:1 on the light panel — illegible. On light,
+       run the gradient rust → deep-ember instead so every stop clears 3:1. */
+    background-image: linear-gradient(135deg, #FF651F, #FFCF3D);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  :root[data-theme="light"] .g15-grad {
+    background-image: linear-gradient(135deg, #A04009, #D25A0C);
+  }
+
+  .g15-lede {
+    margin: 0;
+    max-width: 42ch;
+    font-size: 15px;
+    line-height: 1.6;
+    color: var(--g15-muted);
+  }
+
+  .g15-points {
+    margin: 6px 0 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--g15-muted);
+  }
+  .g15-points li { display: flex; gap: 10px; align-items: baseline; }
+  .g15-points strong { color: var(--g15-ink); font-weight: 600; }
+  .g15-tick { color: var(--g15-accent-text); font-weight: 700; }
+
+  .g15-foot {
+    margin: auto 0 0;
+    padding-top: 20px;
+    border-top: 1px solid var(--g15-line);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--g15-dim);
+  }
+
+  @media (max-height: 720px) {
+    .g15-brand { gap: 26px; padding: 36px 40px; }
+    .g15-headline { font-size: 32px; }
+    .g15-points { gap: 9px; }
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════
+     RIGHT — WorkOS's own form. NOT ours; approximated for context only.
+     ══════════════════════════════════════════════════════════════════════ */
+  .hak-form-pane {
+    display: grid;
+    place-items: center;
+    padding: 40px 32px;
+    background: var(--hak-page-bg);
+  }
+  .hak-form { width: 100%; max-width: 336px; display: flex; flex-direction: column; gap: 16px; }
+  .hak-form h2 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--form-ink);
+  }
+  .hak-form .sub { margin: -8px 0 4px; font-size: 13px; color: var(--form-muted); }
+  .hak-label {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--form-muted);
+  }
+  .hak-input {
+    width: 100%;
+    padding: 10px 12px;
+    font: 400 14px/1.4 var(--hak-font);
+    color: var(--form-ink);
+    background: var(--form-field);
+    border: 1px solid var(--form-line);
+    border-radius: var(--hak-radius);
+  }
+  .hak-input:focus { outline: 2px solid var(--hak-button-bg); outline-offset: 1px; }
+  .hak-btn {
+    width: 100%;
+    padding: 11px 14px;
+    font: 600 14px/1 var(--hak-font);
+    color: var(--hak-button-text);
+    background: var(--hak-button-bg);
+    border: 0;
+    border-radius: var(--hak-radius);
+    cursor: pointer;
+  }
+  .hak-btn:hover { filter: brightness(1.07); }
+  .hak-divider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--form-muted);
+  }
+  .hak-divider::before,
+  .hak-divider::after { content: ""; flex: 1; height: 1px; background: var(--form-line); }
+  .hak-oauth {
+    width: 100%;
+    padding: 10px 14px;
+    font: 500 14px/1 var(--hak-font);
+    color: var(--form-ink);
+    background: var(--form-surface);
+    border: 1px solid var(--form-line);
+    border-radius: var(--hak-radius);
+    cursor: pointer;
+  }
+  .hak-oauth:hover { border-color: var(--form-muted); }
+  .hak-fine { margin: 4px 0 0; font-size: 12px; color: var(--form-muted); text-align: center; }
+  .hak-fine a { color: var(--hak-link); text-decoration: none; }
+  .hak-fine a:hover { text-decoration: underline; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<button class="theme-toggle" id="t">Toggle theme</button>
+
+<!-- ══ LEFT: paste-ready custom HTML (workos-authkit-branding.md §2) ═════════
+     ONE difference vs the paste-ready version: the logo <img> is swapped for an
+     inline <svg> so this mock renders with no network dependency, before the
+     mark has ever been deployed. In the REAL WorkOS panel you MUST use the <img>
+     with the absolute https://app.gate15.dev/... URL — inline <svg> is not
+     documented as surviving AuthKit's sanitizer. -->
+<div class="g15-brand" data-hak-custom-html>
+  <p class="g15-lockup">
+    <svg class="g15-mark" viewBox="0 0 32 32" aria-hidden="true">
+      <defs>
+        <linearGradient id="g15plate" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#FF5A1F" />
+          <stop offset="1" stop-color="#FFC53D" />
+        </linearGradient>
+      </defs>
+      <!-- steel plate, one machined 45° notch -->
+      <path d="M4 0h20l8 8v20a4 4 0 0 1-4 4H4a4 4 0 0 1-4-4V4a4 4 0 0 1 4-4z" fill="url(#g15plate)" />
+      <text x="16" y="22.5" text-anchor="middle" font-family="Archivo, sans-serif"
+            font-size="15" font-weight="700" letter-spacing="-0.5" fill="#140D07">15</text>
+    </svg>
+    <span class="g15-name">GATE</span><span class="g15-num">15</span>
+  </p>
+
+  <div class="g15-copy">
+    <p class="g15-eyebrow"><span class="g15-dot"></span> Private beta for serious builders</p>
+    <h1 class="g15-headline">Build with <span class="g15-grad">the AI you trust</span>.</h1>
+    <p class="g15-lede">
+      Describe what you want, pick the AI for each step — Claude, GPT, or Gemini —
+      and watch your app come to life with a live preview.
+    </p>
+    <ul class="g15-points">
+      <li><span class="g15-tick">✓</span> <strong>Private, isolated VMs</strong> — every project in its own secure space</li>
+      <li><span class="g15-tick">✓</span> <strong>Your choice of model</strong> — Claude, GPT, and Gemini, per turn</li>
+      <li><span class="g15-tick">✓</span> <strong>Real apps, live preview</strong> — deploy when you're ready</li>
+    </ul>
+  </div>
+
+  <p class="g15-foot">SOC 2-aligned · Private VMs · You own the code</p>
+</div>
+
+<!-- ══ RIGHT: WorkOS's own form — approximated, NOT ours to style ═══════════ -->
+<div class="hak-form-pane">
+  <div class="hak-form">
+    <h2>Sign in</h2>
+    <p class="sub">Engineering, on demand.</p>
+
+    <div>
+      <label class="hak-label" for="e">Email</label>
+      <input class="hak-input" id="e" type="email" placeholder="you@company.com" />
+    </div>
+
+    <button class="hak-btn">Continue</button>
+
+    <div class="hak-divider">or</div>
+
+    <button class="hak-oauth">Continue with Google</button>
+    <button class="hak-oauth">Continue with GitHub</button>
+
+    <p class="hak-fine">
+      By signing in you agree to the <a href="#">terms</a> and <a href="#">privacy policy</a>.
+    </p>
+  </div>
+</div>
+
+<script>
+  // Mock-only. AuthKit's sanitizer strips <script>, so this never ships.
+  document.getElementById("t").addEventListener("click", () => {
+    const r = document.documentElement;
+    r.dataset.theme = r.dataset.theme === "light" ? "dark" : "light";
+  });
+</script>
+</body>
+</html>

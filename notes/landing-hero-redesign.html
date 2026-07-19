@@ -1,0 +1,604 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Uniqus Code — landing hero redesign (mock)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400..1000;1,400..1000&family=JetBrains+Mono:wght@400..700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --brand-purple: #482879;
+    --brand-purple-hi: #5a32a0;
+    --brand-magenta: #B21E7D;
+    --brand-gradient: linear-gradient(135deg, #482879, #B21E7D);
+
+    --mk-bg: #07080d;
+    --mk-panel-solid: #12131c;
+    --mk-line: rgba(255,255,255,0.11);
+    --mk-line-strong: rgba(255,255,255,0.18);
+    --mk-text: #f4f2ee;
+    --mk-muted: #a8a39b;
+    --mk-dim: #716d66;
+
+    --font-sans: "DM Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-xl: 16px;
+    --radius-full: 9999px;
+
+    --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--mk-bg);
+    color: var(--mk-text);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: inherit; text-decoration: none; }
+  img { display: block; max-width: 100%; }
+
+  /* ---------- annotation banner (mock-only, not part of the design) ---------- */
+  .mock-banner {
+    background: #1d1e29;
+    color: var(--mk-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-align: center;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--mk-line);
+  }
+  .mock-banner strong { color: var(--mk-text); }
+
+  /* ================= HERO ================= */
+  .hero {
+    position: relative;
+    height: clamp(720px, 96vh, 980px);
+    overflow: hidden;
+    isolation: isolate;
+    background: var(--mk-bg); /* shows through once the photo fades out at the bottom */
+    /* Where the horizon actually renders, as a % of hero height. A plain
+       fixed percentage (e.g. 59%) only matches the photo's real horizon for
+       ONE container aspect ratio. object-fit: cover crops vertically once the
+       container is wider (relative to height) than the source photo — a
+       19x9-ish hero on an ordinary wide monitor clears that threshold — and
+       the visible horizon shifts as a result. 60% is just the fallback for
+       the instant before the script below computes the real value. */
+    --horizon-pct: 60%;
+  }
+  .hero-media {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+  }
+  .hero-media img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center 38%;
+  }
+  /* dusk vignette up top for nav contrast only — the bottom fade now lives on
+     .hero-water-mask, since that layer (not this one) is what's visible below
+     the horizon once the headline is sandwiched underneath it. */
+  .hero-media::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, rgba(4,3,8,0.30) 0%, rgba(4,3,8,0) 16%);
+  }
+
+  /* -------- water-mask: a second copy of the SAME image, clipped to just the
+     water portion, stacked ABOVE the headline. This is the "image sandwich"
+     (photo → headline → photo slice) that lets the headline sink behind the
+     waterline while its full text node stays in the DOM, just visually
+     covered wherever the mask is opaque. Clip line matches the headline's
+     top:59% anchor and the horizon in the source photo. -------- */
+  .hero-water-mask {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    clip-path: inset(var(--horizon-pct) 0 0 0);
+    pointer-events: none;
+  }
+  .hero-water-mask img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center 38%;
+  }
+  .hero-water-mask::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg,
+      rgba(4,3,8,0) 0%,
+      rgba(4,3,8,0) 56%,
+      rgba(4,3,8,0.62) 80%,
+      var(--mk-bg) 100%);
+  }
+
+  .hero-nav {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 22px clamp(20px, 4vw, 56px) 0;
+  }
+  .hero-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    font-weight: 650;
+    font-size: 15px;
+    color: var(--mk-text);
+    letter-spacing: -0.01em;
+  }
+  .hero-brand .mark {
+    width: 20px; height: 20px;
+    border-radius: 6px;
+    background: var(--brand-gradient);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+  }
+  .hero-links {
+    display: flex;
+    align-items: center;
+    gap: 28px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--mk-muted);
+  }
+  .hero-links a { opacity: 0.92; transition: opacity 160ms var(--ease-out); }
+  .hero-links a:hover { opacity: 1; color: var(--mk-text); }
+  .hero-right { display: flex; align-items: center; gap: 14px; }
+  .hero-signin { font-size: 13px; font-weight: 600; color: var(--mk-text); }
+  .hero-cta-btn {
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    background: var(--brand-gradient);
+    padding: 9px 18px;
+    border-radius: var(--radius-md);
+    box-shadow: 0 6px 18px rgba(178,30,125,0.28);
+    transition: transform 160ms var(--ease-out), opacity 160ms var(--ease-out);
+  }
+  .hero-cta-btn:hover { opacity: 0.92; transform: translateY(-1px); }
+
+  @media (max-width: 900px) {
+    .hero-links { display: none; }
+  }
+
+  /* -------- sky zone: nav + eyebrow only, clouds stay uncluttered -------- */
+  .hero-sky {
+    position: absolute;
+    top: 96px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 3;
+  }
+
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: var(--mk-muted);
+    background: rgba(15,14,20,0.42);
+    border: 1px solid rgba(255,255,255,0.16);
+    backdrop-filter: blur(10px);
+    padding: 6px 13px 6px 10px;
+    border-radius: var(--radius-full);
+    white-space: nowrap;
+  }
+  .eyebrow .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--brand-magenta);
+    box-shadow: 0 0 0 4px rgba(178,30,125,0.24);
+  }
+
+  /* -------- headline: sunk behind the water-mask layer (z-index 1, below
+     .hero-water-mask's z-index 2) so the very bottom of the letters just
+     grazes beneath the waterline — the "image sandwich" (photo → headline →
+     photo slice). The full text node is untouched by any clip/overflow, so
+     it's still 100% present in the DOM.
+     NOTE: this offset is tuned against actual glyph ink, not the CSS line
+     box. "Build with AI you trust" has almost no descenders (only the "y"),
+     so most of the line box below the baseline is empty padding — a sink
+     sized as a plain % of box height (e.g. 14%) lands entirely in that empty
+     padding and the mask never touches a visible pixel, reading as "floating
+     above the horizon with a gap" instead of sinking. -74% is about as far as
+     this can be pushed while still touching at all — confirmed by rendering
+     the mask as solid red and sweeping the offset: -66% clipped far too much,
+     -72% was a clean small graze, and -75% and beyond loses contact entirely
+     (the ink stays fully above the clip line — the floating-gap bug again).
+     -74% is the last value with any contact, so raising it further than this
+     isn't possible without detaching it from the water. -------- */
+  .hero-headline-wrap {
+    position: absolute;
+    left: 50%;
+    top: var(--horizon-pct);
+    transform: translate(-50%, -78%);
+    z-index: 1;
+    width: min(1600px, 95vw);
+    text-align: center;
+    pointer-events: none;
+  }
+  .hero-headline-wrap::before {
+    content: "";
+    position: absolute;
+    left: 50%; top: 55%;
+    width: 132%; height: 280%;
+    transform: translate(-50%, -50%);
+    background: radial-gradient(50% 58% at 50% 56%, rgba(3,2,6,0.6), rgba(3,2,6,0.34) 55%, rgba(3,2,6,0) 82%);
+    z-index: -1;
+  }
+  .hero-headline {
+    margin: 0;
+    font-weight: 700;
+    line-height: 0.98;
+    letter-spacing: -0.025em;
+    font-size: clamp(34px, 6.6vw, 108px);
+    white-space: nowrap;
+    color: var(--mk-text);
+    text-shadow:
+      0 1px 2px rgba(0,0,0,0.85),
+      0 3px 14px rgba(0,0,0,0.55);
+  }
+  .hero-headline .grad {
+    /* the standard dark-purple brand gradient reads too dark for text sitting
+       directly on a photo — bias this one brighter (magenta into warm gold,
+       pulled from the sunset itself) so it stays legible over both the dark
+       sky and the bright horizon glow. A large blurred dark shadow (fine on
+       opaque white text) reads as a black silhouette on thin gradient glyphs,
+       so this gets its own much lighter shadow instead of inheriting the h1's. */
+    background: linear-gradient(120deg, #ff5fa8 0%, #e0559a 30%, #ff9d5c 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    text-shadow: 0 2px 6px rgba(0,0,0,0.3);
+  }
+
+  /* -------- mirrored reflection: same box as the real headline, flipped
+     around its OWN bottom edge (transform-origin: bottom) so the mirror axis
+     sits right at the headline's baseline — the classic still-water
+     reflection, anchored at the object's base and fading downward. Sits
+     above the water-mask (z-index 2) so it reads as floating ON the water,
+     but below the composer (z-index 3, later in DOM) so the glass panel
+     paints over it where they'd overlap. -------- */
+  .hero-headline-reflect-wrap {
+    position: absolute;
+    left: 50%;
+    top: var(--horizon-pct);
+    transform: translate(-50%, -78%);
+    z-index: 3;
+    width: min(1600px, 95vw);
+    text-align: center;
+    pointer-events: none;
+  }
+  .hero-headline-reflect {
+    margin: 0;
+    font-weight: 700;
+    line-height: 0.98;
+    letter-spacing: -0.025em;
+    font-size: clamp(34px, 6.6vw, 108px);
+    white-space: nowrap;
+    color: var(--mk-text);
+    transform: scaleY(-1);
+    transform-origin: bottom center;
+    /* spec called for 0.08, but at that opacity (plus the blur) it was
+       imperceptible against the warm, moderately bright water — 0.22 was
+       still too subtle to read in practice against the photo's own texture,
+       so this is bumped further to an unmistakable (if soft) ghost. */
+    opacity: 0.4;
+    filter: blur(4px);
+    -webkit-mask-image: linear-gradient(to bottom, black 0%, transparent 60%);
+    mask-image: linear-gradient(to bottom, black 0%, transparent 60%);
+  }
+  .hero-headline-reflect .grad {
+    background: linear-gradient(120deg, #ff5fa8 0%, #e0559a 30%, #ff9d5c 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* -------- water zone: the composer sits centered in the ocean band, i.e.
+     halfway between the (dynamic) horizon and the bottom of the hero (100%) —
+     centered via transform on both axes so it stays centered regardless of
+     the composer's actual content height. -------- */
+  .hero-water {
+    position: absolute;
+    top: calc((var(--horizon-pct) + 100%) / 2);
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 3;
+    width: min(640px, 88vw);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+  }
+
+  .composer {
+    width: 100%;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,0.07), rgba(255,255,255,0) 60%),
+      rgba(13,14,20,0.58);
+    border: 1px solid rgba(255,255,255,0.14);
+    border-radius: var(--radius-xl);
+    backdrop-filter: blur(18px);
+    box-shadow: 0 24px 60px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.06);
+    padding: 16px 16px 12px;
+    transition: box-shadow 200ms var(--ease-out), border-color 200ms var(--ease-out);
+  }
+  .composer:focus-within {
+    box-shadow: 0 0 0 3px rgba(178,30,125,0.24), 0 24px 60px rgba(0,0,0,0.5);
+    border-color: rgba(178,30,125,0.4);
+  }
+  .composer-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .composer-row input {
+    flex: 1;
+    border: 0;
+    background: transparent;
+    outline: none;
+    font-family: var(--font-sans);
+    font-size: 14.5px;
+    color: var(--mk-text);
+  }
+  .composer-row input::placeholder { color: rgba(244,242,238,0.42); }
+  .composer-send {
+    flex-shrink: 0;
+    width: 34px; height: 34px;
+    border-radius: 50%;
+    background: var(--brand-gradient);
+    box-shadow: 0 4px 14px rgba(178,30,125,0.4);
+    display: flex; align-items: center; justify-content: center;
+    transition: transform 140ms var(--ease-out);
+  }
+  .composer-send:hover { transform: scale(1.06); }
+  .composer-send svg { width: 15px; height: 15px; }
+
+  .composer-suggestions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(255,255,255,0.1);
+  }
+  .composer-suggestions button {
+    font-family: var(--font-sans);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--mk-muted);
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.13);
+    border-radius: var(--radius-full);
+    padding: 6px 12px;
+    cursor: pointer;
+    transition: background 160ms var(--ease-out), border-color 160ms var(--ease-out), color 160ms var(--ease-out);
+  }
+  .composer-suggestions button:hover {
+    background: rgba(255,255,255,0.1);
+    border-color: rgba(255,255,255,0.22);
+    color: var(--mk-text);
+  }
+
+  .hero-proof {
+    margin-top: 26px;
+    display: flex;
+    align-items: stretch;
+    justify-content: center;
+    gap: 0;
+  }
+  .hero-proof > div {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 0 22px;
+    border-left: 1px solid rgba(255,255,255,0.16);
+  }
+  .hero-proof > div:first-child { border-left: 0; padding-left: 0; }
+  .hero-proof strong {
+    font-size: 13.5px;
+    font-weight: 650;
+    color: var(--mk-text);
+    letter-spacing: -0.01em;
+    text-shadow: 0 2px 12px rgba(0,0,0,0.5);
+  }
+  .hero-proof span {
+    font-size: 11px;
+    color: var(--mk-muted);
+    text-shadow: 0 2px 12px rgba(0,0,0,0.5);
+  }
+
+  @media (max-width: 640px) {
+    .hero-proof { flex-direction: column; gap: 10px; }
+    .hero-proof > div { border-left: 0; padding: 0; align-items: center; }
+  }
+
+  /* ================= MARQUEE (rest-of-page continuity) ================= */
+  .marquee-band {
+    background: var(--mk-bg);
+    border-top: 1px solid var(--mk-line);
+    border-bottom: 1px solid var(--mk-line);
+    padding: 26px clamp(20px, 4vw, 56px);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 34px;
+    justify-content: center;
+  }
+  .marquee-band span {
+    font-family: var(--font-sans);
+    font-weight: 750;
+    font-size: clamp(15px, 1.7vw, 22px);
+    color: var(--mk-muted);
+    letter-spacing: -0.01em;
+  }
+  .marquee-band span:nth-child(3n+1) {
+    background: var(--brand-gradient);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .continues-note {
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--mk-dim);
+    letter-spacing: 0.03em;
+    padding: 34px 20px 54px;
+  }
+</style>
+</head>
+<body>
+
+  <div class="mock-banner">
+    <strong>MOCK — landing hero redesign.</strong> Static HTML only, not wired to the app. Hero image generated with Gemini (Nano Banana 2).
+  </div>
+
+  <section class="hero">
+    <div class="hero-media">
+      <img src="assets/sunset-sky-v2-4.jpg" alt="" />
+    </div>
+
+    <div class="hero-water-mask" aria-hidden="true" role="presentation">
+      <img src="assets/sunset-sky-v2-4.jpg" alt="" />
+    </div>
+
+    <nav class="hero-nav">
+      <a href="#" class="hero-brand"><span class="mark"></span>Uniqus Code</a>
+      <div class="hero-links">
+        <a href="#how">How it works</a>
+        <a href="#models">AI models</a>
+        <a href="#workspaces">Workspaces</a>
+        <a href="#pricing">Pricing</a>
+        <a href="#trust">Trust</a>
+        <a href="#docs">Docs</a>
+      </div>
+      <div class="hero-right">
+        <a href="#" class="hero-signin">Sign in</a>
+        <a href="#" class="hero-cta-btn">Get started</a>
+      </div>
+    </nav>
+
+    <div class="hero-sky">
+      <span class="eyebrow"><span class="dot"></span>Private beta for serious builders</span>
+    </div>
+
+    <div class="hero-headline-wrap">
+      <h1 class="hero-headline"><span class="base">Build with</span> <span class="grad">AI you trust</span></h1>
+    </div>
+
+    <div class="hero-headline-reflect-wrap" aria-hidden="true">
+      <h1 class="hero-headline-reflect">Build with <span class="grad">AI you trust</span></h1>
+    </div>
+
+    <div class="hero-water">
+      <div class="composer">
+        <div class="composer-row">
+          <input type="text" placeholder="Ask Uniqus to build an internal tool that…" />
+          <div class="composer-send">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 19V5" /><path d="M5 12l7-7 7 7" />
+            </svg>
+          </div>
+        </div>
+        <div class="composer-suggestions">
+          <button>An internal admin tool</button>
+          <button>A Stripe billing flow</button>
+          <button>A customer CRM</button>
+          <button>A marketing landing page</button>
+        </div>
+      </div>
+
+      <div class="hero-proof" aria-label="Platform highlights">
+        <div>
+          <strong>4 AI providers</strong>
+          <span>Anthropic, Z.ai, OpenAI, Google</span>
+        </div>
+        <div>
+          <strong>A machine per project</strong>
+          <span>Private and secure</span>
+        </div>
+        <div>
+          <strong>Launch-ready</strong>
+          <span>tested, previewed, live</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="marquee-band" aria-label="Core platform capabilities">
+    <span>Idea to app</span>
+    <span>Plan mode</span>
+    <span>Live preview</span>
+    <span>Import your code</span>
+    <span>Built-in web search</span>
+    <span>Publish to the web</span>
+    <span>Encrypted and private</span>
+    <span>Rewind anytime</span>
+    <span>Design packs</span>
+  </section>
+
+  <p class="continues-note">— rest of the page (AI models, workspaces, features, trust, footer) continues unchanged below —</p>
+
+  <script>
+    // Where the horizon in assets/sunset-sky-v2-4.jpg actually falls, measured
+    // directly against the source pixels (row-variance jump from smooth sky
+    // gradient to rippled water texture) — NOT eyeballed.
+    var NATIVE_IMG_ASPECT = 1376 / 768;
+    var NATIVE_HORIZON_FRACTION = 0.605;
+    // matches .hero-media/.hero-water-mask img { object-position: center 38%; }
+    var OBJECT_POSITION_Y = 0.38;
+
+    function updateHorizon() {
+      var hero = document.querySelector(".hero");
+      if (!hero) return;
+      var rect = hero.getBoundingClientRect();
+      var containerW = rect.width, containerH = rect.height;
+      if (!containerW || !containerH) return;
+      var containerAspect = containerW / containerH;
+
+      var horizonFraction;
+      if (containerAspect <= NATIVE_IMG_ASPECT) {
+        // height-constrained: object-fit:cover crops left/right only, so the
+        // full image height maps 1:1 onto the container — horizon renders at
+        // its native fraction, untouched by object-position.
+        horizonFraction = NATIVE_HORIZON_FRACTION;
+      } else {
+        // width-constrained: cover crops top/bottom, so the visible vertical
+        // window shifts per object-position-y — recompute where the horizon
+        // lands inside that window.
+        var scaledHeight = containerW / NATIVE_IMG_ASPECT;
+        var overflow = scaledHeight - containerH;
+        var croppedFromTop = overflow * OBJECT_POSITION_Y;
+        var horizonPxInScaled = NATIVE_HORIZON_FRACTION * scaledHeight;
+        horizonFraction = (horizonPxInScaled - croppedFromTop) / containerH;
+      }
+
+      // guard against a degenerate value if this ever runs before layout settles
+      horizonFraction = Math.max(0.3, Math.min(0.85, horizonFraction));
+      hero.style.setProperty("--horizon-pct", (horizonFraction * 100).toFixed(2) + "%");
+    }
+
+    updateHorizon();
+    window.addEventListener("resize", updateHorizon);
+  </script>
+</body>
+</html>

@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Website Name Ideas &amp; Domain Check — 2026-07-08</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --card: #f8f9fb;
+    --taken: #b91c1c;
+    --taken-bg: #fef2f2;
+    --available: #15803d;
+    --available-bg: #f0fdf4;
+    --unknown: #92400e;
+    --unknown-bg: #fffbeb;
+    --accent: #4f46e5;
+    --code-bg: #f1f1f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14151a;
+      --fg: #e8e8ec;
+      --muted: #9a9aa8;
+      --border: #2c2d35;
+      --card: #1c1d24;
+      --taken: #f87171;
+      --taken-bg: #2a1414;
+      --available: #4ade80;
+      --available-bg: #10241a;
+      --unknown: #fbbf24;
+      --unknown-bg: #2a2110;
+      --accent: #818cf8;
+      --code-bg: #24252d;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14151a; --fg: #e8e8ec; --muted: #9a9aa8; --border: #2c2d35; --card: #1c1d24;
+    --taken: #f87171; --taken-bg: #2a1414; --available: #4ade80; --available-bg: #10241a;
+    --unknown: #fbbf24; --unknown-bg: #2a2110; --accent: #818cf8; --code-bg: #24252d;
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #6b7280; --border: #e5e7eb; --card: #f8f9fb;
+    --taken: #b91c1c; --taken-bg: #fef2f2; --available: #15803d; --available-bg: #f0fdf4;
+    --unknown: #92400e; --unknown-bg: #fffbeb; --accent: #4f46e5; --code-bg: #f1f1f4;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+    margin: 0;
+    padding: 2.5rem 1.25rem 5rem;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; }
+  h1 { font-size: 1.7rem; margin-bottom: 0.25rem; }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin-top: 0; margin-bottom: 1.75rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.75rem; margin-bottom: 0.5rem; border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; }
+  h3 { font-size: 1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; color: var(--accent); }
+  p { margin: 0.6rem 0; }
+  .lede {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.1rem 1.4rem;
+    margin-bottom: 1.5rem;
+  }
+  .lede strong { color: var(--available); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+    margin: 0.75rem 0 1.5rem;
+  }
+  caption { text-align: left; color: var(--muted); font-size: 0.82rem; margin-bottom: 0.4rem; }
+  th, td {
+    text-align: left;
+    padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th {
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+  tr:hover td { background: var(--card); }
+  .name { font-weight: 600; }
+  .badge {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .badge.taken { color: var(--taken); background: var(--taken-bg); }
+  .badge.available { color: var(--available); background: var(--available-bg); }
+  .badge.unknown { color: var(--unknown); background: var(--unknown-bg); }
+  .dot { text-align: center; font-weight: 700; }
+  .dot.yes { color: var(--available); }
+  .dot.no { color: var(--taken); opacity: 0.45; }
+  .note { color: var(--muted); font-size: 0.82rem; }
+  code {
+    background: var(--code-bg);
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+    font-size: 0.85em;
+  }
+  .table-scroll { overflow-x: auto; }
+  .price-table td, .price-table th { text-align: right; }
+  .price-table td:first-child, .price-table th:first-child,
+  .price-table td:nth-child(2), .price-table th:nth-child(2) { text-align: left; }
+  .callout {
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent);
+    background: var(--card);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin: 1rem 0;
+  }
+  .callout.win { border-left-color: var(--available); }
+  .callout h3 { margin-top: 0; }
+  ul { padding-left: 1.3rem; }
+  li { margin: 0.35rem 0; }
+  .tier-table td:first-child { font-weight: 700; }
+  .star { color: #f59e0b; }
+  footer { margin-top: 3rem; color: var(--muted); font-size: 0.8rem; border-top: 1px solid var(--border); padding-top: 1rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Website Name Ideas &amp; Domain Check</h1>
+<p class="subtitle">Compiled 2026-07-08 · 174 candidate names checked live across .com / .dev / .app / .build / .codes (+ a 10-name .io spot check + a 76-name B2B SaaS collision check)</p>
+
+<div class="lede">
+<p><strong>Found real, registrable options.</strong> The first two rounds checked 54 plain-English words on .com/.dev/.app/.io and came back 100% taken — that's normal, single dictionary words on those TLDs have been squatted for decades. Widening the search to <code>.build</code> and <code>.codes</code> (much smaller, far-less-squatted registries) and adding 22 coined/product-style names (in the spirit of "OpenClaw" / "T3 Chat") turned up <strong>dozens of open domains — including two names free on all five extensions at once, .com included.</strong> A fourth round tried <code>-ly</code>/<code>-us</code>/<code>-ify</code> suffixes on the strongest words — <code>.com</code> turned out to be fully squatted for this trick too, but six suffix names are wide open everywhere else. A fifth round went after more advanced/obscure CS jargon (concurrency, distributed systems, compilers, git internals, ML) — <code>.com</code> was a clean sweep of "taken" again, but <code>.build</code>/<code>.codes</code> still delivered. <strong>A sixth round added 50 more advanced terms and, critically, ran a B2B SaaS brand-collision check on all 76 advanced terms from rounds 5+6</strong> — turns out 24 of 26 round-5 names and 37 of 50 round-6 names collide with a real, currently-operating company (mostly cybersecurity, fintech, and AI SaaS firms). Every collided name got a fallback search: 4 common prefixes (Get-/Try-/Use-/Run-) and 4 suffixes (-ly/-us/-ify/-io) checked for a clean, collision-avoiding .com. See <a href="#available-now">Available Now</a> and <a href="#collisions">Collision Check</a> below.</p>
+</div>
+
+<h2 id="available-now">Available now — top picks</h2>
+<p>All confirmed available via live RDAP lookup moments before this report was compiled (2026-07-08). Domain availability changes constantly — verify again before registering.</p>
+
+<div class="table-scroll">
+<table class="tier-table">
+<caption>Tier 1 — available on every extension checked, including .com</caption>
+<thead><tr><th>Name</th><th>.com</th><th>.dev</th><th>.app</th><th>.build</th><th>.codes</th><th>Style</th></tr></thead>
+<tbody>
+<tr><td>Q3Code <span class="star">★</span></td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Coined, T3-style abbreviation</td></tr>
+<tr><td>N1Build <span class="star">★</span></td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Coined, T3-style abbreviation</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="table-scroll">
+<table class="tier-table">
+<caption>Tier 2 — available on 4 of 5 (only .com is taken)</caption>
+<thead><tr><th>Name</th><th>.com</th><th>.dev</th><th>.app</th><th>.build</th><th>.codes</th><th>Style</th></tr></thead>
+<tbody>
+<tr><td>ForgeClaw</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Coined, OpenClaw-style</td></tr>
+<tr><td>PixelClaw</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Coined, OpenClaw-style</td></tr>
+<tr><td>NestCode</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Coined, OpenClaw-style</td></tr>
+<tr><td>WeaveClaw</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Coined, OpenClaw-style</td></tr>
+<tr><td>Craftus</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Craft + -us suffix</td></tr>
+<tr><td>Sparkus</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Spark + -us suffix</td></tr>
+<tr><td>Sculptus</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Sculpt + -us suffix</td></tr>
+<tr><td>Compilus</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Compile + -us suffix</td></tr>
+<tr><td>Probeus</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Probe + -us suffix</td></tr>
+<tr><td>Deployify</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Deploy + -ify suffix</td></tr>
+<tr><td>Desugar <span class="star">★</span></td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Real compiler term (macro desugaring) — <strong>no B2B SaaS collision found</strong></td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="table-scroll">
+<table class="tier-table">
+<caption>Tier 3 — a real recognizable word, open on most extensions</caption>
+<thead><tr><th>Name</th><th>.com</th><th>.dev</th><th>.app</th><th>.build</th><th>.codes</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td>Shell</td><td class="dot no">✕</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>.com is one of the internet's oldest domains (1989); .dev is on the aftermarket (see below) but has no public price</td></tr>
+<tr><td>BuildClaw</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Coined, OpenClaw-style</td></tr>
+<tr><td>Continuation</td><td class="dot no">✕</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Real PL term (continuation-passing style) — no collision found</td></tr>
+<tr><td>Peephole</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Real compiler term (peephole optimization) — no collision found</td></tr>
+<tr><td>Compaction</td><td class="dot no">✕</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Real DB/storage term — no collision found</td></tr>
+<tr><td>Backpressure</td><td class="dot no">✕</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Real streaming/systems term — no collision found</td></tr>
+<tr><td>Failover</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot no">✕</td><td class="dot yes">✓</td><td class="dot yes">✓</td><td>Real systems-reliability term — no collision found</td></tr>
+</tbody>
+</table>
+</div>
+<p class="note">Barrier — the previous top pick from Category 5 — has been <strong>moved out of this tier</strong>: it collides with Barrier Networks, a real UK cybersecurity MSSP. See <a href="#collisions">Collision Check</a> for its fallback options (<code>runbarrier.com</code>, <code>barrierify.com</code>).</p>
+
+<div class="callout win">
+<h3>Solid single-TLD wins (simple real words, free on .build and/or .codes)</h3>
+<p><strong>Free on both .build and .codes:</strong> <code>Wick</code>, <code>Glint</code>, <code>Hollow</code>, <code>Husk</code>, <code>Plume</code>, <code>Branch</code>, <code>Thread</code>, <code>Socket</code></p>
+<p><strong>Free on .build only:</strong> <code>Loft</code>, <code>Kernel</code>, <code>Commit</code>, <code>Cache</code>, <code>Buffer</code>, <code>Fork</code>, <code>Grep</code>, <code>Patch</code>, <code>Pipe</code>, <code>Probe</code></p>
+<p><strong>Free on .codes only:</strong> <code>Conjure</code>, <code>Mint</code>, <code>Summon</code>, <code>Render</code>, <code>Anything</code>, <code>Chisel</code>, <code>Grain</code>, <code>Loop</code>, <code>Daemon</code>, <code>Cron</code></p>
+<p class="note">Full status per name/TLD is in the reference tables below.</p>
+</div>
+
+<h2>Registrar pricing reference</h2>
+<div class="table-scroll">
+<table class="price-table">
+<caption>Standard non-premium pricing per year, checked 2026-07-08. GoDaddy's "first year" is a promo price — real cost from year 2 is the renewal column.</caption>
+<thead><tr><th>Registrar</th><th>TLD</th><th>First year</th><th>Renewal (real cost)</th></tr></thead>
+<tbody>
+<tr><td>GoDaddy</td><td>.com</td><td>$4.99*</td><td>$22.99</td></tr>
+<tr><td>GoDaddy</td><td>.dev</td><td>$15.99</td><td>$23.99</td></tr>
+<tr><td>GoDaddy</td><td>.app</td><td>$15.99</td><td>$27.99</td></tr>
+<tr><td>GoDaddy</td><td>.io</td><td>$0.01**</td><td>$89.99</td></tr>
+<tr><td>GoDaddy</td><td>.build</td><td>$49.99</td><td>$49.99 (no promo)</td></tr>
+<tr><td>GoDaddy</td><td>.codes</td><td>$9.99</td><td>$109.99</td></tr>
+<tr><td>Cloudflare</td><td>.com</td><td>$10.46</td><td>$10.46</td></tr>
+<tr><td>Cloudflare</td><td>.dev</td><td>$12.20</td><td>$12.20</td></tr>
+<tr><td>Cloudflare</td><td>.app</td><td>$14.20</td><td>$14.20</td></tr>
+<tr><td>Cloudflare</td><td>.io</td><td>$50.00</td><td>$50.00</td></tr>
+<tr><td>Cloudflare</td><td>.build</td><td>$25.20</td><td>$25.20</td></tr>
+<tr><td>Cloudflare</td><td>.codes</td><td>$55.20</td><td>$55.20</td></tr>
+</tbody>
+</table>
+</div>
+<p class="note">* New-customer promo, no multi-year commitment required. ** Requires a mandatory 3-year purchase; years 2–3 bill at $89.99 each. Cloudflare figures are third-party-scraped snapshots (Cloudflare doesn't publish a static list) but consistent with its documented at-cost model — cheapest for .com/.dev/.build, GoDaddy cheaper for .codes' first year only (renewal is much higher).</p>
+
+<h2>Will any of these get flagged "Premium"?</h2>
+<div class="callout">
+<p><strong>Short answer: no, very unlikely for any name on this page.</strong> "Premium" pricing is a surcharge some registries/registrars apply <em>at first registration</em> to strings they've algorithmically judged especially valuable — mainly very short strings (1–4 characters), plain dictionary words, and numeric domains. Every available name in this report is a multi-syllable invented word or a real word + suffix (Craftus, ForgeClaw, Q3Code, etc.) — exactly the profile that registry premium-scoring engines do <em>not</em> flag. Spot searches for a few of the strongest picks (Craftus.dev, Sparkus.app, Compilus.build) turned up no premium listings anywhere.</p>
+<p>Caveat: live checkout verification (GoDaddy's actual cart, which shows a "Premium" badge + price directly) needs browser automation, and this session's automation credits ran out mid-research — so this is a well-grounded estimate from registry pricing patterns and search spot-checks, not a screenshot of a checkout page. Before registering, a 10-second sanity check is free: search the name directly on <a href="https://www.godaddy.com">godaddy.com</a> or <a href="https://www.namecheap.com">namecheap.com</a> — if it's premium, the elevated price is shown immediately, no purchase needed.</p>
+<p class="note">Don't confuse this with <em>aftermarket</em> pricing (below) — that's a completely different thing: a domain that's already registered, being resold by its current owner. Aftermarket prices ($4,599 for Diff.dev, etc.) have nothing to do with registry premium tiers.</p>
+</div>
+
+<h2>Aftermarket — domains already taken but for sale</h2>
+<div class="table-scroll">
+<table>
+<thead><tr><th>Domain</th><th>Marketplace</th><th>Price</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td class="name">Diff.dev</td><td>Afternic (GoDaddy)</td><td><strong>$4,599</strong> Buy-It-Now</td><td>Listing also accepts "Make an offer" for a lower negotiated price</td></tr>
+<tr><td class="name">Shell.dev</td><td>Afternic (GoDaddy)</td><td>No public price</td><td>Parked/for-sale landing page shows no Buy-It-Now figure — "make offer" only, price on request</td></tr>
+<tr><td class="name">Mintly.com</td><td>Afternic (GoDaddy)</td><td>No public price found</td><td>Registered 2006, nameservers point to Afternic (parked/for-sale pattern), but no listing page or Buy-It-Now figure was found — would need a direct inquiry</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>Category 1 — "Create Anything" (simple words evoking making/building)</h2>
+<div class="table-scroll">
+<table>
+<caption>All 27 names checked across all 5 extensions.</caption>
+<thead><tr><th>Name</th><th>.com</th><th>.dev</th><th>.app</th><th>.build</th><th>.codes</th></tr></thead>
+<tbody>
+<tr><td class="name">Forge</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Craft</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Conjure</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Spawn</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Spark</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Weave</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Loom</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Mint</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Sculpt</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Bloom</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Genesis</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Summon</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Render</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Canvas</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Anything</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Ember</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Anvil</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Chisel</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Kiln</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Wick</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Glint</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Rune</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Hollow</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Loft</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Grain</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Husk</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Plume</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>Category 2 — "Dev Term" (Replit/Cursor-style, drawn from developer vocabulary)</h2>
+<div class="table-scroll">
+<table>
+<caption>All 27 names checked across all 5 extensions.</caption>
+<thead><tr><th>Name</th><th>.com</th><th>.dev</th><th>.app</th><th>.build</th><th>.codes</th></tr></thead>
+<tbody>
+<tr><td class="name">Compile</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Runtime</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Kernel</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Stack</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Branch</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Commit</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Deploy</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Ship</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Debug</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Loop</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Thread</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Cache</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Token</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Prompt</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Buffer</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Diff</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken*</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Fork</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Grep</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Patch</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Pipe</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Shell</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken*</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Daemon</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Socket</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Cron</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Probe</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Relay</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Beacon</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+</tbody>
+</table>
+</div>
+<p class="note">* Diff.dev and Shell.dev are registered but parked on the aftermarket — see the Aftermarket table above for pricing.</p>
+
+<h2>Category 3 — Coined / product-style names (OpenClaw / T3-style)</h2>
+<p>Invented brand names rather than dictionary words — the same naming pattern as products like Cursor, Replit, or "T3 Chat." Made-up words are far less likely to already be squatted, and it shows: this category produced the two best results in the whole search.</p>
+<div class="table-scroll">
+<table>
+<caption>22 coined names checked across all 5 extensions.</caption>
+<thead><tr><th>Name</th><th>.com</th><th>.dev</th><th>.app</th><th>.build</th><th>.codes</th></tr></thead>
+<tbody>
+<tr><td class="name">OpenClaw</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">ClawCode</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">CodeClaw</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">VibeCode</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">BuildClaw</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">ForgeClaw</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">NullForge</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">ZeroClick</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">PixelClaw</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">LoopKit</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">NestCode</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">BuildWise</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">CodeNest</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">ClawSpace</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">SparkLoop</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">WeaveClaw</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">CraftKit</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">ForgeKit</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">ByteClaw</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">OpenForge</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Q3Code <span class="star">★</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">N1Build <span class="star">★</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>Category 4 — Suffix remixes (-ly / -us / -ify on the strongest words)</h2>
+<p>The classic startup naming trick: take a word that's taken as a bare domain and bolt on a short suffix (Grammar<strong>ly</strong>, Shopif<strong>y</strong>, Bit<strong>ly</strong>) to land a clean, pronounceable, available string. Candidates below were filtered to drop anything that read awkwardly out loud or collided with an existing word's meaning (dropped: Forgely, Weavely, Mintus — reads as "minus" — Probely — reads as "probably" — Stackify — an existing APM product — among others).</p>
+<p><strong>Notable finding: every one of these is taken on .com too</strong> — domainers have mined the suffix trick as thoroughly as bare words. <code>Mintly.com</code> (registered 2006) is parked on the aftermarket, see the table above. But <code>.dev</code>/<code>.app</code>/<code>.build</code>/<code>.codes</code> are wide open for most of them.</p>
+<div class="table-scroll">
+<table>
+<caption>22 suffix names checked across all 5 extensions.</caption>
+<thead><tr><th>Name</th><th>Base + suffix</th><th>.com</th><th>.dev</th><th>.app</th><th>.build</th><th>.codes</th></tr></thead>
+<tbody>
+<tr><td class="name">Craftly</td><td>Craft + ly</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Mintly</td><td>Mint + ly</td><td><span class="badge taken">Taken*</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Stackly</td><td>Stack + ly</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Shiply</td><td>Ship + ly</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Threadly</td><td>Thread + ly</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Forkly</td><td>Fork + ly</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Pipely</td><td>Pipe + ly</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Patchly</td><td>Patch + ly</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Craftus <span class="star">★</span></td><td>Craft + us</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Sparkus <span class="star">★</span></td><td>Spark + us</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Sculptus <span class="star">★</span></td><td>Sculpt + us</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Compilus <span class="star">★</span></td><td>Compile + us</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Cronus</td><td>Cron + us</td><td><span class="badge taken">Taken*</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td></tr>
+<tr><td class="name">Probeus <span class="star">★</span></td><td>Probe + us</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Craftify</td><td>Craft + ify</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Sparkify</td><td>Spark + ify</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Debugify</td><td>Debug + ify</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Deployify <span class="star">★</span></td><td>Deploy + ify</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Shipify</td><td>Ship + ify</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Forkify</td><td>Fork + ify</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Patchify</td><td>Patch + ify</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+<tr><td class="name">Renderify</td><td>Render + ify</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td></tr>
+</tbody>
+</table>
+</div>
+<p class="note">* Mintly.com (registered 2006) and Cronus.com (registered, actively listed for sale via a domain broker) are both on the aftermarket, not standard registration. ★ = available on 4 of 5 extensions, only .com taken — the strongest suffix results.</p>
+
+<h2>Category 5 — Advanced / obscure dev terms</h2>
+<p>Past the everyday vocabulary (fork, deploy, cache) into more insider CS jargon: concurrency primitives (Mutex, Barrier), distributed-systems terms (Raft, Paxos, Quorum, Gossip, Shard), compiler internals (Lexer, Thunk, Sigil, Monad), git plumbing (Bisect, Cherry, Stash), and ML vocabulary (Tensor, Gradient, Epoch). Dropped a few candidates for bad connotations before checking: <strong>Nonce</strong> (a real cryptographic term, but also offensive British slang — not worth the risk), and <strong>Deadlock / Segfault / Panic</strong> (technically on-brand for a coding tool, but all read as "something broke," the opposite of "create anything").</p>
+<p><strong>.com was a clean sweep of "taken" again</strong> — for real reasons: a follow-up B2B SaaS collision check (see <a href="#collisions">Collision Check</a>) found that <strong>24 of these 26 names are already used as a brand by a real, currently-operating tech/SaaS company</strong> — only <code>Bisect</code> and <code>Zombie</code> came back clean. This is a strong pattern: meaningful, memorable CS jargon is exactly what other technical founders reach for too. Seven names — <strong>Sigil, Monad, Quorum, Raft, Checkpoint, Vertex, Stash</strong> — are also taken on <em>every single TLD checked</em>, including .build and .codes.</p>
+<div class="table-scroll">
+<table>
+<caption>26 advanced/obscure terms checked across all 5 extensions. Collision = an existing B2B SaaS/tech company already uses this name (see Collision Check section for details + fallback domains).</caption>
+<thead><tr><th>Name</th><th>Domain</th><th>.com</th><th>.dev</th><th>.app</th><th>.build</th><th>.codes</th><th>Collision?</th></tr></thead>
+<tbody>
+<tr><td class="name">Barrier</td><td>concurrency (sync barrier)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Mutex</td><td>concurrency (mutual exclusion lock)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Heap</td><td>data structure / memory region</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Thunk</td><td>compiler term (deferred computation)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Lexer</td><td>compiler (tokenizer)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Paxos</td><td>distributed consensus algorithm</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Gossip</td><td>distributed systems (gossip protocol)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge unknown">Yes (med.)</span></td></tr>
+<tr><td class="name">Shard</td><td>database/distributed partition</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Watermark</td><td>stream processing (event-time marker)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Tombstone</td><td>database (deletion marker)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge unknown">Yes (med.)</span></td></tr>
+<tr><td class="name">Jitter</td><td>networking (latency variance)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Tensor</td><td>ML (multi-dim array)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Gradient</td><td>ML (optimization)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Epoch</td><td>ML / time (training pass, or unix time origin)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Sentinel</td><td>Redis/k8s (monitoring node)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Handshake</td><td>networking (connection setup)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Bisect</td><td>git (binary search for a bad commit)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">No</span></td></tr>
+<tr><td class="name">Cherry</td><td>git (cherry-pick)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Zombie</td><td>OS (defunct process)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">No</span></td></tr>
+<tr><td class="name">Sigil</td><td>syntax marker (Perl/Ruby/Elixir sigils)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Monad</td><td>functional programming</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Quorum</td><td>distributed consensus</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Raft</td><td>distributed consensus algorithm</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Checkpoint</td><td>ML / systems (saved state)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Vertex</td><td>graph theory node</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Stash</td><td>git (stash)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+</tbody>
+</table>
+</div>
+<p class="note">Domain-availability data above predates the collision check and is unaffected by it (a name can be domain-available yet still collide with a company that owns a <em>different</em> domain/TLD for their brand). See <a href="#collisions">Collision Check</a> for company names and fallback options.</p>
+
+<h2>Category 6 — 50 more advanced dev terms (collision-checked from the start)</h2>
+<p>Expanding Category 5 with 50 more terms — more concurrency primitives (Semaphore, Spinlock, Fiber, Actor), memory/allocator jargon (Arena, Slab, Guard, Latch), PL theory (Closure, Combinator, Continuation, Phantom types), distributed-systems vocabulary (Byzantine, Rebalance, Hinted handoff, Sloppy quorum), database internals (Vacuum, Compaction, Isolation, Predicate), and security terms (Taint, Attest, Enclave, Warden) — this time checking for B2B SaaS collisions on every single one, not as a retrofit.</p>
+<p><strong>37 of these 50 also collide</strong> with an existing company — a similarly high hit rate to Category 5, reinforcing that well-known CS jargon is heavily mined territory for tech branding generally, not a fluke of the first batch. The 13 genuinely clean names are the best material in this whole report for a name that's both technically evocative <em>and</em> safe to build a brand on.</p>
+<div class="table-scroll">
+<table>
+<caption>50 terms checked across all 5 extensions + B2B SaaS collision search. codes:unknown = rate-limited during the check, not confirmed either way.</caption>
+<thead><tr><th>Name</th><th>Domain</th><th>.com</th><th>.dev</th><th>.app</th><th>.build</th><th>.codes</th><th>Collision?</th></tr></thead>
+<tbody>
+<tr><td class="name">Semaphore</td><td>concurrency (signaling primitive)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Spinlock</td><td>concurrency (busy-wait lock)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Futex</td><td>concurrency (fast userspace mutex)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge unknown">Yes (med.)</span></td></tr>
+<tr><td class="name">Fiber</td><td>concurrency (lightweight thread)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Actor</td><td>concurrency (actor model)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Reactor</td><td>concurrency (reactor pattern)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Rendezvous</td><td>concurrency (channel sync point)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Preempt</td><td>OS scheduling (preemption)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Arena</td><td>memory (arena allocator)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Slab</td><td>memory (slab allocator)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Canary</td><td>testing/security (canary release/token)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Trampoline</td><td>compiler (tail-call trampoline)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Guard</td><td>PL (guard clause)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Prefetch</td><td>systems (cache prefetching)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Latch</td><td>concurrency (countdown latch)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Closure</td><td>PL (lexical closure)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Combinator</td><td>PL (functional combinator)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge unknown">Yes (med.)</span></td></tr>
+<tr><td class="name">Continuation <span class="star">★</span></td><td>PL (continuation-passing style)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">No</span></td></tr>
+<tr><td class="name">Desugar <span class="star">★</span></td><td>compiler (syntax desugaring)</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">No</span></td></tr>
+<tr><td class="name">Peephole <span class="star">★</span></td><td>compiler (peephole optimization)</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">No</span></td></tr>
+<tr><td class="name">Grammar</td><td>PL (formal grammar)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">No</span></td></tr>
+<tr><td class="name">Hygiene</td><td>PL (macro hygiene)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge unknown">Unknown*</span></td><td><span class="badge available">No</span></td></tr>
+<tr><td class="name">Phantom</td><td>type theory (phantom type)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Variance</td><td>type theory (co/contravariance)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Reify</td><td>PL (reification)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Unify</td><td>PL (type unification)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Membership</td><td>distributed systems (cluster membership)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">No</span></td></tr>
+<tr><td class="name">Failover <span class="star">★</span></td><td>systems reliability</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">No</span></td></tr>
+<tr><td class="name">Byzantine</td><td>distributed systems (Byzantine fault tolerance)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Rebalance</td><td>distributed systems (partition rebalancing)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Sloppy</td><td>distributed systems (sloppy quorum)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">No</span></td></tr>
+<tr><td class="name">Hinted</td><td>distributed systems (hinted handoff)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge unknown">Yes (med.)</span></td></tr>
+<tr><td class="name">Vacuum</td><td>database (Postgres VACUUM)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge unknown">Yes (med.)</span></td></tr>
+<tr><td class="name">Compaction <span class="star">★</span></td><td>database (LSM-tree compaction)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">No</span></td></tr>
+<tr><td class="name">Redo</td><td>database (redo log)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Isolation</td><td>database (transaction isolation)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">No</span></td></tr>
+<tr><td class="name">Predicate</td><td>logic/database (predicate lock)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Backpressure <span class="star">★</span></td><td>streaming systems</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">No</span></td></tr>
+<tr><td class="name">Demux</td><td>networking/hardware (demultiplexer)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge unknown">Yes (med.)</span></td></tr>
+<tr><td class="name">Ingress</td><td>k8s/networking</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge unknown">Yes (med.)</span></td></tr>
+<tr><td class="name">Egress</td><td>k8s/networking</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Sidecar</td><td>k8s pattern</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Bulkhead</td><td>resilience pattern</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge unknown">Yes (med.)</span></td></tr>
+<tr><td class="name">Debounce</td><td>UI/electronics (rate limiting)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Backoff</td><td>systems (exponential backoff)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">No</span></td></tr>
+<tr><td class="name">Mesh</td><td>networking (service mesh)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Taint</td><td>security/PL (taint analysis)</td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">Available</span></td><td><span class="badge available">No†</span></td></tr>
+<tr><td class="name">Attest</td><td>security (remote attestation)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Enclave</td><td>security (secure enclave)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Yes</span></td></tr>
+<tr><td class="name">Warden</td><td>security (access control)</td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge available">Available</span></td><td><span class="badge taken">Taken</span></td><td><span class="badge taken">Yes</span></td></tr>
+</tbody>
+</table>
+</div>
+<p class="note">★ = clean (no collision) AND available on 3+ of 5 extensions — the standouts, already folded into <a href="#available-now">Available Now</a>. * Hygiene.codes hit a rate limit mid-check and was never confirmed either way — worth a manual recheck. † Taint has no brand collision, but the word has a crude slang meaning in British English (perineum) — same caveat as "Nonce" earlier in this report; consider carefully for anything customer-facing.</p>
+
+<h2>Alt-TLD spot check — top 10 names on .io</h2>
+<p>From the first pass: the 5 strongest name from each of Category 1/2 were also checked on .io. All 10 were taken (.io is nearly as squatted as .com for real words).</p>
+<div class="table-scroll">
+<table>
+<thead><tr><th>Name</th><th>.io</th><th>since</th></tr></thead>
+<tbody>
+<tr><td class="name">Forge</td><td><span class="badge taken">Taken</span></td><td>2011-03-20</td></tr>
+<tr><td class="name">Craft</td><td><span class="badge taken">Taken</span></td><td>2013-06-20</td></tr>
+<tr><td class="name">Weave</td><td><span class="badge taken">Taken</span></td><td>2011-05-05</td></tr>
+<tr><td class="name">Loom</td><td><span class="badge taken">Taken</span></td><td>2012-03-05</td></tr>
+<tr><td class="name">Bloom</td><td><span class="badge taken">Taken</span></td><td>2017-11-13</td></tr>
+<tr><td class="name">Compile</td><td><span class="badge taken">Taken</span></td><td>2010-10-23</td></tr>
+<tr><td class="name">Runtime</td><td><span class="badge taken">Taken</span></td><td>2014-08-28</td></tr>
+<tr><td class="name">Kernel</td><td><span class="badge taken">Taken</span></td><td>2010-12-21</td></tr>
+<tr><td class="name">Stack</td><td><span class="badge taken">Taken</span></td><td>2011-10-21</td></tr>
+<tr><td class="name">Deploy</td><td><span class="badge taken">Taken</span></td><td>2012-10-14</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2 id="collisions">Collision check &amp; fallback domains</h2>
+<p>Every name in Categories 5 and 6 (76 total: 26 + 50) was searched individually for an existing, currently-operating B2B SaaS/cybersecurity/fintech/AI company already using it as a brand — not just documentation mentioning the term generically. <strong>This check was NOT run on Categories 1–4</strong> (the plain-English "create anything" words, dev-term words, coined OpenClaw/T3-style names, or suffix remixes) — those are either too generic to attribute to one company (Forge, Craft) or invented compounds unlikely to collide (Q3Code, ForgeClaw), but they haven't been formally verified the same way.</p>
+<p><strong>Result: 61 of 76 advanced/obscure terms (80%) collide with a real company</strong> — overwhelmingly cybersecurity, fintech, and AI/B2B-SaaS firms, exactly the pattern you flagged. For every collision, 4 prefixes (<code>Get-</code>/<code>Try-</code>/<code>Use-</code>/<code>Run-</code>) and 4 suffixes (<code>-ly</code>/<code>-us</code>/<code>-ify</code>/<code>-io</code>) were checked on <code>.com</code> to find a clean alternative. 17 names had no clean fallback among those 8 options — for those, either accept the collision risk, try a different modifier, or drop the name.</p>
+<div class="table-scroll">
+<table>
+<caption>Collided names only (15 came back clean — Bisect, Zombie, Continuation, Desugar, Peephole, Grammar, Hygiene, Membership, Failover, Sloppy, Compaction, Isolation, Backpressure, Backoff, Taint — no entry needed).</caption>
+<thead><tr><th>Name</th><th>Collides with</th><th>Space</th><th>Best fallback .com</th></tr></thead>
+<tbody>
+<tr><td class="name">Mutex</td><td>Mutex Inc / Mutex Systems</td><td>B2B SaaS/AI, cybersecurity, fintech</td><td><code>getmutex.com</code></td></tr>
+<tr><td class="name">Heap</td><td>Heap Inc. (heap.io, now Contentsquare)</td><td>Product analytics SaaS</td><td><code>runheap.com</code></td></tr>
+<tr><td class="name">Barrier</td><td>Barrier Networks</td><td>Cybersecurity (MSSP)</td><td><code>runbarrier.com</code> / <code>barrierify.com</code></td></tr>
+<tr><td class="name">Sigil</td><td>Sigil, Inc. (sigilprotects.com)</td><td>B2B SaaS — brand protection</td><td class="note">None found — needs a different name</td></tr>
+<tr><td class="name">Thunk</td><td>Thunk.AI</td><td>AI enterprise automation</td><td><code>runthunk.com</code></td></tr>
+<tr><td class="name">Monad</td><td>Monad, Inc. / monad.xyz</td><td>Cybersecurity data pipeline / blockchain</td><td><code>runmonad.com</code></td></tr>
+<tr><td class="name">Lexer</td><td>Lexer.io</td><td>Customer Data Platform SaaS</td><td><code>runlexer.com</code></td></tr>
+<tr><td class="name">Quorum</td><td>Quorum Software / Quorum.us</td><td>Enterprise software</td><td class="note">None found — needs a different name</td></tr>
+<tr><td class="name">Raft</td><td>Raft (teamraft.com) / raft.ai</td><td>Govtech/defense AI; logistics AI</td><td class="note">None found — needs a different name</td></tr>
+<tr><td class="name">Paxos</td><td>Paxos Trust Company</td><td>Regulated fintech/blockchain</td><td><code>trypaxos.com</code></td></tr>
+<tr><td class="name">Gossip</td><td>Gossip Insights / Gossip Analytics</td><td>AI social listening SaaS</td><td><code>rungossip.com</code></td></tr>
+<tr><td class="name">Shard</td><td>ShardSecure</td><td>Cybersecurity — cloud data security</td><td class="note">None found — needs a different name</td></tr>
+<tr><td class="name">Watermark</td><td>Watermark Insights</td><td>EdTech SaaS</td><td><code>trywatermark.com</code></td></tr>
+<tr><td class="name">Checkpoint</td><td>Check Point Software (NASDAQ: CHKP)</td><td>Cybersecurity — major publicly-traded</td><td><code>runcheckpoint.com</code></td></tr>
+<tr><td class="name">Sentinel</td><td>SentinelOne (NYSE: S) / Microsoft Sentinel</td><td>Cybersecurity — major publicly-traded</td><td class="note">None found — needs a different name</td></tr>
+<tr><td class="name">Tombstone</td><td>Acuity Analytics ("TombstoneHub")</td><td>Fintech / investment banking</td><td><code>gettombstone.com</code></td></tr>
+<tr><td class="name">Vertex</td><td>Vertex, Inc. (NASDAQ: VERX) / Google Vertex AI</td><td>Tax SaaS; AI platform — major brands</td><td class="note">None found — needs a different name</td></tr>
+<tr><td class="name">Tensor</td><td>tensor.trade / tensor.auto</td><td>Crypto trading; autonomous-vehicle AI</td><td class="note">None found — needs a different name</td></tr>
+<tr><td class="name">Gradient</td><td>Gradient AI</td><td>Insurtech (insurance underwriting AI)</td><td><code>gradientio.com</code></td></tr>
+<tr><td class="name">Epoch</td><td>Epoch Payments / Epoch AI</td><td>Fintech payments; AI research org</td><td class="note">None found — needs a different name</td></tr>
+<tr><td class="name">Jitter</td><td>Jitter (jitter.video)</td><td>Motion design/animation SaaS</td><td><code>getjitter.com</code></td></tr>
+<tr><td class="name">Handshake</td><td>Handshake (joinhandshake.com)</td><td>Recruiting/HR-tech — major brand</td><td><code>runhandshake.com</code></td></tr>
+<tr><td class="name">Cherry</td><td>Cherry Technologies (withcherry.com)</td><td>Fintech — BNPL/AP automation</td><td><code>runcherry.com</code></td></tr>
+<tr><td class="name">Stash</td><td>Stash Financial (stash.com)</td><td>Fintech — consumer investing, major brand</td><td class="note">None found — needs a different name</td></tr>
+<tr><td class="name">Semaphore</td><td>Semaphore (semaphore.io, ex-SemaphoreCI)</td><td>Dev-tools — CI/CD SaaS</td><td><code>usesemaphore.com</code></td></tr>
+<tr><td class="name">Spinlock</td><td>Spinlock Technologies / Spinlock Security</td><td>Cybersecurity consulting</td><td><code>getspinlock.com</code></td></tr>
+<tr><td class="name">Futex</td><td>Futex Labs / FuTex Systems</td><td>CRM/marketing automation; fintech</td><td><code>getfutex.com</code></td></tr>
+<tr><td class="name">Fiber</td><td>Fiber AI (fiber.ai) / gofiber.io</td><td>AI data APIs; dev-tools framework</td><td class="note">None found — needs a different name</td></tr>
+<tr><td class="name">Actor</td><td>Apify ("Actor"/"Actors")</td><td>Dev-tools — web scraping/automation</td><td class="note">None found — needs a different name</td></tr>
+<tr><td class="name">Reactor</td><td>Reactor (reactor.inc) / reactordata.com</td><td>AI infra for generative media; data platform</td><td><code>tryreactor.com</code></td></tr>
+<tr><td class="name">Rendezvous</td><td>TIBCO Rendezvous / HCL Rendezvous</td><td>Enterprise messaging middleware; AI collab</td><td><code>userendezvous.com</code></td></tr>
+<tr><td class="name">Preempt</td><td>Preempt Security (acquired by CrowdStrike)</td><td>Cybersecurity — Zero Trust</td><td><code>usepreempt.com</code></td></tr>
+<tr><td class="name">Arena</td><td>Arena Solutions ("Arena, a PTC Business")</td><td>Cloud PLM/QMS SaaS</td><td class="note">None found — needs a different name</td></tr>
+<tr><td class="name">Slab</td><td>Slab, Inc. (slab.com)</td><td>B2B SaaS — knowledge base/wiki</td><td><code>slabus.com</code></td></tr>
+<tr><td class="name">Canary</td><td>Thinkst Canary / Canary Technologies / Red Canary</td><td>Cybersecurity (deception); hospitality tech</td><td><code>canaryly.com</code></td></tr>
+<tr><td class="name">Trampoline</td><td>Trampoline AI (trampoline.ai)</td><td>AI-native SaaS — RFP/proposal automation</td><td><code>usetrampoline.com</code></td></tr>
+<tr><td class="name">Guard</td><td>Lakera Guard / Datadog AI Guard</td><td>AI/LLM security</td><td class="note">None found — needs a different name</td></tr>
+<tr><td class="name">Prefetch</td><td>Prefetch (prefetch.io)</td><td>Dev-tools — Brand Data API</td><td><code>getprefetch.com</code></td></tr>
+<tr><td class="name">Latch</td><td>Latch, Inc. (Nasdaq: LTCH, now "DOOR")</td><td>Enterprise IoT access control; 2FA</td><td class="note">None found — needs a different name</td></tr>
+<tr><td class="name">Closure</td><td>Closure (closure-intel.com, YC-backed)</td><td>AI SaaS — law enforcement/investigations</td><td><code>runclosure.com</code></td></tr>
+<tr><td class="name">Combinator</td><td>Y Combinator</td><td>Startup accelerator/VC (adjacent to dev/AI/fintech)</td><td><code>getcombinator.com</code></td></tr>
+<tr><td class="name">Phantom</td><td>Phantom Technologies (phantom.com)</td><td>Fintech/crypto — self-custodial wallet</td><td class="note">None found — needs a different name</td></tr>
+<tr><td class="name">Variance</td><td>Variance (variance.com, formerly Intrinsic)</td><td>AI — fraud/risk/compliance</td><td><code>runvariance.com</code></td></tr>
+<tr><td class="name">Reify</td><td>Reify (reify.com)</td><td>Dev-tools — low-code platform</td><td><code>runreify.com</code></td></tr>
+<tr><td class="name">Unify</td><td>Unify (unifygtm.com) / UnifyApps</td><td>AI GTM sales; iPaaS integration</td><td><code>unifyify.com</code></td></tr>
+<tr><td class="name">Byzantine</td><td>Byzantine Finance (byzantine.fi)</td><td>Fintech/DeFi infrastructure</td><td><code>trybyzantine.com</code></td></tr>
+<tr><td class="name">Rebalance</td><td>Rebalance360 / Rebalance Capital</td><td>Fintech — wealth management (RIA)</td><td><code>userebalance.com</code></td></tr>
+<tr><td class="name">Hinted</td><td>HintEd (hinted.me)</td><td>B2B SaaS — Digital Adoption Platform</td><td><code>tryhinted.com</code></td></tr>
+<tr><td class="name">Vacuum</td><td>Vacuumlabs</td><td>Fintech/blockchain product engineering</td><td><code>tryvacuum.com</code></td></tr>
+<tr><td class="name">Redo</td><td>Redo Tech, Inc. (redo.com)</td><td>B2B SaaS — e-commerce returns platform</td><td><code>redoio.com</code></td></tr>
+<tr><td class="name">Predicate</td><td>Predicate (predicate.io)</td><td>Fintech/crypto compliance — AML/CFT</td><td><code>getpredicate.com</code></td></tr>
+<tr><td class="name">Demux</td><td>Demux Video Services Ltd</td><td>UK digital forensics/investigative software</td><td><code>getdemux.com</code></td></tr>
+<tr><td class="name">Ingress</td><td>AI Ingress / Ingress Software / Ingress Technology AI</td><td>AI compliance SaaS</td><td><code>tryingress.com</code></td></tr>
+<tr><td class="name">Egress</td><td>Egress Software Technologies (Egress.com)</td><td>Cybersecurity — email security/DLP</td><td><code>runegress.com</code></td></tr>
+<tr><td class="name">Sidecar</td><td>Sidecar (sidecardata.com)</td><td>DataOps/AI platform</td><td><code>sidecarly.com</code></td></tr>
+<tr><td class="name">Bulkhead</td><td>Bulkhead (@bulkhead-ai)</td><td>AI dev-tools — security scanner</td><td><code>trybulkhead.com</code></td></tr>
+<tr><td class="name">Debounce</td><td>DeBounce (debounce.com)</td><td>Dev-tools — email verification API</td><td><code>getdebounce.com</code></td></tr>
+<tr><td class="name">Mesh</td><td>Mesh Payments / Mesh Security / Mesh.ai</td><td>Fintech spend mgmt; cybersecurity; AI/HR</td><td class="note">None found — needs a different name</td></tr>
+<tr><td class="name">Attest</td><td>Attest (askattest.com)</td><td>AI consumer/market research SaaS</td><td class="note">None found — needs a different name</td></tr>
+<tr><td class="name">Enclave</td><td>Enclave (enclave.ai) / Enclave Networks</td><td>AI security research; Zero Trust networking</td><td><code>useenclave.com</code></td></tr>
+<tr><td class="name">Warden</td><td>Warden AI (warden-ai.com) / warden.dev</td><td>AI governance/assurance; dev-tool CLI</td><td><code>wardenus.com</code></td></tr>
+</tbody>
+</table>
+</div>
+<p class="note">"Confidence: medium" collisions (noted in Categories 5/6 as "Yes (med.)") are real but smaller/less-established companies — worth a second look before ruling the name out entirely, unlike the "high confidence" ones (SentinelOne, Check Point, Vertex Inc, Handshake, Heap, Stash, Paxos, Monad, Quorum, Y Combinator), which are well-known enough that a collision is a real risk regardless of company size.</p>
+
+<h2 id="recommendations">Recommendations</h2>
+<div class="callout win">
+<h3>Best overall picks</h3>
+<ul>
+<li><strong>Q3Code</strong> or <strong>N1Build</strong> — clean sweep, available on all 5 extensions including .com. Lowest risk, most flexibility, and in the same coined/abbreviated spirit as "T3." Not expected to be premium (see below) — standard registration price applies. Not formally collision-checked (Category 3 scope), but as invented abbreviations they're a very low collision risk.</li>
+<li><strong>Desugar</strong> — the strongest find from the collision-check round: a real compiler term (syntax desugaring), <strong>zero B2B SaaS collision found</strong>, and open on 4 of 5 extensions (.dev/.app/.build/.codes, only .com taken). Arguably the best all-around pick in the whole report — real technical meaning + verified brand safety.</li>
+<li><strong>Continuation / Peephole / Compaction / Backpressure / Failover</strong> — the other clean (no-collision), 3-of-5-available standouts from the advanced-jargon rounds. All real, meaningful CS terms with no brand conflict found.</li>
+<li><strong>Shell</strong> — a real, memorable, on-theme word (shell = where you run code) with .app/.build/.codes wide open. Skip .com/.dev or pursue them later via the aftermarket route below. Not part of the formal collision check, but "Shell" is generic enough (an OS/computing term for decades) that risk seems low.</li>
+<li><strong>ForgeClaw / PixelClaw / NestCode / WeaveClaw</strong> — if a compound "claw/kit/nest" style brand appeals, any of these are open everywhere except .com.</li>
+<li><strong>Craftus / Sparkus / Sculptus / Compilus / Probeus / Deployify</strong> — the suffix-remix standouts, open on 4 of 5 extensions. Same low premium risk as the coined names above.</li>
+</ul>
+</div>
+<div class="callout">
+<h3>Reconsider: Barrier</h3>
+<p>Barrier was the top pick from the advanced-jargon round, but the collision check found <strong>Barrier Networks</strong>, a real UK cybersecurity managed-services company actively branded as "Barrier." If that's too close for comfort, the best fallbacks are <code>runbarrier.com</code> (prefix) or <code>barrierify.com</code> (suffix) — both confirmed available.</p>
+</div>
+<div class="callout">
+<h3>Other paths</h3>
+<ul>
+<li><strong>Buy on the aftermarket.</strong> <code>Diff.dev</code> is listed at a concrete $4,599 Buy-It-Now via Afternic; <code>Shell.dev</code> and <code>Mintly.com</code> are both listed but with no public price (would need a direct offer).</li>
+<li><strong>.build and .codes are the deepest wells found here.</strong> Nearly every "taken on .com" word from the original brainstorm turned out to be open on one or both of these — worth checking any other favorite word directly at <code>rdap.centralnic.com/build/domain/&lt;name&gt;.build</code> or via a registrar search.</li>
+<li><strong>The suffix trick is mined out on .com specifically</strong> — if a clean .com is a hard requirement, plan on either an aftermarket purchase or a different naming approach (e.g. Q3Code/N1Build-style coined abbreviations, which is exactly where the .com wins came from in this search).</li>
+<li><strong>If a name from Category 5/6 collides and has no fallback</strong> (17 names, listed in the Collision Check table — Sigil, Quorum, Raft, Shard, Sentinel, Vertex, Tensor, Epoch, Stash, Fiber, Actor, Arena, Guard, Latch, Phantom, Mesh, Attest), it's genuinely worth dropping rather than forcing a modifier — several of these collide with major, well-funded, or publicly-traded companies (SentinelOne, Check Point, Vertex Inc.) where even a prefixed variant risks confusion.</li>
+</ul>
+</div>
+
+<footer>
+Generated 2026-07-08 for Uniqus Code naming research. Availability checked live via RDAP against Verisign (.com), Google Registry (.dev/.app), Identity Digital (.io/.codes), and CentralNic (.build); results are a point-in-time snapshot and can change fast, especially for the newly-discovered open names above. Pricing figures noted with their source; GoDaddy figures from godaddy.com TLD pages, Cloudflare figures from cfdomainpricing.com (Cloudflare doesn't publish a static price list). Aftermarket prices from live Afternic listing pages. Premium-pricing assessments (Category 4 section) are estimated from registry pricing patterns and search spot-checks, not a live GoDaddy checkout screenshot — browser-automation credits ran out mid-session; verify at a registrar before registering if it matters. Collision-check results (Categories 5/6) are based on live web search for each name against B2B SaaS/cybersecurity/fintech/AI company databases and marketing sites — thorough but not exhaustive; a "no collision found" result means none turned up in this search, not an absolute guarantee, and a formal trademark search is still recommended before committing to any name.
+</footer>
+
+</div>
+</body>
+</html>

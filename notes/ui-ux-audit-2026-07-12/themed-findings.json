@@ -1,0 +1,636 @@
+[
+  {
+    "lens": "design-language",
+    "themes": [
+      {
+        "theme": "Emoji and off-set dingbat glyphs used as UI icons",
+        "severity": "high",
+        "summary": "The house rule 'one icon set, one stroke weight; NEVER emoji as UI icons' is broken across the entire app. True color emoji appear in the ProjectPicker icon picker/starter cards/project-avatar identity (ICON_CHOICES 🚀✨📊…, STARTERS, ProjectAvatar), the Design Systems Generate/Refine buttons (✨ U+2728), the Plan/ModelPicker (🔒 ⚡ ⚠), AgentPreviewPanel (🖱️ ✓ ✗ ▶ ✕), DatabasesView/DeployButton (🔑 ⬇ ⚠), ChatPanel (💭 ⚡ ⚠ ✕), PreviewPanel toasts (⚠ ✓), and shared Modal/Toaster primitives (✕ close, ✓/!/i status). Many of these are load-bearing (project avatar identity, safety-lock line, status badges), and each renders in the platform's own emoji/dingbat font at inconsistent color, weight, and metrics — undercutting the 'precision instrument' posture. The strongest offenders are true color emoji; the ▲◉✕✓ dingbats still violate the one-set/one-stroke half of the rule and sit beside proper stroke-2 SVGs in the same files.",
+        "recommendation": "Replace every emoji/dingbat glyph with the existing house single-stroke SVG icon set at one stroke weight (the same set already used for send/search/error-triangle/close elsewhere in each file). Keep existing aria-label/aria-hidden. If a colored project avatar is a deliberate product choice, isolate it as a labeled avatar affordance, not as app iconography.",
+        "affectedSurfaces": [
+          "Project dashboard (ProjectPicker: icon picker, starter cards, project avatars, tile chips)",
+          "Design Systems Generate/Refine buttons",
+          "Plan document + Model picker",
+          "Agent Preview live view + saved flows",
+          "Databases inspector + Deploy modal",
+          "Chat panel (reasoning/routing/error/dismiss)",
+          "Preview toolbar (share warning + copy/picker toasts)",
+          "Shared Modal close + Toast status/close primitives"
+        ],
+        "exampleFindings": [
+          "apps/web/components/ProjectPicker.tsx:57-60 ICON_CHOICES = [\"🚀\",\"✨\",\"📊\",…] is the entire project-icon picker; :2421 ProjectAvatar renders the emoji as project identity",
+          "apps/web/components/DesignSystemsView.tsx:489,739 \"✨ Generate\" / \"✨ Refine\" (U+2728)",
+          "apps/web/components/ModelPicker.tsx:212,297,317,135 \"⚡ Auto\" and \"⚠ Advanced override active\"; PlanDocument.tsx:265 \"🔒 Nothing runs until you click Approve\"",
+          "apps/web/components/AgentPreviewPanel.tsx:177 🖱️, :190 ✓/✗ badge, :297 ▶ Replay",
+          "apps/web/components/Modal.tsx:168 ✕ close; Toaster.tsx:44 ✓/!/i status, :66 ✕ close (siblings use stroke-2 SVGs)"
+        ]
+      },
+      {
+        "theme": "Off-scale / half-pixel type sizes bypass the --fs-* ramp",
+        "severity": "high",
+        "summary": "The :root type ramp (--fs-* = 10/11/12/13/14/16/20/24/32) whose own comment forbids half-pixels is bypassed by ~59 half-pixel selectors in globals.css (10.5/11.5/12.5/13.5/14.5px across chat, plan, settings, dashboard, design-systems, skills, marketing tables/status) plus scattered inline half-pixel font sizes in components (GuestBanner 12.5, FirstRunWizard 11.5, ChatPanel RoutingChip 11.5, PreviewPanel 12.5/11.5, DesignSystemsView 12.5). These render sub-pixel-blurry and make the documented scale unusable as a source of truth; the inline component sizes also hardcode raw numbers instead of var(--fs-*), so they won't track the density flip.",
+        "recommendation": "Snap every half-pixel to the nearest scale token via var(): 10.5→--fs-2xs/--fs-xs, 11.5→--fs-xs, 12.5→--fs-sm, 13.5→--fs-base, 14.5→--fs-md. Migrate inline component fontSize numbers to var(--fs-*) tokens/shared classes so they honor the ramp and density theme.",
+        "affectedSurfaces": [
+          "globals.css app-wide (~59 rules)",
+          "Guest banner + first-run wizard + coachmark (.cm-dismiss)",
+          "Chat panel composer/routing chip",
+          "Preview toolbar error panel + Share modal",
+          "Design Systems editor helpers",
+          "Dashboard mode tabs + example chips"
+        ],
+        "exampleFindings": [
+          "apps/web/app/globals.css: ~59 half-pixel rules incl. .plan-doc .plan-deliverables 14.5px (2015), .error-card-title 13.5px (2124), .settings-row .v 12.5px (5202), .dash-tabs button 12.5px (4482), .dash-chip 12.5px (4524), .status-state 12.5px (9784) — none reference the --fs-* ramp (67-75)",
+          "apps/web/components/ChatPanel.tsx:2030 RoutingChip fontSize: 11.5 (only inline half-pixel; crux of that finding)",
+          "apps/web/components/PreviewPanel.tsx:1279,1322 fontSize: 11.5 (share code + expiry); 1013/1069/1090/1211/1217/1233 fontSize: 12.5",
+          "apps/web/components/GuestBanner.tsx:62 fontSize: 12.5; FirstRunWizard.tsx:107 fontSize: 11.5; DesignSystemsView.tsx:1323,1328 fontSize: 12.5"
+        ]
+      },
+      {
+        "theme": "Hardcoded hex/rgba duplicates semantic + brand tokens (won't flip in light theme)",
+        "severity": "medium",
+        "summary": "Numerous surfaces hand-code colors that already exist as tokens, so they drift from the palette AND fail theme parity (raw values don't flip in light theme). The recurring culprit is the amber warn color hardcoded as rgba(240,180,41)/#f0b429 instead of --conf-medium (GuestBanner fill/border/icon, GuestLoginActions recovery-code border, PreviewAnnotator notice banner, .chat-offline-dot). Error reds are also hardcoded: convertFailed banner rgba(220,90,90), Deploy status banner rgba(80,200,120)/rgba(220,90,90), destructive-SQL confirm fill rgba(239,68,68,0.10) (== --conf-low-bg exactly), .status-dot.down #ff6b6b (siblings are tokenized). Blog thumbnails hardcode eight hex stops (several literally equal to --mk-* tokens). The GuestBanner case is user-impacting: in light theme the amber icon measures 1.68:1 contrast, dropping the 'temporary guest account' warning exactly where a user risks losing unsaved work.",
+        "recommendation": "Drive warn surfaces from --conf-medium / --conf-medium-bg (or a dedicated --warn token), error surfaces from --conf-low / --conf-low-bg, and status/thumbnail fills from the existing --mk-*/--brand-* tokens (color-mix for tints). Restores light-theme parity and one source of truth.",
+        "affectedSurfaces": [
+          "Guest account banner",
+          "Login recovery-code modal",
+          "Screenshot annotator notice banner",
+          "Chat offline indicator",
+          "Guest-convert failure banner",
+          "Deploy live-status banner",
+          "Databases destructive-SQL confirm",
+          "Status page down-dot",
+          "Blog index thumbnails"
+        ],
+        "exampleFindings": [
+          "apps/web/components/GuestBanner.tsx:63,64,74 rgba(240,180,41,…)/#f0b429 — no --conf-medium, no light-theme flip; icon 1.68:1 in light",
+          "apps/web/components/DeployButton.tsx:397-403 rgba(80,200,120,0.08)/rgba(220,90,90,0.08) instead of --conf-high-bg/--conf-low-bg (different hue+opacity, no flip)",
+          "apps/web/components/DatabasesView.tsx:506 background rgba(239,68,68,0.10) == --conf-low-bg exactly (border already tokenized)",
+          "apps/web/app/globals.css:9783 .status-dot.down #ff6b6b while .ok/.degraded siblings use var(--mk-green/--mk-amber); 8691-8699 .chat-offline-dot hardcoded amber",
+          "apps/web/app/globals.css:9589-9592 blog .post-thumb p1-p4 eight hardcoded stops (#2dd4bf/#38bdf8/#64d29b/#f6c86d literally == --mk-* tokens)"
+        ]
+      },
+      {
+        "theme": "Purple used as the active/focus/attention cue where the rule reserves magenta",
+        "severity": "high",
+        "summary": "The house palette reserves magenta (#B21E7D / --accent) for active/selected/focus/attention and purple (#482879) for structure only, yet purple (or a foreign indigo/violet) signals 'act on me' in several places. First-run coachmarks border and dismiss CTA use --brand-purple (the single most attention-seeking onboarding element renders in the recede color on near-black). Pending plan cards outline in --brand-purple (border + 8% fill) — the most action-needed card under-sells its CTA. Split-pane resize handles set background:--brand-purple with outline:none on :focus-visible, computing to 1.70:1 (a near-invisible focus ring, also a WCAG 2.4.7 weakness). And the active chat-session row uses raw indigo-500 rgba(99,102,241,0.10) instead of the magenta active tint.",
+        "recommendation": "Move active/focus/attention cues to magenta: coachmark border/CTA → var(--brand-magenta)/--brand-gradient; pending plan card → magenta tint border + color-mix; resize handles → drop outline:none (restore the global magenta ring) or set 2px solid var(--brand-magenta); chat-session active row → color-mix(in srgb, var(--brand-magenta) 9%, transparent). Keep purple for ambient structure/hover only.",
+        "affectedSurfaces": [
+          "First-run coachmarks",
+          "Plan document + plan stub (pending state)",
+          "In-app split-pane resize handles",
+          "Chat session dropdown (active row)"
+        ],
+        "exampleFindings": [
+          "apps/web/app/globals.css:2177,2198 .cm-pop border + .cm-dismiss fill use var(--brand-purple) on the first-run coachmark",
+          "apps/web/app/globals.css:1905-1908,1980-1986 .plan-card.pending / .plan-stub border-color var(--brand-purple) + rgba(72,40,121,0.08)",
+          "apps/web/app/globals.css:525-530,547-552 .resize-handle-h/v:focus-visible set background:var(--brand-purple); outline:none → 1.70:1 focus ring",
+          "apps/web/components/ChatSessionDropdown.tsx:208 active row background rgba(99,102,241,0.10) (indigo-500), not the magenta active tint"
+        ]
+      },
+      {
+        "theme": "var() fallbacks encode wrong-brand hues (violet #a78bfa/#7c3aed) or stale token values",
+        "severity": "medium",
+        "summary": "Many inline and CSS var() fallbacks carry the wrong color — either the banned clichéd-AI violet as the --accent fallback (#a78bfa) or --brand-purple fallback (#7c3aed, Tailwind violet-600, not the brand #482879), or a stale hex that diverges from the current token. Because the tokens are always defined in :root these rarely render, so most are low-severity latent drift — but they are copy-paste seams from a foreign design system: a dropped cascade in a scoped subtree would flash the banned violet as an active/diff/todo accent. ChatPanel additionally holds a cluster of stale-hex fallbacks (--conf-low #c0392b vs real #f87171, --conf-high #3ea76a vs #34d399, --brand-magenta #d4439a vs #B21E7D, etc.).",
+        "recommendation": "Prefer bare var(--token) (tokens are guaranteed in :root); where a fallback is kept, mirror the exact token hex — #B21E7D for --accent, #482879 for --brand-purple, and the current semantic values for --conf-*. Never seed a violet #a78bfa/#7c3aed fallback.",
+        "affectedSurfaces": [
+          "Chat panel (links, code labels, semantic fg pairs)",
+          "Coachmark + inline-tasks accent",
+          "Checkpoints diff renderer",
+          "Todo list in-progress state",
+          "AgentPreviewPanel",
+          "Provider-keys card",
+          "EditorPreviewArea dots",
+          "globals.css plan intro / .tasks-inline"
+        ],
+        "exampleFindings": [
+          "apps/web/components/ChatPanel.tsx:857,1134,1177 color: var(--accent, #a78bfa) — violet fallback for magenta; 1023-1052/2038 stale hex (--conf-low #c0392b, --conf-high #3ea76a, --brand-magenta #d4439a)",
+          "apps/web/app/globals.css:1851-1852,2177,2198,2227 var(--brand-purple, #7c3aed) and .tasks-inline-active var(--accent, #a78bfa) (Tailwind violets)",
+          "apps/web/components/CheckpointsModal.tsx:352 diff @@ line var(--accent, #a78bfa) purple fallback; TodoList.tsx:69 in_progress var(--accent, #a78bfa) (SubAgentList/ActivityMonitor correctly use #B21E7D)",
+          "apps/web/components/ProviderKeysCard.tsx:89 var(--conf-high, #3ea76a) near-duplicate green"
+        ]
+      },
+      {
+        "theme": "Undefined tokens make hardcoded off-brand fallbacks actually render",
+        "severity": "medium",
+        "summary": "Unlike the 'dead fallback' theme, several components reference tokens that are NOT defined in globals.css :root (--danger, --bg-deep, --text-default), so their hardcoded hex fallbacks DO paint — an off-brand error red and off-palette surfaces that also never flip in light theme. --danger→#d9534f renders the live/agent-preview status dots instead of the semantic --conf-low #f87171 across EditorPreviewArea, Workspace, and AgentPreviewPanel; --bg-deep→#08080a and --text-default→#e8e8ea render the Agent-Preview canvas and input text.",
+        "recommendation": "Replace the three undefined tokens with real ones: --danger → --conf-low, --bg-deep → --bg-code, --text-default → --text-primary (leave already-defined --conf-high/--conf-medium/--accent-primary/--bg-base references alone — their fallbacks never render). Restores the semantic error red and light-theme parity.",
+        "affectedSurfaces": [
+          "Project workspace shell + file explorer (live/agent dots)",
+          "Preview (Agent) live view canvas/input/dots",
+          "Builder agent-preview dot"
+        ],
+        "exampleFindings": [
+          "apps/web/components/EditorPreviewArea.tsx:389 live dot var(--danger, #d9534f) — --danger undefined so #d9534f renders (should be --conf-low)",
+          "apps/web/components/AgentPreviewPanel.tsx:558 liveDot var(--danger, #d9534f), :476 canvas var(--bg-deep, #08080a), :550 input var(--text-default, #e8e8ea) — all three tokens undefined in :root",
+          "apps/web/components/Workspace.tsx:1318 Builder agent-preview dot repeats var(--danger, #d9534f)"
+        ]
+      },
+      {
+        "theme": "Semantic color misuse: amber (warn) shown for hard errors / red deletions",
+        "severity": "medium",
+        "summary": "The semantic ramp maps --conf-medium (amber) to warn/building and --conf-low (red) to failed/error/deletion, but several surfaces cross the wires. In PreviewPanel the runtime-error badge count, the error 'kind' label, and the 'Preview unavailable' overlay icon all use --conf-medium amber for hard errors (the sibling TerminalPanel correctly maps stderr→--conf-low). The ActivityMonitor diff-card header colors the removed-lines count amber while the diff body colors the same '−N' red. The route-error/error-boundary warning-triangle icons are amber while the error <pre> in the same card is red. Each is an internal inconsistency where amber under-reads a genuine error as a mere caution.",
+        "recommendation": "Use --conf-low for hard-error/deletion signals: the runtime-error badge count, error 'kind' label, 'Preview unavailable' overlay icon, and the removed-lines count. Keep --conf-medium only for genuinely transient states ('slow / still starting'); for the crash/route-error icons decide intentionally (amber only if truly recoverable; the 404 info-circle stays neutral).",
+        "affectedSurfaces": [
+          "Preview toolbar runtime-error badge/panel + load overlay",
+          "Activity Monitor diff-card header",
+          "Route error card + error boundary fallback"
+        ],
+        "exampleFindings": [
+          "apps/web/components/PreviewPanel.tsx:973,1038,1227 error badge count / kind label / 'Preview unavailable' icon use var(--conf-medium) (TerminalPanel maps stderr→--conf-low)",
+          "apps/web/components/ActivityMonitor.tsx:98-99 removed count var(--conf-medium) while .am-diff-del body uses var(--conf-low) (globals.css:10031)",
+          "apps/web/app/globals.css:4183,4248 .error-fallback svg / .route-error-card svg var(--conf-medium) while error <pre> at 4202/4262 is var(--conf-low)"
+        ]
+      },
+      {
+        "theme": "Off-brand gradient-text overuse: pink→blue instead of purple→magenta, and gradient scalpel diluted",
+        "severity": "medium",
+        "summary": "The brand gradient (--brand-gradient = purple #482879 → magenta #B21E7D) is the single 'one moment per view' scalpel, but the live marketing heroes and stat numbers hardcode a pink→lavender→BLUE ramp (#ff4d97→#b96bff→#5b8bff) that reintroduces a cool blue competing with magenta — on .mk-hero h1 .grad (14 marketing pages) and .stat .num. The dashboard does it right (.dash-hero h1 .grad → var(--brand-gradient)). Compounding it, the gradient .num treatment is applied to whole rows of stat values including qualitative phrases ('Sub-second','Live','WorkOS','Plan-first','4 AI') on workspaces/enterprise/about, so four gradient-clipped phrases per band dilute the one-brand-moment discipline and repurpose the numeric-stat pattern for prose. A dead duplicate .marketing-shell .hero h1 .grad rule (7108, with the blue stop) also lingers as cruft.",
+        "recommendation": "Point .mk-hero h1 .grad and .stat .num at var(--brand-gradient) (or keep them strictly purple→magenta, dropping the #5b8bff blue stop); if the light hero variant is intentional, promote it to a named token (e.g. --brand-gradient-hero). Reserve the gradient .num treatment for genuinely numeric metrics — render qualitative stats in solid --mk-text. Delete the dead 7108-7113 rule.",
+        "affectedSurfaces": [
+          "Marketing page heroes (.mk-hero, 14 pages)",
+          "Hero + workspaces/enterprise/about stat grids",
+          "Marketing home hero (dead duplicate rule)"
+        ],
+        "exampleFindings": [
+          "apps/web/app/globals.css:8817 .mk-hero h1 .grad linear-gradient(100deg,#ff4d97,#b96bff 48%,#5b8bff 100%) and :8993 .stat .num same pink→blue ramp — should be var(--brand-gradient) (cf. .dash-hero at 4450)",
+          "apps/web/app/globals.css:7108-7113 dead duplicate .marketing-shell .hero h1 .grad (blue stop) overridden by 7780-7789 — cruft",
+          "apps/web/app/(marketing)/workspaces/page.tsx:9-14 STATS 'Sub-second'/'Live'/'Saved' and enterprise/page.tsx:162-167 'WorkOS'/'Plan-first' feed gradient-clipped .stat .num (qualitative prose in the numeral pattern)"
+        ]
+      }
+    ],
+    "topIndividual": [
+      {
+        "title": "Primary send buttons use a faded gradient when disabled (banned 'broken' pattern) — on both the marketing hero and the dashboard composer",
+        "severity": "high",
+        "lens": "design-language",
+        "surface": "Marketing hero composer + dashboard describe-mode composer",
+        "file": "apps/web/app/globals.css",
+        "line": "7273, 7284",
+        "principle": "Disabled buttons = flat gray (--bg-surface-active / --text-dim), never a faded gradient — a faded gradient reads as 'broken'.",
+        "evidence": ".hp-send { background: var(--brand-gradient) } (7273) with .hp-send:disabled { opacity:0.5; cursor:default; box-shadow:none } (7284) — a half-opacity purple→magenta gradient, the named banned pattern. It's the DEFAULT paint whenever the describe/hero textarea is empty (first paint), on the highest-traffic ungated affordance. The in-app .composer .send-btn:disabled (2985-2989) does it correctly with flat var(--bg-surface-active)/var(--text-dim).",
+        "impact": "On first paint the primary CTA on the site's most important conversion surface (and the dashboard composer) shows a washed-out gradient circle reading as broken/half-loaded rather than intentionally inert.",
+        "recommendation": "Give .hp-send:disabled a flat fill: background: var(--bg-surface-active); color: var(--text-dim); cursor: not-allowed; box-shadow: none — mirroring the documented .btn-primary/.send-btn disabled convention.",
+        "title_note": ""
+      },
+      {
+        "title": "Unsaved-file dirty dot renders MAGENTA (accent leak) instead of the intended amber warn color, competing with the real active-tab cue",
+        "severity": "high",
+        "lens": "design-language",
+        "surface": "Project workspace shell + file explorer",
+        "file": "apps/web/components/EditorPreviewArea.tsx",
+        "line": "312",
+        "principle": "Magenta (#B21E7D / --accent) = live/selected/focus only; --conf-medium #fbbf24 = warn/building.",
+        "evidence": "Line 309-312: dirty-dot color = status===\"saving\" ? var(--text-muted) : var(--accent-primary, #fbbf24). The fallback #fbbf24 shows amber was intended, but --accent-primary IS defined #B21E7D (globals.css:18), so the dot renders magenta — the same magenta as the active-tab underline (.tab underline var(--brand-magenta), globals.css:3607-3609).",
+        "impact": "Every unsaved file shows a magenta dot competing with the genuine magenta active-tab/active-row cues, eroding the 'accented = live/selected' contract and mislabeling a warn state as 'selected'.",
+        "recommendation": "Use var(--conf-medium) for the dirty dot and drop the misleading --accent-primary reference."
+      },
+      {
+        "title": "Green 'live' status-dot halo reused decoratively as a bullet on every static marketing eyebrow",
+        "severity": "low",
+        "lens": "design-language",
+        "surface": "All five marketing hero eyebrows",
+        "file": "apps/web/app/globals.css",
+        "line": "8855-8858",
+        "principle": "A status dot's color carries semantic meaning (green = live/operational); overloading it as decoration dilutes the convention.",
+        "evidence": ".mk-eyebrow .dot { background: var(--mk-green); box-shadow: 0 0 0 3px color-mix(...--mk-green 22%...) } (8855-8858), rendered as a bullet before Pricing/Models/Workspaces/Enterprise/Templates labels — none of which are 'live'. (Not an a11y issue: the dot always sits beside a text label.)",
+        "impact": "The same green halo reads as 'operational' in-app and 'decorative marker' in marketing, softly diluting the status-dot convention.",
+        "recommendation": "Use --mk-dim or a non-semantic marker for the marketing eyebrow bullet; reserve the green halo for surfaces where 'live/operational' is actually true."
+      }
+    ],
+    "counts": {
+      "critical": 0,
+      "high": 6,
+      "medium": 16,
+      "low": 16
+    }
+  },
+  {
+    "lens": "accessibility",
+    "counts": {
+      "critical": 2,
+      "high": 11,
+      "medium": 12,
+      "low": 12
+    },
+    "themes": [
+      {
+        "theme": "Suppressed keyboard focus rings (outline:none overriding the global magenta :focus-visible)",
+        "severity": "critical",
+        "summary": "Multiple interactive surfaces set `outline:none` on :focus (or never add :focus-within), defeating the global `*:focus-visible{outline:2px solid var(--brand-magenta);offset:2px}` ring at globals.css:193-198. Worst is the ungated marketing hero + bottom 'try it' composer — the primary conversion element — where the focused <textarea> gets zero visible focus indicator (globals.css:7172-7186, 8141-8156; no :focus-within on .hero-prompt/.bottom-prompt). The same pattern degrades the SQL console (globals.css:6283, a run-as-postgres surface with no undo), the contact form fields (globals.css:9735-9738, :focus outranks :focus-visible), and the composer textareas .hp-input/.bp-input (7179/8148). The last-resort global-error screen shows only the UA default (unbranded) ring because its self-contained <style> defines no :focus rule (global-error.tsx:19-23).",
+        "recommendation": "Never blanket-remove the outline: scope suppression to `:focus:not(:focus-visible)` and add an explicit `:focus-visible{outline:2px solid var(--brand-magenta);outline-offset:2px}` per control, OR add `:focus-within` ring styling on wrapper elements (mirroring the already-correct `.dash-hero .newproj-form:focus-within` at globals.css:4504 and `.composer-field:focus-within` at 2298). For global-error.tsx add `button:focus-visible{outline:2px solid #B21E7D;outline-offset:2px}` to its inline THEME_TOKENS block (hardcoded hex acceptable there).",
+        "affectedSurfaces": [
+          "Marketing hero + bottom build CTA composer",
+          "Databases → SQL console",
+          "Contact form",
+          "Last-resort global error screen"
+        ],
+        "exampleFindings": [
+          "Marketing hero + bottom 'try it' prompt inputs have no visible keyboard-focus indicator (globals.css:7172-7186, 8141-8156) — CRITICAL",
+          "SQL console kills the focus ring on keyboard focus (globals.css:6283; DatabasesView.tsx:470)",
+          "Contact form inputs suppress the global magenta focus ring (globals.css:9735-9738)",
+          "global-error.tsx recovery buttons rely on the UA default focus ring (global-error.tsx:19-23,64-98)"
+        ]
+      },
+      {
+        "theme": "Low-contrast text tokens fail WCAG 1.4.3 (< 4.5:1) as real body/meta text — often in BOTH themes",
+        "severity": "high",
+        "summary": "Several foreground tokens are used as genuine small/normal text below the 4.5:1 AA floor, and the two most-used ones fail in both light and dark. `--text-dim` #7c7a72 (globals.css:38-41) carries a 'now ~4.6:1' fix comment but recomputes to 3.85–4.48:1 on the surfaces where it actually sits (--bg-surface-hover, --bg-chat, --bg-pane) across 94 usages. `--mk-dim` #716d66 dark / #8b8790 light (globals.css:6708/6730) measures 2.96–3.89:1 on marketing surfaces across ~26 real-text usages (pricing, job meta, form notes, TOC) — including the marketing bottom-note pricing line. Magenta #B21E7D used as TEXT (not fill) also fails: prose/docs links 2.89–3.16:1 (globals.css:390,4932,9616,9749; stray dead #a78bfa fallback at 2227), per-card CTA links (community:216,227; contact:140; careers:255), changelog commit-SHA links dragged to 3.60:1 by opacity:0.62 (changelog/page.tsx:874-889), and small magenta text on magenta tints (role-pill globals.css:5538-5543 ~2.74:1; owner pill MembersView.tsx:226-227; WorkspaceSwitcher Create-org row:235,253). btn-danger white-on-#f87171 = 2.77:1 in dark (globals.css:2821-2823; OrgSettingsView.tsx:286,310,315).",
+        "recommendation": "Lift the token values to clear 4.5:1 on their LIGHTEST respective surface and re-verify on all surfaces they touch: --text-dim → ~#8a887f; --mk-dim dark ~#8b877f / light ~#6f6c75. For magenta-as-text use a lightened tint (color-mix magenta 70% + #fff ≈ 4.5:1) and/or a resting underline for prose/docs links; reserve #B21E7D for fills/rings/borders. Remove the opacity:0.62 multiplier on changelog links (full-opacity --mk-muted passes). Give btn-danger a darker red fill (~#c9433f) so white label clears 4.5:1 in dark. Delete the dead #a78bfa fallback at globals.css:2227.",
+        "affectedSurfaces": [
+          "In-app dark theme (chips, hints, meta, chat)",
+          "All marketing pages (pricing, jobs, forms, TOC, prose links)",
+          "Changelog commit links",
+          "Org Settings danger zone",
+          "Members / Workspace switcher badges + rows",
+          "Community / contact / careers CTA links"
+        ],
+        "exampleFindings": [
+          "--text-dim fails AA on the mid-tone dark surfaces where it is used (globals.css:38-41; 94 usages)",
+          "--mk-dim fails AA as real body/meta text in BOTH themes (globals.css:6708 dark, 6730 light; ~26 usages)",
+          "Changelog commit-hash links fail AA text contrast via opacity 0.62 (changelog/page.tsx:874-889)",
+          "btn-danger white on #f87171 = 2.77:1 in dark (globals.css:2821-2823; OrgSettingsView.tsx:286,310,315)",
+          "Magenta prose/CTA links below AA on dark surfaces (globals.css:390,4932,9616,9749; community/page.tsx:216,227)"
+        ]
+      },
+      {
+        "theme": "Dynamic/streaming regions are not announced to assistive tech (missing aria-live/role)",
+        "severity": "high",
+        "summary": "Live-updating content has no aria-live or role=log/status/alert, so screen-reader users get no announcement of the app's primary output or of failures. The worst is the chat panel: the streaming assistant answer + reasoning trace stream into bare divs (ChatPanel.tsx:842,1968,2527) with no live region — a WCAG 4.1.3 blocker for the panel's core function. Other gaps: Agent-preview live step stream (AgentPreviewPanel.tsx:146-199), guest login create/restore errors and busy state (GuestLoginActions.tsx:246-257,175-179; GuestBanner.tsx:151 already uses role=alert, so it's inconsistent), the guest-convert failure banner (ProjectPicker.tsx:874-886, while the in-form error at 1699 correctly uses role=alert), and the near-cap budget reading (OrgUsageView.tsx). One low nit is the inverse: error toasts are double-announced — role=alert nested inside aria-live=polite (Toaster.tsx:17,41).",
+        "recommendation": "Add role=\"log\" + aria-live=\"polite\" (aria-relevant=\"additions text\") to the chat conversation container; wrap agent-preview status/caption in aria-live=\"polite\"; add role=\"alert\" to the guest-error and convert-failure banners plus an aria-live=\"polite\" busy-status region — matching the existing role=alert patterns already used elsewhere in the same files. For Toaster, use one live mechanism (drop the wrapper aria-live OR the per-row roles) to stop double-announcing.",
+        "affectedSurfaces": [
+          "Chat panel (streaming answer)",
+          "Preview (Agent) live view",
+          "Login → guest create/restore errors",
+          "Project dashboard → convert-failure banner",
+          "Org Usage budget meter",
+          "Toaster"
+        ],
+        "exampleFindings": [
+          "Streaming conversation has no aria-live/role=log — screen readers never hear the answer (ChatPanel.tsx:842,1954-1972,2516-2529) — HIGH",
+          "Guest login errors not announced (GuestLoginActions.tsx:246-257; cf GuestBanner.tsx:151)",
+          "AgentPreviewPanel streams steps with no aria-live region (AgentPreviewPanel.tsx:146-199)",
+          "convertFailed banner not announced as alert (ProjectPicker.tsx:874-886; cf 1699)",
+          "Error toast double-announced: role=alert inside aria-live=polite (Toaster.tsx:17,41)"
+        ]
+      },
+      {
+        "theme": "Partial ARIA menu/tab widgets — role declared without the required keyboard pattern",
+        "severity": "medium",
+        "summary": "Several widgets set role=menu/menuitem or role=tablist/tab but never implement the expected keyboard model (arrow-key roving focus, focus-into-panel on open, focus-return to trigger, aria-controls→tabpanel), so the advertised ARIA contract is broken and partial ARIA is worse than a plain disclosure. Menus: Explore nav dropdown (NavExploreMenu.tsx:55,61,71 via Popover.tsx which only wires Esc+outside-click), file-explorer row context menu (FileExplorer.tsx:784-850, no focus-move-on-open/arrows; Workspace.tsx:164-171 is the good pattern), and the model flyout (ModelPicker.tsx:205-218, role=menu but <button> children lack role=menuitem + arrows). Tabs: dashboard describe/zip/github mode tabs + nested GitHub auth tabs (ProjectPicker.tsx:1255-1272,1496-1531), and the Design Systems 'Create method' tabs (DesignSystemsView.tsx:519-524) — role=tablist with no arrow keys, no aria-controls, no role=tabpanel. All remain operable via Tab, so these are conformance/polish gaps rather than blockers.",
+        "recommendation": "For each: either complete the pattern (roving tabindex + ArrowUp/Down or Left/Right, focus-in on open, focus-return on close, aria-controls wiring a role=tabpanel) mirroring the correct in-repo examples (ProjectActionsMenu.tsx:2234-2260, Workspace.tsx:164-171), OR downgrade the ARIA to match reality — a disclosure button (aria-expanded) with a plain nav list, or a role=group of toggle buttons with aria-pressed.",
+        "affectedSurfaces": [
+          "Marketing nav Explore dropdown",
+          "File explorer row context menu",
+          "Model picker flyout",
+          "Project dashboard mode tabs (+ GitHub auth tabs)",
+          "Design Systems 'Create method' tabs"
+        ],
+        "exampleFindings": [
+          "Explore dropdown role=menu with no arrow keys/focus management (NavExploreMenu.tsx:55; Popover.tsx:64-84)",
+          "Row context menu opens without moving focus in; no arrow keys despite role=menu (FileExplorer.tsx:406-433,784-850)",
+          "Create-method tablist has no arrow-key support / tabpanel wiring (DesignSystemsView.tsx:519-524)",
+          "Mode-tab 'tablist' lacks tabpanel wiring and arrow-key nav (ProjectPicker.tsx:1255-1272,1496-1531)",
+          "Model flyout role=menu without menuitem children or arrow-key nav (ModelPicker.tsx:205-218)"
+        ]
+      },
+      {
+        "theme": "Controls lack accessible names (placeholder-only inputs, icon-only buttons)",
+        "severity": "high",
+        "summary": "Multiple form controls carry only a placeholder or an unassociated sibling <label> (placeholder is not a label; vanishes on input — WCAG 1.3.1/3.3.2), and several icon-only buttons expose only a title attribute or a bare glyph rather than a robust accessible name (1.1.1/4.1.2). Worst is the guest-restore recovery-code input (GuestLoginActions.tsx:210-218) on the account-recovery path — placeholder only, no aria-label/label. Also unlabeled: Skills editor Name/Description/markdown fields (SkillsView.tsx:666-703, labels are unpaired siblings; DesignSystemsView.tsx:869 shows the correct aria-label pattern), and AgentPreviewPanel FlowComposer inputs/selects (AgentPreviewPanel.tsx:339-350,357-391). Icon-only naming gaps: chat attachment remove button announces bare 'x' (ChatPanel.tsx:1358-1365 — title but no aria-label, unlike sibling 1336-1343), and chat-session rename/delete buttons rely on title + ✎/× glyphs (ChatSessionDropdown.tsx:235-250). The Appearance segmented radiogroup has no accessible name (AppearanceCard.tsx:40-49).",
+        "recommendation": "Add a programmatic label to every control: aria-label (or <label htmlFor>+id) on the recovery-code, Skills, and FlowComposer inputs (e.g. 'Recovery code', 'Flow name', 'CSS selector'); add aria-label to icon-only buttons (e.g. `Remove ${file.name}`) instead of relying on title/glyph; add aria-label/aria-labelledby to the Appearance radiogroup pointing at its 'Theme'/'Density' label. Follow the correct in-repo examples (DesignSystemsView.tsx:869, PreviewPanel.tsx:851, ChatPanel.tsx:1336-1343).",
+        "affectedSurfaces": [
+          "Login → guest recovery-code form",
+          "Skills editor modal",
+          "Preview (Agent) FlowComposer",
+          "Chat panel attachment remove",
+          "Chat session dropdown",
+          "Settings → Appearance"
+        ],
+        "exampleFindings": [
+          "Guest-restore recovery-code input has no label — placeholder only (GuestLoginActions.tsx:210-218) — HIGH",
+          "Skills editor labels not programmatically associated (SkillsView.tsx:666-703)",
+          "FlowComposer inputs/selects have placeholder-only labels (AgentPreviewPanel.tsx:339-350,357-391)",
+          "Attachment remove button accessible name is bare 'x' (ChatPanel.tsx:1358-1365)",
+          "Appearance radiogroup has no accessible name (AppearanceCard.tsx:40-49)"
+        ]
+      },
+      {
+        "theme": "Touch targets below the 24px AA minimum (WCAG 2.5.8)",
+        "severity": "low",
+        "summary": "Small controls fall under the 24px target-size floor and are not enlarged by the @media (pointer:coarse) block. Attachment remove '×' buttons are 18×18px with no compensating padding, shared by both the marketing/landing composer and the chat panel (globals.css:2452-2457). The 'Have a recovery code?' toggle is ~15px tall (GuestLoginActions.tsx:195-202, .btn-ghost not in the coarse-pointer rule at globals.css:8422-8443). Chat-session rename/delete icon-btn-xs buttons are ~14-16px on fine pointers and only reach 36px on coarse (globals.css:3414-3424,8439-8442 — still below the 44px ideal).",
+        "recommendation": "Enlarge each hit area to ≥24px (ideally 44px) without growing the visual glyph — use min-width/min-height with transparent inset padding or negative margins, and add the affected classes (.attachment-chip button, .btn-ghost, .icon-btn-xs) to the @media (pointer:coarse) min-size rule, bumping the coarse minimum to 44px.",
+        "affectedSurfaces": [
+          "Marketing/landing composer",
+          "Chat panel attachments",
+          "Login → recovery-code toggle",
+          "Chat session dropdown"
+        ],
+        "exampleFindings": [
+          "Attachment remove button is an 18px touch target (globals.css:2452-2457; LandingPrompt.tsx:199-206 / ChatPanel.tsx:1358)",
+          "'Have a recovery code?' toggle is sub-24px (GuestLoginActions.tsx:195-202)",
+          "Icon-only rename/delete session buttons are tiny hit targets (ChatSessionDropdown.tsx:235-250)"
+        ]
+      },
+      {
+        "theme": "Light-theme parity gaps: dark tokens not flipped, leaving light-mode contrast below AA",
+        "severity": "critical",
+        "summary": "The light theme redefines base surface/text tokens but omits several tokens it still relies on for text, so light mode is a half-built theme with hard contrast failures. The marketing accent set (--mk-cyan/teal/green/amber) is never re-declared in light (globals.css:6721-6734), so the /status page green signalling drops to 1.69:1 on #f5f3ef — a critical AA failure. The semantic --conf-high #0f9d6b (3.47:1) and --conf-medium #b27400 (3.90:1) fail on white despite a comment claiming 'AA contrast on white' (globals.css:129-134), and the three --conf-*-bg tint tokens are never flipped for light (54/56/58), breaking real text-on-tint pairings (.repo-unlink-btn:hover, .db-sql-error). --mk-dim and magenta-as-text (above theme) also fail in light.",
+        "recommendation": "Add :root[data-theme=\"light\"] .marketing-shell overrides for --mk-cyan/teal/green/amber clearing 4.5:1 on #f5f3ef (green near #157347); deepen light --conf-high (~#0a7f54) and --conf-medium (~#8f5e00) to 4.5:1 as text; add explicit light --conf-*-bg tint overrides (or verify the composited result passes). Audit the full token set for any dark-only token consumed as light-mode text.",
+        "affectedSurfaces": [
+          "Marketing /status page",
+          "Light theme confidence/status badges",
+          "Light theme tinted callouts (.db-sql-error, .repo-unlink-btn)"
+        ],
+        "exampleFindings": [
+          "Marketing accent colors never flipped for light theme — status page green 1.69:1 (globals.css:6721-6734; status/page.tsx:9781,9785) — CRITICAL",
+          "Light theme leaves semantic status colors below AA and never overrides --conf-*-bg tints (globals.css:129-134, 54/56/58)"
+        ]
+      },
+      {
+        "theme": "Heading-order skips (h1→h3, or no h1) — WCAG 1.3.1",
+        "severity": "high",
+        "summary": "Several surfaces break the programmatic heading outline. The /status page has NO h1 and starts at h2 (status/page.tsx:48; the shared layout emits only an h2 'Ready to build?', and sibling pages contact/community/about all have h1) — high because it leaves screen-reader users with no top-level heading. Changelog and Blog listings jump h1→h3 with no intervening h2 (changelog/page.tsx:843→865; blog/page.tsx:20→46/65). The workspace editor empty state is a lone h3 with no parent h1/h2 in the shell (EditorPreviewArea.tsx:467; Workspace.tsx has no heading).",
+        "recommendation": "Give /status an <h1> ('System status.'). Demote changelog/blog card titles to <h2> or add a visible-or-sr-only <h2> ('All releases'/'Latest posts') before the list. For the workspace shell, use <h2> for the empty-state title or add a visually-hidden h1 so the outline is monotonic.",
+        "affectedSurfaces": [
+          "Marketing /status",
+          "Changelog + Blog index",
+          "Project workspace shell"
+        ],
+        "exampleFindings": [
+          "Status page has no <h1> — starts at <h2> (status/page.tsx:48) — HIGH",
+          "Changelog and Blog listings skip a heading level h1→h3 (changelog/page.tsx:843,865; blog/page.tsx:20,46,65)",
+          "Editor empty-state heading jumps to <h3> with no h1/h2 (EditorPreviewArea.tsx:467)"
+        ]
+      },
+      {
+        "theme": "Status/meaning conveyed by color alone (WCAG 1.4.1)",
+        "severity": "medium",
+        "summary": "A few surfaces encode state through color without a reliable non-color cue. The Agent-preview filmstrip encodes pass/fail purely as thumbnail border color (red vs default) with the accessible name being only the frame label — no text/icon/aria stating pass or fail (AgentPreviewPanel.tsx:573-583, ok flag at 211). Guest error text is distinguished only by --conf-low red with no icon/prefix/tinted container, next to similarly-styled help copy (GuestLoginActions.tsx:246-257). The near-cap budget meter leans on fill tone, though a redundant 'Approaching cap' status text does render (OrgUsageView.tsx:113-116) so it is a redundancy gap, not a strict failure. Decorative faux-chrome dots in the Design Systems preview are un-hidden color-only spans (DesignSystemPreview.tsx:114-115).",
+        "recommendation": "Add a non-color affordance for failure states: an sr-only 'passed'/'failed' appended to filmstrip thumbnail titles plus a ✗ overlay; a small alert icon or bold 'Couldn't sign in' lead on guest errors; a near-cap explanatory note mirroring the over-cap alert. Mark the decorative preview dots aria-hidden=\"true\".",
+        "affectedSurfaces": [
+          "Preview (Agent) filmstrip",
+          "Login → guest error states",
+          "Org Usage budget meter",
+          "Design Systems live preview"
+        ],
+        "exampleFindings": [
+          "Filmstrip thumbnails encode pass/fail by border color only (AgentPreviewPanel.tsx:573-583)",
+          "Guest error text carries meaning by red color alone (GuestLoginActions.tsx:246-257)",
+          "DesignSystemPreview faux top-bar dots are unlabeled decorative color spans (DesignSystemPreview.tsx:114-115)"
+        ]
+      }
+    ],
+    "topIndividual": [
+      {
+        "title": "Delete-file confirmation is a hand-rolled dialog with no role=dialog, focus trap, Esc, or focus return",
+        "surface": "Project workspace shell + file explorer",
+        "file": "apps/web/components/FileExplorer.tsx",
+        "line": "907-935",
+        "lens": "accessibility",
+        "severity": "high",
+        "principle": "WCAG 4.1.2 / 2.1.2 No Keyboard Trap / 2.4.3 Focus Order — modal dialog pattern",
+        "evidence": "DeleteConfirm renders .proj-dialog-overlay/.proj-dialog with NO role=\"dialog\", aria-modal, Escape handler, initial focus, focus-trap, or focus restoration — on the highest-stakes explorer action (deletes from sandbox + Storage). The shared Modal.tsx supplies all of these (role/aria-modal 143-144, Esc 81-85, trap 86-114, initial focus 72-74, restore 122) and is already used for 'Stop the dev server?' at EditorPreviewArea.tsx:476-480.",
+        "impact": "A keyboard user gets no Esc-to-cancel, focus is neither moved into nor trapped in the dialog, and it isn't announced as modal — on an irreversible destructive action, inconsistent with every other confirm in the app.",
+        "recommendation": "Replace the ad-hoc proj-dialog markup with the shared <Modal> (danger footer button), inheriting role=dialog, focus trap, Esc, and focus restore."
+      },
+      {
+        "title": "Editor/preview tab close/save affordance is a non-focusable <span onClick> nested inside the tab <button>",
+        "surface": "Project workspace shell",
+        "file": "apps/web/components/EditorPreviewArea.tsx",
+        "line": "299-330, 357-369",
+        "lens": "accessibility",
+        "severity": "high",
+        "principle": "WCAG 2.1.1 Keyboard / 4.1.2 — interactive content must not nest inside a button",
+        "evidence": "Each file/preview tab is a real <button>, and inside it the dirty-save (•) and close (×) controls are <span className=\"x\" onClick=…> with e.stopPropagation() (lines 300-330, 357-368). globals.css .tab .x (3610-3620) sets only size/color — no tabindex, role, or accessible name.",
+        "impact": "Keyboard-only and screen-reader users can switch to a tab but cannot reach or activate its ×/• — closing a file, saving a per-tab dirty file, or stopping a running dev server is mouse-only, and the control is announced as nothing. Nesting a clickable span in a <button> is also invalid HTML.",
+        "recommendation": "Render the close/save affordance as its own real <button type=\"button\"> with an aria-label (e.g. `Close ${filename}` / `Save ${filename}`) as a SIBLING of the tab button inside a flex container, not nested inside it."
+      },
+      {
+        "title": "Settings page has no <main> landmark and no skip-to-content link",
+        "surface": "Settings (all sections)",
+        "file": "apps/web/components/SettingsView.tsx",
+        "line": "229-244",
+        "lens": "accessibility",
+        "severity": "medium",
+        "principle": "WCAG 1.3.1 / 2.4.1 — semantic landmarks; skip-to-content",
+        "evidence": "SettingsView returns a fragment (<nav> then <div className=\"settings-wrap\">) with no <main>; layout.tsx renders {children} straight into <body> with no <main> and no skip link. Grep confirms no skip link exists anywhere in apps/web, and other routes (page.tsx:50, login:18, marketing layout:47, ProjectPicker:1200) DO wrap in <main> — settings is the outlier.",
+        "impact": "Screen-reader/keyboard users get no main-content landmark to jump to and no skip link, so navigating past the topnav requires tabbing through it every visit.",
+        "recommendation": "Wrap .settings-wrap in <main id=\"main\"> and add a visually-hidden skip-to-content link in the layout body targeting #main (the whole app also lacks a skip link)."
+      },
+      {
+        "title": "Tooltip has no Escape-to-dismiss",
+        "surface": "Shared Tooltip primitive",
+        "file": "apps/web/components/Tooltip.tsx",
+        "line": "35-57",
+        "lens": "accessibility",
+        "severity": "medium",
+        "principle": "WCAG 1.4.13 Content on Hover or Focus (dismissible)",
+        "evidence": "The wrapper opens on mouseenter/focus and closes only on mouseleave/blur — no keydown handler, so Escape while the trigger is focused doesn't dismiss the bubble. It renders via Popover WITHOUT onRequestClose, and Popover's Escape path is gated on onRequestClose (Popover.tsx:65,74-76), so it never fires.",
+        "impact": "WCAG 1.4.13 'dismissible' is not met: a keyboard user whose tooltip overlaps needed content cannot dismiss it without moving focus. Affects every tooltip in the app.",
+        "recommendation": "Add an Escape keydown handler on the wrapper that calls setOpen(false) while keeping focus on the trigger, or pass onRequestClose to Popover so its existing Escape path fires."
+      }
+    ]
+  },
+  {
+    "lens": "behavioral-ux",
+    "themes": [
+      {
+        "theme": "'Coming soon' / dead-stub upgrade affordances in the dashboard usage card",
+        "severity": "medium",
+        "summary": "The signed-in Free user's sidebar usage card shows a button-shaped, tinted-but-non-interactive 'More on Pro — coming soon' chip (cursor:default) that advertises a tier which does not exist and does nothing. It sits above a bare 'Plan: Free / Projects: N' quota readout with no value/outcome framing. This is exactly the 'coming soon' band-aid CLAUDE.md forbids and the raw-quota (not value) framing the behavioral-ux guidance warns against. Two verified findings target this same card.",
+        "recommendation": "Remove the 'More on Pro — coming soon' text and the faux-button styling until Pro actually ships; do not ship a dead pseudo-button. When Pro exists, replace it with a value-framed nudge surfaced at the real gate (the '1 private workspace at a time' limit) that names the unlocked outcome ('this next build needs a second workspace'), not a static plan label + project count.",
+        "affectedSurfaces": [
+          "Project dashboard — sidebar usage card (ProjectPicker.tsx:1185-1196)"
+        ],
+        "exampleFindings": [
+          "ProjectPicker.tsx:1194-1196 — <div className=\"upgrade\" title=\"Higher limits and team features are on the way.\">…'More on Pro — coming soon'</div>; .upgrade rule is cursor:default (globals.css:4587/4599), a non-interactive faux-button",
+          "ProjectPicker.tsx:1185-1193 — usage card renders only 'Plan: Free' + 'Projects: N' with no relation to any limit the user is approaching and no outcome framing"
+        ]
+      },
+      {
+        "theme": "Marketing copy promises billing/tier mechanisms the product cannot fulfil, or that mismatch their destination",
+        "severity": "high",
+        "summary": "Public marketing surfaces assert paid mechanics and destinations that don't exist in the product. Pricing markets a 'Start a Team trial' CTA and per-seat proration ('$20 per active member… we prorate the difference on your next invoice'), and Support explicitly tells users to 'Manage your plan and seats from Settings' — but there is NO billing/checkout/subscribe/cancel route anywhere and settings/page.tsx has zero plan/seat/subscription UI; the CTA dead-ends at /login. Separately, the Community 'Office hours' card's 'See the schedule' CTA points at the same Discord invite as the forum card, not a schedule. These are honesty gaps directly against the product's 'compete on trust' wedge and the easy-cancel principle from the Amazon FTC case.",
+        "recommendation": "Until real billing ships, make the Team CTA honest ('Join the Team waitlist' / 'Talk to us') and remove/soften the 'next invoice', 'prorate', and 'Manage your plan and seats from Settings' copy in pricing and support. When billing lands, add one-click self-serve cancel/downgrade in Settings so the copy becomes true. For the community card, point 'See the schedule' at a real schedule/events surface or relabel it (e.g. 'Join on Discord').",
+        "affectedSurfaces": [
+          "Pricing (marketing) — pricing/page.tsx:33, 98",
+          "Support (marketing) — support/page.tsx:90-91",
+          "Community (marketing) — community/page.tsx:120-128"
+        ],
+        "exampleFindings": [
+          "pricing/page.tsx:33 — cta:{label:'Start a Team trial', href:'/login'}; FAQ line 98 promises per-seat proration on 'your next invoice' with no billing route in the app",
+          "support/page.tsx:90-91 — 'Manage your plan and seats from Settings' points to a nonexistent Settings billing surface (settings/page.tsx has no billing UI)",
+          "community/page.tsx:120-128 — 'Office hours' cta 'See the schedule' → https://discord.gg/uniqus-code, the same invite already used by the forum card (line 90)"
+        ]
+      },
+      {
+        "theme": "Stale/vague product copy: garbled characters, filler labels, jargon, and out-of-date docblocks",
+        "severity": "high",
+        "summary": "Several visible or in-repo strings undercut the 'precision instrument' positioning through corruption or imprecision. The public /templates page renders genuine double-encoded mojibake (em-dashes/arrows) in 5 user-visible blurb/description fields. The login primary CTA says the filler-laden, uninformative 'Continue securely'. The beginner-facing Builder preview pill reintroduces a bare mono port ('Live preview :3000') that the design deliberately hid elsewhere. And the settings route docblock still claims model/prompts/appearance are 'scaffolded with a coming soon marker' though all three now persist, leaving dead .soon CSS behind.",
+        "recommendation": "Re-save templates.tsx as clean UTF-8 (no BOM), replacing every double-encoded em-dash/arrow with '—'/'→', and add a CI grep for the c3a2 byte pair. Reword the login CTA to describe the action without asserting a single provider (WorkOS AuthKit is multi-method), e.g. 'Continue to sign in'. Disambiguate multiple previews with a human ordinal ('Live preview 1/2') and keep the port only in the title attribute. Update the settings docblock to reflect the shipped persistence and delete the unreferenced .soon/.settings-soon-badge styles.",
+        "affectedSurfaces": [
+          "Templates gallery (public) — templates.tsx / templates/page.tsx",
+          "Login page — login/page.tsx:30-32",
+          "Project workspace Builder view — Workspace.tsx:1297",
+          "Settings route — settings/page.tsx:6-12 + globals.css:5203-5215"
+        ],
+        "exampleFindings": [
+          "templates.tsx lines 51, 95, 117, 170, 183 — user-visible {category.blurb}/{t.desc} strings contain double-encoded em-dash mojibake (bytes c3 a2 e2 82 ac e2 80 9d)",
+          "login/page.tsx:30-32 — <a className=\"signin-btn\">Continue securely</a>; 'securely' is filler and the button hints at no sign-in method",
+          "Workspace.tsx:1297 — `Live preview :${p.port}` reintroduces raw port in the beginner Builder view, contradicting the comment above it (1294-1296)",
+          "settings/page.tsx:8-11 — docblock says default model/prompts/appearance are 'scaffolded with a coming soon marker'; all three now persist and .soon CSS (globals.css:5203-5215) is dead"
+        ]
+      }
+    ],
+    "topIndividual": [
+      {
+        "title": "Top-nav links vanish on mobile with no hamburger replacement, stranding phone visitors",
+        "file": "apps/web/app/globals.css",
+        "line": "7686",
+        "surface": "Marketing home + nav/footer",
+        "lens": "behavioral-ux",
+        "severity": "high",
+        "principle": "Correctness-state / responsive: primary navigation must remain reachable at all breakpoints; conversion surfaces must not strand mobile visitors.",
+        "evidence": "globals.css:7686 `@media (max-width: 820px){ .marketing-shell .topnav .links { display: none; } }` hides the entire nav link set (defined only in page.tsx:29-37). No hamburger/menu-toggle component exists; at <520px the Sign in ghost button is also hidden (globals.css:7731-7733), leaving only the brand lockup + primary CTA.",
+        "impact": "On phones — the highest-traffic device class — a first-touch marketing visitor cannot reach Pricing, Docs, Models, Workspaces, or any Explore/footer destination from the top of the page; they must scroll the entire page to the footer. Harms navigation and conversion.",
+        "recommendation": "Add a mobile menu (hamburger) below 820px that opens the same link set (reuse NavExploreMenu / FOOTER_COLUMNS as the source of truth) instead of hiding the links outright."
+      },
+      {
+        "title": "Delete-database confirm leaves the primary action silently inert with no in-context reason",
+        "file": "apps/web/components/DatabasesView.tsx",
+        "line": "551-582",
+        "surface": "Databases inspector → Delete this database?",
+        "lens": "behavioral-ux",
+        "severity": "low",
+        "principle": "Honest, low-friction destructive flows; disabled-state legibility",
+        "evidence": "DatabasesView.tsx:551-558 the 'Delete forever' button is `disabled={actionBusy || deleteText !== (db.name ?? ref)}` (type-to-match gate). The input (577-582) has a visible label and name-as-placeholder but no live 'names don't match' helper and no aria-describedby tying the disabled button to the input. A trailing-space or case slip leaves the primary action silently dead.",
+        "impact": "A good anti-footgun gate (not a dark pattern), but a near-miss leaves the action silently inert with no explanation, reading as broken rather than protective.",
+        "recommendation": "Add a field hint once the user has typed and/or aria-describedby so the disabled reason is announced; trim whitespace before comparing."
+      }
+    ],
+    "counts": {
+      "critical": 0,
+      "high": 3,
+      "medium": 1,
+      "low": 3
+    }
+  },
+  {
+    "lens": "correctness-state",
+    "counts": {
+      "critical": 0,
+      "high": 1,
+      "medium": 4,
+      "low": 6
+    },
+    "themes": [
+      {
+        "theme": "Load-failure errors silently collapse into empty/blank states with no distinct error affordance or retry",
+        "severity": "medium",
+        "summary": "Multiple views catch a failed initial fetch and degrade to a state indistinguishable from 'genuinely empty' or 'not connected', with no persistent inline error, no retry, and (worst case) a lossy edit surface. TasksView.tsx:79-82 and CommentsView.tsx:53-56 catch the error, fire a transient toast, then set the list to [] (CommentsView) or prev ?? [] (TasksView) so the render falls into the true-empty copy ('No tasks yet…' TasksView.tsx:283-295; 'No comments yet…' CommentsView.tsx:205-217) — after the toast auto-dismisses the user sees a wrong empty state implying their data is gone. SettingsView.tsx:137/141/145 coerce a failed integration status fetch into a disconnected object, so a transient API error renders identically to a real 'Not connected'. Most seriously, CustomPromptsCard.tsx:108-113 only branches status.kind==='loading'; on 'error' it falls through to the full editable form with empty textareas (saved stays {custom_prompt:'',default_skills:''} at line 52) and neither the fields nor Save are disabled — typing and saving sends the empty diff and silently overwrites the real server-side prompt/skills that just failed to load.",
+        "recommendation": "Track a distinct error state separate from empty/loading and render an explicit error block styled with --conf-low plus a Retry action. For CustomPromptsCard, add a dedicated status.kind==='error' branch on initial load and keep the editors hidden/disabled until settings load successfully, so a failed load cannot be saved over. For SettingsView integrations, distinguish an errored status fetch from 'Not connected' rather than collapsing both.",
+        "affectedSurfaces": [
+          "Tasks view — apps/web/components/TasksView.tsx:79-82, 283-295",
+          "Comments view — apps/web/components/CommentsView.tsx:53-56, 205-217",
+          "Settings → Integrations (GitHub/Supabase/Figma) — apps/web/components/SettingsView.tsx:137, 141, 145",
+          "Settings → Agent → Custom prompts & default skills — apps/web/components/CustomPromptsCard.tsx:52, 108-113, 213-215"
+        ],
+        "exampleFindings": [
+          "TasksView/CommentsView: catch → toast.error then setList([]) → renders the true-empty state with no inline error or retry",
+          "SettingsView.tsx:137/141/145: status-fetch catch coerces failure to a disconnected object → transient error looks like 'Not connected'",
+          "CustomPromptsCard.tsx:108-113: only 'loading' branched; 'error' falls through to blank editable form, Save sends empty diff and overwrites unloaded data (data-loss risk)"
+        ]
+      },
+      {
+        "theme": "Async loading states are bare text, not layout-matched skeletons",
+        "severity": "low",
+        "summary": "Views that load asynchronously show a plain mono/lowercase text line instead of the layout-matched skeletons the app ships elsewhere (globals.css .skeleton / .ide-skeleton). TasksView.tsx:281-282 and CommentsView.tsx:203-204 render 'Loading…' as a single eyebrow line, then jump to a full row list (layout shift). SettingsView integration cards show '<span class=\"v\">checking…</span>' (300/348/394) and CustomPromptsCard.tsx:111 shows 'loading…'. This is the design-language §4 'every state gets craft — skeletons that match the layout' gap, not a functional break.",
+        "recommendation": "Replace the bare text with 2–3 hairline-divided skeleton rows sized like the real task/comment/integration row, reusing the shared .skeleton pulse, to avoid the load→list layout shift.",
+        "affectedSurfaces": [
+          "Tasks view — apps/web/components/TasksView.tsx:281-282",
+          "Comments view — apps/web/components/CommentsView.tsx:203-204",
+          "Settings → Integrations — apps/web/components/SettingsView.tsx:300, 348, 394",
+          "Settings → Agent → Custom prompts — apps/web/components/CustomPromptsCard.tsx:111"
+        ],
+        "exampleFindings": [
+          "TasksView.tsx:281-282 / CommentsView.tsx:203-204: `=== null ? <div style={eyebrow}>Loading…</div>` instead of a skeleton",
+          "SettingsView integration cards render 'checking…' / CustomPromptsCard 'loading…' as plain text where the doc calls for a .skeleton pulse"
+        ]
+      }
+    ],
+    "topIndividual": [
+      {
+        "title": "Destructive 'Confirm delete' button is painted GREEN (success token), not red",
+        "file": "apps/web/components/DesignSystemsView.tsx",
+        "line": "893",
+        "surface": "Design Systems editor — delete confirmation",
+        "lens": "correctness-state",
+        "severity": "high",
+        "principle": "Destructive/error styling must use the danger token (--conf-low); semantic color must match meaning.",
+        "evidence": "Line 893: `style={{ ...smallBtn, color: \"var(--conf-high, #e5484d)\" }}` on the armed 'Confirm delete' button (label at line 900). globals.css:53 defines `--conf-high: #34d399` (GREEN, the success/live token), so the token — not the #e5484d literal fallback — is what renders. The warmup Delete step (line 907) uses `var(--conf-medium)` → amber #fbbf24, so escalation is inverted: warmup amber, final irreversible delete green.",
+        "impact": "The most dangerous action in the view (permanent, no-undo delete of a saved design system) reads as the safe/positive green a user associates with success, misleading on the click that destroys data.",
+        "recommendation": "Use `var(--conf-low)` (red) for the Confirm delete text color. Note: there is no `btn-danger` class anywhere in the codebase, so ignore any suggestion to reuse one — the token fix stands on its own."
+      },
+      {
+        "title": "Org/project member removal is instant and irreversible with no confirm or in-flight guard",
+        "file": "apps/web/components/OrgMembersView.tsx",
+        "line": "81-89, 241-251",
+        "surface": "Org Members directory / Project Members",
+        "lens": "correctness-state",
+        "severity": "medium",
+        "principle": "Destructive actions need a confirm/undo guard and must be consistent with the app's own patterns.",
+        "evidence": "OrgMembersView remove button `onClick={() => void remove(member)}` (246) calls removeOrgMemberApi directly (remove fn 81-89) and drops the row with no confirm and no disabled guard on the button (241-251); busy state exists only for invite. MembersView.tsx:255 has the identical immediate-remove ✕ pattern. By contrast OrgSettingsView's leave/delete use an inline two-step confirm (281-320).",
+        "impact": "A single misclick silently revokes a teammate's access to shared projects with no undo, inconsistent with the deliberate two-step confirm the same feature uses for leave/delete.",
+        "recommendation": "Add a lightweight inline confirm (reuse the org-confirm-actions two-step pattern) or a confirm/undo toast before calling remove*MemberApi, and disable the remove control while a mutation is in flight to prevent double-submits/races."
+      },
+      {
+        "title": "A $0 monthly cap renders self-contradictory budget controls",
+        "file": "apps/web/components/OrgUsageView.tsx",
+        "line": "37-42, 92, 120-124",
+        "surface": "Org Usage view / Org Settings budget",
+        "lens": "correctness-state",
+        "severity": "medium",
+        "principle": "State handled consistently; no contradictory state across a screen.",
+        "evidence": "pct gates on `usage.budget_usd && usage.budget_usd > 0` (38), so budget_usd===0 → pct=null → the budget-position panel renders '∞' / 'No enforced ceiling' with the meter hidden (120-124). But status/header/enforcement gate on `budget_usd == null` and 0 !== null, so the same view simultaneously shows a $0.00 cap (92) and 'Runs pause at cap'. saveBudget (OrgSettingsView.tsx:81) only rejects amount<0, so a $0 cap is savable. (The auditor's broader claims of 'No monthly cap'/'Uncapped workspace'/'Monitoring only' were FALSE — those gate on ==null correctly; the real defect is only the pct-gated reading vs the $0.00 cap.)",
+        "impact": "An org that sets a $0 hard cap sees '∞ / No enforced ceiling' with no meter next to a $0.00 cap and 'Runs pause at cap' — undermining trust in spend controls.",
+        "recommendation": "Use `budget_usd == null` as the single 'uncapped' test everywhere (so 0 → pct=100, enforced $0 cap), OR reject 0 in saveBudget and treat blank as the only 'no cap'."
+      },
+      {
+        "title": "Dead hero-aurora markup: the documented ambient brand glow renders nothing",
+        "file": "apps/web/app/page.tsx",
+        "line": "52-56",
+        "surface": "Marketing home",
+        "lens": "correctness-state",
+        "severity": "low",
+        "principle": "No orphaned/non-functional markup; every decorative element gets craft.",
+        "evidence": "page.tsx:52-56 renders `<div className='hero-aurora' aria-hidden><span class='glow-top'/><span class='glow-box'/><span class='glow-bottom'/></div>`, but a grep of globals.css for `hero-aurora`/`.glow-` returns 0 matches and these four class names appear only in page.tsx — empty, unstyled spans.",
+        "impact": "The intended ambient hero glow is wired into the JSX but produces nothing; orphaned decorative markup. aria-hidden means no a11y harm — purely a dead-code/craft gap.",
+        "recommendation": "Either add the .hero-aurora/.glow-* CSS to render the documented radial brand glow, or remove the dead markup if the flat gradient hero is intentional."
+      },
+      {
+        "title": "Preview <iframe> has no sandbox attribute though the surrounding code treats the framed app as untrusted",
+        "file": "apps/web/components/PreviewPanel.tsx",
+        "line": "1180-1192",
+        "surface": "Preview stage — proxied app iframe",
+        "lens": "correctness-state",
+        "severity": "low",
+        "principle": "Defense-in-depth; the code's own comments treat the preview as untrusted.",
+        "evidence": "The <iframe> (1180-1192) sets key/ref/src/className/title/onLoad/onError but no sandbox attribute, while message listeners explicitly guard against a 'malicious preview app (or any cross-origin frame)' spoofing the URL bar (comment 613-617) and origin-check picker/error messages. The framed content is arbitrary agent/user-generated code.",
+        "impact": "Low: content is cross-origin (proxied) so same-origin DOM access is already blocked — this is defense-in-depth, not a rendered-UX defect.",
+        "recommendation": "Consider `sandbox=\"allow-scripts allow-forms allow-same-origin allow-popups\"` tuned to what the injected picker/nav script and previewed apps need; verify the picker still functions before shipping."
+      },
+      {
+        "title": "Templates category grids have no empty-state guard and no title/description line-clamp",
+        "file": "apps/web/app/(marketing)/templates/page.tsx",
+        "line": "43-78",
+        "surface": "Templates gallery",
+        "lens": "correctness-state",
+        "severity": "low",
+        "principle": "Every collection needs an empty/overflow story; long titles/descriptions should truncate cleanly.",
+        "evidence": "CATEGORIES.map → category.templates.map renders a 3-col .template-grid per category (43-78) with no zero-length fallback; an emptied category would render a bare heading over an empty grid. globals.css .template-body h3 (9395) and p (9396) have no -webkit-line-clamp, so unusually long copy could break card rhythm. (The repeated cards are a legitimate hand-curated collection — NOT a banned identical-card row.)",
+        "impact": "Low today because the catalog is static and curated; the risk is only for a future emptied category or overlong copy.",
+        "recommendation": "Add a minimal empty guard (skip or show 'more coming' when category.templates is empty) and a -webkit-line-clamp on .template-body h3/p for resilience."
+      }
+    ]
+  }
+]
