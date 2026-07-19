@@ -48,7 +48,17 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       suppressHydrationWarning
     >
       <head>
-        <script nonce={nonce} dangerouslySetInnerHTML={{ __html: APPEARANCE_BOOTSTRAP }} />
+        {/*
+         * Browsers deliberately hide the parsed nonce content attribute, so
+         * React sees `nonce=""` in the DOM even though the server emitted the
+         * request nonce and CSP accepted it. Suppress only that unavoidable,
+         * one-level attribute comparison; the nonce itself remains enforced.
+         */}
+        <script
+          nonce={nonce}
+          suppressHydrationWarning
+          dangerouslySetInnerHTML={{ __html: APPEARANCE_BOOTSTRAP }}
+        />
       </head>
       <body>
         <a className="skip-link" href="#main-content">

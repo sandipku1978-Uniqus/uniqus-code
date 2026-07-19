@@ -10,10 +10,24 @@ import {
   geminiWebSearchBillableUsage,
   mergeGeminiWebSearchQueries,
 } from "./google.js";
-import { OpenAIAdapter, openAIWebSearchBillableUsage } from "./openai.js";
-import { ZaiAdapter, zaiWebSearchBillableUsage } from "./zai.js";
+import {
+  OpenAIAdapter,
+  openAIWebSearchBillableUsage,
+  toResponsesTools,
+} from "./openai.js";
+import { ZaiAdapter, zaiWebSearchBillableUsage, toChatTools } from "./zai.js";
+import { webSearchToolForModel } from "../tools.js";
 
 describe("provider-side web-search billing", () => {
+  it("keeps platform search either request-bounded or completely absent", () => {
+    expect(webSearchToolForModel("claude-sonnet-4-6")).toMatchObject({
+      name: "web_search",
+      max_uses: 10,
+    });
+    expect(toResponsesTools([], false)).toEqual([]);
+    expect(toChatTools([], false)).toEqual([]);
+  });
+
   it("uses Anthropic's authoritative server-tool request count", () => {
     expect(
       anthropicWebSearchBillableUsage({

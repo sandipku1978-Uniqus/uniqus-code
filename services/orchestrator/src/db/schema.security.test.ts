@@ -18,4 +18,10 @@ describe("server-private schema controls", () => {
     expect(schema).toMatch(/from projects where id = old\.project_id for update/i);
     expect(schema).toMatch(/project_members_retain_owner/i);
   });
+
+  it("uses atomic credit escrow instead of an account-wide run lease", () => {
+    expect(schema).toMatch(/create or replace function public\.reserve_billing_credits/i);
+    expect(schema).toMatch(/drop table if exists billing_run_leases/i);
+    expect(schema).not.toMatch(/create table if not exists billing_run_leases/i);
+  });
 });

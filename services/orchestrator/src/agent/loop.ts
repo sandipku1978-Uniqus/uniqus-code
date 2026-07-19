@@ -13,6 +13,10 @@ import {
   estimateFixedPromptTokens,
   estimateMessageChars,
   estimateMessageTokens,
+  conservativeRequestCostUsd,
+  conservativeMessageTokenUpperBound,
+  conservativeFixedPromptTokenUpperBound,
+  postCompactionMessageTokenUpperBound,
   compactionTriggerTokens,
   contextWindowTokensForModel,
   type CompactionResult,
@@ -58,7 +62,6 @@ import {
   availableProvidersFromKeys,
   turnReferencesImage,
   lastUserMessageText,
-  type AutoPick,
 } from "./autoRouter.js";
 import {
   AGENT_TYPES,
@@ -86,7 +89,10 @@ import {
   type TokenUsage,
 } from "./providers/index.js";
 import { describeImage as describeImageGlm, layoutParse as glmLayoutParse } from "./providers/zai.js";
-import { describeImage as describeImageGemini } from "./providers/google.js";
+import {
+  describeImage as describeImageGemini,
+  VISION_BRIDGE_MODEL,
+} from "./providers/google.js";
 import type {
   ChangedFile,
   DesignTokens,
@@ -130,6 +136,7 @@ import { renderGuidancePacks } from "./guidancePacks.js";
 import { searchKnowledgeDocuments } from "../db/knowledgeDocuments.js";
 import { extractText } from "./knowledgeExtract.js";
 import { estimateTurnCostUsd } from "@gate15/api-types";
+import { assertPlatformModelPriced, RunPlatformSpend } from "./runSpend.js";
 import type { RunMetricsCollector } from "../telemetry/runMetrics.js";
 import {
   SemanticToolRetryTracker,
@@ -597,7 +604,14 @@ export interface LoopHooks {
    * surfaces as a tool error so the loop can recover. Absent ⇒ the tool is
    * unavailable (e.g. plan mode already active) and reports so to the model.
    */
-  requestPlan?: (reason: string) => Promise<string>;
+  requestPlan?: (
+    reason: string,
+    platformBudgetUsd?: number,
+  ) => Promise<{
+    text: string;
+    platformCostUsd: number;
+    unknownPlatformSpend?: true;
+  }>;
   /**
    * The CURRENT permission mode, read fresh before every tool call so a mid-turn
    * change (the composer's mode dropdown → `set_permission_mode`) takes effect on
@@ -758,11 +772,10 @@ export interface LoopOptions extends LoopHooks {
    */
   modelChoice?: ModelChoice;
   /**
-   * A task-aware Auto result computed concurrently by the caller. Property
-   * presence is significant: explicit null means "classification already ran
-   * and chose the static fallback"; absence preserves the in-loop classifier.
+   * Optional clean user directive for Auto routing when `userMessage` contains
+   * large inlined file bodies. Execution still receives the full message.
    */
-  preResolvedAutoPick?: AutoPick | null;
+  routingUserMessage?: string;
   /**
    * Reasoning effort for the agent turn (the composer's thinking control).
    * Passed through to the provider adapter, which maps it to its native
@@ -781,6 +794,8 @@ export interface LoopOptions extends LoopHooks {
    * for compaction and as the Anthropic provider key.
    */
   providerKeys?: ProviderKeys;
+  /** Billing provenance for each resolved key. Omitted by non-billing callers. */
+  providerKeySources?: Partial<Record<ModelProvider, "account" | "platform" | "missing">>;
   /**
    * The GitHub repo linked to this project, if any. Injected into the system
    * prompt so the agent knows it has a repo (and talks about git accordingly).
@@ -858,6 +873,8 @@ export interface LoopOptions extends LoopHooks {
   usageRunId?: string | null;
   /** Stable treatment/control assignment inherited by specialized sub-agents. */
   inheritedProfileCohort?: ProgressiveProfileCohort;
+  /** Hard ceiling for the portion of this loop funded by Gate 15 credentials. */
+  platformBudgetUsd?: number;
 }
 
 export interface LoopResult {
@@ -907,6 +924,12 @@ export interface LoopResult {
    * estimate stops under-counting whenever those tools ran. Absent when zero.
    */
   auxCostUsd?: number;
+  /** Lead-model cost priced once per provider request, never from aggregate usage. */
+  leadCostUsd: number;
+  /** Exact portion of this loop (lead + auxiliary + nested) funded by Gate 15 keys. */
+  platformCostUsd?: number;
+  /** A platform provider request started but returned no trustworthy usage receipt. */
+  unknownPlatformSpend?: true;
   /**
    * Why the final iteration ended, when known (e.g. "max_tokens" on a truncated
    * answer, "refusal"). Lets the server surface truncation/refusal on the
@@ -915,7 +938,7 @@ export interface LoopResult {
    */
   stopReason?: StreamTurnResult["stopReason"];
   /** Harness-enforced nested-loop bound, distinct from a provider stop reason. */
-  executionLimit?: "wall_time" | "iterations" | "output_tokens";
+  executionLimit?: "wall_time" | "iterations" | "output_tokens" | "credits";
   /** True only when the terminal provider turn contained a usable final answer. */
   finalAnswerEmitted: boolean;
 }
@@ -936,11 +959,98 @@ export function hasMeaningfulFinalAnswer(
   return content.some((block) => block.type === "text" && meaningful(block.text));
 }
 
-/** Explicit null is meaningful: it says the caller already resolved Auto to fallback. */
-export function hasPreResolvedAutoPick(
-  opts: Pick<LoopOptions, "preResolvedAutoPick">,
-): boolean {
-  return Object.prototype.hasOwnProperty.call(opts, "preResolvedAutoPick");
+export function hasAuthoritativeTokenUsage(
+  usage: TokenUsage | null | undefined,
+): usage is TokenUsage {
+  return Boolean(
+    usage &&
+      (usage.inputTokens > 0 ||
+        usage.outputTokens > 0 ||
+        (usage.cacheReadTokens ?? 0) > 0 ||
+        (usage.cacheCreationTokens ?? 0) > 0),
+  );
+}
+
+/** Conservative output cap that keeps one provider request inside a USD budget. */
+export function affordableOutputTokensForBudget(input: {
+  model: string;
+  estimatedInputTokens: number;
+  budgetUsd: number;
+  requestedOutputTokens: number;
+  /** Fixed provider-side fees to keep outside the token envelope. */
+  reservedCostUsd?: number;
+}): number {
+  const requested = Math.max(1, Math.floor(input.requestedOutputTokens));
+  const inputTokens = Math.max(0, Math.ceil(input.estimatedInputTokens));
+  const tokenBudgetUsd = Math.max(
+    0,
+    input.budgetUsd - Math.max(0, input.reservedCostUsd ?? 0),
+  );
+  const cost = (outputTokens: number): number =>
+    conservativeRequestCostUsd(input.model, inputTokens, outputTokens);
+  if (!Number.isFinite(tokenBudgetUsd) || tokenBudgetUsd <= 0 || cost(1) > tokenBudgetUsd) {
+    return 0;
+  }
+  let low = 1;
+  let high = requested;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (cost(mid) <= tokenBudgetUsd) low = mid;
+    else high = mid - 1;
+  }
+  return low;
+}
+
+/**
+ * Gemini charges PDF visual input by page, not only by transport bytes. Base64
+ * bytes conservatively cover embedded/native text; the documented 258 tokens
+ * per page covers compact, image-only PDFs that can otherwise exceed that.
+ */
+export function conservativePdfOcrInputTokens(
+  dataUrl: string,
+  pageCount?: number,
+): number {
+  const pages = Number.isFinite(pageCount) && (pageCount ?? 0) > 0
+    ? Math.min(1_000, Math.floor(pageCount ?? 1_000))
+    : 1_000;
+  return (
+    Math.max(Buffer.byteLength(dataUrl, "utf8"), pages * 258) +
+    256
+  );
+}
+
+/** Unknown provider media tokenization is bounded by the model's full context. */
+export function conservativeMediaInputTokens(
+  estimatedTokens: number,
+  model: string,
+  platformFunded: boolean,
+): number {
+  const estimate = Math.max(1, Math.ceil(estimatedTokens));
+  return platformFunded
+    ? Math.max(estimate, contextWindowTokensForModel(model))
+    : estimate;
+}
+
+// The largest currently configured per-call search envelope is Anthropic's ten
+// $0.01 searches; $0.15 also covers ten Gemini search-list units at $0.014.
+// Actual tool fees are still settled from provider usage, and any unused reserve
+// remains in the wallet for a later request.
+export const PLATFORM_PROVIDER_TOOL_RESERVE_USD = 0.15;
+export const PLATFORM_MIN_ANSWER_TOKENS = 512;
+
+export function compactionBudgetPreservingAnswer(input: {
+  remainingUsd: number;
+  leadModel: string;
+  postCompactionInputTokenUpperBound: number;
+  reserveSearch: boolean;
+}): number {
+  const answerReserveUsd =
+    conservativeRequestCostUsd(
+      input.leadModel,
+      input.postCompactionInputTokenUpperBound,
+      PLATFORM_MIN_ANSWER_TOKENS,
+    ) + (input.reserveSearch ? PLATFORM_PROVIDER_TOOL_RESERVE_USD : 0);
+  return Math.max(0, input.remainingUsd - answerReserveUsd);
 }
 
 /** Nested loops contribute counters/timing but never replace lead-run dimensions. */
@@ -1046,6 +1156,13 @@ export async function runAgentLoop(
   // Declared before Auto routing because an ambiguous task can make a real,
   // billed classifier call before the lead provider is resolved.
   let auxCostUsd = 0;
+  const platformSpend = new RunPlatformSpend(opts.platformBudgetUsd);
+  const isPlatformProvider = (provider: ModelProvider): boolean =>
+    opts.providerKeySources?.[provider] === "platform";
+  const addAuxCost = (provider: ModelProvider, costUsd: number): void => {
+    auxCostUsd += costUsd;
+    if (isPlatformProvider(provider)) platformSpend.record(costUsd);
+  };
   // Resolve the model + provider once per turn. The model can't change
   // mid-turn (the user picks it before sending), so a single adapter serves
   // every iteration of this loop.
@@ -1069,43 +1186,48 @@ export async function runAgentLoop(
         opts.metrics?.recordRoutingClassifier({ timedOut: result.timedOut });
       },
       onClassifierUsage: (usage: TokenUsage & { provider: "anthropic"; model: string }) => {
-        opts.metrics?.recordProviderCall({ usage });
-        auxCostUsd += recordBridgeUsage(
-          opts.projectId ?? null,
-          opts.userId ?? null,
+        addAuxCost(
           usage.provider,
-          usage.model,
-          usage,
-          usageRunId,
+          recordBridgeUsage(
+            opts.projectId ?? null,
+            opts.userId ?? null,
+            usage.provider,
+            usage.model,
+            usage,
+            usageRunId,
+          ),
         );
+        opts.metrics?.recordProviderCall({ usage });
       },
+      beforeClassifier: (maxCostUsd: number, model: string) => {
+        if (runSignal?.aborted) throw new Error("aborted before routing classifier request");
+        if (!isPlatformProvider("anthropic")) return;
+        assertPlatformModelPriced(model, true, "routing classifier");
+        const remaining = platformSpend.remaining();
+        if (remaining !== undefined && maxCostUsd > remaining) {
+          throw new Error("platform credit is too small for the routing classifier");
+        }
+      },
+      onClassifierUnknown: () => {
+        if (isPlatformProvider("anthropic")) platformSpend.quarantineUnknown();
+      },
+      signal: runSignal,
     };
-    const hasPreResolvedPick = hasPreResolvedAutoPick(opts);
-    const picked = hasPreResolvedPick
-      ? (opts.preResolvedAutoPick ?? null)
-      : await (opts.metrics
-          ? opts.metrics.measure("routing", () =>
-              pickAutoModel(
-                "agent",
-                {
-                  userMessage,
-                  previousUserMessage: lastUserMessageText(opts.messages),
-                  hasImages: turnReferencesImage(userMessage, opts.messages),
-                  availableProviders: availableProvidersFromKeys(keys),
-                },
-                autoPickOptions,
-              ),
-            )
-          : pickAutoModel(
-              "agent",
-              {
-                userMessage,
-                previousUserMessage: lastUserMessageText(opts.messages),
-                hasImages: turnReferencesImage(userMessage, opts.messages),
-                availableProviders: availableProvidersFromKeys(keys),
-              },
-              autoPickOptions,
-            ));
+    const routingUserMessage = opts.routingUserMessage ?? userMessage;
+    const pick = () =>
+      pickAutoModel(
+        "agent",
+        {
+          userMessage: routingUserMessage,
+          previousUserMessage: lastUserMessageText(opts.messages),
+          hasImages: turnReferencesImage(routingUserMessage, opts.messages),
+          availableProviders: availableProvidersFromKeys(keys),
+        },
+        autoPickOptions,
+      );
+    const picked = opts.metrics
+      ? await opts.metrics.measure("routing", pick)
+      : await pick();
     if (picked) {
       // Strip the routing metadata off the model the loop runs with; keep tier/
       // vision only for the UI announcement below.
@@ -1139,6 +1261,11 @@ export async function runAgentLoop(
   if (!nestedAgentRun) {
     opts.metrics?.setPhaseModel("executor", resolved.provider, resolved.model);
   }
+  assertPlatformModelPriced(
+    resolved.model,
+    isPlatformProvider(resolved.provider),
+    "lead model",
+  );
   const provider = getProvider(resolved.provider, keys);
   // Cumulative token usage across every iteration of this turn. Committed after
   // each provider call; the live figure (committed + the in-flight call's
@@ -1152,6 +1279,7 @@ export async function runAgentLoop(
   // doesn't silently drop that call's billed tokens from the turn's record.
   // Cleared to null the instant a call commits, so it's never double-counted.
   let inflight: TokenUsage | null = null;
+  let leadCostUsd = 0;
   // Per-turn changeset (C6 Tier-1), keyed by path. Populated from each
   // successful write_file/edit_file editStats below, plus any files a spawned
   // sub-agent changed (merged in via runSubAgents); emitted on finish(). Action
@@ -1196,9 +1324,10 @@ export async function runAgentLoop(
       await drainOwnedSubAgents(executionLimit ?? "aborted");
     }
     if (!nestedAgentRun) opts.metrics?.recordFilesChanged(changed.size);
+    const usage = usageSnapshot();
     return {
       aborted,
-      usage: usageSnapshot(),
+      usage,
       model: resolved.model,
       provider: resolved.provider,
       changedFiles: changedSnapshot(),
@@ -1212,6 +1341,9 @@ export async function runAgentLoop(
             }
           : undefined,
       auxCostUsd: auxCostUsd || undefined,
+      leadCostUsd,
+      platformCostUsd: platformSpend.runCostUsd || undefined,
+      unknownPlatformSpend: platformSpend.hasUnknownSpend || undefined,
       stopReason,
       executionLimit,
       finalAnswerEmitted,
@@ -1238,6 +1370,10 @@ export async function runAgentLoop(
     (e as Error & { usageModel?: string }).usageModel = resolved.model;
     (e as Error & { usageProvider?: string }).usageProvider = resolved.provider;
     (e as Error & { auxCostUsd?: number }).auxCostUsd = auxCostUsd;
+    (e as Error & { leadCostUsd?: number }).leadCostUsd = leadCostUsd;
+    (e as Error & { platformCostUsd?: number }).platformCostUsd = platformSpend.runCostUsd;
+    (e as Error & { unknownPlatformSpend?: true }).unknownPlatformSpend =
+      platformSpend.hasUnknownSpend || undefined;
     (e as Error & { changedFiles?: LoopResult["changedFiles"] }).changedFiles = changedSnapshot();
     if (!nestedAgentRun) opts.metrics?.recordFilesChanged(changed.size);
     throw e;
@@ -1254,11 +1390,16 @@ export async function runAgentLoop(
   // can't combine search with function calling. Tell the prompt the truth for
   // the resolved model so the agent neither reasons about a missing tool nor
   // skips a search it could have run.
-  const hasWebSearch =
+  const providerSupportsWebSearch =
     resolved.provider === "anthropic" ||
     resolved.provider === "openai" ||
     resolved.provider === "zai" ||
     (resolved.provider === "google" && /^gemini-3/.test(resolved.model));
+  // Anthropic exposes max_uses=10. Google/OpenAI/Z.ai do not expose a hard
+  // request-level invocation cap, so those built-ins are BYOK-only.
+  const hasWebSearch =
+    providerSupportsWebSearch &&
+    (!isPlatformProvider(resolved.provider) || resolved.provider === "anthropic");
   // Vision: every provider here is multimodal EXCEPT Z.ai — our only zai model,
   // glm-5.2, is text-only. A text-only model gets the analyze_image bridge
   // (added to the tool list below) instead of native image input.
@@ -1373,6 +1514,10 @@ export async function runAgentLoop(
   let systemPrompt = rebuildSystemPrompt();
   let toolSchemaChars = JSON.stringify(activeTools).length;
   let fixedPromptTokens = estimateFixedPromptTokens(systemPrompt, activeTools);
+  let fixedPromptTokenUpperBound = conservativeFixedPromptTokenUpperBound(
+    systemPrompt,
+    activeTools,
+  );
   const loadSkill = (rawSkillId: unknown): string => {
     if (typeof rawSkillId !== "string" || !rawSkillId.trim()) {
       throw new Error("load_skill requires skill_id from the attached skill catalog");
@@ -1387,6 +1532,10 @@ export async function runAgentLoop(
     loadedLibrarySkillIds.add(skill.id);
     systemPrompt = rebuildSystemPrompt();
     fixedPromptTokens = estimateFixedPromptTokens(systemPrompt, activeTools);
+    fixedPromptTokenUpperBound = conservativeFixedPromptTokenUpperBound(
+      systemPrompt,
+      activeTools,
+    );
     return `Loaded skill: ${skill.name}. Its full instructions are now available in system context for the rest of this turn.`;
   };
   const loadCapabilities = (rawGroups: unknown): string => {
@@ -1416,6 +1565,10 @@ export async function runAgentLoop(
       systemPrompt = rebuildSystemPrompt();
       toolSchemaChars = JSON.stringify(activeTools).length;
       fixedPromptTokens = estimateFixedPromptTokens(systemPrompt, activeTools);
+      fixedPromptTokenUpperBound = conservativeFixedPromptTokenUpperBound(
+        systemPrompt,
+        activeTools,
+      );
       opts.metrics?.recordCapabilityLoad(
         activeTools.length,
         toolState.loadedCapabilities().length,
@@ -1489,6 +1642,8 @@ export async function runAgentLoop(
     /** Whether this sub-agent's report has already been surfaced to the lead. */
     reported: boolean;
     lastAction?: string;
+    platformBudgetUsd?: number;
+    unknownPlatformSpend?: boolean;
     usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number };
   }
   const bgSubAgents: BgSubAgent[] = [];
@@ -1499,6 +1654,57 @@ export async function runAgentLoop(
   let subAgentCostUsd = 0;
   let subAgentInputTokens = 0;
   let subAgentOutputTokens = 0;
+  const remainingPlatformBudgetUsd = (): number | undefined =>
+    platformSpend.remaining();
+  const requestBudgetedPlan = opts.requestPlan
+    ? async (reason: string): Promise<string> => {
+        try {
+          const result = await opts.requestPlan!(reason, remainingPlatformBudgetUsd());
+          platformSpend.record(result.platformCostUsd, true);
+          if (result.unknownPlatformSpend) platformSpend.quarantineUnknown();
+          return result.text;
+        } catch (err) {
+          platformSpend.record(
+            Number((err as { platformCostUsd?: number }).platformCostUsd ?? 0),
+            true,
+          );
+          if ((err as { unknownPlatformSpend?: true }).unknownPlatformSpend) {
+            platformSpend.quarantineUnknown();
+          }
+          throw err;
+        }
+      }
+    : undefined;
+  const auxiliaryBoundary: AuxiliaryProviderBoundary = {
+    assertModelPriced: (provider, model) =>
+      assertPlatformModelPriced(model, isPlatformProvider(provider), `${provider} helper`),
+    remaining: (provider) =>
+      isPlatformProvider(provider) ? remainingPlatformBudgetUsd() : undefined,
+    start: (provider, maxCostUsd) => {
+      if (runSignal?.aborted) {
+        throw Object.assign(new Error("aborted before auxiliary provider request"), {
+          name: "AbortError",
+        });
+      }
+      const remaining = isPlatformProvider(provider)
+        ? remainingPlatformBudgetUsd()
+        : undefined;
+      if (remaining !== undefined && Math.max(0, maxCostUsd) > remaining + 1e-9) {
+        throw new Error(
+          `The ${provider} helper call was not started because it can cost up to ` +
+            `$${Math.max(0, maxCostUsd).toFixed(3)} and only $${remaining.toFixed(3)} ` +
+            "of platform-funded credit remains.",
+        );
+      }
+    },
+    settle: (provider, costUsd, usage) => {
+      addAuxCost(provider, costUsd);
+      opts.metrics?.recordProviderCall({ usage });
+    },
+    unknown: (provider) => {
+      if (isPlatformProvider(provider)) platformSpend.quarantineUnknown();
+    },
+  };
   // Aggregate spend of auxiliary model calls (image gen / vision bridge / OCR)
   // this turn, priced per-model as each fires. Folded onto the LoopResult so the
   // complete marker's shown cost includes them — they're extra billed calls the
@@ -1544,6 +1750,11 @@ export async function runAgentLoop(
           return `No sub-agents started: this turn has reached its ${MAX_SUB_AGENTS_PER_TURN}-agent total limit. Integrate the existing reports and finish the remaining work directly.`;
         }
         const accepted = specs.slice(0, remaining);
+        const batchBudgetUsd =
+          opts.platformBudgetUsd === undefined
+            ? undefined
+            : (platformSpend.remaining() ?? 0) /
+              (accepted.length + 1);
         const started: { id: string; index: number; type: string; task: string; model: string }[] = [];
         for (const spec of accepted) {
           const def = AGENT_TYPES[spec.type] ?? AGENT_TYPES.general;
@@ -1560,9 +1771,13 @@ export async function runAgentLoop(
             report: "",
             aborted: false,
             reported: false,
+            platformBudgetUsd: batchBudgetUsd,
             usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
           };
           bgSubAgents.push(entry);
+          if (entry.platformBudgetUsd !== undefined) {
+            entry.platformBudgetUsd = platformSpend.delegate(entry.platformBudgetUsd);
+          }
           const usesProgressiveProfile =
             profileCohort === "treatment" &&
             def.capabilities !== "all" &&
@@ -1587,6 +1802,7 @@ export async function runAgentLoop(
                 sandbox: opts.sandbox,
                 apiKey: opts.apiKey,
                 providerKeys: keys,
+                providerKeySources: opts.providerKeySources,
                 projectId: opts.projectId,
                 sessionId: opts.sessionId,
                 messages: subMessages,
@@ -1611,6 +1827,7 @@ export async function runAgentLoop(
                 personaPreamble: buildSubAgentPreamble(def, spec.instructions),
                 subAgentType: def.key,
                 executionBudget: subAgentExecutionBudgetForCohort(def, profileCohort),
+                platformBudgetUsd: entry.platformBudgetUsd,
                 metrics: opts.metrics,
                 usageRunId,
                 inheritedProfileCohort: profileCohort,
@@ -1678,13 +1895,19 @@ export async function runAgentLoop(
                 sub.model,
                 sub.usage,
                 usageRunId,
+                sub.leadCostUsd,
               );
               subAgentInputTokens += sub.usage.inputTokens;
               subAgentOutputTokens += sub.usage.outputTokens;
               // The sub-agent's own token cost PLUS any auxiliary model calls it
               // made (image gen / vision bridge / OCR) — otherwise a sub-agent
               // that generates images shows only its text cost in the turn total.
-              subAgentCostUsd += estimateTurnCostUsd(sub.model, sub.usage) + (sub.auxCostUsd ?? 0);
+              subAgentCostUsd += sub.leadCostUsd + (sub.auxCostUsd ?? 0);
+              platformSpend.record(sub.platformCostUsd ?? 0);
+              if (sub.unknownPlatformSpend) {
+                entry.unknownPlatformSpend = true;
+                platformSpend.quarantineUnknown();
+              }
               // Fold the sub-agent's file changes into THIS turn's changeset so
               // the "What changed" list + the server's checkpoint/sync see them.
               for (const f of sub.changedFiles) {
@@ -1704,6 +1927,9 @@ export async function runAgentLoop(
                 usageModel?: string;
                 usageProvider?: ModelProvider;
                 auxCostUsd?: number;
+                platformCostUsd?: number;
+                leadCostUsd?: number;
+                unknownPlatformSpend?: true;
                 changedFiles?: LoopResult["changedFiles"];
               };
               if (failed.usageTotals) {
@@ -1716,12 +1942,18 @@ export async function runAgentLoop(
                   entry.model,
                   failed.usageTotals,
                   usageRunId,
+                  failed.leadCostUsd,
                 );
                 subAgentInputTokens += failed.usageTotals.inputTokens;
                 subAgentOutputTokens += failed.usageTotals.outputTokens;
                 subAgentCostUsd +=
-                  estimateTurnCostUsd(entry.model, failed.usageTotals) +
+                  (failed.leadCostUsd ?? 0) +
                   (failed.auxCostUsd ?? 0);
+                platformSpend.record(failed.platformCostUsd ?? 0);
+              }
+              if (failed.unknownPlatformSpend) {
+                entry.unknownPlatformSpend = true;
+                platformSpend.quarantineUnknown();
               }
               for (const file of failed.changedFiles ?? []) {
                 const previous = changed.get(file.path);
@@ -1732,6 +1964,15 @@ export async function runAgentLoop(
                 });
               }
             } finally {
+              // Unknown child spend owns its allocation until top-level escrow
+              // settlement. Returning it here would let the lead spend the same
+              // dollars a second time.
+              if (entry.platformBudgetUsd !== undefined) {
+                platformSpend.finishDelegation(
+                  entry.platformBudgetUsd,
+                  entry.unknownPlatformSpend === true,
+                );
+              }
               if (entry.status === "error") opts.metrics?.recordSubagentError();
               emitSubAgent(entry);
             }
@@ -1828,6 +2069,15 @@ export async function runAgentLoop(
     // (every tool_use already paired with a tool_result).
     const manualCompaction = opts.consumeManualCompactionRequest?.() ?? false;
     let compactionFailed = false;
+    const remainingBeforeCompaction = isPlatformProvider("anthropic")
+      ? remainingPlatformBudgetUsd()
+      : undefined;
+    const postCompactionInputTokenUpperBound =
+      fixedPromptTokenUpperBound +
+      postCompactionMessageTokenUpperBound(messages, {
+        ...compactionBudget,
+        keepTokens: manualCompaction ? 1 : undefined,
+      });
     const compacted = await maybeCompact(messages, opts.apiKey, runSignal, {
       ...compactionBudget,
       force: manualCompaction,
@@ -1839,16 +2089,33 @@ export async function runAgentLoop(
         opts.metrics?.recordCompaction({ failed: true });
       },
       onUsage: (usage) => {
-        opts.metrics?.recordProviderCall({ usage });
-        auxCostUsd += recordBridgeUsage(
-          opts.projectId ?? null,
-          opts.userId ?? null,
+        addAuxCost(
           usage.provider,
-          usage.model,
-          usage,
-          usageRunId,
+          recordBridgeUsage(
+            opts.projectId ?? null,
+            opts.userId ?? null,
+            usage.provider,
+            usage.model,
+            usage,
+            usageRunId,
+          ),
         );
+        opts.metrics?.recordProviderCall({ usage });
       },
+      onUnknownPlatformSpend: isPlatformProvider("anthropic")
+        ? () => platformSpend.quarantineUnknown()
+        : undefined,
+      maxCostUsd:
+        remainingBeforeCompaction === undefined
+          ? undefined
+          : isPlatformProvider(resolved.provider)
+            ? compactionBudgetPreservingAnswer({
+                remainingUsd: remainingBeforeCompaction,
+                leadModel: resolved.model,
+                postCompactionInputTokenUpperBound,
+                reserveSearch: hasWebSearch,
+              })
+            : remainingBeforeCompaction,
     });
     if (compacted) {
       opts.metrics?.recordCompaction({
@@ -1865,6 +2132,33 @@ export async function runAgentLoop(
       opts.onManualCompactionHandled?.(
         compactionFailed ? "error" : compacted ? "compacted" : "noop",
       );
+    }
+
+    let providerMaxTokens = executionBudget?.maxOutputTokens
+      ? Math.max(1, Math.min(MAX_TOKENS, executionBudget.maxOutputTokens - usageOut))
+      : MAX_TOKENS;
+    if (opts.platformBudgetUsd !== undefined) {
+      const remainingPlatformBudget = platformSpend.remaining() ?? 0;
+      if (isPlatformProvider(resolved.provider)) {
+        providerMaxTokens = affordableOutputTokensForBudget({
+          model: resolved.model,
+          // A cold Anthropic cache write is more expensive than fresh input, so
+          // affordability uses the conservative cache-write envelope and keeps
+          // provider-side search fees outside the token budget.
+          estimatedInputTokens:
+            fixedPromptTokenUpperBound + conservativeMessageTokenUpperBound(messages),
+          budgetUsd: remainingPlatformBudget,
+          requestedOutputTokens: providerMaxTokens,
+          reservedCostUsd: hasWebSearch ? PLATFORM_PROVIDER_TOOL_RESERVE_USD : 0,
+        });
+      }
+      if (providerMaxTokens <= 0) {
+        const creditMessage =
+          "[Platform usage credits reached their safe limit for this run. Add provider keys or more credits to continue.]";
+        opts.onText?.(`\n\n${creditMessage}`);
+        record({ role: "assistant", content: [{ type: "text", text: creditMessage }] });
+        return finish(false, undefined, "credits", true);
+      }
     }
 
     // Live output estimation between real usage reports (see liveUsage.ts:
@@ -1890,12 +2184,21 @@ export async function runAgentLoop(
     // blocks plus the client tool calls to execute. Provider-side tools
     // (Anthropic web_search) are surfaced by the adapter and not returned here.
     let turn;
+    const thisProviderRequestUsesPlatform = isPlatformProvider(resolved.provider);
+    let thisProviderReceipt: TokenUsage | null = null;
     const providerStartedAt = performance.now();
     let providerTtftMs: number | undefined;
     const markProviderFirstDelta = (): void => {
       if (providerTtftMs === undefined) providerTtftMs = performance.now() - providerStartedAt;
     };
     const stopModelPhase = opts.metrics?.startPhase("model");
+    // Provider SDK abort signals are advisory and may still bill a request once
+    // dispatched. Re-check at the exact boundary so a locally aborted turn does
+    // not create an avoidable unknown charge.
+    if (runSignal?.aborted) {
+      stopModelPhase?.();
+      return finish(true, undefined, wallBudgetExpired ? "wall_time" : undefined);
+    }
     try {
       turn = await provider.streamAgentTurn({
         model: resolved.model,
@@ -1908,11 +2211,10 @@ export async function runAgentLoop(
         // a dev server and saturate the sandbox — the lead owns the preview.
         tools: activeTools,
         messages,
-        maxTokens: executionBudget?.maxOutputTokens
-          ? Math.max(1, Math.min(MAX_TOKENS, executionBudget.maxOutputTokens - usageOut))
-          : MAX_TOKENS,
+        maxTokens: providerMaxTokens,
         thinkingEffort: opts.thinkingEffort,
         thinkingEnabled: opts.thinkingEnabled,
+        disableWebSearch: !hasWebSearch,
         signal: runSignal,
         // Streamed content also feeds the live output-token estimate, so the
         // counter moves DURING a long thinking/text stream instead of only at
@@ -1944,21 +2246,35 @@ export async function runAgentLoop(
         // abort can bank it (see finish). A REAL report from the adapter is
         // authoritative (it includes thinking): it resets the char estimate,
         // and later estimates build on top of it.
-        onUsage: (u) => liveEst.onRealUsage(u),
+        onUsage: (u) => {
+          if (hasAuthoritativeTokenUsage(u)) thisProviderReceipt = { ...u };
+          liveEst.onRealUsage(u);
+        },
         onBillableToolUsage: (billable) => {
-          auxCostUsd += recordProviderToolFee(
-            opts.projectId ?? null,
-            opts.userId ?? null,
+          addAuxCost(
             resolved.provider,
-            resolved.model,
-            billable,
-            usageRunId,
+            recordProviderToolFee(
+              opts.projectId ?? null,
+              opts.userId ?? null,
+              resolved.provider,
+              resolved.model,
+              billable,
+              usageRunId,
+            ),
           );
           opts.metrics?.recordBillableToolUsage(billable.units, billable.accuracy);
         },
       });
     } catch (err) {
       stopModelPhase?.();
+      if (thisProviderReceipt) {
+        const requestCostUsd = estimateTurnCostUsd(resolved.model, thisProviderReceipt);
+        leadCostUsd += requestCostUsd;
+        if (thisProviderRequestUsesPlatform) platformSpend.record(requestCostUsd);
+        inflight = { ...(thisProviderReceipt as TokenUsage) };
+      } else if (thisProviderRequestUsesPlatform) {
+        platformSpend.quarantineUnknown();
+      }
       opts.metrics?.recordProviderCall({
         ttftMs: providerTtftMs,
         error: !(runSignal?.aborted || isAbortError(err, runSignal)),
@@ -1977,6 +2293,16 @@ export async function runAgentLoop(
       return throwWithUsage(err);
     }
     stopModelPhase?.();
+    const settledRequestUsage = hasAuthoritativeTokenUsage(turn.usage)
+      ? turn.usage
+      : thisProviderReceipt;
+    if (settledRequestUsage) {
+      const requestCostUsd = estimateTurnCostUsd(resolved.model, settledRequestUsage);
+      leadCostUsd += requestCostUsd;
+      if (thisProviderRequestUsesPlatform) platformSpend.record(requestCostUsd);
+    } else if (thisProviderRequestUsesPlatform) {
+      platformSpend.quarantineUnknown();
+    }
     opts.metrics?.recordProviderCall({
       ttftMs: providerTtftMs,
       usage: turn.usage,
@@ -1985,10 +2311,10 @@ export async function runAgentLoop(
     // Commit this iteration's usage into the running totals, then emit the
     // settled cumulative figure. Clear `inflight` so the now-committed call
     // can't be banked again if a later iteration aborts.
-    usageIn += turn.usage?.inputTokens ?? 0;
-    usageOut += turn.usage?.outputTokens ?? 0;
-    usageCacheRead += turn.usage?.cacheReadTokens ?? 0;
-    usageCacheCreate += turn.usage?.cacheCreationTokens ?? 0;
+    usageIn += settledRequestUsage?.inputTokens ?? 0;
+    usageOut += settledRequestUsage?.outputTokens ?? 0;
+    usageCacheRead += settledRequestUsage?.cacheReadTokens ?? 0;
+    usageCacheCreate += settledRequestUsage?.cacheCreationTokens ?? 0;
     inflight = null;
     // Settled cumulative for the live counter — the fresh/cache split (the
     // server re-combines for the composer's "total in" and prices the spend).
@@ -2280,7 +2606,7 @@ export async function runAgentLoop(
             opts.previewBaseUrl,
             runSignal,
             opts.requestUserAnswer,
-            opts.requestPlan,
+            requestBudgetedPlan,
             opts.onTodoWrite,
             opts.userId ?? null,
             (added, removed) => {
@@ -2292,10 +2618,7 @@ export async function runAgentLoop(
             hasVision,
             runSubAgents,
             awaitSubAgents,
-            (cost, usage) => {
-              auxCostUsd += cost;
-              opts.metrics?.recordProviderCall({ usage });
-            },
+            auxiliaryBoundary,
             loadCapabilities,
             loadSkill,
             usageRunId,
@@ -2680,6 +3003,7 @@ function recordSubAgentUsage(
   model: string,
   usage: LoopResult["usage"],
   runId?: string | null,
+  costUsd = 0,
 ): void {
   if (!projectId) return;
   if (!usage.inputTokens && !usage.outputTokens && !usage.cacheReadTokens && !usage.cacheCreationTokens) {
@@ -2695,7 +3019,7 @@ function recordSubAgentUsage(
     outputTokens: usage.outputTokens,
     cacheReadTokens: usage.cacheReadTokens,
     cacheCreationTokens: usage.cacheCreationTokens,
-    costUsd: estimateTurnCostUsd(model, usage),
+    costUsd,
     elapsedMs: 0,
   }).catch(() => console.error("recordUsageEvent (sub-agent) failed"));
 }
@@ -2819,6 +3143,14 @@ function assertModelReadablePath(candidate: string): void {
   }
 }
 
+export interface AuxiliaryProviderBoundary {
+  assertModelPriced(provider: ModelProvider, model: string): void;
+  remaining(provider: ModelProvider): number | undefined;
+  start(provider: ModelProvider, maxCostUsd: number): void;
+  settle(provider: ModelProvider, costUsd: number, usage?: TokenUsage): void;
+  unknown(provider: ModelProvider): void;
+}
+
 export async function executeTool(
   sandbox: Sandbox,
   name: string,
@@ -2829,7 +3161,7 @@ export async function executeTool(
   previewBaseUrl: string | undefined,
   signal: AbortSignal | undefined,
   requestUserAnswer: LoopHooks["requestUserAnswer"],
-  requestPlan: LoopHooks["requestPlan"],
+  requestPlan: ((reason: string) => Promise<string>) | undefined,
   onTodoWrite: LoopHooks["onTodoWrite"],
   userId: string | null,
   /** Fires once with per-file line stats for write_file/edit_file (UI diff badge). */
@@ -2864,7 +3196,7 @@ export async function executeTool(
    * accumulates these into the turn's auxCostUsd so the complete marker's shown
    * cost includes them (they're separate billed calls the token usage misses).
    */
-  onAuxCost?: (costUsd: number, usage?: TokenUsage) => void,
+  auxiliaryBoundary?: AuxiliaryProviderBoundary,
   /** Monotonic progressive-profile expansion, scoped to this loop turn. */
   loadCapabilities?: (groups: unknown) => string,
   /** Progressive disclosure for attached reusable skills, scoped to this turn. */
@@ -2877,6 +3209,75 @@ export async function executeTool(
   | { __multimodal: true; content: unknown[]; __imagePaths?: string[] }
 > {
   const args = input as Record<string, any>;
+  const cappedAuxOutputTokens = (
+    provider: ModelProvider,
+    model: string,
+    estimatedInputTokens: number,
+    requestedOutputTokens = 4096,
+  ): number => {
+    auxiliaryBoundary?.assertModelPriced(provider, model);
+    const budgetUsd = auxiliaryBoundary?.remaining(provider);
+    if (budgetUsd === undefined) return requestedOutputTokens;
+    const maxTokens = affordableOutputTokensForBudget({
+      model,
+      estimatedInputTokens,
+      budgetUsd,
+      requestedOutputTokens,
+    });
+    if (maxTokens <= 0) {
+      throw new Error(
+        `The ${provider} helper call was not started because the remaining ` +
+          "platform-funded credit is too small. Add that provider's key or more build credits.",
+      );
+    }
+    return maxTokens;
+  };
+  const runAuxiliaryProviderCall = async <T>(
+    provider: ModelProvider,
+    model: string,
+    estimatedInputTokens: number,
+    maxOutputTokens: number,
+    call: () => Promise<T>,
+    usageOf: (result: T) => TokenUsage | undefined,
+  ): Promise<T> => {
+    auxiliaryBoundary?.assertModelPriced(provider, model);
+    const maxCostUsd = conservativeRequestCostUsd(
+      model,
+      estimatedInputTokens,
+      maxOutputTokens,
+    );
+    let started = false;
+    let settled = false;
+    try {
+      if (signal?.aborted) {
+        throw Object.assign(new Error("aborted before auxiliary provider request"), {
+          name: "AbortError",
+        });
+      }
+      auxiliaryBoundary?.start(provider, maxCostUsd);
+      started = true;
+      const result = await call();
+      const usage = usageOf(result);
+      if (hasAuthoritativeTokenUsage(usage)) {
+        const costUsd = recordBridgeUsage(
+          projectId,
+          userId,
+          provider,
+          model,
+          usage,
+          usageRunId,
+        );
+        auxiliaryBoundary?.settle(provider, costUsd, usage);
+        settled = true;
+      } else {
+        auxiliaryBoundary?.unknown(provider);
+      }
+      return result;
+    } catch (err) {
+      if (started && !settled) auxiliaryBoundary?.unknown(provider);
+      throw err;
+    }
+  };
   switch (name) {
     case "read_file":
       if (typeof args.path !== "string") {
@@ -3193,14 +3594,36 @@ export async function executeTool(
       if (typeof args.prompt !== "string" || !args.prompt.trim()) {
         throw new Error("generate_image requires 'prompt' as a non-empty string");
       }
-      const gen = await generateImage({
-        apiKey: googleApiKey ?? "",
-        sandbox,
-        prompt: args.prompt,
-        model: typeof args.model === "string" ? args.model : undefined,
-        aspectRatio: typeof args.aspect_ratio === "string" ? args.aspect_ratio : undefined,
-        inputImagePath: typeof args.input_image === "string" ? args.input_image : undefined,
-      });
+      let providerStarted = false;
+      let providerSettled = false;
+      let imageUsage: TokenUsage | undefined;
+      let gen;
+      try {
+        gen = await generateImage({
+          apiKey: googleApiKey ?? "",
+          sandbox,
+          prompt: args.prompt,
+          model: typeof args.model === "string" ? args.model : undefined,
+          aspectRatio: typeof args.aspect_ratio === "string" ? args.aspect_ratio : undefined,
+          inputImagePath: typeof args.input_image === "string" ? args.input_image : undefined,
+          signal,
+          onProviderStart: (maxCostUsd) => {
+            auxiliaryBoundary?.start("google", maxCostUsd);
+            providerStarted = true;
+          },
+          onProviderReceipt: (costUsd, usage) => {
+            imageUsage = usage;
+            if (hasAuthoritativeTokenUsage(usage)) {
+              auxiliaryBoundary?.settle("google", costUsd, usage);
+              providerSettled = true;
+            }
+          },
+        });
+      } catch (err) {
+        if (providerStarted && !providerSettled) auxiliaryBoundary?.unknown("google");
+        throw err;
+      }
+      if (providerStarted && !providerSettled) auxiliaryBoundary?.unknown("google");
       // Image output is billed per image — record it as its own usage event so
       // the dashboard reflects the spend (separate from the turn's token usage),
       // AND fold it into the turn's aux cost so the complete marker's shown price
@@ -3212,13 +3635,12 @@ export async function executeTool(
           runId: usageRunId,
           provider: "google",
           model: gen.model,
-          inputTokens: 0,
-          outputTokens: 0,
+          inputTokens: imageUsage?.inputTokens ?? 0,
+          outputTokens: imageUsage?.outputTokens ?? 0,
           costUsd: gen.estimated_cost_usd,
           elapsedMs: 0,
         }).catch(() => console.error("recordUsageEvent (image generation) failed"));
       }
-      onAuxCost?.(gen.estimated_cost_usd);
       // Hand the FIRST image back as a preview the agent can SEE (so it can judge
       // the result) plus the path(s) to reference from the app's code.
       const previewImg = await readAssetBase64(sandbox.rootDir, gen.images[0].asset_path).catch(
@@ -3510,17 +3932,30 @@ export async function executeTool(
         // use, and are metered for cost. (Image assets are handled natively above.)
         if (mime === "application/pdf") {
           const fileUrl = `data:${mime};base64,${buf.toString("base64")}`;
-          if (zaiApiKey) {
+          const estimatedDocumentTokens = conservativePdfOcrInputTokens(
+            fileUrl,
+            extracted.pageCount,
+          );
+          // Z.ai's documented layout_parsing endpoint has no output-token cap.
+          // Keep it available for account-funded keys, but never spend platform
+          // credit through an unbounded request shape.
+          const zaiOcrIsPlatformFunded =
+            auxiliaryBoundary?.remaining("zai") !== undefined;
+          if (zaiApiKey && !zaiOcrIsPlatformFunded) {
             try {
-              const ocr = await glmLayoutParse({
-                apiKey: zaiApiKey,
-                baseURL: process.env.ZAI_BASE_URL || undefined,
-                file: fileUrl,
-                signal,
-              });
-              onAuxCost?.(
-                recordBridgeUsage(projectId, userId, "zai", "glm-ocr", ocr.usage, usageRunId),
-                ocr.usage,
+              const ocr = await runAuxiliaryProviderCall(
+                "zai",
+                "glm-ocr",
+                estimatedDocumentTokens,
+                4096,
+                () =>
+                  glmLayoutParse({
+                    apiKey: zaiApiKey,
+                    baseURL: process.env.ZAI_BASE_URL || undefined,
+                    file: fileUrl,
+                    signal,
+                  }),
+                (result) => result.usage,
               );
               if (ocr.markdown.trim()) {
                 return `Asset ${args.name} (${mime}) — OCR text (GLM-OCR):\n\n${ocr.markdown}`;
@@ -3531,18 +3966,29 @@ export async function executeTool(
           }
           if (googleApiKey) {
             try {
-              const ocr = await describeImageGemini({
-                apiKey: googleApiKey,
-                media: [{ base64: buf.toString("base64"), mimeType: mime }],
-                system: "You are a precise OCR engine. Transcribe text exactly; never summarize or invent.",
-                question:
-                  "Extract ALL text from this document as clean Markdown, preserving headings, lists, tables, and reading order. Output only the extracted text.",
-                thinking: "low",
-                signal,
-              });
-              onAuxCost?.(
-                recordBridgeUsage(projectId, userId, "google", ocr.model, ocr.usage, usageRunId),
-                ocr.usage,
+              const googleModel = process.env.VISION_BRIDGE_MODEL || VISION_BRIDGE_MODEL;
+              const maxOcrOutputTokens = cappedAuxOutputTokens(
+                "google",
+                googleModel,
+                estimatedDocumentTokens,
+              );
+              const ocr = await runAuxiliaryProviderCall(
+                "google",
+                googleModel,
+                estimatedDocumentTokens,
+                maxOcrOutputTokens,
+                () =>
+                  describeImageGemini({
+                    apiKey: googleApiKey,
+                    media: [{ base64: buf.toString("base64"), mimeType: mime }],
+                    system: "You are a precise OCR engine. Transcribe text exactly; never summarize or invent.",
+                    question:
+                      "Extract ALL text from this document as clean Markdown, preserving headings, lists, tables, and reading order. Output only the extracted text.",
+                    thinking: "low",
+                    maxOutputTokens: maxOcrOutputTokens,
+                    signal,
+                  }),
+                (result) => result.usage,
               );
               if (ocr.text.trim()) {
                 return `Asset ${args.name} (${mime}) — OCR text (Gemini):\n\n${ocr.text}`;
@@ -3587,33 +4033,51 @@ export async function executeTool(
       }
       const thinking: ThinkingEffort =
         process.env.VISION_BRIDGE_THINKING === "medium" ? "medium" : "low";
-      const bridge = googleApiKey
-        ? await describeImageGemini({
-            apiKey: googleApiKey,
-            media,
-            question: spec.question,
-            system: spec.system,
-            thinking,
-            signal,
-          })
-        : await describeImageGlm({
-            apiKey: zaiApiKey!,
-            baseURL: process.env.ZAI_BASE_URL || undefined,
-            media,
-            question: spec.question,
-            system: spec.system,
-            signal,
-          });
-      onAuxCost?.(
-        recordBridgeUsage(
-          projectId,
-          userId,
-          googleApiKey ? "google" : "zai",
-          bridge.model,
-          bridge.usage,
-          usageRunId,
-        ),
-        bridge.usage,
+      const bridgeProvider: ModelProvider = googleApiKey ? "google" : "zai";
+      const bridgeModel = googleApiKey
+        ? process.env.VISION_BRIDGE_MODEL || VISION_BRIDGE_MODEL
+        : process.env.ZAI_VISION_MODEL || "glm-5v-turbo";
+      const rawBridgeInputEstimate =
+        media.reduce((sum, item) => sum + item.base64.length + 2048, 0) +
+          Buffer.byteLength(spec.question, "utf8") +
+          Buffer.byteLength(spec.system ?? "", "utf8") +
+          256;
+      const estimatedBridgeInputTokens = conservativeMediaInputTokens(
+        rawBridgeInputEstimate,
+        bridgeModel,
+        auxiliaryBoundary?.remaining(bridgeProvider) !== undefined,
+      );
+      const maxBridgeOutputTokens = cappedAuxOutputTokens(
+        bridgeProvider,
+        bridgeModel,
+        estimatedBridgeInputTokens,
+      );
+      const bridge = await runAuxiliaryProviderCall(
+        bridgeProvider,
+        bridgeModel,
+        estimatedBridgeInputTokens,
+        maxBridgeOutputTokens,
+        () =>
+          googleApiKey
+            ? describeImageGemini({
+                apiKey: googleApiKey,
+                media,
+                question: spec.question,
+                system: spec.system,
+                thinking,
+                maxOutputTokens: maxBridgeOutputTokens,
+                signal,
+              })
+            : describeImageGlm({
+                apiKey: zaiApiKey!,
+                baseURL: process.env.ZAI_BASE_URL || undefined,
+                media,
+                question: spec.question,
+                system: spec.system,
+                maxTokens: maxBridgeOutputTokens,
+                signal,
+              }),
+        (result) => result.usage,
       );
       return `Vision analysis (${name}) of ${spec.paths.join(", ")}:\n\n${bridge.text}`;
     }

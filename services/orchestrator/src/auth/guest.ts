@@ -27,22 +27,18 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { randomInt, createHash, randomUUID } from "node:crypto";
+import { randomInt, createHash } from "node:crypto";
 import { parse as parseCookie } from "cookie";
 import { sealData, unsealData } from "iron-session";
 import {
   createGuestUser,
   getGuestByRecoveryHash,
   getGuestRecoveryCode,
-  getUserById,
-  claimGuestForConversion,
-  releaseGuestLifecycleClaim,
-  markGuestConverted,
   touchUserActivity,
   type UserRecord,
 } from "../db/users.js";
 import { publicError } from "../security/publicError.js";
-import { reassignProjectsOwner } from "../db/projects.js";
+import { convertGuestAccount } from "../db/billing.js";
 
 export const GUEST_COOKIE = "gate15-guest";
 /**
@@ -235,23 +231,13 @@ export async function handleGuestRestore(
 export async function handleGuestMerge(
   req: IncomingMessage,
   workosUser: UserRecord,
-): Promise<{ moved: number }> {
+): Promise<{ moved: number; completed: boolean }> {
   const guestCookie = await unsealGuestFromCookieHeader(req.headers.cookie);
-  if (!guestCookie) return { moved: 0 };
-  const guest = await getUserById(guestCookie.userId);
-  if (!guest || guest.account_type !== "guest" || guest.converted_at || guest.guest_lifecycle_claim) {
-    return { moved: 0 };
-  }
-  const claim = randomUUID();
-  if (!(await claimGuestForConversion(guest.id, claim))) return { moved: 0 };
-  try {
-    const moved = await reassignProjectsOwner(guest.id, workosUser.id);
-    await markGuestConverted(guest.id, claim);
-    return { moved };
-  } catch (err) {
-    await releaseGuestLifecycleClaim(guest.id, claim).catch(() => {});
-    throw err;
-  }
+  if (!guestCookie) return { moved: 0, completed: false };
+  return {
+    moved: await convertGuestAccount(guestCookie.userId, workosUser.id),
+    completed: true,
+  };
 }
 
 /**

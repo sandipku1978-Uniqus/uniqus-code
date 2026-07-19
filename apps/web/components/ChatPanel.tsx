@@ -2253,14 +2253,13 @@ const ChatItemView = memo(function ChatItemView({
     return (
       <div className="msg">
         <div className="head">
-          <span className="av agent">G</span>
           <span className="name">Gate 15</span>
           <span className="frame">Engineering agent</span>
           <span className="msg-actions">
             <CopyButton text={item.content} label="Copy" className="msg-action-btn" />
           </span>
         </div>
-        <div className="msg-body" style={{ paddingLeft: 30 }}>
+        <div className="msg-body" style={{ paddingLeft: 0 }}>
           <Markdown content={markdown} />
           <SourcesFooter sources={sources} />
         </div>
@@ -2366,23 +2365,32 @@ function ErrorCard({
         </ul>
       )}
       <div className="error-card-actions">
-        <button
-          type="button"
-          className="btn-secondary"
-          onClick={onRetry}
-          disabled={!canAct}
-          title={canAct ? "Run the last request again" : "Available once the agent is idle and connected"}
-        >
-          Retry run
-        </button>
-        <button
-          type="button"
-          className="msg-action-btn"
-          onClick={onSimplify}
-          title="Put a 'try a simpler approach' prompt in the composer"
-        >
-          Simplify request
-        </button>
+        {copy.action && (
+          <a className="btn-primary" href={copy.action.href}>
+            {copy.action.label}
+          </a>
+        )}
+        {!copy.hideRetry && (
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={onRetry}
+            disabled={!canAct}
+            title={canAct ? "Run the last request again" : "Available once the agent is idle and connected"}
+          >
+            Retry run
+          </button>
+        )}
+        {!copy.hideSimplify && (
+          <button
+            type="button"
+            className="msg-action-btn"
+            onClick={onSimplify}
+            title="Put a 'try a simpler approach' prompt in the composer"
+          >
+            Simplify request
+          </button>
+        )}
         <button
           type="button"
           className="msg-action-btn"

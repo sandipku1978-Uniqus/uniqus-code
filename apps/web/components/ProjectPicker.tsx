@@ -11,7 +11,7 @@ import {
 } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import type { DeploymentState, ProjectSummary, Organization } from "@gate15/api-types";
+import type { BillingStatus, DeploymentState, ProjectSummary, Organization } from "@gate15/api-types";
 import { roleAtLeast } from "@gate15/api-types";
 import BrandLockup from "./BrandLockup";
 import GuestBanner from "./GuestBanner";
@@ -39,6 +39,7 @@ import { createFirstTurnIntent } from "@/lib/first-turn-intent";
 import {
   fetchProjects,
   fetchUsageStatsApi,
+  fetchBillingStatusApi,
   createProjectFromBriefApi,
   importGithubApi,
   importZipApi,
@@ -346,12 +347,14 @@ export default function ProjectPicker({
   signOutUrl,
   accountType = "standard",
   convertFailed = false,
+  convertRetryHref = "/api/guest/convert",
 }: {
   userEmail: string | null;
   userName: string | null;
   signOutUrl: string;
   accountType?: "standard" | "guest";
   convertFailed?: boolean;
+  convertRetryHref?: string;
 }) {
   const router = useRouter();
   const isGuest = accountType === "guest";
@@ -359,6 +362,8 @@ export default function ProjectPicker({
   const searchParams = useSearchParams();
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [usage, setUsage] = useState<AccountUsageStats | null>(null);
+  const [billing, setBilling] = useState<BillingStatus | null>(null);
+  const [billingError, setBillingError] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Distinct from the in-form `error` so a project-load failure can render a
   // real error+retry block instead of dead-ending on the skeleton (§E).
@@ -529,6 +534,21 @@ export default function ProjectPicker({
       .catch(() => {});
     return () => controller.abort();
   }, [loadProjects]);
+
+  const loadBilling = useCallback(() => {
+    setBilling(null);
+    setBillingError(false);
+    fetchBillingStatusApi()
+      .then((response) => setBilling(response.billing))
+      .catch(() => {
+        setBilling(null);
+        setBillingError(true);
+      });
+  }, []);
+
+  useEffect(() => {
+    loadBilling();
+  }, [loadBilling]);
 
   // Load the user's organizations for the workspace switcher, and reconcile a
   // persisted active workspace against reality: if the stored org id is no
@@ -974,12 +994,11 @@ export default function ProjectPicker({
           }}
         >
           <span>
-            We couldn&apos;t move your guest projects to your signed-in account yet — but
-            nothing was lost. Your guest projects are still safe; retry, or sign out and
-            back in.
+            We couldn&apos;t finish moving your guest projects to this account. We kept the
+            guest session so you can retry the conversion.
           </span>
           <a
-            href="/api/guest/convert"
+            href={convertRetryHref}
             className="btn-ghost"
             style={{ fontSize: 12, padding: "3px 9px", marginLeft: "auto" }}
           >
@@ -1306,15 +1325,47 @@ export default function ProjectPicker({
           <div className="usage">
             <div className="row">
               <span>Plan</span>
-              <span className="v">{isGuest ? "Guest" : "Free"}</span>
+              <span className="v">
+                {isGuest
+                  ? "Guest"
+                  : billing
+                    ? billing.plan === "byok"
+                      ? "BYOK"
+                      : billing.plan.charAt(0).toUpperCase() + billing.plan.slice(1)
+                    : billingError
+                      ? (
+                        <button
+                          type="button"
+                          className="btn-ghost"
+                          onClick={loadBilling}
+                          style={{ minHeight: 28, padding: "2px 6px", fontSize: 11 }}
+                        >
+                          Retry billing
+                        </button>
+                      )
+                      : "Checking…"}
+              </span>
             </div>
+            {billing && (
+              <div className="row">
+                <span>Build credits</span>
+                <span className="v">
+                  {billing.requires_byok
+                    ? "Your keys"
+                    : `$${billing.usage_credit_balance_usd.toFixed(2)}`}
+                </span>
+              </div>
+            )}
             <div className="row">
               <span>Projects</span>
               <span className="v">{projects?.length ?? 0}</span>
             </div>
-            <div className="upgrade" title="Higher limits and team features are on the way.">
-              {isGuest ? "Sign in to keep your work across devices" : "More on Pro — coming soon"}
-            </div>
+            <Link
+              className="upgrade"
+              href={isGuest ? "/login" : "/settings#billing-settings"}
+            >
+              {isGuest ? "Sign in to keep your work across devices" : "Manage plan & credits"}
+            </Link>
           </div>
         </aside>
 

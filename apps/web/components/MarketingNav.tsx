@@ -16,10 +16,8 @@ const ROUTE_LINKS = [
 ] as const;
 
 const LANDING_LINKS = [
-  { label: "How it works", href: "#workflow" },
-  { label: "AI models", href: "#models" },
-  { label: "Private workspaces", href: "#workspaces" },
-  { label: "Trust", href: "#trust" },
+  { label: "Product", href: "#workflow" },
+  { label: "Evidence", href: "#evidence" },
   { label: "Pricing", href: "/pricing" },
   { label: "Docs", href: "/docs" },
 ] as const;
@@ -100,7 +98,9 @@ export default function MarketingNav({
             </Link>
           ),
         )}
-        <NavExploreMenu excludeHrefs={desktopRouteHrefs} />
+        {variant !== "landing" && (
+          <NavExploreMenu excludeHrefs={desktopRouteHrefs} />
+        )}
       </div>
 
       <div className="right">
@@ -167,6 +167,13 @@ export default function MarketingNav({
               Sign in
             </Link>
           )}
+          <Link
+            className="marketing-mobile-cta btn-primary"
+            href={ctaHref}
+            onClick={closeMobile}
+          >
+            {ctaLabel}
+          </Link>
         </div>
       )}
     </nav>

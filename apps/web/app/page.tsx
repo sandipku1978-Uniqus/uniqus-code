@@ -7,14 +7,14 @@ import SiteFooter from "@/components/SiteFooter";
 import { getGuestSession } from "@/lib/guest-server";
 
 /**
- * Landing page v3 — "workshop at first light".
+ * Landing page v4 — “the build record”.
  *
- * A quiet, editorial composition: an understated left-aligned hero with the
- * real composer, then one big painterly stage — the workspace window floating
- * on generated artwork of the gate at dawn (public/brand/atmos-stage.webp),
- * the window offset left so the painting's single ember glow stays visible.
- * Below: three asymmetric feature bands, a hairline trust index, and a calm
- * closing band. All styles live under `.landing-v3` in globals.css.
+ * Gate 15 is presented as an accountable operating system for software work,
+ * not a magical prompt box. The page opens with one representative build
+ * ledger, follows that same build through its approval gates, and puts the real
+ * project composer in the hero. Dark graphite is the default; the existing light
+ * theme flips the editorial surfaces to cold concrete without changing the
+ * product instrument.
  */
 export default async function MarketingPage() {
   const { user } = await withAuth();
@@ -22,10 +22,10 @@ export default async function MarketingPage() {
   const signedIn = !!user || !!guest;
   const ctaHref = signedIn ? "/projects" : "/login";
   const ctaPrimary = signedIn ? "Open dashboard" : "Get started";
-  const ctaHero = signedIn ? "Open dashboard" : "Start building";
+  const ctaHero = signedIn ? "Open dashboard" : "Start a build";
 
   return (
-    <div className="marketing-shell landing-v3">
+    <div className="marketing-shell landing-v4">
       {guest && <GuestBanner />}
       <MarketingNav
         signedIn={signedIn}
@@ -36,136 +36,159 @@ export default async function MarketingPage() {
       />
 
       <main id="main-content" tabIndex={-1}>
-        <section className="lv3-hero">
-          <div className="lv3-hero-inner">
-            <h1>
-              The coding agent you can{" "}
-              <span className="grad">hold accountable.</span>
+        <section className="br-hero" aria-labelledby="br-title">
+          <div className="br-hero-copy">
+            <span className="br-kicker">Illustrative build record 015</span>
+            <h1 id="br-title">
+              Every change.
+              <span>Accounted for.</span>
             </h1>
-            <p className="lv3-lede">
-              Gate 15 plans before it touches a file, builds on a private machine
-              per project, and keeps the running app beside the work. Claude,
-              Gemini, GPT, or GLM — your pick, every turn.
+            <p>
+              Gate 15 turns a brief into an approved plan, a private build, and
+              a verifiable change record. You keep the final say at every gate.
             </p>
-
-            {/* The landing composer is intentionally unchanged. */}
             <LandingPrompt
               variant="hero"
               signedIn={signedIn}
               ctaHref={ctaHref}
               ctaLabel={ctaHero}
-              placeholder="Ask Gate 15 to build an internal tool that…"
-              suggestions={HERO_SUGGESTIONS}
+              placeholder="Describe the tool your team needs…"
             />
-          </div>
-        </section>
-
-        <section
-          className="lv3-stage"
-          id="product-proof"
-          aria-label="The Gate 15 workspace: an approved plan, visible build activity, and a running preview of a dispatch board"
-        >
-          <div className="lv3-stage-frame">
-            <StageWindow />
-          </div>
-          <div className="lv3-legend" aria-label="What the workspace shows">
-            <span><b>01</b> Approved plan</span>
-            <span><b>02</b> Visible activity</span>
-            <span><b>03</b> Running preview</span>
-            <span><b>04</b> Manual publish</span>
-          </div>
-        </section>
-
-        <section className="lv3-band" id="workflow">
-          <div className="lv3-band-copy">
-            <span className="lv3-num">01 / Plan</span>
-            <h2>Nothing changes until you approve the plan.</h2>
-            <p>
-              Send a brief and Gate 15 reads the project, then proposes concrete
-              steps — files, migrations, tests. Edit the plan or approve it as-is;
-              the first write happens after you say so.
-            </p>
-            <ul className="lv3-ticks">
-              <li>Steps are editable before anything runs</li>
-              <li>Every change stays visible while it builds</li>
-            </ul>
-          </div>
-          <PlanVisual />
-        </section>
-
-        <section className="lv3-band flip" id="models">
-          <div className="lv3-band-copy">
-            <span className="lv3-num">02 / Models</span>
-            <h2>The right model for the turn, not the subscription.</h2>
-            <p>
-              Auto matches each request to the model built for it — fast ones for
-              small edits, deep reasoners for architecture. Override it for any
-              single turn without touching the rest of the project.
-            </p>
-            <ul className="lv3-ticks">
-              <li>Auto picks by task, not by price</li>
-              <li>Override any single turn</li>
-            </ul>
-          </div>
-          <ModelsVisual />
-        </section>
-
-        <section className="lv3-band" id="workspaces">
-          <div className="lv3-band-copy">
-            <span className="lv3-num">03 / Machine</span>
-            <h2>Every project gets its own machine.</h2>
-            <p>
-              Real packages, real processes, a real database — inside a private VM
-              that belongs to that project alone. Close the tab, come back next
-              week, and it reopens exactly where you left it.
-            </p>
-            <ul className="lv3-ticks">
-              <li>Install real packages and services</li>
-              <li>State survives between sessions</li>
-            </ul>
-          </div>
-          <MachineVisual />
-        </section>
-
-        <section className="lv3-trust" id="trust">
-          <div className="lv3-trust-head">
-            <div>
-              <span className="lv3-num">04 / Trust</span>
-              <h2>Nothing important happens off-screen.</h2>
+            <div className="br-hero-actions">
+              <a className="br-secondary-action" href="#workflow">
+                Inspect the illustrative build
+                <ArrowIcon />
+              </a>
             </div>
-            <p>Five defaults that keep the agent honest — each one visible in the workspace at the moment it matters.</p>
           </div>
-          <div className="lv3-trust-grid">
-            {TRUST_ROWS.map((row) => (
-              <article className="lv3-trust-cell" key={row.num}>
-                <span className="lv3-trust-num">{row.num}</span>
-                <h3>{row.title}</h3>
-                <p>{row.body}</p>
-                <span className={`lv3-evidence ${row.tone}`}>
+
+          <BuildRecord />
+        </section>
+
+        <section className="br-workflow" id="workflow" aria-labelledby="workflow-title">
+          <header className="br-section-head br-section-head-wide">
+            <div>
+              <span className="br-kicker">One build / start to finish</span>
+              <h2 id="workflow-title">The work stays legible while it moves.</h2>
+            </div>
+            <p>
+              One request, one chain of custody. Plans, file changes, tests,
+              preview checks, and the release decision stay attached to the same turn.
+            </p>
+          </header>
+
+          <div className="br-stage-list">
+            <article className="br-stage">
+              <StageCopy
+                number="01"
+                label="Plan gate"
+                title="Nothing changes until the plan is visible."
+                body="Gate 15 reads the project and proposes concrete steps, files, migrations, and checks. Edit the approach or approve it as written."
+              />
+              <PlanLedger />
+            </article>
+
+            <article className="br-stage br-stage-flip">
+              <StageCopy
+                number="02"
+                label="Private build"
+                title="Every command lands on a machine for this project alone."
+                body="Real packages, processes, databases, and dev servers run inside a private VM. The file delta and command trail remain visible as the build progresses."
+              />
+              <ChangeLedger />
+            </article>
+
+            <article className="br-stage">
+              <StageCopy
+                number="03"
+                label="Verification"
+                title="The running app is evidence, not decoration."
+                body="Gate 15 runs the suite, opens the preview, checks responsive layouts, and reports the outcome beside the work that produced it."
+              />
+              <VerifyLedger />
+            </article>
+
+            <article className="br-stage br-release-stage">
+              <StageCopy
+                number="04"
+                label="Release gate"
+                title="Publishing remains a separate decision."
+                body="A successful build is ready for review, not automatically live. Shipping stays an explicit action you control."
+              />
+              <div className="br-release-ledger" aria-label="Release status: ready for review and not published">
+                <div>
+                  <span className="br-status br-status-ready"><i aria-hidden="true" /> Ready for review</span>
+                  <strong>Not published</strong>
+                  <small>Last verified · 09:48</small>
+                </div>
+                <Link href="/docs#ship">
+                  How publishing works
+                  <ArrowIcon />
+                </Link>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section className="br-evidence" id="evidence" aria-labelledby="evidence-title">
+          <header className="br-section-head">
+            <div>
+              <span className="br-kicker">Control record</span>
+              <h2 id="evidence-title">Nothing important happens off-screen.</h2>
+            </div>
+            <p>
+              Five product defaults keep the agent accountable, with the receipt
+              shown in the workspace at the moment it matters.
+            </p>
+          </header>
+
+          <div className="br-control-ledger">
+            {CONTROL_ROWS.map((row) => (
+              <article className="br-control-row" key={row.number}>
+                <span className="br-control-number">{row.number}</span>
+                <div className="br-control-copy">
+                  <h3>{row.title}</h3>
+                  <p>{row.body}</p>
+                </div>
+                <span className={`br-control-proof ${row.tone}`}>
                   <i aria-hidden="true" />
-                  {row.evidence}
+                  {row.proof}
                 </span>
               </article>
             ))}
           </div>
         </section>
 
-        <section className="lv3-close">
-          <div className="lv3-close-inner">
-            <h2>Ready when you are.</h2>
-            <p>Start from a sentence, a repo, or a zip.</p>
+        <section className="br-systems" id="product" aria-labelledby="systems-title">
+          <header className="br-section-head br-section-head-wide">
+            <div>
+              <span className="br-kicker">Under the work</span>
+              <h2 id="systems-title">A real machine. A deliberate model choice.</h2>
+            </div>
+            <p>
+              The infrastructure stays predictable: a private runtime for the
+              project and task-aware routing for each turn, both overridable by you.
+            </p>
+          </header>
 
-            {/* The landing composer is intentionally unchanged. */}
-            <LandingPrompt
-              variant="bottom"
-              signedIn={signedIn}
-              ctaHref={ctaHref}
-              ctaLabel={ctaHero}
-              placeholder="Describe the tool your team needs…"
-            />
+          <div className="br-system-grid">
+            <MachineLedger />
+            <RoutingLedger />
+          </div>
+        </section>
 
-            <p className="lv3-close-note">
-              Free for solo projects · Team plans from $20/seat/month ·{" "}
+        <section className="br-close" aria-labelledby="close-title">
+          <div className="br-close-inner">
+            <span className="br-kicker">New build request</span>
+            <h2 id="close-title">Bring the brief. Keep the final say.</h2>
+            <p>Start from a sentence, a repository, or a zip.</p>
+
+            <Link className="btn-primary br-primary-action br-close-action" href={ctaHref}>
+              {ctaHero}
+            </Link>
+
+            <p className="br-close-note">
+              $3 trial usage · BYOK from $8/month ·{" "}
               <Link href="/pricing">See pricing</Link>
             </p>
           </div>
@@ -176,272 +199,206 @@ export default async function MarketingPage() {
   );
 }
 
-/** The workspace window that floats on the stage painting. Pure mock — every
- * control is decorative (tabIndex -1), the whole window reads as one image. */
-function StageWindow() {
+function BuildRecord() {
   return (
-    <div
-      className="lv3w"
-      role="img"
-      aria-label="Gate 15 workspace window: the agent pane shows an approved three-step plan and live build activity, the preview pane shows the running Meridian Freight dispatch board"
-    >
-      <div className="lv3w-bar" aria-hidden="true">
-        <span className="lv3w-dots" aria-hidden="true"><i /><i /><i /></span>
-        <span className="lv3w-title">
-          <b className="lv3w-mark">15</b>
-          meridian-dispatch <i>/</i> <strong>Builder</strong>
-        </span>
-        <span className="lv3w-run"><i /> Running</span>
-      </div>
-
-      <div className="lv3w-body" aria-hidden="true">
-        <aside className="lv3w-chat">
-          <div className="lv3w-brief">
-            Build a dispatch board for our freight team — live loads, driver
-            assignments, exception flags.
-          </div>
-          <div className="lv3w-plan">
-            <header>
-              <span><i /> Plan approved</span>
-              <b>3 steps</b>
-            </header>
-            <ol>
-              <li><span>01</span>Model loads, drivers, and exceptions</li>
-              <li><span>02</span>Build the dispatch board</li>
-              <li><span>03</span>Wire live updates and verify</li>
-            </ol>
-          </div>
-          <div className="lv3w-act">
-            <div><i className="done" /><span>Created 9 project files</span><time>0:14</time></div>
-            <div><i className="done" /><span>Tests passing · 6/6</span><time>0:38</time></div>
-            <div><i className="done" /><span>Captured desktop preview</span><time>0:47</time></div>
-            <div><i className="live" /><span>Checking the mobile layout</span><time>live</time></div>
-          </div>
-          <div className="lv3w-note">
-            <span>Ready for review</span>
-            <p>The board is running. Desktop and mobile layouts checked.</p>
-          </div>
-        </aside>
-
-        <div className="lv3w-app">
-          <div className="lv3w-url">
-            <span>preview.gate15.dev / dispatch</span>
-            <b>Live</b>
-          </div>
-          <div className="lv3w-screen">
-            <aside>
-              <b className="lv3w-appmark">M</b>
-              <nav>
-                <b>Board</b>
-                <span>Loads</span>
-                <span>Drivers</span>
-                <span>History</span>
-              </nav>
-            </aside>
-            <main>
-              <header>
-                <div>
-                  <small>MERIDIAN FREIGHT</small>
-                  <h3>Dispatch board</h3>
-                </div>
-                <button type="button" tabIndex={-1}>+ New load</button>
-              </header>
-              <div className="lv3w-stats">
-                <div><span>On the road</span><b>14</b></div>
-                <div><span>Unassigned</span><b>03</b></div>
-                <div><span>Exceptions</span><b>02</b></div>
-              </div>
-              <div className="lv3w-table">
-                <div className="lv3w-th"><span>Load</span><span>Route</span><span>Driver</span><span>Status</span></div>
-                <div className="lv3w-tr"><span>LD-2481</span><span>Oakland → Reno</span><span>D. Okafor</span><em className="ok">On time</em></div>
-                <div className="lv3w-tr"><span>LD-2482</span><span>Fresno → Portland</span><span>M. Reyes</span><em className="warn">Delayed 40m</em></div>
-                <div className="lv3w-tr"><span>LD-2484</span><span>Salt Lake → Boise</span><span>Unassigned</span><em>Needs driver</em></div>
-                <div className="lv3w-tr"><span>LD-2485</span><span>Boise → Helena</span><span>J. Tran</span><em className="ok">On time</em></div>
-              </div>
-            </main>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PlanVisual() {
-  return (
-    <div className="lv3-band-visual">
-      <div className="lv3-viz" aria-label="A proposed four-step plan waiting for approval, with the files each step touches and edit and approve actions">
-      <div className="lv3-viz-bar">
-        <span className="lv3-viz-crumb"><b>15</b> crew-scheduler <i>/</i> plan</span>
-        <span className="lv3-chip pending"><i aria-hidden="true" /> Waiting for approval</span>
-      </div>
-      <ol className="lv3-plan-steps">
-        <li>
-          <span className="n">01</span>
-          <div><b>Model shifts and crews</b><small>schema.sql · seed.ts</small></div>
-          <em>+96 lines</em>
-        </li>
-        <li>
-          <span className="n">02</span>
-          <div><b>Build the weekly rota with drag-to-swap</b><small>RotaView.tsx · rota.css</small></div>
-          <em>+214 lines</em>
-        </li>
-        <li>
-          <span className="n">03</span>
-          <div><b>Flag overtime conflicts before they save</b><small>rules.ts</small></div>
-          <em>+58 lines</em>
-        </li>
-        <li>
-          <span className="n">04</span>
-          <div><b>Run the suite and verify the preview</b><small>12 tests · desktop + mobile</small></div>
-          <em>checks</em>
-        </li>
+    <section className="br-record" aria-labelledby="record-title">
+      <header className="br-record-head">
+        <span className="br-record-mark" aria-hidden="true"><LedgerIcon /></span>
+        <h2 id="record-title">Illustrative build record / Ready for review</h2>
+        <span>Example · BR-015</span>
+      </header>
+      <ol className="br-record-rows">
+        {BUILD_RECORD_ROWS.map((row) => (
+          <li className={`br-record-row ${row.tone}`} key={row.number}>
+            <span className="br-record-index">{row.number}</span>
+            <span className="br-record-label">{row.label}</span>
+            <span className="br-record-value">
+              <i aria-hidden="true" />
+              <span>{row.value}</span>
+              {row.action && <b>{row.action}</b>}
+            </span>
+            <time>{row.time}</time>
+          </li>
+        ))}
       </ol>
-      <footer className="lv3-viz-foot">
-        <button type="button" tabIndex={-1} className="lv3-fake-ghost">Edit plan</button>
-        <button type="button" tabIndex={-1} className="lv3-fake-primary">Approve &amp; build</button>
+      <footer className="br-record-foot">
+        <span>Traceable</span>
+        <span>Verifiable</span>
+        <span>Accountable</span>
       </footer>
-      </div>
-      <aside className="lv3-float left" aria-hidden="true">
-        <span>Plan edited</span>
-        <b>Step 02 · updated by you</b>
-      </aside>
+    </section>
+  );
+}
+
+function StageCopy({
+  number,
+  label,
+  title,
+  body,
+}: {
+  number: string;
+  label: string;
+  title: string;
+  body: string;
+}) {
+  return (
+    <div className="br-stage-copy">
+      <span className="br-stage-label"><b>{number}</b> / {label}</span>
+      <h3>{title}</h3>
+      <p>{body}</p>
     </div>
   );
 }
 
-function ModelsVisual() {
+function PlanLedger() {
   return (
-    <div className="lv3-band-visual">
-      <div className="lv3-viz" aria-label="Auto routing the current turn to Claude Opus, with the quick and standard tiers routed to other models">
-      <div className="lv3-viz-bar">
-        <span className="lv3-viz-crumb"><b className="auto">A</b> auto routing</span>
-        <span className="lv3-chip ok"><i aria-hidden="true" /> 4 providers online</span>
+    <div className="br-instrument br-plan-ledger" aria-label="An editable three-step plan waiting for approval">
+      <header>
+        <span>Proposed plan / 3 steps</span>
+        <span className="br-status br-status-waiting"><i aria-hidden="true" /> Waiting for approval</span>
+      </header>
+      <ol>
+        <li><b>01</b><span>Model loads, drivers, and exceptions<small>schema.sql · seed.ts</small></span><em>+96</em></li>
+        <li><b>02</b><span>Build the dispatch board<small>DispatchBoard.tsx · board.css</small></span><em>+214</em></li>
+        <li><b>03</b><span>Wire live updates and verify<small>events.ts · 6 tests</small></span><em>checks</em></li>
+      </ol>
+      <footer><span>Edit plan</span><strong>Approve &amp; build</strong></footer>
+    </div>
+  );
+}
+
+function ChangeLedger() {
+  return (
+    <div className="br-instrument br-change-ledger" aria-label="A live file and command record inside a private project machine">
+      <header>
+        <span>meridian-dispatch / Project VM</span>
+        <span className="br-status br-status-running"><i aria-hidden="true" /> Running</span>
+      </header>
+      <div className="br-command">$ npm test &amp;&amp; npm run dev <span>process 4242</span></div>
+      <div className="br-change-row"><span>schema.sql</span><em>+96</em><small>created</small></div>
+      <div className="br-change-row"><span>DispatchBoard.tsx</span><em>+214</em><small>created</small></div>
+      <div className="br-change-row"><span>board.css</span><em>+102 / −18</em><small>changed</small></div>
+      <footer><span>9 files changed</span><strong>+412 / −38</strong></footer>
+    </div>
+  );
+}
+
+function VerifyLedger() {
+  return (
+    <div className="br-instrument br-verify-ledger" aria-label="Verification results for tests, desktop, mobile, and runtime errors">
+      <header>
+        <span>Verification record</span>
+        <span className="br-status br-status-complete"><i aria-hidden="true" /> Complete</span>
+      </header>
+      <div className="br-verify-grid">
+        <div><span>Test suite</span><strong>6 / 6</strong><small>passing</small></div>
+        <div><span>Desktop</span><strong>1440</strong><small>checked</small></div>
+        <div><span>Mobile</span><strong>390</strong><small>checked</small></div>
+        <div><span>Console</span><strong>0</strong><small>errors</small></div>
       </div>
-      <div className="lv3-turn">
-        <small>This turn</small>
-        <p>&ldquo;Refactor the auth flow without breaking guest sessions.&rdquo;</p>
-        <div className="lv3-turn-route">
-          <span>Hard</span>
-          <i aria-hidden="true">→</i>
-          <b>Claude Opus 4.8</b>
-          <em>deep reasoning</em>
-        </div>
+      <footer><span>Captured running preview</span><strong>09:41</strong></footer>
+    </div>
+  );
+}
+
+function MachineLedger() {
+  return (
+    <article className="br-system br-machine-ledger">
+      <header>
+        <div><span>Private workspace</span><h3>One project, one machine.</h3></div>
+        <span className="br-status br-status-running"><i aria-hidden="true" /> Running</span>
+      </header>
+      <div className="br-machine-path" aria-label="Browser to control plane to private project VM to live preview">
+        <span>Your browser<small>encrypted session</small></span>
+        <i aria-hidden="true">→</i>
+        <span>Control plane<small>selected project only</small></span>
+        <i aria-hidden="true">→</i>
+        <strong>Project VM<small>meridian-dispatch</small></strong>
+        <i aria-hidden="true">→</i>
+        <span>Live preview<small>port 4242</small></span>
       </div>
-      <div className="lv3-model-rows">
-        <div className="lv3-model-row">
-          <span className="lv3-tier">Quick</span>
-          <p>Tighten the hero spacing on mobile</p>
-          <b>Gemini 3.5 Flash</b>
-        </div>
-        <div className="lv3-model-row">
-          <span className="lv3-tier">Standard</span>
-          <p>Add CSV export to the reports page</p>
-          <b>Claude Sonnet 4.6</b>
-        </div>
-      </div>
-      <footer className="lv3-viz-foot models">
-        <span>Prefer to choose?</span>
-        <div><b>Claude</b><b>Gemini</b><b>GPT</b><b>GLM</b></div>
+      <footer>
+        <span>Node 22</span><span>Project disk</span><span>Saved state</span>
+        <Link href="/workspaces">Explore workspaces <ArrowIcon /></Link>
       </footer>
-      </div>
-      <aside className="lv3-float" aria-hidden="true">
-        <span>Vision turn</span>
-        <b>Screenshot → Gemini 3.5 Flash</b>
-      </aside>
-    </div>
+    </article>
   );
 }
 
-function MachineVisual() {
+function RoutingLedger() {
   return (
-    <div className="lv3-band-visual">
-      <div className="lv3-viz" aria-label="Isolation diagram: your browser reaches the Gate 15 control plane, which routes only to the selected project's private virtual machine">
-      <div className="lv3-viz-bar">
-        <span className="lv3-viz-crumb">workspace isolation</span>
-        <span className="lv3-chip ok"><i aria-hidden="true" /> 2 projects</span>
-      </div>
-      <div className="lv3-iso">
-        <div className="lv3-iso-node">Your browser <small>encrypted session</small></div>
-        <div className="lv3-iso-stem" aria-hidden="true" />
-        <div className="lv3-iso-node plane">Gate 15 control plane <small>routes only to the selected project</small></div>
-        <div className="lv3-iso-fork" aria-hidden="true"><i /><i /></div>
-        <div className="lv3-iso-vms">
-          <article className="lv3-vm">
-            <header>
-              <span><i className="on" aria-hidden="true" /> VM 01 · Running</span>
-              <b>crew-scheduler</b>
-            </header>
-            <div className="lv3-vm-grid">
-              <span>Files</span>
-              <span>Postgres 16</span>
-              <span>Node 22</span>
-              <span>Preview :4242</span>
-            </div>
-          </article>
-          <article className="lv3-vm saved">
-            <header>
-              <span><i aria-hidden="true" /> VM 02 · Saved</span>
-              <b>launch-site</b>
-            </header>
-            <div className="lv3-vm-grid">
-              <span>Files</span>
-              <span>SQLite</span>
-              <span>Node 22</span>
-              <span>State kept</span>
-            </div>
-          </article>
-        </div>
-      </div>
-      </div>
-      <aside className="lv3-float" aria-hidden="true">
-        <span>Real runtime</span>
-        <b>npm install stripe · ok</b>
-      </aside>
-    </div>
+    <article className="br-system br-routing-ledger">
+      <header>
+        <div><span>Auto routing</span><h3>Fit the model to the turn.</h3></div>
+        <span className="br-status br-status-complete"><i aria-hidden="true" /> Online</span>
+      </header>
+      <div className="br-route-row"><span>Quick</span><p>Tighten mobile spacing</p><strong>Gemini 3.5 Flash</strong></div>
+      <div className="br-route-row"><span>Standard</span><p>Add CSV export</p><strong>Claude Sonnet 4.6</strong></div>
+      <div className="br-route-row active"><span>Hard</span><p>Refactor authentication</p><strong>Claude Opus 4.8</strong></div>
+      <footer><span>Override any turn</span><Link href="/models">Compare models <ArrowIcon /></Link></footer>
+    </article>
   );
 }
 
-const HERO_SUGGESTIONS = [
-  "An internal admin tool",
-  "A Stripe billing flow",
-  "A customer CRM",
-  "A marketing landing page",
+function ArrowIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M4 10h11M11 6l4 4-4 4" />
+    </svg>
+  );
+}
+
+function LedgerIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M6 5h10M6 10h10M6 15h10" />
+      <path d="M3 5h.01M3 10h.01M3 15h.01" />
+    </svg>
+  );
+}
+
+const BUILD_RECORD_ROWS = [
+  { number: "01", label: "Request", value: "Dispatch board for a freight team", time: "09:02", tone: "neutral", action: null },
+  { number: "02", label: "Plan", value: "Approved by you · 09:14", time: "09:14", tone: "complete", action: null },
+  { number: "03", label: "Changes", value: "9 files · +412 / −38", time: "09:27", tone: "changed", action: null },
+  { number: "04", label: "Verify", value: "6/6 tests · desktop + mobile checked", time: "09:41", tone: "complete", action: null },
+  { number: "05", label: "Release", value: "Waiting for your approval", time: "09:48", tone: "pending", action: "Approval required" },
 ] as const;
 
-const TRUST_ROWS = [
+const CONTROL_ROWS = [
   {
-    num: "01",
+    number: "01",
     title: "Plans wait for you",
     body: "Review or edit the proposed approach before the first implementation step.",
-    evidence: "Edit plan · Approve",
-    tone: "pending",
+    proof: "Edit plan · Approve",
+    tone: "waiting",
   },
   {
-    num: "02",
+    number: "02",
     title: "Sources stay attached",
-    body: "Web-researched answers keep their citations — titles and domains visible.",
-    evidence: "3 cited sources",
-    tone: "ok",
+    body: "Web-researched answers keep their citations, titles, and domains visible.",
+    proof: "3 cited sources",
+    tone: "complete",
   },
   {
-    num: "03",
+    number: "03",
     title: "Secrets stay out of chat",
-    body: "Credentials are stored encrypted; their values never appear in the conversation.",
-    evidence: "DATABASE_URL · hidden",
+    body: "Credentials are encrypted and their raw values never appear in the conversation.",
+    proof: "DATABASE_URL · hidden",
     tone: "neutral",
   },
   {
-    num: "04",
-    title: "Any experiment can rewind",
-    body: "Checkpoints give risky work a clear way back to a known-good state.",
-    evidence: "Checkpoint v3 · 2 min ago",
-    tone: "ok",
+    number: "04",
+    title: "Experiments can rewind",
+    body: "Checkpoints give risky work a clear path back to a known-good state.",
+    proof: "Checkpoint v3 · 2 min ago",
+    tone: "complete",
   },
   {
-    num: "05",
+    number: "05",
     title: "Publishing is a decision",
-    body: "Nothing goes live on its own. Shipping stays a visible action you choose.",
-    evidence: "Not published",
+    body: "Nothing goes live on its own. Shipping remains a visible action you choose.",
+    proof: "Not published",
     tone: "neutral",
   },
 ] as const;

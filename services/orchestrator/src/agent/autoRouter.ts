@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { MODEL_CATALOG } from "@gate15/api-types";
+import { estimateTurnCostUsd, MODEL_CATALOG } from "@gate15/api-types";
 import type { ProviderKeys, ProviderName } from "./providers/types.js";
 import { ensureAnthropic, type ResolvedModel } from "./router.js";
 
@@ -73,6 +73,11 @@ export interface PickOptions {
     cacheReadTokens: number;
     cacheCreationTokens: number;
   }) => void;
+  /** Last affordability/abort check immediately before the classifier request. */
+  beforeClassifier?: (maxCostUsd: number, model: string) => void;
+  /** The classifier request started but returned no trustworthy usage receipt. */
+  onClassifierUnknown?: () => void;
+  signal?: AbortSignal;
 }
 
 const DEFAULT_CLASSIFIER_TIMEOUT_MS = 1_500;
@@ -307,8 +312,7 @@ export async function pickAutoModel(
       signals.userMessage,
       signals.previousUserMessage,
       opts.anthropicKey,
-      opts.onClassifier,
-      opts.onClassifierUsage,
+      opts,
     );
     if (classified) {
       source = "classifier";
@@ -342,8 +346,7 @@ async function classifyTierLLM(
   userMessage: string,
   previousUserMessage?: string,
   apiKey?: string,
-  onClassifier?: (result: { timedOut: boolean; succeeded: boolean }) => void,
-  onClassifierUsage?: PickOptions["onClassifierUsage"],
+  opts: PickOptions = {},
 ): Promise<"quick" | "standard" | "hard" | null> {
   if (!apiKey) return null;
   const system =
@@ -365,16 +368,37 @@ async function classifyTierLLM(
   const content = `${
     prev ? `The user's PREVIOUS request, for context only (the new request may continue it):\n${prev.slice(0, 600)}\n\n` : ""
   }Request to classify:\n${userMessage.slice(0, 4000)}`;
+  const classifierModel = ensureAnthropic("classify");
+  let usageReported = false;
+  let providerStarted = false;
+  let unknownReported = false;
+  const reportUnknown = (): void => {
+    if (unknownReported || usageReported || !providerStarted) return;
+    unknownReported = true;
+    opts.onClassifierUnknown?.();
+  };
+  const reportUsage = (usage: Parameters<NonNullable<PickOptions["onClassifierUsage"]>>[0]) => {
+    if (usageReported) return;
+    usageReported = true;
+    opts.onClassifierUsage?.(usage);
+  };
   try {
+    if (opts.signal?.aborted) return null;
     const client = new Anthropic({ apiKey });
-    const classifierModel = ensureAnthropic("classify");
     const controller = new AbortController();
-    let usageReported = false;
-    const reportUsage = (usage: Parameters<NonNullable<PickOptions["onClassifierUsage"]>>[0]) => {
-      if (usageReported) return;
-      usageReported = true;
-      onClassifierUsage?.(usage);
-    };
+    const estimatedInputTokens = Buffer.byteLength(system + content, "utf8") + 256;
+    opts.beforeClassifier?.(
+      estimateTurnCostUsd(classifierModel, {
+        inputTokens: estimatedInputTokens,
+        outputTokens: 4,
+      }),
+      classifierModel,
+    );
+    if (opts.signal?.aborted) return null;
+    providerStarted = true;
+    const requestSignal = opts.signal
+      ? AbortSignal.any([controller.signal, opts.signal])
+      : controller.signal;
     const call = client.messages.create({
       model: classifierModel,
       max_tokens: 4,
@@ -385,16 +409,26 @@ async function classifyTierLLM(
         // the API 400s on a trailing-whitespace assistant turn).
         { role: "assistant", content: "Classification:" },
       ],
-    }, { signal: controller.signal }).then((response) => {
+    }, { signal: requestSignal }).then((response) => {
       const usage = response.usage;
-      reportUsage({
+      const normalized = {
         provider: "anthropic",
         model: classifierModel,
         inputTokens: usage.input_tokens ?? 0,
         outputTokens: usage.output_tokens ?? 0,
         cacheReadTokens: usage.cache_read_input_tokens ?? 0,
         cacheCreationTokens: usage.cache_creation_input_tokens ?? 0,
-      });
+      } as const;
+      if (
+        normalized.inputTokens ||
+        normalized.outputTokens ||
+        normalized.cacheReadTokens ||
+        normalized.cacheCreationTokens
+      ) {
+        reportUsage(normalized);
+      } else {
+        reportUnknown();
+      }
       return response;
     });
     // Cap the tiebreak so a slow classify call can't stall the turn start.
@@ -412,18 +446,11 @@ async function classifyTierLLM(
       if (timeout) clearTimeout(timeout);
     }
     if (!response) {
-      // An aborted timeout may not carry authoritative provider usage. Record a
-      // conservative bounded estimate so cost-per-task does not silently omit
-      // the classifier simply because its response missed the latency budget.
-      reportUsage({
-        provider: "anthropic",
-        model: classifierModel,
-        inputTokens: Math.ceil((system.length + content.length) / 3.3),
-        outputTokens: 4,
-        cacheReadTokens: 0,
-        cacheCreationTokens: 0,
-      });
-      onClassifier?.({ timedOut: true, succeeded: false });
+      // A timeout can cross the provider boundary without returning an
+      // authoritative receipt. Quarantine platform spend instead of inventing
+      // usage and then reusing the same allocation.
+      reportUnknown();
+      opts.onClassifier?.({ timedOut: true, succeeded: false });
       return null;
     }
     const text = response.content
@@ -432,24 +459,28 @@ async function classifyTierLLM(
       .join("")
       .toUpperCase();
     if (text.includes("HARD")) {
-      onClassifier?.({ timedOut: false, succeeded: true });
+      opts.onClassifier?.({ timedOut: false, succeeded: true });
       return "hard";
     }
     if (text.includes("QUICK")) {
-      onClassifier?.({ timedOut: false, succeeded: true });
+      opts.onClassifier?.({ timedOut: false, succeeded: true });
       return "quick";
     }
     if (text.includes("STANDARD") || text.includes("ROUTINE")) {
-      onClassifier?.({ timedOut: false, succeeded: true });
+      opts.onClassifier?.({ timedOut: false, succeeded: true });
       return "standard";
     }
-    onClassifier?.({ timedOut: false, succeeded: false });
+    opts.onClassifier?.({ timedOut: false, succeeded: false });
     return null;
   } catch (err) {
+    // The request crossed the provider boundary even when it failed before a
+    // response/usage receipt. Quarantine the platform allocation so a retry
+    // cannot spend the same dollars again.
+    reportUnknown();
     const aborted =
       err instanceof Error &&
       (err.name === "AbortError" || err.message.includes("routing classifier timeout"));
-    onClassifier?.({ timedOut: aborted, succeeded: false });
+    opts.onClassifier?.({ timedOut: aborted, succeeded: false });
     console.warn(
       `[auto-router] tiebreak classify failed; using heuristic default:`,
       err instanceof Error ? err.message : err,

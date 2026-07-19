@@ -3,7 +3,6 @@ import {
   buildSystemPrompt,
   createOwnedSubAgentDrain,
   hasMeaningfulFinalAnswer,
-  hasPreResolvedAutoPick,
   inheritedSubAgentPermissionHooks,
   isNestedAgentRun,
 } from "./loop.js";
@@ -220,24 +219,6 @@ describe("nested-agent ownership", () => {
     releaseDurability();
     await first;
     expect(settled).toEqual(["sync-started", "durable"]);
-  });
-});
-
-describe("pre-resolved Auto option", () => {
-  it("distinguishes absence from an explicit null fallback", () => {
-    expect(hasPreResolvedAutoPick({})).toBe(false);
-    expect(hasPreResolvedAutoPick({ preResolvedAutoPick: null })).toBe(true);
-    expect(
-      hasPreResolvedAutoPick({
-        preResolvedAutoPick: {
-          provider: "anthropic",
-          model: "claude-sonnet-4-6",
-          overridden: false,
-          tier: "standard",
-          vision: false,
-        },
-      }),
-    ).toBe(true);
   });
 });
 

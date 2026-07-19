@@ -1,5 +1,6 @@
 import Link from "next/link";
 import BrandLockup from "@/components/BrandLockup";
+import { legalPolicyLinks } from "@/lib/legal-policies";
 
 /**
  * Shared marketing footer — the single source of truth for the footer
@@ -51,6 +52,7 @@ function isExternal(href: string) {
 }
 
 export default function SiteFooter() {
+  const policies = legalPolicyLinks();
   return (
     <footer className="site-footer">
       <div className="footer-panel">
@@ -62,7 +64,20 @@ export default function SiteFooter() {
             </p>
           </div>
           <div className="footer-brand-foot">
-            <span>&copy; 2026 Gate 15 · Formal policies pending publication</span>
+            <span className="footer-policy-links">
+              &copy; 2026 Gate 15 ·{" "}
+              {policies.terms ? (
+                <a href={policies.terms} target="_blank" rel="noopener noreferrer">Terms</a>
+              ) : (
+                "Terms unavailable"
+              )}
+              {" · "}
+              {policies.privacy ? (
+                <a href={policies.privacy} target="_blank" rel="noopener noreferrer">Privacy</a>
+              ) : (
+                "Privacy unavailable"
+              )}
+            </span>
           </div>
         </div>
 

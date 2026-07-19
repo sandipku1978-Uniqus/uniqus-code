@@ -176,9 +176,9 @@ const COMPARE: {
   {
     feature: "Built-in web search",
     claude: "yes",
-    glm: "yes",
-    gpt: "yes",
-    gemini: "yes",
+    glm: "with your key",
+    gpt: "with your key",
+    gemini: "3.x + your key",
   },
   {
     feature: "Thinking effort (low → max)",
@@ -383,19 +383,20 @@ export default function ModelsPage() {
               <span className="mk-ic cyan">
                 <ModelIcon name="search" />
               </span>
-              <h3>Built-in web search, on every provider</h3>
+              <h3>Native web search across providers</h3>
               <p>
                 When the answer depends on something current — a library&rsquo;s
                 latest API, a framework that shipped last week, today&rsquo;s docs —
-                the model can search the web on its own. It&rsquo;s built in for
-                Claude, GLM, GPT, and Gemini alike, so you get up-to-date answers no
-                matter which AI you&rsquo;re using. Every search shows up in the
-                project history, so you can see exactly what it looked up.
+                the model can search the web on its own. Capped Claude search works
+                with Gate 15 credit. GLM, GPT, and Gemini 3.x use their native search
+                when you provide that provider&rsquo;s key, so an unbounded provider tool
+                can never silently spend the shared wallet. Every search shows up in
+                project activity, so you can see exactly what it looked up.
               </p>
               <ul className="mk-checks">
-                <li>Available on all four providers</li>
+                <li>Capped Claude search works with shared or personal credentials</li>
+                <li>GLM, GPT, and Gemini search is available with your provider key</li>
                 <li>Used only when the answer needs fresh information</li>
-                <li>Each search is logged in your project&rsquo;s history</li>
               </ul>
             </div>
             <div className="mk-row-art">

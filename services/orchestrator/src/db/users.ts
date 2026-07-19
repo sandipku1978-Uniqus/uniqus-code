@@ -633,53 +633,6 @@ export async function touchUserActivity(id: string): Promise<boolean> {
   return Array.isArray(data) && data.length === 1;
 }
 
-/**
- * Mark a guest account converted: its projects have just been reassigned to a
- * WorkOS account. Null the recovery columns so the dead account can never be
- * re-claimed with the old code.
- */
-export async function claimGuestForConversion(guestId: string, claim: string): Promise<boolean> {
-  const { data, error } = await db()
-    .from("users")
-    .update({ guest_lifecycle_claim: claim, guest_lifecycle_claimed_at: new Date().toISOString() })
-    .eq("id", guestId)
-    .eq("account_type", "guest")
-    .is("converted_at", null)
-    .is("guest_lifecycle_claim", null)
-    .select("id");
-  if (error) throw new Error(`claimGuestForConversion failed: ${error.message}`);
-  return Array.isArray(data) && data.length === 1;
-}
-
-export async function releaseGuestLifecycleClaim(guestId: string, claim: string): Promise<void> {
-  const { error } = await db()
-    .from("users")
-    .update({ guest_lifecycle_claim: null, guest_lifecycle_claimed_at: null })
-    .eq("id", guestId)
-    .eq("guest_lifecycle_claim", claim);
-  if (error) throw new Error(`releaseGuestLifecycleClaim failed: ${error.message}`);
-}
-
-export async function markGuestConverted(guestId: string, claim: string): Promise<void> {
-  const { data, error } = await db()
-    .from("users")
-    .update({
-      converted_at: new Date().toISOString(),
-      guest_recovery_hash: null,
-      guest_recovery_code_enc: null,
-      guest_lifecycle_claim: null,
-      guest_lifecycle_claimed_at: null,
-    })
-    .eq("id", guestId)
-    .eq("account_type", "guest")
-    .eq("guest_lifecycle_claim", claim)
-    .select("id");
-  if (error) throw new Error(`markGuestConverted failed: ${error.message}`);
-  if (!Array.isArray(data) || data.length !== 1) {
-    throw new Error("markGuestConverted failed: guest lifecycle claim was lost");
-  }
-}
-
 /** Atomically win the right to perform irreversible guest cleanup. */
 export async function claimGuestForDeletion(
   guestId: string,

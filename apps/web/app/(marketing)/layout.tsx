@@ -60,8 +60,8 @@ export default async function MarketingLayout({
             placeholder="Ask Gate 15 to build an app for…"
           />
           <p className="bottom-note">
-            Free for solo projects. Team plans from $20/seat/month. Enterprise on
-            request.
+            Start with $3 in trial usage. BYOK from $8/month. Included model
+            credits from $20/month.
           </p>
         </div>
         <SiteFooter />

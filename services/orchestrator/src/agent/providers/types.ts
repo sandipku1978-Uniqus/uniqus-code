@@ -51,6 +51,8 @@ export interface StreamTurnParams {
    * off, OpenAI `minimal`, Gemini its lowest tier) for a faster, cheaper turn.
    */
   thinkingEnabled?: boolean;
+  /** Omit provider-native web search when its per-request spend is not bounded. */
+  disableWebSearch?: boolean;
   signal?: AbortSignal;
   /** Fires for each streamed text delta. */
   onText?: (delta: string) => void;

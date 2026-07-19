@@ -66,10 +66,9 @@ const TOPICS: Topic[] = [
         q: "How much does it cost to start?",
         a: (
           <>
-            The Free plan is genuinely free, no credit card required — you get one
-            private workspace at a time, Auto model routing, live preview, plan mode,
-            and built-in web search. See <Link href="/pricing">pricing</Link> for what
-            Team and Enterprise add.
+            The Free plan needs no credit card and includes a one-time $3 model wallet
+            for trying real work. See <Link href="/pricing">pricing</Link> for BYOK,
+            Plus, and configurable Max wallets.
           </>
         ),
       },
@@ -78,17 +77,19 @@ const TOPICS: Topic[] = [
   {
     id: "billing",
     eyebrow: "Account & billing",
-    heading: "Plans, seats, and keys.",
+    heading: "Plans, billing, and keys.",
     blurb:
-      "How billing works, what happens when you add teammates, and how to bring your own model API keys.",
+      "How plans and billing work, and how to bring your own model API keys.",
     faqs: [
       {
-        q: "How do I get Team access?",
+        q: "Which paid plan should I choose?",
         a: (
           <>
-            Team access is currently opened through assisted onboarding at $20 per
-            active member per month. Contact us through the Enterprise page and
-            we&rsquo;ll confirm seats, billing, and workspace setup with you.
+            Choose BYOK at $8/month when you want model charges on your own provider
+            accounts. Plus is $20/month with $12 in build credit and a separate $2
+            retry/correction reserve for an immediate follow-up when work comes back broken.
+            Max lets you choose $100–$200/month with the exact wallet
+            shown before Stripe checkout.
           </>
         ),
       },
@@ -96,11 +97,12 @@ const TOPICS: Topic[] = [
         q: "Can I use my own model API keys?",
         a: (
           <>
-            Yes, on every plan — Free included, as long as you&rsquo;ve signed up for a
-            full account (guest sessions can&rsquo;t yet). Add your Anthropic, OpenAI, or
-            Google key in Settings and that usage is billed by the provider directly.
-            Your keys are encrypted at rest and are never displayed back in full or
-            exposed to the agent.
+            Yes, on BYOK, Plus, and Max. BYOK requires Anthropic for every session
+            because it powers internal planning and compaction; manually selected models
+            also need their provider key. On Plus and Max, a configured key overrides
+            included credits for that provider.
+            Keys are encrypted at rest, never displayed back in full, and never exposed
+            to the agent.
           </>
         ),
       },
@@ -221,11 +223,12 @@ const TOPICS: Topic[] = [
         q: "Can the agent search the web?",
         a: (
           <>
-            Yes — built-in web search is available on Claude, GPT, GLM, and the latest
-            Gemini models, so the agent can pull in current docs and API details rather than
-            guessing from memory. Searches show up as a clearly labeled step in the
-            activity, and the system only advertises search when the model you picked
-            actually supports it.
+            Yes. Capped Claude search works with Gate 15 credit or your own key. GPT,
+            GLM, and Gemini 3.x use their native search when you provide that provider&rsquo;s
+            key. This keeps tools without a provider-side usage cap from silently spending
+            the shared wallet. Searches appear as a clearly labeled activity step, and the
+            system only advertises search when the selected model and credential mode
+            support it.
           </>
         ),
       },
@@ -233,12 +236,11 @@ const TOPICS: Topic[] = [
         q: "Do I need my own API key to switch models?",
         a: (
           <>
-            No — every plan can pick any model on our shared keys, no setup required.
-            Adding your own Anthropic, OpenAI, or Google key in Settings is optional; it
-            just moves that provider&rsquo;s usage onto your own billing instead of ours.
-            If a key is ever missing for a model you choose, you&rsquo;ll get a clear
-            &ldquo;set X&rdquo; message for that turn only — the rest of your work keeps
-            going.
+            It depends on the plan. Free uses Gate 15 keys while its one-time build
+            credit remains. BYOK always needs your Anthropic key for internal work and
+            the matching provider key for a manually selected model. On Plus and Max,
+            your key overrides included credit for that provider; a blank provider uses
+            Gate 15 credit until the build balance is exhausted.
           </>
         ),
       },

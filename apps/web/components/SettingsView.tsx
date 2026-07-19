@@ -1,14 +1,22 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import BrandLockup from "./BrandLockup";
 import ModelPicker from "./ModelPicker";
 import AppearanceCard from "./AppearanceCard";
 import CustomPromptsCard from "./CustomPromptsCard";
 import ProviderKeysCard from "./ProviderKeysCard";
+import BillingCard from "./BillingCard";
 import Modal from "./Modal";
 import { toast } from "@/lib/toast";
+import {
+  billingActivationReady,
+  completedCheckoutSearch,
+  formatUsd,
+  isBillingCancelReturn,
+  isBillingCheckoutReturn,
+} from "@/lib/billing-display";
 import {
   fetchGithubStatus,
   disconnectGithubApi,
@@ -19,6 +27,11 @@ import {
   fetchFigmaStatus,
   disconnectFigmaApi,
   figmaOauthStartUrl,
+  cancelBillingCheckoutApi,
+  fetchBillingCheckoutStatusApi,
+  fetchBillingStatusApi,
+  ApiError,
+  type BillingStatus,
   type GithubStatus,
   type SupabaseStatus,
   type FigmaStatus,
@@ -131,16 +144,35 @@ function IntegrationStatusError({
   );
 }
 
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function clearBillingReturnParams(): void {
+  const params = new URLSearchParams(window.location.search);
+  params.delete("billing");
+  params.delete("session_id");
+  params.delete("attempt_id");
+  const qs = params.toString();
+  window.history.replaceState(
+    {},
+    "",
+    window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
+  );
+}
+
 export default function SettingsView({
   userEmail,
   userName,
   signOutUrl,
   accountType = "standard",
+  signupHref,
 }: {
   userEmail: string | null;
   userName: string | null;
   signOutUrl: string;
   accountType?: "standard" | "guest";
+  signupHref: string;
 }) {
   const isGuest = accountType === "guest";
   const [github, setGithub] = useState<GithubStatus | null>(null);
@@ -155,6 +187,30 @@ export default function SettingsView({
   const [figmaError, setFigmaError] = useState<string | null>(null);
   const [confirmingFigmaDisconnect, setConfirmingFigmaDisconnect] = useState(false);
   const [disconnectingFigma, setDisconnectingFigma] = useState(false);
+  const [billing, setBilling] = useState<BillingStatus | null>(null);
+  const [billingState, setBillingState] = useState<"loading" | "ready" | "error">("loading");
+  const [billingError, setBillingError] = useState<string | null>(null);
+  const billingReturnResultRef = useRef<string | null | undefined>(undefined);
+  const billingReturnAnnouncedRef = useRef(false);
+  const billingActivationCompletedRef = useRef(false);
+  if (typeof window !== "undefined" && billingReturnResultRef.current === undefined) {
+    billingReturnResultRef.current = new URLSearchParams(window.location.search).get("billing");
+  }
+
+  const loadBillingStatus = useCallback((): void => {
+    setBillingState("loading");
+    setBillingError(null);
+    fetchBillingStatusApi()
+      .then(({ billing: nextBilling }) => {
+        setBilling(nextBilling);
+        setBillingState("ready");
+      })
+      .catch((error) => {
+        setBilling(null);
+        setBillingError(error instanceof Error ? error.message : "Couldn't check billing");
+        setBillingState("error");
+      });
+  }, []);
 
   function loadGithubStatus(): void {
     setGithub(null);
@@ -195,6 +251,170 @@ export default function SettingsView({
     // runs when the account type changes, not on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isGuest]);
+
+  useEffect(() => {
+    const billingReturn = billingReturnResultRef.current;
+    if (isBillingCheckoutReturn(billingReturn)) {
+      // The Checkout-return handler below owns this first read so an ordinary
+      // status response cannot overwrite activation or cancellation state.
+      return;
+    }
+    loadBillingStatus();
+  }, [isGuest, loadBillingStatus]);
+
+  // Checkout completion and webhook provisioning are separate events. Keep the
+  // billing card in a named activation state until the subscription and its
+  // credit grant are visible, then clear Stripe's return parameters.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const result = billingReturnResultRef.current ?? new URLSearchParams(window.location.search).get("billing");
+    if (!result) return;
+    let cancelled = false;
+
+    if (result === "success") {
+      const sessionId = new URLSearchParams(window.location.search).get("session_id");
+      if (!billingReturnAnnouncedRef.current) {
+        billingReturnAnnouncedRef.current = true;
+        toast.info("Checkout returned — verifying payment and plan access");
+      }
+      if (billingActivationCompletedRef.current) {
+        billingReturnResultRef.current = null;
+        clearBillingReturnParams();
+        return;
+      }
+      setBillingState("loading");
+      setBillingError(null);
+      void (async () => {
+        if (!sessionId) {
+          billingReturnResultRef.current = null;
+          clearBillingReturnParams();
+          setBilling(null);
+          setBillingError(
+            "Checkout returned without a session identifier, so this payment cannot be verified. No paid access has been granted.",
+          );
+          setBillingState("error");
+          return;
+        }
+        let lastError: string | null = null;
+        let invalidSession = false;
+        for (let attempt = 0; attempt < 40 && !cancelled; attempt += 1) {
+          if (attempt > 0) await wait(1_500);
+          if (cancelled) return;
+          try {
+            const checkout = await fetchBillingCheckoutStatusApi(sessionId);
+            if (!checkout.fulfilled) continue;
+            const response = await fetchBillingStatusApi();
+            if (cancelled) return;
+            lastError = null;
+            if (billingActivationReady(response.billing)) {
+              setBilling(response.billing);
+              setBillingState("ready");
+              if (!billingActivationCompletedRef.current) {
+                billingActivationCompletedRef.current = true;
+                toast.success(
+                  response.billing.plan === "byok"
+                    ? "BYOK activated — add provider keys to start"
+                    : "Plan activated and credits are ready",
+                );
+              }
+              billingReturnResultRef.current = null;
+              clearBillingReturnParams();
+              return;
+            }
+          } catch (error) {
+            lastError = error instanceof Error ? error.message : "Couldn't check billing";
+            if (error instanceof ApiError && error.code === "invalid_checkout") {
+              invalidSession = true;
+              break;
+            }
+          }
+        }
+        if (cancelled) return;
+        if (invalidSession) {
+          billingReturnResultRef.current = null;
+          clearBillingReturnParams();
+        }
+        setBilling(null);
+        setBillingError(
+          lastError ??
+            "Stripe Checkout returned, but invoice-backed plan access is still pending. Retry this check; no paid access has been granted yet.",
+        );
+        setBillingState("error");
+        toast.info("Plan verification is still pending — retry the billing check");
+      })();
+    } else if (isBillingCancelReturn(result)) {
+      setBillingState("loading");
+      setBillingError(null);
+      void (async () => {
+        try {
+          const attemptId = new URLSearchParams(window.location.search).get("attempt_id");
+          const cancellation = attemptId
+            ? await cancelBillingCheckoutApi(attemptId)
+            : { canceled: false, completed: false };
+          if (cancelled) return;
+          if (cancellation.completed) {
+            if (!cancellation.session_id) {
+              throw new Error(
+                "Checkout completed without a session identifier, so this payment cannot be verified.",
+              );
+            }
+            window.location.replace(
+              window.location.pathname +
+                `?${completedCheckoutSearch(window.location.search, cancellation.session_id)}` +
+                window.location.hash,
+            );
+            return;
+          }
+          if (!billingReturnAnnouncedRef.current) {
+            billingReturnAnnouncedRef.current = true;
+            toast.info("Checkout canceled — your existing plan is unchanged");
+          }
+          billingReturnResultRef.current = null;
+          clearBillingReturnParams();
+          loadBillingStatus();
+        } catch (error) {
+          if (cancelled) return;
+          setBilling(null);
+          setBillingError(
+            error instanceof Error
+              ? error.message
+              : "Couldn't close the canceled Checkout. Retry this check.",
+          );
+          setBillingState("error");
+        }
+      })();
+    } else {
+      clearBillingReturnParams();
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // WorkOS return URLs cannot carry a URL fragment through the server, but the
+  // validated plan query survives. Restore the pricing CTA's intended landing
+  // position after authentication.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (!["byok", "plus", "max"].includes(params.get("plan") ?? "")) return;
+    window.requestAnimationFrame(() => {
+      document.getElementById("billing-settings")?.scrollIntoView({ block: "start" });
+    });
+  }, []);
+
+  // Billing errors deep-link directly to the provider-key card, which lives in
+  // a collapsed native disclosure. Open its owning section before scrolling so
+  // the CTA never lands on hidden content.
+  useEffect(() => {
+    if (typeof window === "undefined" || window.location.hash !== "#provider-keys-settings") {
+      return;
+    }
+    const target = document.getElementById("provider-keys-settings");
+    const section = target?.closest("details");
+    if (section && !section.open) section.open = true;
+    target?.scrollIntoView({ block: "start" });
+  }, []);
 
   // Surface the OAuth round-trip result when Supabase redirects back to /settings.
   useEffect(() => {
@@ -330,6 +550,56 @@ export default function SettingsView({
                 </button>
               </form>
             </div>
+          </div>
+        </Section>
+
+        {/* ── Billing ────────────────────────────────────────────────────── */}
+        <Section
+          title="Billing"
+          subtitle="Your plan, model-usage wallet, and Stripe billing controls."
+          defaultOpen
+        >
+          <div id="billing-settings">
+            {isGuest ? (
+              <div className="settings-card billing-guest-card">
+                <h2>Guest trial</h2>
+                <p className="settings-card-sub">
+                  Guest sessions can try Gate 15, but subscriptions need a full account so
+                  purchases, credits, and receipts stay attached to you.
+                </p>
+                <div className="settings-row">
+                  <span className="k">Trial build balance</span>
+                  <span className="v">
+                    {billing
+                      ? formatUsd(billing.usage_credit_balance_usd)
+                      : billingState === "error"
+                        ? (
+                          <button type="button" className="btn-ghost" onClick={loadBillingStatus}>
+                            Retry billing
+                          </button>
+                        )
+                        : "Checking…"}
+                  </span>
+                </div>
+                <div className="settings-row">
+                  <span className="k">Ready to choose a plan?</span>
+                  <Link href={signupHref} className="btn-primary">
+                    Create your account
+                  </Link>
+                </div>
+              </div>
+            ) : (
+              <BillingCard
+                billing={billing}
+                loadState={billingState}
+                loadError={billingError}
+                onRetry={
+                  billingReturnResultRef.current
+                    ? () => window.location.reload()
+                    : loadBillingStatus
+                }
+              />
+            )}
           </div>
         </Section>
 
@@ -558,7 +828,9 @@ export default function SettingsView({
             subtitle="Power-user controls — bring your own provider API keys."
           >
             {/* Bring-your-own provider keys (F7) — standard accounts only */}
-            <ProviderKeysCard />
+            <div id="provider-keys-settings">
+              <ProviderKeysCard billing={billing} billingState={billingState} />
+            </div>
           </Section>
         )}
       </main>

@@ -1,120 +1,127 @@
 import Link from "next/link";
+import PricingMaxCard from "./PricingMaxCard";
 
 export const metadata = {
   title: "Pricing — Gate 15",
   description:
-    "Simple, transparent pricing. Start free for solo projects, scale with Team plans, and talk to us for Enterprise.",
+    "Start with $3 in trial usage, bring your own AI keys for $8, or choose a prepaid Gate 15 model wallet from $20 per month.",
 };
 
 const TIERS = [
   {
     name: "Free",
     amount: "$0",
-    per: "forever",
-    desc: "For solo builders exploring ideas and shipping side projects.",
-    cta: { label: "Start building", href: "/login", primary: true },
+    per: "no card required",
+    desc: "A small, real trial wallet for testing Gate 15 before you commit.",
+    cta: { label: "Start free", href: "/login", primary: false },
     features: [
-      { label: "Unlimited public-idea projects", on: true },
-      { label: "Auto routing across Claude and Gemini", on: true },
-      { label: "GPT and GLM available as manual choices", on: true },
-      { label: "Bring your own model API keys", on: true },
-      { label: "One private workspace at a time", on: true },
-      { label: "Live preview + plan mode", on: true },
-      { label: "Built-in web search", on: true },
-      { label: "Community support", on: true },
+      "$3 one-time build balance",
+      "Core agent, plan, preview & sandbox workflow",
+      "Auto routing while trial credit remains",
+      "Hard stop at $0 — never a surprise charge",
+      "Provider keys available after upgrade",
     ],
   },
   {
-    name: "Team",
+    name: "BYOK",
+    amount: "$8",
+    per: "/ month",
+    desc: "A paid account for builders who want model charges on their own provider accounts.",
+    cta: { label: "Choose BYOK", href: "/settings?plan=byok#billing-settings", primary: false },
+    features: [
+      "Provider-key access",
+      "No Gate 15 model-usage wallet",
+      "Anthropic key required for every session",
+      "OpenAI, Google & Z.ai keys as needed",
+      "Provider spend stays on your accounts",
+    ],
+  },
+  {
+    name: "Plus",
     amount: "$20",
-    per: "/ seat / month",
-    desc: "For teams building real products together, with room to scale.",
+    per: "/ month",
+    desc: "A predictable monthly wallet for regular building, with immediate correction follow-ups kept separate.",
     badge: "Most popular",
     featured: true,
-    cta: { label: "Talk to us about Team", href: "/contact", primary: true },
+    cta: { label: "Choose Plus", href: "/settings?plan=plus#billing-settings", primary: true },
     features: [
-      { label: "Everything in Free", on: true },
-      { label: "Concurrent private workspaces", on: true },
-      { label: "GitHub sync + one-click deploys", on: true },
-      { label: "Skills, secrets & design packs", on: true },
-      { label: "Checkpoints & rewind history", on: true },
-      { label: "Priority email support", on: true },
+      "$12 monthly build balance",
+      "$2 retry/correction reserve",
+      "$14 total monthly model credits",
+      "Included Gate 15 model wallet",
+      "Optional BYOK provider overrides",
     ],
   },
-  {
-    name: "Enterprise",
-    amount: "Custom",
-    per: "talk to us",
-    desc: "For organizations with security, scale, and compliance needs.",
-    cta: { label: "Contact sales", href: "/enterprise", primary: false },
-    features: [
-      { label: "Everything in Team", on: true },
-      { label: "SSO today via WorkOS — SAML & SCIM on our roadmap", on: true },
-      { label: "Dedicated VM capacity & SLAs", on: true },
-      { label: "Org audit views & roles — rolling out, early access", on: true },
-      { label: "DPA, security review & invoicing", on: true },
-      { label: "Dedicated success manager", on: true },
-    ],
-  },
-];
+] as const;
 
-const COMPARE: { group: string; rows: { label: string; free: string; team: string; ent: string }[] }[] = [
+const COMPARE: {
+  group: string;
+  rows: { label: string; free: string; byok: string; plus: string; max: string }[];
+}[] = [
   {
-    group: "Building",
+    group: "Model usage",
     rows: [
-      { label: "Private workspaces", free: "1", team: "Unlimited", ent: "Unlimited" },
-      { label: "Auto model routing", free: "yes", team: "yes", ent: "yes" },
-      { label: "Bring your own API keys", free: "yes", team: "yes", ent: "yes" },
-      { label: "Built-in web search", free: "yes", team: "yes", ent: "yes" },
+      { label: "Gate 15 build balance", free: "$3 once", byok: "—", plus: "$12 / mo", max: "$75–$160 / mo" },
+      { label: "Retry/correction reserve", free: "—", byok: "—", plus: "$2 / mo", max: "$10–$20 / mo" },
+      { label: "Total included model credits", free: "$3 once", byok: "—", plus: "$14 / mo", max: "$85–$180 / mo" },
+      { label: "Bring your own provider keys", free: "no", byok: "required", plus: "optional", max: "optional" },
+      { label: "Platform-funded work at $0", free: "stops", byok: "not applicable", plus: "BYOK can continue", max: "BYOK can continue" },
     ],
   },
   {
-    group: "Ship & recover",
+    group: "Platform",
     rows: [
-      { label: "GitHub sync", free: "no", team: "yes", ent: "yes" },
-      { label: "One-click deploys", free: "no", team: "yes", ent: "yes" },
-      { label: "Checkpoints & rewind", free: "Last 24h", team: "Full history", ent: "Full history" },
+      { label: "Private project microVMs", free: "yes", byok: "yes", plus: "yes", max: "yes" },
+      { label: "Plan mode + live preview", free: "yes", byok: "yes", plus: "yes", max: "yes" },
+      { label: "Auto model routing", free: "with credit", byok: "Anthropic key", plus: "yes", max: "yes" },
+      { label: "Manual Claude, Gemini, GPT & GLM", free: "with credit", byok: "Anthropic + model key", plus: "yes", max: "yes" },
+      { label: "GitHub, deploys, skills & checkpoints", free: "yes", byok: "yes", plus: "yes", max: "yes" },
     ],
   },
   {
-    group: "Team & security",
+    group: "Billing",
     rows: [
-      { label: "SSO (WorkOS)", free: "no", team: "no", ent: "yes" },
-      { label: "SAML / SCIM", free: "no", team: "no", ent: "Roadmap" },
-      { label: "Org audit views & roles", free: "no", team: "no", ent: "Early access" },
-      { label: "Audit trail (secrets, connectors, checkpoints)", free: "yes", team: "yes", ent: "yes" },
-      { label: "Encrypted secrets", free: "yes", team: "yes", ent: "yes" },
-      { label: "Support", free: "Community", team: "Priority email", ent: "Dedicated" },
+      { label: "Monthly platform price", free: "$0", byok: "$8", plus: "$20", max: "$100–$200" },
+      { label: "Stripe customer portal", free: "—", byok: "yes", plus: "yes", max: "yes" },
+      { label: "Choose monthly commitment", free: "—", byok: "fixed", plus: "fixed", max: "$10 steps" },
     ],
   },
 ];
 
 const FAQ = [
   {
-    q: "Is the Free plan really free?",
-    a: "Yes. Solo builders can plan, build, preview, and iterate on projects without a credit card. Auto mode routes to the best AI for each step at no cost on Free.",
+    q: "What does the Free plan include?",
+    a: "Free includes a one-time $3 build balance so you can run real tasks and test the workflow without entering a card. When it reaches $0, model-funded work stops until you choose a paid plan.",
   },
   {
-    q: "How do I get Team access?",
-    a: "Team access is currently opened through assisted onboarding. Contact us and we’ll help confirm seats, billing, and workspace setup before anything is charged.",
+    q: "How does BYOK work?",
+    a: "BYOK is $8 per month for provider-key access, with no Gate 15 model wallet. Anthropic is required for every session because it powers internal planning, compaction, and Auto. Add OpenAI, Google, or Z.ai for any manual models you use. Gate 15 never falls back to its own keys on this plan.",
   },
   {
-    q: "Can I use my own model API keys?",
-    a: "Yes, on every plan — Free included, as long as you've signed up for a full account (guest sessions can't yet). Add your own Anthropic, OpenAI, or Google key in Settings and usage for that provider bills to your account directly — keys stay encrypted at rest and are never shown back in full. Z.ai (GLM) keys aren't supported yet. Need per-org keys for a whole team? Reach out through the Enterprise page.",
+    q: "What is the retry/correction reserve?",
+    a: "It is a separate allowance for an immediate follow-up when completed work comes back broken and you ask Gate 15 to retry or correct it. It is not another general-purpose wallet, so ordinary building cannot quietly consume that reserve.",
   },
   {
-    q: "What happens to my guest work if I sign up?",
-    a: "Guest accounts need no Google or email sign-in — you get a one-time recovery code to restore your projects on another device. When you create a full account, your guest projects carry over automatically so nothing is lost.",
+    q: "How is Max calculated?",
+    a: "Choose $100–$200 per month in $10 steps. Build balance is 85% of the commitment minus $10; the retry/correction reserve is 10%. That gives $85 total model credits at $100 and $180 at $200, with the exact split shown before checkout.",
   },
   {
-    q: "Do you offer discounts for startups or education?",
-    a: "Yes — reach out through the Enterprise page and tell us about your team. We work with early-stage startups, nonprofits, and educators.",
+    q: "Can Plus and Max also use my provider keys?",
+    a: "Yes. On Plus and Max, a configured provider key overrides the Gate 15 wallet for that provider. Leave it blank to use included credits. Keys are encrypted, write-only, and never exposed to the sandbox or agent.",
+  },
+  {
+    q: "Who handles my card and subscription?",
+    a: "Stripe hosts checkout and the billing portal. Gate 15 stores the plan and credit-ledger state needed to enforce your wallet, but card details stay with Stripe.",
+  },
+  {
+    q: "What happens to my guest work when I sign up?",
+    a: "Your guest projects carry over to the full account automatically. Subscriptions require a full account so purchases, credits, and receipts stay attached to the right person.",
   },
 ];
 
 function cell(value: string) {
   if (value === "yes") return <span className="yes" aria-label="Included">✓</span>;
-  if (value === "no") return <span className="no" aria-label="Not included">—</span>;
+  if (value === "no" || value === "—") return <span className="no" aria-label="Not included">—</span>;
   return value;
 }
 
@@ -127,11 +134,11 @@ export default function PricingPage() {
             <span className="dot" /> Pricing
           </span>
           <h1>
-            Pricing that scales <span className="grad">with your ideas</span>.
+            A clear edge on <span className="grad">included AI spend</span>.
           </h1>
           <p className="mk-lede">
-            Start free, invite your team when you&rsquo;re ready, and only talk to
-            sales when you need enterprise controls. No surprises.
+            Pay for the platform, bring your own model keys, or choose a prepaid wallet.
+            Every route is explicit before the agent starts spending.
           </p>
         </div>
       </section>
@@ -139,11 +146,11 @@ export default function PricingPage() {
       <div className="mk-page wide">
         <div className="pricing-grid">
           {TIERS.map((tier) => (
-            <div
-              className={`price-card${tier.featured ? " featured" : ""}`}
+            <article
+              className={`price-card${"featured" in tier && tier.featured ? " featured" : ""}`}
               key={tier.name}
             >
-              {tier.badge && <span className="price-badge">{tier.badge}</span>}
+              {"badge" in tier && tier.badge && <span className="price-badge">{tier.badge}</span>}
               <div className="price-name">{tier.name}</div>
               <div className="price-amount">
                 <span className="amt">{tier.amount}</span>
@@ -159,55 +166,42 @@ export default function PricingPage() {
                 </Link>
               </div>
               <ul className="price-features">
-                {tier.features.map((f) => (
-                  <li key={f.label} className={f.on ? "" : "off"}>
-                    {f.label}
-                  </li>
-                ))}
+                {tier.features.map((feature) => <li key={feature}>{feature}</li>)}
               </ul>
-            </div>
+            </article>
           ))}
+          <PricingMaxCard />
         </div>
       </div>
 
       <section className="mk-page">
         <div className="mk-section-head center">
           <span className="label-eyebrow">Compare plans</span>
-          <h2>Every detail, side by side.</h2>
+          <h2>Platform access and model spend, separated.</h2>
         </div>
-        <div style={{ overflowX: "auto" }}>
+        <div className="compare-scroll">
           <table className="compare-table">
             <thead>
               <tr>
                 <th>Feature</th>
                 <th>Free</th>
-                <th>Team</th>
-                <th>Enterprise</th>
+                <th>BYOK</th>
+                <th>Plus</th>
+                <th>Max</th>
               </tr>
             </thead>
             {COMPARE.map((section) => (
               <tbody key={section.group}>
                 <tr>
-                  <th
-                    colSpan={4}
-                    style={{
-                      color: "var(--mk-dim)",
-                      fontFamily: "var(--font-mono-stack)",
-                      fontSize: 11,
-                      letterSpacing: "0.06em",
-                      textTransform: "uppercase",
-                      paddingTop: 24,
-                    }}
-                  >
-                    {section.group}
-                  </th>
+                  <th colSpan={5} className="compare-group">{section.group}</th>
                 </tr>
                 {section.rows.map((row) => (
                   <tr key={row.label}>
                     <th>{row.label}</th>
                     <td>{cell(row.free)}</td>
-                    <td>{cell(row.team)}</td>
-                    <td>{cell(row.ent)}</td>
+                    <td>{cell(row.byok)}</td>
+                    <td>{cell(row.plus)}</td>
+                    <td>{cell(row.max)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -219,7 +213,7 @@ export default function PricingPage() {
       <section className="mk-page narrow">
         <div className="mk-section-head center">
           <span className="label-eyebrow">FAQ</span>
-          <h2>Questions, answered.</h2>
+          <h2>Wallets without the fine print.</h2>
         </div>
         <div className="faq-list">
           {FAQ.map((item) => (

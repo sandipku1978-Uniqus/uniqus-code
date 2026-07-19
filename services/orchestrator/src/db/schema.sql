@@ -440,6 +440,1167 @@ begin
   end if;
 end$$;
 
+-- Gate 15 subscriptions + model-credit wallet. Stripe owns payment lifecycle;
+-- these tables own product entitlements and compute credits. Amounts are stored
+-- as integer micro-USD so debits never accumulate floating-point drift.
+create table if not exists billing_accounts (
+  user_id uuid primary key references users(id) on delete cascade,
+  plan text not null default 'free'
+    check (plan in ('free', 'byok', 'plus', 'max')),
+  subscription_status text not null default 'none'
+    check (subscription_status in (
+      'none', 'incomplete', 'incomplete_expired', 'trialing', 'active',
+      'past_due', 'unpaid', 'paused', 'canceled'
+    )),
+  stripe_customer_id text unique,
+  stripe_subscription_id text unique,
+  stripe_subscription_item_id text,
+  max_monthly_usd integer
+    check (max_monthly_usd is null or (max_monthly_usd between 100 and 200 and max_monthly_usd % 10 = 0)),
+  current_period_start timestamptz,
+  current_period_end timestamptz,
+  last_valid_invoice_id text,
+  entitled_through timestamptz,
+  cancel_at_period_end boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- `create table if not exists` does not add columns to an earlier deployment.
+-- Keep the billing migration rerunnable as the paid-entitlement state evolves.
+alter table billing_accounts
+  add column if not exists last_valid_invoice_id text;
+alter table billing_accounts
+  add column if not exists entitled_through timestamptz;
+
+create table if not exists billing_credit_grants (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  source_key text not null unique,
+  bucket text not null check (bucket in ('usage', 'reliability')),
+  amount_microusd bigint not null check (amount_microusd >= 0),
+  remaining_microusd bigint not null check (
+    remaining_microusd >= 0 and remaining_microusd <= amount_microusd
+  ),
+  -- Unspent allowance temporarily removed by a nonterminal subscription state.
+  -- Replaying the same valid invoice restores only this amount, never spent credit.
+  suspended_microusd bigint not null default 0 check (
+    suspended_microusd >= 0 and suspended_microusd <= amount_microusd
+  ),
+  constraint billing_credit_grants_available_check check (
+    remaining_microusd + suspended_microusd <= amount_microusd
+  ),
+  stripe_invoice_id text,
+  starts_at timestamptz not null default now(),
+  expires_at timestamptz,
+  created_at timestamptz not null default now()
+);
+alter table billing_credit_grants
+  add column if not exists suspended_microusd bigint not null default 0;
+alter table billing_credit_grants
+  drop constraint if exists billing_credit_grants_available_check;
+alter table billing_credit_grants
+  add constraint billing_credit_grants_available_check check (
+    remaining_microusd + suspended_microusd <= amount_microusd
+  );
+create index if not exists billing_credit_grants_spend_idx
+  on billing_credit_grants(user_id, bucket, expires_at, created_at)
+  where remaining_microusd > 0;
+
+-- Idempotency marker for guest -> WorkOS conversion. Without this, spending a
+-- guest trial and then signing in would mint a second $3 Free wallet.
+create table if not exists billing_trial_merges (
+  guest_user_id uuid primary key references users(id) on delete cascade,
+  target_user_id uuid not null references users(id) on delete cascade,
+  merged_at timestamptz not null default now()
+);
+
+-- One immutable settlement row per top-level agent run. `uncovered_microusd`
+-- makes any single-run overage explicit instead of allowing a negative wallet.
+create table if not exists billing_credit_ledger (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  run_id uuid not null,
+  requested_microusd bigint not null check (requested_microusd >= 0),
+  usage_microusd bigint not null default 0 check (usage_microusd >= 0),
+  reliability_microusd bigint not null default 0 check (reliability_microusd >= 0),
+  uncovered_microusd bigint not null default 0 check (uncovered_microusd >= 0),
+  preferred_bucket text not null check (preferred_bucket in ('usage', 'reliability')),
+  created_at timestamptz not null default now(),
+  unique (user_id, run_id)
+);
+create index if not exists billing_credit_ledger_user_idx
+  on billing_credit_ledger(user_id, created_at desc);
+
+-- Debit a bounded run budget before any platform provider call. The detailed
+-- grant allocations let normal completion return every unused microdollar to
+-- the exact source grant (and therefore preserve its original expiry). If an
+-- orchestrator dies mid-run, the reserved cap stays consumed instead of
+-- exposing the whole wallet to unrecorded provider spend.
+create table if not exists billing_credit_reservations (
+  user_id uuid not null references users(id) on delete cascade,
+  run_id uuid not null,
+  requested_microusd bigint not null check (requested_microusd >= 0),
+  reserved_microusd bigint not null check (
+    reserved_microusd >= 0 and reserved_microusd <= requested_microusd
+  ),
+  preferred_bucket text not null check (preferred_bucket in ('usage', 'reliability')),
+  finalized_microusd bigint check (finalized_microusd is null or finalized_microusd >= 0),
+  created_at timestamptz not null default now(),
+  finalized_at timestamptz,
+  primary key (user_id, run_id),
+  check ((finalized_microusd is null) = (finalized_at is null))
+);
+
+create table if not exists billing_credit_reservation_items (
+  user_id uuid not null,
+  run_id uuid not null,
+  ordinal integer not null check (ordinal > 0),
+  grant_id uuid not null references billing_credit_grants(id),
+  bucket text not null check (bucket in ('usage', 'reliability')),
+  amount_microusd bigint not null check (amount_microusd > 0),
+  refundable boolean not null default true,
+  primary key (user_id, run_id, ordinal),
+  unique (user_id, run_id, grant_id),
+  foreign key (user_id, run_id)
+    references billing_credit_reservations(user_id, run_id) on delete cascade
+);
+
+-- Audit only. Handlers remain idempotent at the semantic layer (invoice source
+-- keys and subscription upserts), so out-of-order/duplicate webhook delivery is
+-- safe even if two copies race before this row is written.
+create table if not exists stripe_webhook_events (
+  event_id text primary key,
+  event_type text not null,
+  object_id text,
+  processed_at timestamptz not null default now()
+);
+
+-- A refund/void/credit/dispute can be delivered before invoice.paid. This
+-- durable tombstone makes those different webhook events commutative: once an
+-- invoice is invalidated, a delayed paid event can never mint its allowance.
+create table if not exists billing_invoice_invalidations (
+  stripe_invoice_id text primary key,
+  reason text not null,
+  invalidated_at timestamptz not null default now()
+);
+
+-- One open Checkout session per account. The Stripe session itself expires in
+-- 30 minutes; this row closes simultaneous multi-plan/same-plan creation races.
+create table if not exists billing_checkout_attempts (
+  user_id uuid primary key references users(id) on delete cascade,
+  attempt_id uuid not null unique,
+  stripe_session_id text unique,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists billing_checkout_attempts_expiry_idx
+  on billing_checkout_attempts(expires_at);
+
+alter table billing_accounts enable row level security;
+alter table billing_accounts force row level security;
+alter table billing_credit_grants enable row level security;
+alter table billing_credit_grants force row level security;
+alter table billing_trial_merges enable row level security;
+alter table billing_trial_merges force row level security;
+alter table billing_credit_ledger enable row level security;
+alter table billing_credit_ledger force row level security;
+alter table billing_credit_reservations enable row level security;
+alter table billing_credit_reservations force row level security;
+alter table billing_credit_reservation_items enable row level security;
+alter table billing_credit_reservation_items force row level security;
+alter table stripe_webhook_events enable row level security;
+alter table stripe_webhook_events force row level security;
+alter table billing_invoice_invalidations enable row level security;
+alter table billing_invoice_invalidations force row level security;
+alter table billing_checkout_attempts enable row level security;
+alter table billing_checkout_attempts force row level security;
+revoke all on table billing_accounts from public, anon, authenticated;
+revoke all on table billing_credit_grants from public, anon, authenticated;
+revoke all on table billing_trial_merges from public, anon, authenticated;
+revoke all on table billing_credit_ledger from public, anon, authenticated;
+revoke all on table billing_credit_reservations from public, anon, authenticated;
+revoke all on table billing_credit_reservation_items from public, anon, authenticated;
+revoke all on table stripe_webhook_events from public, anon, authenticated;
+revoke all on table billing_invoice_invalidations from public, anon, authenticated;
+revoke all on table billing_checkout_attempts from public, anon, authenticated;
+
+-- Validate one fully paid subscription invoice and mint its allowance in the
+-- same transaction. The invoice advisory lock is shared with invalidation, so
+-- refund-before-paid and paid-before-refund converge on the same safe result.
+create or replace function public.apply_paid_billing_invoice(
+  p_user_id uuid,
+  p_subscription_id text,
+  p_invoice_id text,
+  p_plan text,
+  p_usage_microusd bigint,
+  p_reliability_microusd bigint,
+  p_starts_at timestamptz,
+  p_entitled_through timestamptz
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_account billing_accounts%rowtype;
+begin
+  if p_plan not in ('byok', 'plus', 'max') then
+    raise exception 'invalid paid billing plan';
+  end if;
+  if p_usage_microusd < 0 or p_reliability_microusd < 0 then
+    raise exception 'billing allowance must be non-negative';
+  end if;
+  if p_starts_at is null or p_entitled_through is null or p_entitled_through <= p_starts_at then
+    raise exception 'invalid billing entitlement period';
+  end if;
+
+  perform pg_advisory_xact_lock(
+    hashtextextended('billing-invoice:' || p_invoice_id, 0)
+  );
+  -- Serialize provisioning with settlement and subscription deactivation. A
+  -- delayed paid event must not mint credits after the account became Free.
+  perform pg_advisory_xact_lock(hashtextextended(p_user_id::text, 0));
+
+  if exists (
+    select 1 from billing_invoice_invalidations
+    where stripe_invoice_id = p_invoice_id
+  ) then
+    return false;
+  end if;
+
+  select * into v_account
+  from billing_accounts
+  where user_id = p_user_id
+  for update;
+
+  -- A delayed invoice from another/older subscription must not provision the
+  -- account that happens to share its Customer metadata.
+  if not found
+    or v_account.stripe_subscription_id is distinct from p_subscription_id
+    or v_account.plan is distinct from p_plan
+    or v_account.subscription_status not in ('active', 'past_due') then
+    return false;
+  end if;
+
+  -- A transient nonterminal deactivation may have made an in-flight allocation
+  -- nonrefundable. Once the same paid invoice is valid again, normal settlement
+  -- may safely return that allocation's unused portion to its original grant.
+  update billing_credit_reservation_items i
+  set refundable = true
+  from billing_credit_grants g, billing_credit_reservations r
+  where g.id = i.grant_id
+    and g.stripe_invoice_id = p_invoice_id
+    and r.user_id = i.user_id
+    and r.run_id = i.run_id
+    and r.finalized_microusd is null;
+
+  if p_usage_microusd > 0 then
+    insert into billing_credit_grants (
+      user_id, source_key, bucket, amount_microusd, remaining_microusd,
+      stripe_invoice_id, starts_at, expires_at
+    ) values (
+      p_user_id, 'stripe-invoice:' || p_invoice_id || ':usage', 'usage',
+      p_usage_microusd, p_usage_microusd, p_invoice_id, p_starts_at, p_entitled_through
+    ) on conflict (source_key) do update
+      set remaining_microusd = least(
+            billing_credit_grants.amount_microusd,
+            billing_credit_grants.remaining_microusd + billing_credit_grants.suspended_microusd
+          ),
+          suspended_microusd = 0,
+          starts_at = excluded.starts_at,
+          expires_at = excluded.expires_at
+      where billing_credit_grants.user_id = excluded.user_id
+        and billing_credit_grants.bucket = excluded.bucket
+        and billing_credit_grants.stripe_invoice_id = excluded.stripe_invoice_id;
+  end if;
+
+  if p_reliability_microusd > 0 then
+    insert into billing_credit_grants (
+      user_id, source_key, bucket, amount_microusd, remaining_microusd,
+      stripe_invoice_id, starts_at, expires_at
+    ) values (
+      p_user_id, 'stripe-invoice:' || p_invoice_id || ':reliability', 'reliability',
+      p_reliability_microusd, p_reliability_microusd, p_invoice_id, p_starts_at, p_entitled_through
+    ) on conflict (source_key) do update
+      set remaining_microusd = least(
+            billing_credit_grants.amount_microusd,
+            billing_credit_grants.remaining_microusd + billing_credit_grants.suspended_microusd
+          ),
+          suspended_microusd = 0,
+          starts_at = excluded.starts_at,
+          expires_at = excluded.expires_at
+      where billing_credit_grants.user_id = excluded.user_id
+        and billing_credit_grants.bucket = excluded.bucket
+        and billing_credit_grants.stripe_invoice_id = excluded.stripe_invoice_id;
+  end if;
+
+  -- Free is a lifetime evaluation grant, not an extra first paid-month grant.
+  -- If a Free run is currently holding some of that grant in escrow, prevent
+  -- its later finalization from restoring the trial after paid activation.
+  update billing_credit_reservation_items i
+  set refundable = false
+  from billing_credit_grants g, billing_credit_reservations r
+  where i.user_id = p_user_id
+    and i.refundable
+    and g.id = i.grant_id
+    and g.source_key = 'free-trial:' || p_user_id::text
+    and r.user_id = i.user_id
+    and r.run_id = i.run_id
+    and r.finalized_microusd is null;
+
+  update billing_credit_grants
+  set remaining_microusd = 0
+  where source_key = 'free-trial:' || p_user_id::text
+    and remaining_microusd > 0;
+
+  -- A late paid event from an older cycle may add an already-expired grant, but
+  -- it must never move the authoritative paid-through watermark backwards.
+  if v_account.entitled_through is null
+    or p_entitled_through >= v_account.entitled_through then
+    update billing_accounts
+    set last_valid_invoice_id = p_invoice_id,
+        entitled_through = p_entitled_through,
+        updated_at = now()
+    where user_id = p_user_id;
+  end if;
+
+  return true;
+end;
+$$;
+
+-- Atomically tombstone an invoice, revoke any unspent allowance it already
+-- minted, and remove current paid entitlement (including creditless BYOK).
+create or replace function public.invalidate_billing_invoice(
+  p_invoice_id text,
+  p_reason text
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_user_id uuid;
+begin
+  if coalesce(trim(p_invoice_id), '') = '' then
+    raise exception 'Stripe invoice id is required';
+  end if;
+  if coalesce(trim(p_reason), '') = '' then
+    raise exception 'invoice invalidation reason is required';
+  end if;
+
+  perform pg_advisory_xact_lock(
+    hashtextextended('billing-invoice:' || p_invoice_id, 0)
+  );
+
+  -- A paid invoice normally has one or two grants (usage/reliability); BYOK
+  -- has only the account watermark. Once either exists, share the wallet lock
+  -- with reservation finalization so invalidation cannot race a refund.
+  select coalesce(
+    (
+      select g.user_id from billing_credit_grants g
+      where g.stripe_invoice_id = p_invoice_id
+      limit 1
+    ),
+    (
+      select a.user_id from billing_accounts a
+      where a.last_valid_invoice_id = p_invoice_id
+      limit 1
+    )
+  ) into v_user_id;
+  if v_user_id is not null then
+    perform pg_advisory_xact_lock(hashtextextended(v_user_id::text, 0));
+  end if;
+
+  insert into billing_invoice_invalidations (stripe_invoice_id, reason)
+  values (p_invoice_id, p_reason)
+  on conflict (stripe_invoice_id) do nothing;
+
+  update billing_credit_reservation_items i
+  set refundable = false
+  from billing_credit_grants g, billing_credit_reservations r
+  where g.id = i.grant_id
+    and g.stripe_invoice_id = p_invoice_id
+    and i.refundable
+    and r.user_id = i.user_id
+    and r.run_id = i.run_id
+    and r.finalized_microusd is null;
+
+  update billing_credit_grants
+  set remaining_microusd = 0,
+      suspended_microusd = 0
+  where stripe_invoice_id = p_invoice_id
+    and (remaining_microusd > 0 or suspended_microusd > 0);
+
+  update billing_accounts
+  set last_valid_invoice_id = null,
+      entitled_through = null,
+      updated_at = now()
+  where last_valid_invoice_id = p_invoice_id;
+
+  return true;
+end;
+$$;
+
+-- Suspend every unspent paid allowance and remove its invoice-backed access
+-- evidence in one wallet-serialized transaction. A replay of the same valid
+-- invoice can restore only this unspent amount, never credit already consumed.
+create or replace function public.deactivate_billing_paid_access(
+  p_user_id uuid
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_account_count integer;
+begin
+  perform pg_advisory_xact_lock(hashtextextended(p_user_id::text, 0));
+
+  -- Reserved paid allowance has already left remaining_microusd. Mark it
+  -- nonrefundable before clearing access so finalization cannot restore stale
+  -- paid credits to a now-ineligible account.
+  update billing_credit_reservation_items i
+  set refundable = false
+  from billing_credit_grants g, billing_credit_reservations r
+  where i.user_id = p_user_id
+    and i.refundable
+    and g.id = i.grant_id
+    and g.user_id = p_user_id
+    and g.stripe_invoice_id is not null
+    and r.user_id = i.user_id
+    and r.run_id = i.run_id
+    and r.finalized_microusd is null;
+
+  update billing_credit_grants
+  set suspended_microusd = least(
+        amount_microusd,
+        suspended_microusd + remaining_microusd
+      ),
+      remaining_microusd = 0
+  where user_id = p_user_id
+    and stripe_invoice_id is not null
+    and remaining_microusd > 0;
+
+  update billing_accounts
+  set last_valid_invoice_id = null,
+      entitled_through = null,
+      updated_at = now()
+  where user_id = p_user_id;
+  get diagnostics v_account_count = row_count;
+
+  return v_account_count = 1;
+end;
+$$;
+
+-- Terminal subscription removal is the same wallet operation plus the plan
+-- transition to Free. Keeping the Customer id permits safe Customer reuse and
+-- Billing Portal history while every subscription-specific field is cleared.
+create or replace function public.terminate_billing_subscription(
+  p_user_id uuid,
+  p_customer_id text,
+  p_status text default 'canceled'
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_account_count integer;
+begin
+  if p_status is null or p_status not in ('canceled', 'incomplete_expired') then
+    raise exception 'invalid terminal billing subscription status';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended(p_user_id::text, 0));
+
+  update billing_credit_reservation_items i
+  set refundable = false
+  from billing_credit_grants g, billing_credit_reservations r
+  where i.user_id = p_user_id
+    and i.refundable
+    and g.id = i.grant_id
+    and g.user_id = p_user_id
+    and g.stripe_invoice_id is not null
+    and r.user_id = i.user_id
+    and r.run_id = i.run_id
+    and r.finalized_microusd is null;
+
+  update billing_credit_grants
+  set remaining_microusd = 0,
+      suspended_microusd = 0
+  where user_id = p_user_id
+    and stripe_invoice_id is not null
+    and (remaining_microusd > 0 or suspended_microusd > 0);
+
+  update billing_accounts
+  set plan = 'free',
+      subscription_status = p_status,
+      stripe_customer_id = coalesce(p_customer_id, stripe_customer_id),
+      stripe_subscription_id = null,
+      stripe_subscription_item_id = null,
+      max_monthly_usd = null,
+      current_period_start = null,
+      current_period_end = null,
+      last_valid_invoice_id = null,
+      entitled_through = null,
+      cancel_at_period_end = false,
+      updated_at = now()
+  where user_id = p_user_id;
+  get diagnostics v_account_count = row_count;
+
+  return v_account_count = 1;
+end;
+$$;
+
+-- Atomically acquire one pending Checkout attempt while also rechecking that
+-- no nonterminal Stripe subscription became attached after the HTTP preflight.
+create or replace function public.acquire_billing_checkout_attempt(
+  p_user_id uuid,
+  p_attempt_id uuid,
+  p_ttl_seconds integer default 1860
+)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  perform pg_advisory_xact_lock(hashtextextended(p_user_id::text, 0));
+
+  delete from billing_checkout_attempts
+  where user_id = p_user_id and expires_at <= now();
+
+  if exists (
+    select 1 from billing_accounts
+    where user_id = p_user_id
+      and stripe_subscription_id is not null
+      and subscription_status not in ('none', 'canceled', 'incomplete_expired')
+  ) then
+    return false;
+  end if;
+
+  insert into billing_checkout_attempts (user_id, attempt_id, expires_at)
+  values (
+    p_user_id,
+    p_attempt_id,
+    now() + make_interval(secs => greatest(60, least(p_ttl_seconds, 3600)))
+  )
+  on conflict (user_id) do nothing;
+
+  return exists (
+    select 1 from billing_checkout_attempts
+    where user_id = p_user_id and attempt_id = p_attempt_id and expires_at > now()
+  );
+end;
+$$;
+
+revoke all on function public.apply_paid_billing_invoice(
+  uuid, text, text, text, bigint, bigint, timestamptz, timestamptz
+) from public, anon, authenticated;
+revoke all on function public.invalidate_billing_invoice(text, text)
+  from public, anon, authenticated;
+revoke all on function public.deactivate_billing_paid_access(uuid)
+  from public, anon, authenticated;
+revoke all on function public.terminate_billing_subscription(uuid, text, text)
+  from public, anon, authenticated;
+revoke all on function public.acquire_billing_checkout_attempt(uuid, uuid, integer)
+  from public, anon, authenticated;
+grant execute on function public.apply_paid_billing_invoice(
+  uuid, text, text, text, bigint, bigint, timestamptz, timestamptz
+) to service_role;
+grant execute on function public.invalidate_billing_invoice(text, text)
+  to service_role;
+grant execute on function public.deactivate_billing_paid_access(uuid)
+  to service_role;
+grant execute on function public.terminate_billing_subscription(uuid, text, text)
+  to service_role;
+grant execute on function public.acquire_billing_checkout_attempt(uuid, uuid, integer)
+  to service_role;
+
+-- Atomic FIFO wallet settlement. The per-user advisory lock prevents parallel
+-- sessions from both spending the same grant. Callers choose the bucket at
+-- admission: ordinary and compatibility settlements use usage, while an
+-- explicitly identified correction may prefer reliability first. Replaying a
+-- run_id returns its original settlement.
+create or replace function public.consume_billing_credits(
+  p_user_id uuid,
+  p_run_id uuid,
+  p_amount_microusd bigint,
+  p_preferred_bucket text default 'usage'
+)
+returns table (
+  charged_microusd bigint,
+  uncovered_microusd bigint,
+  usage_remaining_microusd bigint,
+  reliability_remaining_microusd bigint
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_existing billing_credit_ledger%rowtype;
+  v_grant billing_credit_grants%rowtype;
+  v_left bigint;
+  v_take bigint;
+  v_usage bigint := 0;
+  v_reliability bigint := 0;
+begin
+  if p_amount_microusd < 0 then
+    raise exception 'billing amount must be non-negative';
+  end if;
+  if p_preferred_bucket not in ('usage', 'reliability') then
+    raise exception 'invalid billing bucket';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended(p_user_id::text, 0));
+
+  select * into v_existing
+  from billing_credit_ledger
+  where user_id = p_user_id and run_id = p_run_id;
+
+  if found then
+    return query
+      select
+        v_existing.usage_microusd + v_existing.reliability_microusd,
+        v_existing.uncovered_microusd,
+        coalesce(sum(g.remaining_microusd) filter (
+          where g.bucket = 'usage' and (g.expires_at is null or g.expires_at > now())
+        ), 0)::bigint,
+        coalesce(sum(g.remaining_microusd) filter (
+          where g.bucket = 'reliability' and (g.expires_at is null or g.expires_at > now())
+        ), 0)::bigint
+      from billing_credit_grants g
+      where g.user_id = p_user_id;
+    return;
+  end if;
+
+  v_left := p_amount_microusd;
+
+  if p_preferred_bucket = 'reliability' then
+    for v_grant in
+      select * from billing_credit_grants
+      where user_id = p_user_id
+        and bucket = 'reliability'
+        and remaining_microusd > 0
+        and starts_at <= now()
+        and (expires_at is null or expires_at > now())
+      order by expires_at asc nulls last, created_at asc
+      for update
+    loop
+      exit when v_left = 0;
+      v_take := least(v_left, v_grant.remaining_microusd);
+      update billing_credit_grants
+      set remaining_microusd = remaining_microusd - v_take
+      where id = v_grant.id;
+      v_reliability := v_reliability + v_take;
+      v_left := v_left - v_take;
+    end loop;
+  end if;
+
+  for v_grant in
+    select * from billing_credit_grants
+    where user_id = p_user_id
+      and bucket = 'usage'
+      and remaining_microusd > 0
+      and starts_at <= now()
+      and (expires_at is null or expires_at > now())
+    order by expires_at asc nulls last, created_at asc
+    for update
+  loop
+    exit when v_left = 0;
+    v_take := least(v_left, v_grant.remaining_microusd);
+    update billing_credit_grants
+    set remaining_microusd = remaining_microusd - v_take
+    where id = v_grant.id;
+    v_usage := v_usage + v_take;
+    v_left := v_left - v_take;
+  end loop;
+
+  insert into billing_credit_ledger (
+    user_id, run_id, requested_microusd, usage_microusd,
+    reliability_microusd, uncovered_microusd, preferred_bucket
+  ) values (
+    p_user_id, p_run_id, p_amount_microusd, v_usage,
+    v_reliability, v_left, p_preferred_bucket
+  );
+
+  return query
+    select
+      v_usage + v_reliability,
+      v_left,
+      coalesce(sum(g.remaining_microusd) filter (
+        where g.bucket = 'usage' and (g.expires_at is null or g.expires_at > now())
+      ), 0)::bigint,
+      coalesce(sum(g.remaining_microusd) filter (
+        where g.bucket = 'reliability' and (g.expires_at is null or g.expires_at > now())
+      ), 0)::bigint
+    from billing_credit_grants g
+    where g.user_id = p_user_id;
+end;
+$$;
+
+revoke all on function public.consume_billing_credits(uuid, uuid, bigint, text)
+  from public, anon, authenticated;
+grant execute on function public.consume_billing_credits(uuid, uuid, bigint, text)
+  to service_role;
+
+-- Move a bounded amount out of spendable grants before a provider call starts.
+-- The user advisory lock is shared with settlement, cancellation, conversion,
+-- and entitlement revocation, so wallet state cannot change underneath this
+-- allocation. Replaying the same run returns its original reservation.
+create or replace function public.reserve_billing_credits(
+  p_user_id uuid,
+  p_run_id uuid,
+  p_amount_microusd bigint,
+  p_preferred_bucket text default 'usage'
+)
+returns bigint
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_existing billing_credit_reservations%rowtype;
+  v_grant billing_credit_grants%rowtype;
+  v_left bigint;
+  v_take bigint;
+  v_reserved bigint := 0;
+  v_ordinal integer := 0;
+begin
+  if p_amount_microusd < 0 then
+    raise exception 'billing reservation amount must be non-negative';
+  end if;
+  if p_preferred_bucket not in ('usage', 'reliability') then
+    raise exception 'invalid billing reservation bucket';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended(p_user_id::text, 0));
+
+  select * into v_existing
+  from billing_credit_reservations
+  where user_id = p_user_id and run_id = p_run_id;
+  if found then
+    return v_existing.reserved_microusd;
+  end if;
+
+  if exists (
+    select 1 from billing_credit_ledger
+    where user_id = p_user_id and run_id = p_run_id
+  ) then
+    raise exception 'billing run was already settled without a reservation';
+  end if;
+
+  insert into billing_credit_reservations (
+    user_id, run_id, requested_microusd, reserved_microusd, preferred_bucket
+  ) values (
+    p_user_id, p_run_id, p_amount_microusd, 0, p_preferred_bucket
+  );
+
+  v_left := p_amount_microusd;
+
+  if p_preferred_bucket = 'reliability' then
+    for v_grant in
+      select * from billing_credit_grants
+      where user_id = p_user_id
+        and bucket = 'reliability'
+        and remaining_microusd > 0
+        and starts_at <= now()
+        and (expires_at is null or expires_at > now())
+      order by expires_at asc nulls last, created_at asc, id asc
+      for update
+    loop
+      exit when v_left = 0;
+      v_take := least(v_left, v_grant.remaining_microusd);
+      update billing_credit_grants
+      set remaining_microusd = remaining_microusd - v_take
+      where id = v_grant.id;
+      v_ordinal := v_ordinal + 1;
+      insert into billing_credit_reservation_items (
+        user_id, run_id, ordinal, grant_id, bucket, amount_microusd
+      ) values (
+        p_user_id, p_run_id, v_ordinal, v_grant.id, v_grant.bucket, v_take
+      );
+      v_reserved := v_reserved + v_take;
+      v_left := v_left - v_take;
+    end loop;
+  end if;
+
+  for v_grant in
+    select * from billing_credit_grants
+    where user_id = p_user_id
+      and bucket = 'usage'
+      and remaining_microusd > 0
+      and starts_at <= now()
+      and (expires_at is null or expires_at > now())
+    order by expires_at asc nulls last, created_at asc, id asc
+    for update
+  loop
+    exit when v_left = 0;
+    v_take := least(v_left, v_grant.remaining_microusd);
+    update billing_credit_grants
+    set remaining_microusd = remaining_microusd - v_take
+    where id = v_grant.id;
+    v_ordinal := v_ordinal + 1;
+    insert into billing_credit_reservation_items (
+      user_id, run_id, ordinal, grant_id, bucket, amount_microusd
+    ) values (
+      p_user_id, p_run_id, v_ordinal, v_grant.id, v_grant.bucket, v_take
+    );
+    v_reserved := v_reserved + v_take;
+    v_left := v_left - v_take;
+  end loop;
+
+  update billing_credit_reservations
+  set reserved_microusd = v_reserved
+  where user_id = p_user_id and run_id = p_run_id;
+
+  return v_reserved;
+end;
+$$;
+
+-- Settle a reservation exactly once. Only actual spend is retained; unused
+-- allocations go back to their original grant and keep its expiry. Revocation
+-- RPCs flip reservation items to non-refundable. A transient paid-access
+-- deactivation suspends the unused portion for an exact-invoice replay, while
+-- cancellation, invalidation, and Free conversion still burn it permanently.
+create or replace function public.finalize_billing_credit_reservation(
+  p_user_id uuid,
+  p_run_id uuid,
+  p_actual_microusd bigint
+)
+returns table (
+  reservation_found boolean,
+  charged_microusd bigint,
+  uncovered_microusd bigint,
+  usage_remaining_microusd bigint,
+  reliability_remaining_microusd bigint
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_reservation billing_credit_reservations%rowtype;
+  v_existing billing_credit_ledger%rowtype;
+  v_item billing_credit_reservation_items%rowtype;
+  v_left bigint;
+  v_item_charge bigint;
+  v_refund bigint;
+  v_usage bigint := 0;
+  v_reliability bigint := 0;
+begin
+  if p_actual_microusd < 0 then
+    raise exception 'billing settlement amount must be non-negative';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended(p_user_id::text, 0));
+
+  select * into v_reservation
+  from billing_credit_reservations
+  where user_id = p_user_id and run_id = p_run_id
+  for update;
+
+  if not found then
+    return query select false, 0::bigint, 0::bigint, 0::bigint, 0::bigint;
+    return;
+  end if;
+
+  if v_reservation.finalized_microusd is not null then
+    select * into v_existing
+    from billing_credit_ledger
+    where user_id = p_user_id and run_id = p_run_id;
+    if not found then
+      raise exception 'finalized billing reservation has no ledger row';
+    end if;
+    return query
+      select
+        true,
+        v_existing.usage_microusd + v_existing.reliability_microusd,
+        v_existing.uncovered_microusd,
+        coalesce(sum(g.remaining_microusd) filter (
+          where g.bucket = 'usage' and (g.expires_at is null or g.expires_at > now())
+        ), 0)::bigint,
+        coalesce(sum(g.remaining_microusd) filter (
+          where g.bucket = 'reliability' and (g.expires_at is null or g.expires_at > now())
+        ), 0)::bigint
+      from billing_credit_grants g
+      where g.user_id = p_user_id;
+    return;
+  end if;
+
+  v_left := least(p_actual_microusd, v_reservation.reserved_microusd);
+  for v_item in
+    select * from billing_credit_reservation_items
+    where user_id = p_user_id and run_id = p_run_id
+    order by ordinal asc
+    for update
+  loop
+    v_item_charge := least(v_left, v_item.amount_microusd);
+    v_refund := v_item.amount_microusd - v_item_charge;
+    if v_item.bucket = 'reliability' then
+      v_reliability := v_reliability + v_item_charge;
+    else
+      v_usage := v_usage + v_item_charge;
+    end if;
+    v_left := v_left - v_item_charge;
+
+    if v_refund > 0 then
+      if v_item.refundable then
+        update billing_credit_grants g
+        set remaining_microusd = least(
+          g.amount_microusd,
+          g.remaining_microusd + v_refund
+        )
+        where g.id = v_item.grant_id;
+      else
+        -- Deactivation may clear entitlement while a known-cost run is still
+        -- open. Preserve its unused paid escrow as suspended credit so replay
+        -- of this exact invoice can self-heal. This never makes credit spendable
+        -- by itself: apply_paid_billing_invoice restores only p_invoice_id after
+        -- rechecking the current subscription and plan. Terminal cancellation
+        -- clears stripe_subscription_id, and invalidation leaves a tombstone.
+        update billing_credit_grants g
+        set suspended_microusd = least(
+          g.amount_microusd - g.remaining_microusd,
+          g.suspended_microusd + v_refund
+        )
+        where g.id = v_item.grant_id
+          and g.user_id = p_user_id
+          and g.stripe_invoice_id is not null
+          and not exists (
+            select 1
+            from billing_invoice_invalidations i
+            where i.stripe_invoice_id = g.stripe_invoice_id
+          )
+          and exists (
+            select 1
+            from billing_accounts a
+            where a.user_id = p_user_id
+              and a.plan in ('byok', 'plus', 'max')
+              and a.stripe_subscription_id is not null
+              and a.last_valid_invoice_id is null
+          );
+      end if;
+    end if;
+  end loop;
+
+  insert into billing_credit_ledger (
+    user_id, run_id, requested_microusd, usage_microusd,
+    reliability_microusd, uncovered_microusd, preferred_bucket
+  ) values (
+    p_user_id,
+    p_run_id,
+    p_actual_microusd,
+    v_usage,
+    v_reliability,
+    greatest(p_actual_microusd - v_reservation.reserved_microusd, 0),
+    v_reservation.preferred_bucket
+  );
+
+  update billing_credit_reservations
+  set finalized_microusd = p_actual_microusd,
+      finalized_at = now()
+  where user_id = p_user_id and run_id = p_run_id;
+
+  return query
+    select
+      true,
+      v_usage + v_reliability,
+      greatest(p_actual_microusd - v_reservation.reserved_microusd, 0),
+      coalesce(sum(g.remaining_microusd) filter (
+        where g.bucket = 'usage' and (g.expires_at is null or g.expires_at > now())
+      ), 0)::bigint,
+      coalesce(sum(g.remaining_microusd) filter (
+        where g.bucket = 'reliability' and (g.expires_at is null or g.expires_at > now())
+      ), 0)::bigint
+    from billing_credit_grants g
+    where g.user_id = p_user_id;
+end;
+$$;
+
+revoke all on function public.reserve_billing_credits(uuid, uuid, bigint, text)
+  from public, anon, authenticated;
+revoke all on function public.finalize_billing_credit_reservation(uuid, uuid, bigint)
+  from public, anon, authenticated;
+grant execute on function public.reserve_billing_credits(uuid, uuid, bigint, text)
+  to service_role;
+grant execute on function public.finalize_billing_credit_reservation(uuid, uuid, bigint)
+  to service_role;
+
+-- Convert a guest in one transaction: collapse the lifetime Free allowance,
+-- move its personal projects, and retire the guest credential. A pre-existing
+-- merge marker may resume only into the same target account. The row lock is
+-- the conversion claim; durable lifecycle claims remain cleanup-only.
+drop function if exists public.convert_guest_account(uuid, uuid, uuid);
+create or replace function public.convert_guest_account(
+  p_guest_user_id uuid,
+  p_target_user_id uuid
+)
+returns integer
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_free_microusd constant bigint := 3000000;
+  v_guest_remaining bigint := v_free_microusd;
+  v_target_remaining bigint := v_free_microusd;
+  v_merged_remaining bigint;
+  v_existing_target uuid;
+  v_moved integer := 0;
+  v_updated integer := 0;
+  v_guest_account_type text;
+  v_guest_converted_at timestamptz;
+  v_guest_lifecycle_claim uuid;
+begin
+  if p_guest_user_id = p_target_user_id then
+    raise exception 'guest and target account must differ';
+  end if;
+
+  -- Stable lock order prevents two crossed conversion requests from deadlocking.
+  if p_guest_user_id::text < p_target_user_id::text then
+    perform pg_advisory_xact_lock(hashtextextended(p_guest_user_id::text, 0));
+    perform pg_advisory_xact_lock(hashtextextended(p_target_user_id::text, 0));
+  else
+    perform pg_advisory_xact_lock(hashtextextended(p_target_user_id::text, 0));
+    perform pg_advisory_xact_lock(hashtextextended(p_guest_user_id::text, 0));
+  end if;
+
+  select account_type, converted_at, guest_lifecycle_claim
+  into v_guest_account_type, v_guest_converted_at, v_guest_lifecycle_claim
+  from users
+  where id = p_guest_user_id
+  for update;
+  if not found then
+    -- The inactivity sweeper may have legitimately removed a stale guest while
+    -- its longer-lived browser cookie remains. Nothing is left to transfer.
+    return 0;
+  end if;
+  if v_guest_account_type <> 'guest' then
+    raise exception 'guest conversion source is not a guest account';
+  end if;
+
+  select target_user_id into v_existing_target
+  from billing_trial_merges
+  where guest_user_id = p_guest_user_id;
+  if found and v_existing_target <> p_target_user_id then
+    raise exception 'guest trial was already merged into another account';
+  end if;
+  if v_guest_converted_at is not null then
+    if v_existing_target = p_target_user_id then
+      return 0;
+    end if;
+    raise exception 'guest account was already converted without a matching merge';
+  end if;
+  if v_guest_lifecycle_claim is not null then
+    raise exception 'guest lifecycle cleanup is already in progress';
+  end if;
+
+  perform 1 from users
+  where id = p_target_user_id and account_type = 'standard'
+  for update;
+  if not found then
+    raise exception 'guest conversion target is not a standard account';
+  end if;
+
+  insert into billing_accounts (user_id)
+  values (p_guest_user_id), (p_target_user_id)
+  on conflict (user_id) do nothing;
+
+  insert into billing_credit_grants (
+    user_id, source_key, bucket, amount_microusd, remaining_microusd
+  ) values
+    (p_guest_user_id, 'free-trial:' || p_guest_user_id::text, 'usage', v_free_microusd, v_free_microusd),
+    (p_target_user_id, 'free-trial:' || p_target_user_id::text, 'usage', v_free_microusd, v_free_microusd)
+  on conflict (source_key) do nothing;
+
+  if v_existing_target is null then
+    select remaining_microusd into v_guest_remaining
+    from billing_credit_grants
+    where source_key = 'free-trial:' || p_guest_user_id::text
+    for update;
+
+    select remaining_microusd into v_target_remaining
+    from billing_credit_grants
+    where source_key = 'free-trial:' || p_target_user_id::text
+    for update;
+
+    -- Any open reservation was included in the consumed balance above. Do not
+    -- let its later finalization restore trial credit to either old identity.
+    update billing_credit_reservation_items i
+    set refundable = false
+    from billing_credit_grants g, billing_credit_reservations r
+    where g.id = i.grant_id
+      and i.refundable
+      and r.user_id = i.user_id
+      and r.run_id = i.run_id
+      and g.source_key in (
+        'free-trial:' || p_guest_user_id::text,
+        'free-trial:' || p_target_user_id::text
+      )
+      and r.finalized_microusd is null;
+
+    v_merged_remaining := greatest(
+      0,
+      least(v_free_microusd, v_guest_remaining) +
+        least(v_free_microusd, v_target_remaining) - v_free_microusd
+    );
+
+    update billing_credit_grants
+    set remaining_microusd = v_merged_remaining
+    where source_key = 'free-trial:' || p_target_user_id::text;
+
+    update billing_credit_grants
+    set remaining_microusd = 0
+    where source_key = 'free-trial:' || p_guest_user_id::text;
+
+    insert into billing_trial_merges (guest_user_id, target_user_id)
+    values (p_guest_user_id, p_target_user_id);
+  end if;
+
+  update projects
+  set owner_id = p_target_user_id
+  where owner_id = p_guest_user_id and org_id is null;
+  get diagnostics v_moved = row_count;
+
+  update users
+  set converted_at = now(),
+      guest_recovery_hash = null,
+      guest_recovery_code_enc = null,
+      guest_lifecycle_claim = null,
+      guest_lifecycle_claimed_at = null
+  where id = p_guest_user_id
+    and account_type = 'guest'
+    and converted_at is null
+    and guest_lifecycle_claim is null;
+  get diagnostics v_updated = row_count;
+  if v_updated <> 1 then
+    raise exception 'guest conversion row was lost';
+  end if;
+
+  return v_moved;
+end;
+$$;
+
+revoke all on function public.convert_guest_account(uuid, uuid)
+  from public, anon, authenticated;
+grant execute on function public.convert_guest_account(uuid, uuid)
+  to service_role;
+
+-- Atomic credit escrow supersedes the old account-wide two-hour lease. Remove
+-- the compatibility objects so a crashed run cannot block unrelated projects.
+drop function if exists public.merge_billing_free_trial(uuid, uuid);
+drop function if exists public.acquire_billing_run_lease(uuid, uuid, integer);
+drop function if exists public.renew_billing_run_lease(uuid, uuid, integer);
+drop function if exists public.release_billing_run_lease(uuid, uuid);
+drop table if exists billing_run_leases;
+
 drop trigger if exists project_secrets_updated_at on project_secrets;
 create trigger project_secrets_updated_at
   before update on project_secrets

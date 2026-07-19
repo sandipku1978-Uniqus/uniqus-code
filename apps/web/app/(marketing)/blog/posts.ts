@@ -90,6 +90,10 @@ export const POSTS: Post[] = [
         text: "Models have a training cutoff, but the web doesn't stop. A library ships a breaking change, an API renames a field, a framework deprecates a pattern — and an agent working from memory will confidently get it wrong. So we wired built-in web search into all four providers, using each one's own server-side search rather than a bolted-on scraper.",
       },
       {
+        type: "p",
+        text: "Credential mode matters: capped Claude search can use Gate 15 credit, while GLM, GPT, and Gemini search requires your key for that provider. Their APIs do not expose a hard per-request search cap, so Gate 15 does not put those tools on the shared wallet.",
+      },
+      {
         type: "h2",
         text: "One capability, four implementations",
       },
@@ -259,7 +263,7 @@ export const POSTS: Post[] = [
       },
       {
         type: "p",
-        text: "On paid plans you can add your own Anthropic, OpenAI, or Google API keys. Usage then bills through those providers directly, and your keys stay encrypted at rest — never displayed back to you in full, never exposed to the agent.",
+        text: "On paid plans you can add your own Anthropic, OpenAI, Google, or Z.ai API keys. Usage then bills through those providers directly, and your keys stay encrypted at rest — never displayed back to you in full, never exposed to the agent.",
       },
       {
         type: "ul",

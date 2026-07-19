@@ -5,6 +5,8 @@ import type {
   AccountUsageStats,
   AgentTask,
   AuditEvent,
+  BillingPlan,
+  BillingStatus,
   Comment,
   CurrentUser,
   DeploymentState,
@@ -49,6 +51,17 @@ function defaultApiBase(): string {
 const API_BASE = defaultApiBase();
 export function getApiBase(): string { return API_BASE; }
 
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly code?: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     credentials: "include",
@@ -57,7 +70,23 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`API ${res.status}: ${body || res.statusText}`);
+    let message = body || res.statusText || `Request failed (${res.status})`;
+    let code: string | undefined;
+    if (body) {
+      try {
+        const parsed = JSON.parse(body) as { error?: unknown; message?: unknown; code?: unknown };
+        const parsedMessage = typeof parsed.error === "string"
+          ? parsed.error
+          : typeof parsed.message === "string"
+            ? parsed.message
+            : null;
+        if (parsedMessage) message = parsedMessage;
+        if (typeof parsed.code === "string") code = parsed.code;
+      } catch {
+        // Keep a non-JSON response body as the actionable error message.
+      }
+    }
+    throw new ApiError(message, res.status, code);
   }
   return (await res.json()) as T;
 }
@@ -123,6 +152,40 @@ export type { AccountUsageStats } from "@gate15/api-types";
 
 export const fetchUsageStatsApi = (): Promise<{ stats: AccountUsageStats }> =>
   api("/api/account/usage-stats");
+
+// ── Platform billing (Stripe-hosted Checkout + Customer Portal) ──────────────
+
+export type { BillingPlan, BillingStatus } from "@gate15/api-types";
+
+export type CheckoutBillingPlan = Exclude<BillingPlan, "free">;
+
+export const fetchBillingStatusApi = (): Promise<{ billing: BillingStatus }> =>
+  api("/api/billing/status");
+
+export const createBillingCheckoutApi = (input: {
+  plan: CheckoutBillingPlan;
+  max_monthly_usd?: number;
+}): Promise<{ url: string }> =>
+  api("/api/billing/checkout", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+
+export const fetchBillingCheckoutStatusApi = (
+  sessionId: string,
+): Promise<{ completed: boolean; fulfilled: boolean }> =>
+  api(`/api/billing/checkout/status?session_id=${encodeURIComponent(sessionId)}`);
+
+export const cancelBillingCheckoutApi = (
+  attemptId: string,
+): Promise<{ canceled: boolean; completed: boolean; session_id?: string }> =>
+  api("/api/billing/checkout/cancel", {
+    method: "POST",
+    body: JSON.stringify({ attempt_id: attemptId }),
+  });
+
+export const createBillingPortalApi = (): Promise<{ url: string }> =>
+  api("/api/billing/portal", { method: "POST" });
 
 export const createProjectApi = (
   name: string,

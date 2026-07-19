@@ -3,6 +3,7 @@ import {
   estimateTurnCostUsd,
   type DesignTokens,
   type ModelChoice,
+  type ModelProvider,
   type Plan,
   type PlanStep,
 } from "@gate15/api-types";
@@ -32,6 +33,9 @@ import { TOOLS } from "./tools.js";
 import { createLiveOutputEstimator } from "./liveUsage.js";
 import {
   executeTool,
+  affordableOutputTokensForBudget,
+  hasAuthoritativeTokenUsage,
+  PLATFORM_PROVIDER_TOOL_RESERVE_USD,
   truncateToolResultText,
   type LoopHooks,
 } from "./loop.js";
@@ -46,11 +50,15 @@ import {
   estimateFixedPromptTokens,
   estimateMessageChars,
   estimateMessageTokens,
+  conservativeMessageTokenUpperBound,
+  conservativeFixedPromptTokenUpperBound,
 } from "./compact.js";
 import type { RunMetricsCollector } from "../telemetry/runMetrics.js";
 import { recordUsageEvent } from "../db/usage.js";
 import { getProjectSecretPlaintexts } from "../db/secrets.js";
 import { createSecretRedactor } from "./secretRedaction.js";
+import { BillingAccessError } from "../billing/service.js";
+import { assertPlatformModelPriced } from "./runSpend.js";
 
 const PLAN_SYSTEM_PROMPT_BASE = `You are an AI software engineer in plan mode. The user has described what they want built; your job is to INSPECT the project as needed and then produce a structured plan, NOT to execute it.
 
@@ -126,6 +134,12 @@ export interface PlanOptions {
   userId?: string | null;
   modelChoice?: ModelChoice;
   providerKeys?: ProviderKeys;
+  /** Billing provenance for each key used by the planner. */
+  providerKeySources?: Partial<Record<ModelProvider, "account" | "platform" | "missing">>;
+  /** Hard ceiling for planner calls made with Gate 15 credentials. */
+  platformBudgetUsd?: number;
+  /** Marks a started platform request that returned no trustworthy usage receipt. */
+  onUnknownPlatformSpend?: () => void;
   projectId?: string | null;
   signal?: AbortSignal;
   /** Stream the planner's progress to the client (same events as the agent loop). */
@@ -446,6 +460,66 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
     ...providerKeysFromEnv(),
     anthropic: opts.apiKey,
   };
+  let platformSpendUsd = 0;
+  let platformSpendUnknown = false;
+  const markUnknownPlatformSpend = (): void => {
+    platformSpendUnknown = true;
+    opts.onUnknownPlatformSpend?.();
+  };
+  const accountPlatformCost = (input: {
+    provider: string;
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+    costUsd?: number;
+  }): void => {
+    if (opts.providerKeySources?.[input.provider as ModelProvider] !== "platform") return;
+    platformSpendUsd += input.costUsd ?? estimateTurnCostUsd(input.model, {
+      inputTokens: input.inputTokens,
+      outputTokens: input.outputTokens,
+      cacheReadTokens: input.cacheReadTokens ?? 0,
+      cacheCreationTokens: input.cacheCreationTokens ?? 0,
+    });
+  };
+  const maxTokensWithinPlatformBudget = (
+    requestedOutputTokens: number,
+    estimatedInputTokens: number,
+    provider: ModelProvider,
+    model: string,
+    includePaidSearch = true,
+  ): number => {
+    if (
+      opts.platformBudgetUsd === undefined ||
+      opts.providerKeySources?.[provider] !== "platform"
+    ) {
+      return requestedOutputTokens;
+    }
+    const supportsPaidSearch =
+      includePaidSearch &&
+      (opts.providerKeySources?.[provider] !== "platform" || provider === "anthropic") &&
+      (provider === "anthropic" ||
+        provider === "openai" ||
+        provider === "zai" ||
+        (provider === "google" && /^gemini-3/.test(model)));
+    const maxTokens = platformSpendUnknown
+      ? 0
+      : affordableOutputTokensForBudget({
+          model,
+          estimatedInputTokens,
+          budgetUsd: Math.max(0, opts.platformBudgetUsd - platformSpendUsd),
+          requestedOutputTokens,
+          reservedCostUsd: supportsPaidSearch ? PLATFORM_PROVIDER_TOOL_RESERVE_USD : 0,
+        });
+    if (maxTokens <= 0) {
+      throw new BillingAccessError(
+        "credits_exhausted",
+        "The remaining build credit is too small to start another planning request safely. Add provider keys or more credits to continue.",
+      );
+    }
+    return maxTokens;
+  };
   let resolved = resolveModel("plan", opts.modelChoice);
   // Task-aware Auto (same as the agent loop): when on Auto, route per task —
   // plan mode leans toward the stronger reasoner. Best-effort; keeps the static
@@ -472,6 +546,7 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
               ...usage,
               provider: usage.provider as string,
             };
+            accountPlatformCost(reported);
             opts.metrics?.recordProviderCall({ usage: reported });
             if (opts.onUsage) {
               // Route the classifier through the same authoritative callback as
@@ -494,6 +569,24 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
               }).catch(() => console.error("recordUsageEvent (plan classifier) failed"));
             }
           },
+          beforeClassifier: (maxCostUsd, model) => {
+            if (opts.signal?.aborted) throw new Error("aborted before routing classifier request");
+            if (opts.providerKeySources?.anthropic !== "platform") return;
+            assertPlatformModelPriced(model, true, "routing classifier");
+            const remaining =
+              opts.platformBudgetUsd === undefined
+                ? undefined
+                : Math.max(0, opts.platformBudgetUsd - platformSpendUsd);
+            if (platformSpendUnknown || (remaining !== undefined && maxCostUsd > remaining)) {
+              throw new Error("platform credit is too small for the routing classifier");
+            }
+          },
+          onClassifierUnknown: () => {
+            if (opts.providerKeySources?.anthropic === "platform") {
+              markUnknownPlatformSpend();
+            }
+          },
+          signal: opts.signal,
         },
       );
     const picked = opts.metrics ? await opts.metrics.measure("routing", pick) : await pick();
@@ -508,7 +601,14 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
     opts.metrics?.setRoute("manual", explicitChoice ? "manual" : "environment");
   }
   opts.metrics?.setPhaseModel("planner", resolved.provider, resolved.model);
+  assertPlatformModelPriced(
+    resolved.model,
+    opts.providerKeySources?.[resolved.provider] === "platform",
+    "planner",
+  );
   const provider = getProvider(resolved.provider, keys);
+  const resolvedProviderUsesPlatform =
+    opts.providerKeySources?.[resolved.provider] === "platform";
   const hooks = opts.hooks ?? {};
 
   const planTools: Anthropic.Tool[] = [
@@ -526,6 +626,10 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
   ]);
   const planToolSchemaChars = JSON.stringify(planTools).length;
   const fixedPromptTokens = estimateFixedPromptTokens(system, planTools);
+  const fixedPromptTokenUpperBound = conservativeFixedPromptTokenUpperBound(
+    system,
+    planTools,
+  );
 
   // Accumulate the planning phase's token spend across investigation turns so the
   // live estimator can show cumulative work. Each provider call is reported
@@ -552,48 +656,52 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
       usage.cacheReadTokens ||
       usage.cacheCreationTokens
     ) {
-      opts.onUsage?.({
+      const reported = {
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
         cacheReadTokens: usage.cacheReadTokens ?? 0,
         cacheCreationTokens: usage.cacheCreationTokens ?? 0,
         model: resolved.model,
         provider: resolved.provider,
-      });
+      };
+      accountPlatformCost(reported);
+      opts.onUsage?.(reported);
     }
   };
   const reportBillableToolUsage = (billable: BillableToolUsage): void => {
     const costUsd = Number.isFinite(billable.costUsd)
       ? Math.max(0, billable.costUsd)
       : 0;
-    opts.metrics?.recordBillableToolUsage(billable.units, billable.accuracy);
-    if (costUsd <= 0) return;
-    const event = {
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheReadTokens: 0,
-      cacheCreationTokens: 0,
-      model: resolved.model,
-      provider: resolved.provider,
-      costUsd,
-    };
-    if (opts.onUsage) {
-      opts.onUsage(event);
-    } else if (opts.projectId && opts.metrics?.runId) {
-      void recordUsageEvent({
-        projectId: opts.projectId,
-        userId: opts.userId ?? null,
-        runId: opts.metrics.runId,
-        provider: resolved.provider,
-        model: resolved.model,
+    if (costUsd > 0) {
+      const event = {
         inputTokens: 0,
         outputTokens: 0,
         cacheReadTokens: 0,
         cacheCreationTokens: 0,
+        model: resolved.model,
+        provider: resolved.provider,
         costUsd,
-        elapsedMs: 0,
-      }).catch(() => console.error("recordUsageEvent (plan provider tool fee) failed"));
+      };
+      accountPlatformCost(event);
+      if (opts.onUsage) {
+        opts.onUsage(event);
+      } else if (opts.projectId && opts.metrics?.runId) {
+        void recordUsageEvent({
+          projectId: opts.projectId,
+          userId: opts.userId ?? null,
+          runId: opts.metrics.runId,
+          provider: resolved.provider,
+          model: resolved.model,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          costUsd,
+          elapsedMs: 0,
+        }).catch(() => console.error("recordUsageEvent (plan provider tool fee) failed"));
+      }
     }
+    opts.metrics?.recordBillableToolUsage(billable.units, billable.accuracy);
   };
 
   for (let iter = 0; iter < MAX_PLAN_ITERATIONS; iter++) {
@@ -614,19 +722,32 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
 
     let turn;
     let inflightUsage: TokenUsage | undefined;
+    let providerStarted = false;
+    const thisProviderRequestUsesPlatform =
+      opts.providerKeySources?.[resolved.provider] === "platform";
     const providerStartedAt = performance.now();
     let providerTtftMs: number | undefined;
     const markProviderFirstDelta = (): void => {
       if (providerTtftMs === undefined) providerTtftMs = performance.now() - providerStartedAt;
     };
     const stopModelPhase = opts.metrics?.startPhase("model");
+    const providerMaxTokens = maxTokensWithinPlatformBudget(
+      PLAN_MAX_TOKENS,
+      fixedPromptTokenUpperBound + conservativeMessageTokenUpperBound(messages),
+      resolved.provider,
+      resolved.model,
+    );
+    if (opts.signal?.aborted) throw new Error("aborted before planner provider request");
     try {
+      providerStarted = true;
       turn = await provider.streamAgentTurn({
         model: resolved.model,
         system,
         tools: planTools,
         messages,
-        maxTokens: PLAN_MAX_TOKENS,
+        maxTokens: providerMaxTokens,
+        disableWebSearch:
+          resolvedProviderUsesPlatform && resolved.provider !== "anthropic",
         signal: opts.signal,
         onText: (t) => {
           markProviderFirstDelta();
@@ -665,6 +786,13 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
       });
     } catch (err) {
       stopModelPhase?.();
+      if (
+        thisProviderRequestUsesPlatform &&
+        providerStarted &&
+        !hasAuthoritativeTokenUsage(inflightUsage)
+      ) {
+        markUnknownPlatformSpend();
+      }
       bankUsage(inflightUsage);
       reportUsage(inflightUsage);
       opts.metrics?.recordProviderCall({
@@ -676,9 +804,17 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
       throw err;
     }
     stopModelPhase?.();
-    opts.metrics?.recordProviderCall({ ttftMs: providerTtftMs, usage: turn.usage });
-    bankUsage(turn.usage);
-    reportUsage(turn.usage);
+    const settledUsage = hasAuthoritativeTokenUsage(turn.usage)
+      ? turn.usage
+      : hasAuthoritativeTokenUsage(inflightUsage)
+        ? inflightUsage
+        : undefined;
+    if (thisProviderRequestUsesPlatform && !settledUsage) {
+      markUnknownPlatformSpend();
+    }
+    bankUsage(settledUsage);
+    reportUsage(settledUsage);
+    opts.metrics?.recordProviderCall({ ttftMs: providerTtftMs, usage: settledUsage });
 
     messages.push({ role: "assistant", content: secretRedactor.clone(turn.content) });
 
@@ -790,13 +926,24 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
   const stopForcedModelPhase = opts.metrics?.startPhase("model");
   let forced: unknown;
   let forcedUsage: TokenUsage | undefined;
+  let forcedProviderStarted = false;
+  const forcedMaxTokens = maxTokensWithinPlatformBudget(
+    4096,
+    conservativeFixedPromptTokenUpperBound(system, [SUBMIT_PLAN_TOOL]) +
+      conservativeMessageTokenUpperBound(forcedMessages),
+    resolved.provider,
+    resolved.model,
+    false,
+  );
   try {
+    if (opts.signal?.aborted) throw new Error("aborted before forced planner provider request");
+    forcedProviderStarted = true;
     const forcedResult = await provider.callForcedTool({
       model: resolved.model,
       system,
       tool: SUBMIT_PLAN_TOOL,
       messages: forcedMessages,
-      maxTokens: 4096,
+      maxTokens: forcedMaxTokens,
       signal: opts.signal,
       // A provider can receive (and bill) a response that fails its forced-call
       // validation. Capture usage before validation so the catch path can still
@@ -807,11 +954,24 @@ export async function proposePlan(userMessage: string, opts: PlanOptions): Promi
     });
     forced = forcedResult.input;
     forcedUsage = forcedResult.usage ?? forcedUsage;
+    if (
+      resolvedProviderUsesPlatform &&
+      !hasAuthoritativeTokenUsage(forcedUsage)
+    ) {
+      markUnknownPlatformSpend();
+    }
     bankUsage(forcedUsage);
     reportUsage(forcedUsage);
     opts.metrics?.recordProviderCall({ usage: forcedUsage });
   } catch (err) {
     stopForcedModelPhase?.();
+    if (
+      resolvedProviderUsesPlatform &&
+      forcedProviderStarted &&
+      !hasAuthoritativeTokenUsage(forcedUsage)
+    ) {
+      markUnknownPlatformSpend();
+    }
     bankUsage(forcedUsage);
     reportUsage(forcedUsage);
     opts.metrics?.recordProviderCall({

@@ -7,6 +7,10 @@ import {
   estimateFixedPromptTokens,
   estimateMessageTokens,
   estimatedRequestTokens,
+  conservativeMessageTokenUpperBound,
+  compactionSummaryInputTokenUpperBound,
+  MAX_SUMMARY_UTF8_BYTES,
+  truncateUtf8ToBytes,
 } from "./compact.js";
 
 describe("compaction request accounting", () => {
@@ -50,5 +54,44 @@ describe("compaction request accounting", () => {
     expect(contextWindowTokensForModel("claude-sonnet-4-6")).toBe(1_000_000);
     expect(contextWindowTokensForModel("gpt-5.6-sol")).toBe(400_000);
     expect(contextWindowTokensForModel("unknown-model")).toBe(200_000);
+  });
+
+  it("uses UTF-8 bytes rather than character averages for dense Unicode billing bounds", () => {
+    const dense: Anthropic.MessageParam[] = [
+      { role: "user", content: "\u6f22\u{1f600}".repeat(1_000) },
+    ];
+
+    expect(conservativeMessageTokenUpperBound(dense)).toBeGreaterThan(
+      estimateMessageTokens(dense) * 3,
+    );
+  });
+
+  it("adds the maximum visual-token tier even for a tiny compressed image payload", () => {
+    const withImage: Anthropic.MessageParam[] = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: { type: "base64", media_type: "image/png", data: "AA==" },
+          },
+        ],
+      },
+    ];
+
+    expect(conservativeMessageTokenUpperBound(withImage)).toBeGreaterThan(4_784);
+  });
+
+  it("hard-caps a summary's UTF-8 bytes without splitting Unicode", () => {
+    const truncated = truncateUtf8ToBytes("\u{1f600}".repeat(5_000), MAX_SUMMARY_UTF8_BYTES);
+
+    expect(Buffer.byteLength(truncated, "utf8")).toBe(MAX_SUMMARY_UTF8_BYTES);
+    expect(truncated.endsWith("\u{1f600}")).toBe(true);
+  });
+
+  it("includes request wrapper overhead in summarizer affordability", () => {
+    expect(compactionSummaryInputTokenUpperBound("\u6f22")).toBe(
+      Buffer.byteLength("\u6f22", "utf8") + 320,
+    );
   });
 });

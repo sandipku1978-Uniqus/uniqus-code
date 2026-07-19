@@ -1,6 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { createHash } from "node:crypto";
+import { estimateTurnCostUsd } from "@gate15/api-types";
 import { ensureAnthropic } from "./router.js";
+import { assertPlatformModelPriced } from "./runSpend.js";
 
 /**
  * Context-window compaction (Plan §3.6).
@@ -47,6 +49,92 @@ const CHARS_PER_TOKEN = 3.3;
 // the char ratio doesn't silently change image accounting.
 const IMAGE_CHARS = 1500 * 4;
 const MAX_SUMMARY_TOKENS = 4096;
+export const MAX_SUMMARY_UTF8_BYTES = MAX_SUMMARY_TOKENS * 4;
+// Highest current native visual-token tier (Claude Opus 4.8). This covers a
+// highly-compressible image whose base64 byte length is smaller than its
+// dimension-based visual token charge.
+const MAX_VISUAL_TOKENS_PER_IMAGE = 4784;
+
+/**
+ * Billing preflights need an upper bound, not the 3.3 chars/token analytics
+ * estimate. A tokenizer cannot emit more tokens than the UTF-8 bytes it reads;
+ * JSON bytes also cover roles/tool ids, with explicit request/image overhead.
+ */
+export function conservativeMessageTokenUpperBound(
+  messages: Anthropic.MessageParam[],
+): number {
+  const serialized = JSON.stringify(messages);
+  const imageCount = messages.reduce((total, message) => {
+    if (!Array.isArray(message.content)) return total;
+    return total + message.content.filter((block) => block.type === "image").length;
+  }, 0);
+  return Math.max(
+    1,
+    Buffer.byteLength(serialized, "utf8") +
+      messages.length * 64 +
+      imageCount * MAX_VISUAL_TOKENS_PER_IMAGE,
+  );
+}
+
+export function conservativeFixedPromptTokenUpperBound(
+  system: string,
+  tools: Anthropic.Tool[],
+): number {
+  return Math.max(
+    1,
+    Buffer.byteLength(system, "utf8") +
+      Buffer.byteLength(JSON.stringify(tools), "utf8") +
+      256,
+  );
+}
+
+export function compactionSummaryInputTokenUpperBound(payload: string): number {
+  return Buffer.byteLength(payload, "utf8") + 320;
+}
+
+/** Keep persisted summaries inside the exact byte envelope reserved below. */
+export function truncateUtf8ToBytes(text: string, maxBytes: number): string {
+  const cap = Math.max(0, Math.floor(maxBytes));
+  if (Buffer.byteLength(text, "utf8") <= cap) return text;
+  let bytes = 0;
+  let end = 0;
+  for (const character of text) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (bytes + size > cap) break;
+    bytes += size;
+    end += character.length;
+  }
+  return text.slice(0, end);
+}
+
+/**
+ * Price a request against the more expensive of fresh input and a first-time
+ * prompt-cache write. Anthropic marks the builder's stable prompt prefixes as
+ * ephemeral cache entries, and cache creation is currently 1.25x fresh input.
+ * Treating every estimated prompt token as fresh therefore was not a safe
+ * upper bound for a cold cache.
+ */
+export function conservativeRequestCostUsd(
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+): number {
+  const promptTokens = Math.max(0, Math.ceil(inputTokens));
+  const completionTokens = Math.max(0, Math.ceil(outputTokens));
+  const freshInputCost = estimateTurnCostUsd(model, {
+    inputTokens: promptTokens,
+    outputTokens: completionTokens,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+  });
+  const cacheWriteCost = estimateTurnCostUsd(model, {
+    inputTokens: 0,
+    outputTokens: completionTokens,
+    cacheReadTokens: 0,
+    cacheCreationTokens: promptTokens,
+  });
+  return Math.max(freshInputCost, cacheWriteCost);
+}
 
 function numEnv(key: string, fallback: number): number {
   const raw = process.env[key];
@@ -85,6 +173,10 @@ export interface CompactionBudget {
     cacheReadTokens: number;
     cacheCreationTokens: number;
   }) => void;
+  /** Maximum Gate 15-funded cost this summarizer request may start. */
+  maxCostUsd?: number;
+  /** Request crossed the provider boundary but returned no trustworthy receipt. */
+  onUnknownPlatformSpend?: () => void;
 }
 
 function isToolResultBlock(block: unknown): boolean {
@@ -323,6 +415,18 @@ export interface CompactionSnapshotIdentity {
   model: string;
 }
 
+/** Upper bound for the next request after this compaction recipe succeeds. */
+export function postCompactionMessageTokenUpperBound(
+  messages: Anthropic.MessageParam[],
+  budget: CompactionBudget = {},
+): number {
+  const splitIndex = findSplitIndex(messages, compactionKeepTokens(budget));
+  const retained = splitIndex > 0 ? messages.slice(splitIndex) : messages;
+  // The summarizer is hard-truncated to this UTF-8 envelope before it is
+  // persisted, so the next request cannot exceed the reserved summary bytes.
+  return conservativeMessageTokenUpperBound(retained) + MAX_SUMMARY_UTF8_BYTES + 512;
+}
+
 /**
  * A persisted summary is valid only for the exact compaction recipe/model that
  * produced it. Prompt edits automatically change the hash; internal model
@@ -348,36 +452,86 @@ async function summarizeOlderPortion(
   apiKey: string,
   signal?: AbortSignal,
   onUsage?: CompactionBudget["onUsage"],
+  maxCostUsd?: number,
+  onUnknownPlatformSpend?: CompactionBudget["onUnknownPlatformSpend"],
 ): Promise<{ text: string; identity: CompactionSnapshotIdentity }> {
   const transcript = older.map((m, i) => renderMessageForSummary(m, i)).join("\n\n");
   const client = new Anthropic({ apiKey });
   const identity = compactionSnapshotIdentity();
-  const response = await client.messages.create(
-    {
-      model: identity.model,
-      max_tokens: MAX_SUMMARY_TOKENS,
-      system: SUMMARY_SYSTEM_PROMPT,
-      messages: [
-        {
-          role: "user",
-          content: SUMMARY_USER_PROMPT_PREFIX + transcript + SUMMARY_USER_PROMPT_SUFFIX,
-        },
-      ],
-    },
-    signal ? { signal } : undefined,
+  assertPlatformModelPriced(
+    identity.model,
+    Boolean(onUnknownPlatformSpend),
+    "compaction",
   );
-  onUsage?.({
+  let maxSummaryTokens = MAX_SUMMARY_TOKENS;
+  if (maxCostUsd !== undefined) {
+    const estimatedInputTokens = compactionSummaryInputTokenUpperBound(
+      SUMMARY_SYSTEM_PROMPT +
+      SUMMARY_USER_PROMPT_PREFIX +
+      transcript +
+      SUMMARY_USER_PROMPT_SUFFIX,
+    );
+    const cost = (outputTokens: number): number =>
+      conservativeRequestCostUsd(identity.model, estimatedInputTokens, outputTokens);
+    if (cost(1) > maxCostUsd) {
+      throw new Error("remaining build credit is too small to compact this context safely");
+    }
+    let low = 1;
+    let high = MAX_SUMMARY_TOKENS;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (cost(mid) <= maxCostUsd) low = mid;
+      else high = mid - 1;
+    }
+    maxSummaryTokens = low;
+  }
+  if (signal?.aborted) {
+    throw Object.assign(new Error("compaction aborted before provider request"), {
+      name: "AbortError",
+    });
+  }
+  let response;
+  try {
+    response = await client.messages.create(
+      {
+        model: identity.model,
+        max_tokens: maxSummaryTokens,
+        system: SUMMARY_SYSTEM_PROMPT,
+        messages: [
+          {
+            role: "user",
+            content: SUMMARY_USER_PROMPT_PREFIX + transcript + SUMMARY_USER_PROMPT_SUFFIX,
+          },
+        ],
+      },
+      signal ? { signal } : undefined,
+    );
+  } catch (err) {
+    onUnknownPlatformSpend?.();
+    throw err;
+  }
+  const usage = {
     provider: "anthropic",
     model: identity.model,
     inputTokens: response.usage.input_tokens ?? 0,
     outputTokens: response.usage.output_tokens ?? 0,
     cacheReadTokens: response.usage.cache_read_input_tokens ?? 0,
     cacheCreationTokens: response.usage.cache_creation_input_tokens ?? 0,
-  });
-  const text = response.content
-    .map((b) => (b.type === "text" ? b.text : ""))
-    .join("")
-    .trim();
+  } as const;
+  if (
+    usage.inputTokens ||
+    usage.outputTokens ||
+    usage.cacheReadTokens ||
+    usage.cacheCreationTokens
+  ) {
+    onUsage?.(usage);
+  } else {
+    onUnknownPlatformSpend?.();
+  }
+  const text = truncateUtf8ToBytes(
+    response.content.map((b) => (b.type === "text" ? b.text : "")).join(""),
+    MAX_SUMMARY_UTF8_BYTES,
+  ).trim();
   if (!text) {
     throw new Error("compaction summarizer returned empty content");
   }
@@ -411,7 +565,14 @@ export async function maybeCompact(
   let summary: string;
   let snapshotIdentity: CompactionSnapshotIdentity;
   try {
-    const summarized = await summarizeOlderPortion(older, apiKey, signal, budget.onUsage);
+    const summarized = await summarizeOlderPortion(
+      older,
+      apiKey,
+      signal,
+      budget.onUsage,
+      budget.maxCostUsd,
+      budget.onUnknownPlatformSpend,
+    );
     summary = summarized.text;
     snapshotIdentity = summarized.identity;
   } catch (err) {

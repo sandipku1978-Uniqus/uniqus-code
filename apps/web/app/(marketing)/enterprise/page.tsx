@@ -205,10 +205,10 @@ const ROWS: {
     iconClass: "cyan",
     eyebrow: "Your providers",
     title: "Bring your own model keys",
-    body: "Anthropic, OpenAI, and Google keys are already bring-your-own in Settings: add your key and every call — including planning and history compaction — bills your provider account instead of ours, while Auto mode still picks the right model for each step. GLM keys aren’t wired up for BYOK yet, and org-wide managed keys enforced across every seat are on our enterprise roadmap; talk to us if that’s a rollout requirement.",
+    body: "BYOK, Plus, and Max accounts can store Anthropic, OpenAI, Google, and Z.ai keys in Settings. Calls to a configured provider bill that provider account directly; Anthropic remains required on BYOK for internal planning and compaction, and Auto currently routes across Anthropic and Google. Org-wide managed keys enforced across every seat are on our enterprise roadmap; talk to us if that’s a rollout requirement.",
     checks: [
-      "Bring-your-own Anthropic, OpenAI & Google keys — live in Settings today",
-      "Built-in web search across all four providers",
+      "Bring-your-own Anthropic, OpenAI, Google & Z.ai keys on paid plans",
+      "Capped Claude search, plus native GPT, GLM & Gemini search with your provider key",
       "Set an account-wide default model and thinking effort",
     ],
   },

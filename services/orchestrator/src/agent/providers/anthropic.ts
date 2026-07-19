@@ -212,7 +212,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
       system: [{ type: "text", text: p.system, cache_control: { type: "ephemeral" } }],
       tools: withToolCache([
         ...p.tools,
-        webSearchToolForModel(p.model),
+        ...(p.disableWebSearch ? [] : [webSearchToolForModel(p.model)]),
       ] as Anthropic.Tool[]) as Anthropic.MessageCreateParams["tools"],
       messages: withPrefixCache(stripForeignFields(p.messages)),
     } as Anthropic.MessageCreateParamsStreaming;

@@ -147,7 +147,7 @@ export class OpenAIAdapter implements ModelProviderAdapter {
         model: p.model,
         instructions: p.system,
         input: toResponsesInput(p.messages),
-        tools: toResponsesTools(p.tools, true),
+        tools: toResponsesTools(p.tools, !p.disableWebSearch),
         max_output_tokens: p.maxTokens,
         store: false,
         // Ask for the encrypted reasoning so it can be replayed across tool

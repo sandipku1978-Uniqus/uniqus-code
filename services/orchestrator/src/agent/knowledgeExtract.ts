@@ -34,6 +34,8 @@ export interface ExtractResult {
   text: string;
   /** True when we got usable text out of the file. */
   ok: boolean;
+  /** Parser-reported PDF page count, retained even for image-only documents. */
+  pageCount?: number;
 }
 
 function extOf(fileName: string): string {
@@ -67,16 +69,16 @@ function htmlToText(html: string): string {
     .trim();
 }
 
-async function extractPdf(buf: Buffer): Promise<string> {
+async function extractPdf(buf: Buffer): Promise<{ text: string; pageCount: number }> {
   // Import the inner lib file directly: pdf-parse's package index runs a debug
   // block that reads a bundled test PDF when `module.parent` is falsy (which it
   // is under ESM) — importing the lib avoids that crash.
   const mod = (await import("pdf-parse/lib/pdf-parse.js")) as unknown as {
-    default: (data: Buffer) => Promise<{ text: string }>;
+    default: (data: Buffer) => Promise<{ text: string; numpages: number }>;
   };
   const pdfParse = mod.default;
-  const { text } = await pdfParse(buf);
-  return text;
+  const { text, numpages } = await pdfParse(buf);
+  return { text, pageCount: numpages };
 }
 
 async function extractXlsx(buf: Buffer): Promise<string> {
@@ -123,8 +125,8 @@ export async function extractText(
       return { text, ok: text.trim().length > 0 };
     }
     if (ext === "pdf" || mime === "application/pdf") {
-      const text = await extractPdf(buf);
-      return { text: cap(text), ok: text.trim().length > 0 };
+      const { text, pageCount } = await extractPdf(buf);
+      return { text: cap(text), ok: text.trim().length > 0, pageCount };
     }
     if (
       ext === "xlsx" || ext === "xls" || ext === "xlsm" ||

@@ -26,6 +26,10 @@ implemented, the doc says so explicitly.
 
 ## Platform features
 
+- [Stripe subscriptions](./stripe-subscriptions.md) - Free/BYOK/Plus/Max
+  economics, catalog provisioning, webhook and Portal setup, credit lifecycle,
+  and the required end-to-end launch checks.
+
 - [Usage accounting](./usage-accounting.md) — input/output/cache-read/
   cache-creation token classes, per-model pricing (`MODEL_PRICING`), cost
   estimation (`estimateCostUsd`), and per-turn `usage_events` rows.

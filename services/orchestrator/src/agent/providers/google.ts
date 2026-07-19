@@ -355,7 +355,7 @@ export class GoogleAdapter implements ModelProviderAdapter {
     const thinkingConfig = thinkingConfigFor(p.model, p.thinkingEffort, p.thinkingEnabled !== false);
     // Built-in Google Search grounding (3.x only — 2.5 can't combine it with
     // function calling). Needs includeServerSideToolInvocations or 3.x 400s.
-    const useSearch = /^gemini-3/.test(p.model);
+    const useSearch = !p.disableWebSearch && /^gemini-3/.test(p.model);
     const tools = useSearch
       ? [{ googleSearch: {} }, { functionDeclarations: toGeminiFunctionDeclarations(p.tools) }]
       : [{ functionDeclarations: toGeminiFunctionDeclarations(p.tools) }];

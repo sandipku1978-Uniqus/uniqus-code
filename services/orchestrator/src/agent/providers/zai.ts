@@ -269,7 +269,7 @@ export class ZaiAdapter implements ModelProviderAdapter {
     const body = {
       model: p.model,
       messages: toChatMessages(p.system, p.messages),
-      tools: toChatTools(p.tools, true),
+      tools: toChatTools(p.tools, !p.disableWebSearch),
       max_tokens: p.maxTokens,
       stream: true,
       stream_options: { include_usage: true },

@@ -425,7 +425,7 @@ export const TOOLS: Anthropic.Tool[] = [
   {
     name: "generate_image",
     description:
-      "Generate (or edit) a real raster image with Google's Nano Banana models and save it into the project. Use for hero images, logos, illustrations, backgrounds, icons, OG/social images, or product mockups instead of placeholder boxes — pass a SPECIFIC prompt (subject, style, colors, composition). Saves under assets/generated/ and returns the path(s); reference them from your code (e.g. copy into public/ and use the URL). To EDIT an existing project image, pass input_image (a path inside the project) + a prompt describing the change. Requires a Google API key on the server. Costs money per image (~$0.04 nano-banana-2 → ~$0.13 nano-banana-pro), so don't generate gratuitously.",
+      "Generate (or edit) one final 1K raster image with Google's Nano Banana models and save it into the project. Use for hero images, logos, illustrations, backgrounds, icons, OG/social images, or product mockups instead of placeholder boxes — pass a SPECIFIC prompt (subject, style, colors, composition). Saves under assets/generated/ and returns the path; reference it from your code (e.g. copy into public/ and use the URL). To EDIT an existing project image, pass input_image (a path inside the project) + a prompt describing the change. Requires a Google API key on the server. Output starts around $0.067 for nano-banana-2 or $0.134 for nano-banana-pro at 1K, plus prompt/input and thinking tokens, so don't generate gratuitously.",
     input_schema: {
       type: "object",
       properties: {

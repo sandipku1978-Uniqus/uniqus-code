@@ -1,29 +1,25 @@
 import { db } from "./client.js";
 import { encryptToken, decryptToken } from "../auth/encrypt.js";
-import { providerKeysFromEnv, type ProviderKeys, type ProviderName } from "../agent/providers/index.js";
+import {
+  providerKeysFromEnv,
+  type ProviderKeys,
+  type ProviderName,
+} from "../agent/providers/index.js";
 
 /**
- * Bring-Your-Own-Key (F7): per-account provider API keys.
- *
- * Encrypted with the SAME AES-256-GCM helper as project secrets / OAuth tokens
- * (auth/encrypt.ts). The DB never stores plaintext, the value is never returned
- * to the client (only WHICH providers have a key), and the key never enters the
- * sandbox/agent context — it's used only to construct the provider adapter
- * server-side. When an account has a key for a provider it is preferred over the
- * platform env key; otherwise we fall back to the platform key.
+ * Per-account model-provider keys. Values are encrypted at rest, write-only to
+ * clients, and used only by server-side adapters (never placed in a sandbox).
  */
-
 const PROVIDERS: ProviderName[] = ["anthropic", "openai", "google", "zai"];
 
-export function isProviderName(v: string): v is ProviderName {
-  return (PROVIDERS as string[]).includes(v);
+export function isProviderName(value: string): value is ProviderName {
+  return (PROVIDERS as string[]).includes(value);
 }
 
 function providerKeyContext(userId: string, provider: ProviderName): string {
   return `account-provider-key:${userId}:${provider}`;
 }
 
-/** Which providers this account has a stored key for (names only, never values). */
 export async function listAccountProviderKeys(userId: string): Promise<ProviderName[]> {
   const { data, error } = await db()
     .from("account_provider_keys")
@@ -31,7 +27,7 @@ export async function listAccountProviderKeys(userId: string): Promise<ProviderN
     .eq("user_id", userId);
   if (error) throw new Error(`listAccountProviderKeys failed: ${error.message}`);
   return ((data ?? []) as { provider: string }[])
-    .map((r) => r.provider)
+    .map((row) => row.provider)
     .filter(isProviderName);
 }
 
@@ -62,49 +58,92 @@ export async function deleteAccountProviderKey(
   if (error) throw new Error(`deleteAccountProviderKey failed: ${error.message}`);
 }
 
-/** Decrypted account keys (server-side only). Missing providers are omitted. */
-async function getAccountProviderKeys(userId: string): Promise<Partial<Record<ProviderName, string>>> {
+async function getAccountProviderKeys(
+  userId: string,
+): Promise<{
+  keys: Partial<Record<ProviderName, string>>;
+  unreadable: Set<ProviderName>;
+}> {
   const { data, error } = await db()
     .from("account_provider_keys")
     .select("provider, encrypted_value")
     .eq("user_id", userId);
   if (error) throw new Error(`getAccountProviderKeys failed: ${error.message}`);
-  const out: Partial<Record<ProviderName, string>> = {};
+  const keys: Partial<Record<ProviderName, string>> = {};
+  const unreadable = new Set<ProviderName>();
   for (const row of (data ?? []) as { provider: string; encrypted_value: string }[]) {
     if (!isProviderName(row.provider)) continue;
     try {
-      out[row.provider] = decryptToken(
+      keys[row.provider] = decryptToken(
         row.encrypted_value,
         providerKeyContext(userId, row.provider),
       );
-    } catch {
-      // A key encrypted under a rotated master key can't be read — skip it and
-      // fall back to the platform key rather than failing the whole turn.
+    } catch (err) {
+      // Isolate encryption drift to the affected provider. `choose` still
+      // blocks platform fallback for this row, so an unreadable BYOK key can
+      // neither break unrelated providers nor become an invisible charge.
+      unreadable.add(row.provider);
+      console.warn(
+        `[provider-keys] stored ${row.provider} key for ${userId} could not be decrypted; replacement required`,
+        err,
+      );
     }
   }
-  return out;
+  return { keys, unreadable };
 }
 
-/**
- * Resolve the provider keys for a turn: the account's BYOK key per provider when
- * present, else the platform env key. Used by runSession to build the loop /
- * plan / compaction clients, so a BYOK account's spend lands on THEIR provider
- * account — including compaction and planning, which the plan flags as the easy
- * thing to get wrong.
- */
-export async function resolveProviderKeysForUser(userId: string): Promise<ProviderKeys> {
-  const env = providerKeysFromEnv();
-  let account: Partial<Record<ProviderName, string>> = {};
-  try {
-    account = await getAccountProviderKeys(userId);
-  } catch (err) {
-    // Never let a BYOK lookup failure break a turn — fall back to platform keys.
-    console.error("resolveProviderKeysForUser failed; using platform keys:", err);
-  }
+export type ProviderKeySource = "account" | "platform" | "missing";
+export type ProviderKeyPolicy = "platform-only" | "account-only" | "account-first";
+
+export interface ResolvedProviderKeys {
+  keys: ProviderKeys;
+  sources: Record<ProviderName, ProviderKeySource>;
+}
+
+/** Resolve credentials under an explicit billing policy, without hidden fallback. */
+export async function resolveProviderKeysForUserWithSources(
+  userId: string,
+  policy: ProviderKeyPolicy,
+): Promise<ResolvedProviderKeys> {
+  const env = policy === "account-only" ? {} : providerKeysFromEnv();
+  const account =
+    policy === "platform-only"
+      ? { keys: {} as Partial<Record<ProviderName, string>>, unreadable: new Set<ProviderName>() }
+      : await getAccountProviderKeys(userId);
+
+  const choose = (provider: ProviderName): { key: string | undefined; source: ProviderKeySource } => {
+    const accountKey = account.keys[provider];
+    const platformKey = env[provider];
+    if (policy !== "platform-only" && accountKey) {
+      return { key: accountKey, source: "account" };
+    }
+    if (policy !== "platform-only" && account.unreadable.has(provider)) {
+      return { key: undefined, source: "missing" };
+    }
+    if (policy !== "account-only" && platformKey) {
+      return { key: platformKey, source: "platform" };
+    }
+    return { key: undefined, source: "missing" };
+  };
+
+  const anthropic = choose("anthropic");
+  const openai = choose("openai");
+  const google = choose("google");
+  const zai = choose("zai");
   return {
-    anthropic: account.anthropic ?? env.anthropic,
-    openai: account.openai ?? env.openai,
-    google: account.google ?? env.google,
-    zai: account.zai ?? env.zai,
+    // All fields are explicit so downstream code cannot spread env defaults
+    // back into an account-only result.
+    keys: {
+      anthropic: anthropic.key,
+      openai: openai.key,
+      google: google.key,
+      zai: zai.key,
+    },
+    sources: {
+      anthropic: anthropic.source,
+      openai: openai.source,
+      google: google.source,
+      zai: zai.source,
+    },
   };
 }

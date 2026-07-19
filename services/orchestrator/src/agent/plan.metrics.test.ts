@@ -216,4 +216,78 @@ describe("proposePlan run metrics", () => {
       cacheCreationTokens: 1,
     });
   });
+
+  it("marks platform spend unknown only when a started planner call has no usage receipt", async () => {
+    const unknown = vi.fn();
+    fakeProvider.streamAgentTurn.mockRejectedValueOnce(new Error("socket closed before usage"));
+
+    await expect(
+      proposePlan("Plan a safe change", {
+        apiKey: "test-key",
+        providerKeys: { anthropic: "test-key" },
+        providerKeySources: { anthropic: "platform" },
+        sandbox: {} as Sandbox,
+        modelChoice: "anthropic:claude-sonnet-4-6",
+        onUnknownPlatformSpend: unknown,
+      }),
+    ).rejects.toThrow("socket closed before usage");
+    expect(unknown).toHaveBeenCalledTimes(1);
+
+    fakeProvider.streamAgentTurn.mockImplementationOnce(async (params) => {
+      params.onUsage?.({
+        inputTokens: 20,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      });
+      throw new Error("socket closed after usage");
+    });
+
+    await expect(
+      proposePlan("Plan another safe change", {
+        apiKey: "test-key",
+        providerKeys: { anthropic: "test-key" },
+        providerKeySources: { anthropic: "platform" },
+        sandbox: {} as Sandbox,
+        modelChoice: "anthropic:claude-sonnet-4-6",
+        onUnknownPlatformSpend: unknown,
+      }),
+    ).rejects.toThrow("socket closed after usage");
+    expect(unknown).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reserve web-search fees for the forced submit_plan call", async () => {
+    fakeProvider.streamAgentTurn.mockResolvedValueOnce({
+      content: [{ type: "text", text: "I have enough context." }],
+      stopReason: "end_turn",
+      toolCalls: [],
+      usage: {
+        inputTokens: 1_000_000,
+        outputTokens: 120_000,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      },
+    });
+    fakeProvider.callForcedTool.mockResolvedValueOnce({
+      input: { summary: "Done", steps: [{ description: "Make the change" }] },
+      usage: {
+        inputTokens: 20,
+        outputTokens: 5,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      },
+    });
+
+    const plan = await proposePlan("Plan this change", {
+      apiKey: "test-key",
+      providerKeys: { anthropic: "test-key" },
+      providerKeySources: { anthropic: "platform" },
+      platformBudgetUsd: 5,
+      sandbox: {} as Sandbox,
+      modelChoice: "anthropic:claude-sonnet-4-6",
+    });
+
+    expect(plan.summary).toBe("Done");
+    expect(fakeProvider.callForcedTool).toHaveBeenCalledTimes(1);
+  });
 });

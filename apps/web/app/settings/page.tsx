@@ -1,19 +1,30 @@
 import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 import { withAuth } from "@workos-inc/authkit-nextjs";
 import SettingsView from "@/components/SettingsView";
 import { getGuestSession } from "@/lib/guest-server";
+import {
+  billingGuestConvertHref,
+  billingLoginHref,
+  parseBillingSelection,
+} from "@/lib/billing-display";
 
-/**
- * Account settings (#8). Functional where the backend already supports it
- * (profile, GitHub connection, sign out); everything that would need new
- * persistence (default model, custom prompts, appearance) is scaffolded with a
- * "coming soon" marker rather than faked. Per-project things (connectors,
- * secrets, skills) are surfaced as pointers to where they live in the workspace.
- */
-export default async function SettingsPage() {
+/** Coordinate guest/WorkOS identity and billing intent before rendering Settings. */
+export default async function SettingsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ plan?: string; max_monthly_usd?: string }>;
+}) {
   const store = await cookies();
   const hasWorkos = !!store.get("wos-session");
   const guest = await getGuestSession();
+  const params = await searchParams;
+  const billingSelection = parseBillingSelection(params.plan, params.max_monthly_usd);
+  const signupHref = billingLoginHref(billingSelection, true);
+
+  if (guest && hasWorkos) {
+    redirect(billingGuestConvertHref(billingSelection, true));
+  }
 
   if (guest && !hasWorkos) {
     return (
@@ -22,6 +33,7 @@ export default async function SettingsPage() {
         userEmail={null}
         userName={guest.displayName}
         signOutUrl="/api/guest/signout"
+        signupHref={signupHref}
       />
     );
   }
@@ -33,6 +45,7 @@ export default async function SettingsPage() {
       userEmail={user.email}
       userName={[user.firstName, user.lastName].filter(Boolean).join(" ") || null}
       signOutUrl="/api/signout"
+      signupHref={signupHref}
     />
   );
 }

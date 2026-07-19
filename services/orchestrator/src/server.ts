@@ -54,20 +54,13 @@ import { inlineFileRefs as inlineFileRefsConcurrent } from "./agent/inlineFileRe
 import { LIVE_PROJECT_STATE_MARKER, runAgentLoop } from "./agent/loop.js";
 import {
   compactionTriggerTokens,
+  conservativeMessageTokenUpperBound,
   contextWindowTokensForModel,
   estimateMessageTokens,
   maybeCompact,
 } from "./agent/compact.js";
-import { providerKeysFromEnv } from "./agent/providers/index.js";
 import { sanitizeMessagesForPersistence } from "./agent/messageHistory.js";
-import {
-  availableProvidersFromKeys,
-  classifyTaskHeuristic,
-  lastUserMessageText,
-  pickAutoModel,
-  turnReferencesImage,
-  type AutoPick,
-} from "./agent/autoRouter.js";
+import { classifyTaskHeuristic } from "./agent/autoRouter.js";
 import { detectActiveConnectors } from "./connectors/detector.js";
 import { createRunMetrics, type RunMetricsCollector } from "./telemetry/runMetrics.js";
 import {
@@ -348,12 +341,40 @@ import {
 import { startDeploy, pollUntilTerminal, reconcileCreatingDeployment } from "./deploy.js";
 import { buildProjectZip } from "./export.js";
 import {
-  resolveProviderKeysForUser,
+  resolveProviderKeysForUserWithSources,
   listAccountProviderKeys,
   setAccountProviderKey,
   deleteAccountProviderKey,
   isProviderName,
 } from "./db/providerKeys.js";
+import {
+  BillingAccessError,
+  assertCanConfigureByok,
+  authorizeAiRun,
+  chargeAiUsage,
+  getBillingStatus,
+  reservePlatformBillingBudget,
+  type BillingRunAccess,
+} from "./billing/service.js";
+import {
+  affordableAnthropicOutputTokens,
+  beginMeteredAnthropicCall,
+  markMeteredAnthropicCallStarted,
+  releaseMeteredAnthropicCall,
+  settleMeteredAnthropicCall,
+  type MeteredAnthropicCall,
+} from "./billing/anthropic.js";
+import {
+  StripeBillingError,
+  applyStripeWebhook,
+  cancelSubscriptionCheckout,
+  createBillingPortal,
+  createSubscriptionCheckout,
+  getSubscriptionCheckoutStatus,
+  stripeBillingReady,
+  stripeWebhookConfigured,
+  type CheckoutPlan,
+} from "./billing/stripe.js";
 import {
   getLatestDeployment,
   listUnfinishedDeployments,
@@ -690,6 +711,20 @@ function markPreviousRunIfCorrection(key: string, userId: string, message: unkno
   return true;
 }
 
+function canUseReliabilityForCorrection(
+  key: string,
+  userId: string,
+  message: unknown,
+): boolean {
+  const previous = recentMetricRuns.get(key);
+  return Boolean(
+    previous &&
+      previous.userId === userId &&
+      Date.now() - previous.completedAt <= CORRECTION_WINDOW_MS &&
+      looksLikeImmediateCorrection(message),
+  );
+}
+
 // Cap the coalesced replay log (entries, not tokens — text/thinking deltas are
 // merged on push, so a normal turn stays well under this).
 const MAX_RUN_BUFFER = 4000;
@@ -1021,11 +1056,65 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+function billingAccessPublicMessage(error: BillingAccessError): string {
+  const messages: Record<BillingAccessError["code"], string> = {
+    billing_unavailable:
+      "Billing could not be verified right now, so no paid AI request was started. Try again shortly.",
+    subscription_inactive: "An active subscription is required for this action.",
+    credits_exhausted:
+      "Your platform usage credits are exhausted. Add provider keys or choose a plan with more credits.",
+    byok_required: "Add the required provider keys in Settings before continuing on this plan.",
+  };
+  return messages[error.code];
+}
+
+function stripeBillingPublicMessage(error: StripeBillingError): string {
+  const messages: Record<StripeBillingError["code"], string> = {
+    stripe_not_configured: "Billing checkout is not available right now.",
+    stripe_webhook_not_configured: "Billing checkout is not available right now.",
+    active_subscription: "This account already has a subscription. Manage it in Settings.",
+    checkout_in_progress:
+      "A subscription Checkout is already open for this account. Finish or cancel it before starting another.",
+    invalid_plan: "Choose BYOK, Plus, or Max.",
+    invalid_checkout: "This Checkout return is invalid or has already expired.",
+    billing_customer_missing: "No Stripe billing profile exists for this account yet.",
+    stripe_mapping_error:
+      "Stripe could not map this subscription to a Gate 15 plan. Contact support before retrying.",
+  };
+  return messages[error.code];
+}
+
+/** Return a stable, actionable billing error without wrapping it as a 5xx. */
+function sendBillingAccessError(res: ServerResponse, err: unknown): boolean {
+  if (!(err instanceof BillingAccessError)) return false;
+  json(res, err.code === "billing_unavailable" ? 503 : 402, {
+    error: billingAccessPublicMessage(err),
+    code: err.code,
+  });
+  return true;
+}
+
 // Generous ceiling for JSON routes — the largest legit JSON field is a ~64 KB
 // skills doc; binary/file uploads use the Busboy multipart path, not this
 // reader. Buffering without a cap let a near-anonymous guest stream a multi-GB
 // body and OOM the single shared Node process (H-3).
 const MAX_JSON_BODY_BYTES = 10 * 1024 * 1024;
+
+async function readRawBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
+  const declared = Number(req.headers["content-length"]);
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error("request body too large");
+  }
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+    total += bytes.length;
+    if (total > maxBytes) throw new Error("request body too large");
+    chunks.push(bytes);
+  }
+  return Buffer.concat(chunks);
+}
 
 async function readJsonBody<T>(req: IncomingMessage): Promise<T> {
   const declared = Number(req.headers["content-length"]);
@@ -1237,6 +1326,31 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     return;
   }
 
+  // Stripe is server-to-server: no WorkOS cookie and no browser Origin. Verify
+  // the signature over the exact raw bytes before any JSON parser touches them.
+  if (req.url === "/api/billing/stripe/webhook" && req.method === "POST") {
+    if (!stripeWebhookConfigured()) {
+      return json(res, 503, { error: "Stripe webhook is not configured" });
+    }
+    const signature = req.headers["stripe-signature"];
+    if (typeof signature !== "string") {
+      return json(res, 400, { error: "missing Stripe-Signature header" });
+    }
+    try {
+      const raw = await readRawBody(req, 2 * 1024 * 1024);
+      await applyStripeWebhook(raw, signature);
+      return json(res, 200, { received: true });
+    } catch (err) {
+      const isSignatureFailure =
+        (err as { type?: string })?.type === "StripeSignatureVerificationError" ||
+        /signature/i.test(err instanceof Error ? err.message : "");
+      console.error("Stripe webhook failed:", err);
+      return json(res, isSignatureFailure ? 400 : 500, {
+        error: isSignatureFailure ? "invalid Stripe webhook signature" : "Stripe webhook processing failed",
+      });
+    }
+  }
+
   // CSRF/origin gate. The previous CORS block reflected any Origin while
   // allowing credentials, which left state-changing endpoints exposed to any
   // page that could fetch with cookies. Enforce the allowlist on every
@@ -1378,6 +1492,95 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     });
   }
 
+  if (req.url === "/api/billing/status" && req.method === "GET") {
+    return json(res, 200, {
+      billing: await getBillingStatus(user.id, stripeBillingReady()),
+    });
+  }
+
+  if (req.url === "/api/billing/checkout" && req.method === "POST") {
+    if (auth.kind === "guest") {
+      return json(res, 403, {
+        error: "Sign in before starting a paid subscription so it stays attached to your account.",
+      });
+    }
+    const body = await readJsonBody<{ plan?: string; max_monthly_usd?: number }>(req);
+    const plan = String(body.plan ?? "") as CheckoutPlan;
+    if (!(["byok", "plus", "max"] as string[]).includes(plan)) {
+      return json(res, 400, { error: "plan must be byok, plus, or max" });
+    }
+    try {
+      const url = await createSubscriptionCheckout({
+        user,
+        plan,
+        maxMonthlyUsd: body.max_monthly_usd,
+      });
+      return json(res, 200, { url });
+    } catch (err) {
+      if (err instanceof StripeBillingError) {
+        const status = ["active_subscription", "checkout_in_progress"].includes(err.code) ? 409 :
+          err.code === "invalid_plan" ? 400 : 503;
+        return json(res, status, { error: stripeBillingPublicMessage(err), code: err.code });
+      }
+      throw err;
+    }
+  }
+
+  if (req.url?.startsWith("/api/billing/checkout/status?") && req.method === "GET") {
+    if (auth.kind === "guest") {
+      return json(res, 403, { error: "Sign in to verify a subscription Checkout." });
+    }
+    const sessionId = new URL(req.url, "http://localhost").searchParams.get("session_id") ?? "";
+    try {
+      return json(res, 200, await getSubscriptionCheckoutStatus(user.id, sessionId));
+    } catch (err) {
+      if (err instanceof StripeBillingError) {
+        return json(res, err.code === "invalid_checkout" ? 400 : 503, {
+          error: stripeBillingPublicMessage(err),
+          code: err.code,
+        });
+      }
+      throw err;
+    }
+  }
+
+  if (req.url === "/api/billing/checkout/cancel" && req.method === "POST") {
+    if (auth.kind === "guest") {
+      return json(res, 403, { error: "Sign in to cancel a subscription Checkout." });
+    }
+    const body = await readJsonBody<{ attempt_id?: string }>(req);
+    try {
+      return json(
+        res,
+        200,
+        await cancelSubscriptionCheckout(user.id, String(body.attempt_id ?? "")),
+      );
+    } catch (err) {
+      if (err instanceof StripeBillingError) {
+        return json(res, err.code === "invalid_checkout" ? 400 : 503, {
+          error: stripeBillingPublicMessage(err),
+          code: err.code,
+        });
+      }
+      throw err;
+    }
+  }
+
+  if (req.url === "/api/billing/portal" && req.method === "POST") {
+    if (auth.kind === "guest") {
+      return json(res, 403, { error: "Sign in to manage billing." });
+    }
+    try {
+      return json(res, 200, { url: await createBillingPortal(user.id) });
+    } catch (err) {
+      if (err instanceof StripeBillingError) {
+        const status = err.code === "billing_customer_missing" ? 404 : 503;
+        return json(res, status, { error: stripeBillingPublicMessage(err), code: err.code });
+      }
+      throw err;
+    }
+  }
+
   // Collaboration / org-RBAC / comments / durable-task routes (P3/P8). Returns
   // true once it has answered; falls through to the rest of the router otherwise.
   // (Flow CRUD lives there; the live-streaming `/run` below stays here because it
@@ -1512,6 +1715,14 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   }
   // Set or replace an account provider key. The value is write-only.
   if (req.url === "/api/account/provider-keys" && req.method === "PUT") {
+    try {
+      await assertCanConfigureByok(user.id);
+    } catch (err) {
+      if (err instanceof BillingAccessError) {
+        return json(res, 403, { error: billingAccessPublicMessage(err), code: err.code });
+      }
+      throw err;
+    }
     const body = await readJsonBody<{ provider?: string; key?: string }>(req);
     const provider = String(body.provider ?? "");
     const key = String(body.key ?? "").trim();
@@ -1524,7 +1735,8 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     await setAccountProviderKey(user.id, provider, key);
     return json(res, 200, { ok: true, providers: await listAccountProviderKeys(user.id) });
   }
-  // Remove an account provider key (falls back to the platform key thereafter).
+  // Remove the stored credential; the current billing policy decides whether
+  // that provider may use a platform key or must remain unavailable.
   if (req.url === "/api/account/provider-keys" && req.method === "DELETE") {
     const body = await readJsonBody<{ provider?: string }>(req);
     const provider = String(body.provider ?? "");
@@ -1634,10 +1846,10 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
   // NL project creation: user types a free-form brief ("Website for Narayan
   // Balakrishnan, partner with EY at San Jose"), Haiku derives a sane project
   // name and the brief is forwarded to the agent verbatim. Cheaper than making
-  // the user pick a name; refineBrief never throws (falls back to a slug).
+  // the user pick a name; provider failures fall back to a local slug.
   if (req.url === "/api/projects/from-brief" && req.method === "POST") {
-    // Every call makes a platform-billed Haiku call (refineBrief uses our
-    // ANTHROPIC_API_KEY, not BYOK) and creates a project row + sandbox dir.
+    // Every call may make a metered Haiku call under the account's platform/BYOK
+    // policy, then creates a project row + sandbox dir.
     // Cap per account+IP so a throwaway guest can't loop it to burn the API
     // budget / exhaust disk+DB (C-55). Generous enough for real bursts.
     if (!rateLimitOk(`from-brief:${user.id}:${clientIp(req)}`, 20, 5 * 60 * 1000)) {
@@ -1655,8 +1867,9 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (!ws.ok) return json(res, 403, { error: ws.error });
     let refined: { name: string; first_message: string };
     try {
-      refined = await refineBrief(brief);
+      refined = await refineBrief(user.id, brief);
     } catch (err) {
+      if (sendBillingAccessError(res, err)) return;
       return json(res, 502, publicError("brief_refinement_failed", err));
     }
     const project = await createProject({
@@ -2903,9 +3116,10 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (!brief) return json(res, 400, { error: "brief is required" });
     if (brief.length > 4000) return json(res, 400, { error: "brief exceeds 4 KB cap" });
     try {
-      const draft = await generateSkillFromBrief(brief);
+      const draft = await generateSkillFromBrief(user.id, brief);
       return json(res, 200, { draft });
     } catch (err) {
+      if (sendBillingAccessError(res, err)) return;
       return json(res, 502, publicError("skill_generation_failed", err));
     }
   }
@@ -2946,10 +3160,11 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     const tmp = path.join(tmpdir(), `gate15-ds-${randomUUID()}`);
     try {
       await importGithub({ repo_url: repoUrl, branch: body.branch, pat: authToken }, tmp);
-      const tokens = await inferDesignTokensFromDir(tmp);
+      const tokens = await inferDesignTokensFromDir(user.id, tmp);
       const ds = await createDesignSystem(user.id, { name, tokens });
       return json(res, 201, { design_system: ds });
     } catch (err) {
+      if (sendBillingAccessError(res, err)) return;
       return json(res, 400, publicError("design_inference_failed", err));
     } finally {
       await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
@@ -2969,11 +3184,12 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (!brief) return json(res, 400, { error: "brief is required" });
     if (brief.length > 4000) return json(res, 400, { error: "brief exceeds 4 KB cap" });
     try {
-      const { tokens, name: genName } = await generateDesignTokensFromBrief(brief);
+      const { tokens, name: genName } = await generateDesignTokensFromBrief(user.id, brief);
       const name = (body.name ?? "").trim() || genName || "Design system";
       const ds = await createDesignSystem(user.id, { name, tokens });
       return json(res, 201, { design_system: ds });
     } catch (err) {
+      if (sendBillingAccessError(res, err)) return;
       return json(res, 502, publicError("design_generation_failed", err));
     }
   }
@@ -2993,9 +3209,10 @@ async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<vo
     if (!instruction) return json(res, 400, { error: "instruction is required" });
     const baseTokens = mergeDesignTokens(DEFAULT_DESIGN_TOKENS, body.tokens);
     try {
-      const tokens = await tweakDesignTokens(baseTokens, instruction);
+      const tokens = await tweakDesignTokens(user.id, baseTokens, instruction);
       return json(res, 200, { tokens });
     } catch (err) {
+      if (sendBillingAccessError(res, err)) return;
       return json(res, 502, publicError("design_refinement_failed", err));
     }
   }
@@ -4677,7 +4894,6 @@ async function handleConnection(
   effectiveRole: Role,
 ): Promise<void> {
   const sessionId = session.id;
-  const apiKey = process.env.ANTHROPIC_API_KEY!;
   const sandboxDir = sandboxDirFor(project.id);
 
   const send: Sender = (event) => {
@@ -4794,9 +5010,30 @@ async function handleConnection(
     });
 
     let summarizerFailed = false;
+    let platformCostUsd = 0;
+    let unknownPlatformSpend = false;
+    let reservedBudgetUsd = 0;
     const startedAt = Date.now();
     const usageRunId = randomUUID();
     try {
+      let access = await authorizeAiRun(user.id, "anthropic:claude-sonnet-4-6");
+      let resolved = await resolveProviderKeysForUserWithSources(user.id, access.keyPolicy);
+      let compactionKey = resolved.keys.anthropic;
+      if (!compactionKey) {
+        throw new BillingAccessError(
+          "byok_required",
+          "Add an Anthropic API key before compacting context on this plan.",
+        );
+      }
+      if (resolved.sources.anthropic === "platform") {
+        reservedBudgetUsd = await reservePlatformBillingBudget({
+          userId: user.id,
+          runId: usageRunId,
+          availableBudgetUsd: access.platformBudgetUsd,
+          preferReliability: false,
+        });
+        access = { ...access, platformBudgetUsd: reservedBudgetUsd };
+      }
       const [modelHistory, throughMessageId, secretValues] = await Promise.all([
         loadModelHistory(project.id, sessionId),
         latestMessageId(project.id, sessionId),
@@ -4820,15 +5057,27 @@ async function handleConnection(
       const triggerTokens =
         lastContextUsage?.compactionTriggerTokens ??
         compactionTriggerTokens({ contextWindowTokens });
-      const compacted = await maybeCompact(modelHistory, apiKey, undefined, {
+      const compacted = await maybeCompact(modelHistory, compactionKey, undefined, {
         fixedTokens,
         contextWindowTokens,
         force: true,
         keepTokens: 1,
+        maxCostUsd:
+          resolved.sources.anthropic === "platform"
+            ? access.platformBudgetUsd
+            : undefined,
         onFailure: () => {
           summarizerFailed = true;
         },
+        onUnknownPlatformSpend:
+          resolved.sources.anthropic === "platform"
+            ? () => {
+                unknownPlatformSpend = true;
+              }
+            : undefined,
         onUsage: (usage) => {
+          const costUsd = estimateTurnCostUsd(usage.model, usage);
+          if (resolved.sources.anthropic === "platform") platformCostUsd += costUsd;
           void recordUsageEvent({
             projectId: project.id,
             userId: user.id,
@@ -4839,7 +5088,7 @@ async function handleConnection(
             outputTokens: usage.outputTokens,
             cacheReadTokens: usage.cacheReadTokens,
             cacheCreationTokens: usage.cacheCreationTokens,
-            costUsd: estimateTurnCostUsd(usage.model, usage),
+            costUsd,
             elapsedMs: Date.now() - startedAt,
           }).catch((err) => console.error("manual compaction usage write failed:", err));
         },
@@ -4894,12 +5143,28 @@ async function handleConnection(
       });
     } catch (err) {
       console.error(`[ws ${project.id}] manual context compaction failed:`, err);
+      if (err instanceof BillingAccessError) {
+        send({
+          type: "error",
+          message: billingAccessPublicMessage(err),
+          code: err.code,
+          retryable:
+            err.code === "billing_unavailable",
+        });
+      }
       broadcastToSession(project.id, sessionId, {
         type: "context_compaction_state",
         state: "idle",
         outcome: "failed",
       });
     } finally {
+      await chargeAiUsage({
+        userId: user.id,
+        runId: usageRunId,
+        costUsd: platformCostUsd,
+        unknownPlatformSpend,
+        reservedBudgetUsd,
+      }).catch((err) => console.error("manual compaction billing settlement failed:", err));
       manualCompactionsInFlight.delete(key);
     }
   };
@@ -5244,6 +5509,29 @@ async function handleConnection(
           send({ type: "error", message: "agent is already running" });
           return;
         }
+        // Admit model spend before acquiring a mutation lane or booting a VM.
+        // This is fail-closed: a billing/credential lookup failure cannot become
+        // an unmetered platform-key call.
+        try {
+          await authorizeAiRun(user.id, event.model, {
+            allowReliability: canUseReliabilityForCorrection(
+              runK,
+              user.id,
+              event.content,
+            ),
+          });
+        } catch (err) {
+          if (err instanceof BillingAccessError) {
+            send({
+              type: "error",
+              message: billingAccessPublicMessage(err),
+              code: err.code,
+              retryable: err.code === "billing_unavailable",
+            });
+            return;
+          }
+          throw err;
+        }
         const mutationLease = projectMutationLanes.tryAcquire(
           project.id,
           `interactive:${sessionId}`,
@@ -5257,6 +5545,13 @@ async function handleConnection(
           });
           return;
         }
+        // One UUID owns the atomic escrow, usage, and settlement.
+        const permissionMode: PermissionMode =
+          event.permission_mode ??
+          (event.mode === "plan-then-execute" ? "plan" : "bypass");
+        const runMetrics = createRunMetrics({
+          mode: permissionMode === "plan" ? "plan_execution" : "agent",
+        });
         const correctionFollowup = markPreviousRunIfCorrection(runK, user.id, event.content);
         busy = true;
         startedTurn = true;
@@ -5302,13 +5597,7 @@ async function handleConnection(
         // Effective permission mode for this turn. Prefer the new field; fall
         // back to deriving it from the legacy `mode` so an older client still
         // works (plan-then-execute → plan, execute-only → bypass = old behavior).
-        const permissionMode: PermissionMode =
-          event.permission_mode ??
-          (event.mode === "plan-then-execute" ? "plan" : "bypass");
         runHandle.permissionMode = permissionMode;
-        const runMetrics = createRunMetrics({
-          mode: permissionMode === "plan" ? "plan_execution" : "agent",
-        });
         const stopSandboxMetrics = runMetrics.startPhase("sandbox");
         // Lazy VM boot. ensureVm is idempotent — same project id returns
         // the same VM (and resumes if it was paused).
@@ -5491,13 +5780,13 @@ async function handleConnection(
             event.thinking_enabled,
             selectedElement,
             runSend,
-            apiKey,
             history,
             project.id,
             sessionId,
             sandboxDir,
             vmHandle,
             user.id,
+            correctionFollowup,
             () =>
               new Promise<Plan>((resolve) => {
                 runHandle.resolvePlan = resolve;
@@ -6110,13 +6399,14 @@ async function runSession(
   thinkingEnabled: boolean | undefined,
   selectedElement: SelectedElement | null,
   send: Sender,
-  apiKey: string,
   history: Anthropic.MessageParam[],
   projectId: string,
   sessionId: string,
   sandboxDir: string,
   vmHandle: VmHandle | null,
   userId: string,
+  /** High-confidence immediate correction of the previous run. */
+  billingReliabilityPreferred: boolean,
   awaitPlanApproval: () => Promise<Plan>,
   registerUserAnswer: (
     callId: string,
@@ -6163,6 +6453,27 @@ async function runSession(
   let toolCalls = 0;
   const runMetrics = metrics ?? createRunMetrics({ mode: mode === "plan-then-execute" ? "plan_execution" : "agent" });
   const stopPreflightMetrics = runMetrics.startPhase("preflight");
+  let billingAccess: BillingRunAccess;
+  try {
+    // Re-check after sandbox admission: a webhook may have canceled access or a
+    // sibling run may have spent the final credits while this VM was booting.
+    billingAccess = await authorizeAiRun(userId, modelChoice, {
+      allowReliability: billingReliabilityPreferred,
+    });
+  } catch (err) {
+    if (err instanceof BillingAccessError) {
+      stopPreflightMetrics();
+      send({
+        type: "error",
+        message: billingAccessPublicMessage(err),
+        code: err.code,
+        retryable: err.code === "billing_unavailable",
+        terminal: true,
+      });
+      return { aborted: false, finalAnswerEmitted: false };
+    }
+    throw err;
+  }
   // Org monthly soft guard (P3.5): once recorded spend reaches the configured
   // target, stop admitting new turns. Already-admitted concurrent turns can
   // finish, so this is deliberately not represented as a transactional cap.
@@ -6187,12 +6498,30 @@ async function runSession(
     });
     return { aborted: false };
   }
+  let platformBillingReservationMade = false;
+  const ensurePlatformBillingReservation = async (): Promise<void> => {
+    if (billingAccess.credentialMode === "byok" || platformBillingReservationMade) return;
+    billingAccess = {
+      ...billingAccess,
+      platformBudgetUsd: await reservePlatformBillingBudget({
+        userId,
+        runId: runMetrics.runId,
+        availableBudgetUsd: billingAccess.platformBudgetUsd,
+        preferReliability: billingReliabilityPreferred,
+      }),
+    };
+    platformBillingReservationMade = true;
+  };
   // Default reasoning effort when the composer didn't specify one.
   const effort: ThinkingEffort = thinkingEffort ?? "medium";
   // Start independent read-only enrichment together so turn startup pays the
   // slowest lookup rather than the sum of every database/filesystem roundtrip.
   // The budget gate above deliberately remains first.
-  const resolvedKeysPromise = resolveProviderKeysForUser(userId);
+  const resolvedKeySetPromise = resolveProviderKeysForUserWithSources(
+    userId,
+    billingAccess.keyPolicy,
+  );
+  const resolvedKeysPromise = resolvedKeySetPromise.then((resolved) => resolved.keys);
   const accountPromptPromise: Promise<string | null> = userId
     ? getAccountSettings(userId)
         .then((s) => s.custom_prompt)
@@ -6243,67 +6572,6 @@ async function runSession(
     formatUserMessageWithUploads(slashed.expanded, attachments),
   );
   const messageWithRefsBasePromise = inlineFileRefs(messageWithUploads, fileRefs, sandboxDir);
-  // Preserve the Auto classifier, but move its network latency off the critical
-  // path for execute-only turns. Plan mode intentionally keeps resolving from
-  // its final approved execution brief because approval can materially change
-  // the task tier. Manual/env pins bypass this exactly as before.
-  const shouldPreResolveAuto =
-    mode === "execute-only" && !resolveModel("agent", modelChoice).overridden;
-  // Execute-only Auto may make a small classifier call before the lead loop.
-  // It is persisted as its own usage_event below, but the websocket completion
-  // summary also needs its cost so the per-turn estimate matches the run-linked
-  // rows. Plan routing is reported through onPlanUsage and never enters here.
-  let preResolvedClassifierCostUsd = 0;
-  const preResolvedAutoPickPromise: Promise<AutoPick | null> | null = shouldPreResolveAuto
-    ? resolvedKeysPromise
-        .then((keys) =>
-          runMetrics.measure("routing", () =>
-            pickAutoModel(
-              "agent",
-              {
-                // Route from the user's directive + attachment paths, not the
-                // potentially huge inlined contents of @files. File bodies are
-                // evidence for execution, not a reason to inflate or bias the
-                // tiny task-tier classifier.
-                userMessage: messageWithUploads,
-                previousUserMessage: lastUserMessageText(history),
-                hasImages: turnReferencesImage(messageWithUploads, history),
-                availableProviders: availableProvidersFromKeys(keys),
-              },
-              {
-                anthropicKey: keys.anthropic,
-                onClassifier: ({ timedOut }) =>
-                  runMetrics.recordRoutingClassifier({ timedOut }),
-                onClassifierUsage: (usage) => {
-                  runMetrics.recordProviderCall({ usage });
-                  const classifierCostUsd = estimateTurnCostUsd(usage.model, usage);
-                  preResolvedClassifierCostUsd += classifierCostUsd;
-                  void recordUsageEvent({
-                    projectId,
-                    userId,
-                    runId: runMetrics.runId,
-                    provider: usage.provider,
-                    model: usage.model,
-                    inputTokens: usage.inputTokens,
-                    outputTokens: usage.outputTokens,
-                    cacheReadTokens: usage.cacheReadTokens,
-                    cacheCreationTokens: usage.cacheCreationTokens,
-                    costUsd: classifierCostUsd,
-                    elapsedMs: 0,
-                  }).catch(() => console.error("recordUsageEvent (routing classifier) failed"));
-                },
-              },
-            ),
-          ),
-        )
-        .catch((err) => {
-          console.warn(
-            "[auto-router] pre-resolution failed; loop will keep the static Auto floor:",
-            err instanceof Error ? err.message : err,
-          );
-          return null;
-        })
-    : null;
   let [
     resolvedKeys,
     accountPrompt,
@@ -6326,6 +6594,7 @@ async function runSession(
       designSystemPromise,
       librarySkillsPromise,
     ]);
+  const providerKeySources = (await resolvedKeySetPromise).sources;
   accountPrompt = accountPrompt ? ingressSecretRedactor.text(accountPrompt) : accountPrompt;
   skillsBody = skillsBody ? ingressSecretRedactor.text(skillsBody) : skillsBody;
   ingressSecretRedactor.redactInPlace(librarySkills);
@@ -6333,7 +6602,13 @@ async function runSession(
   ingressSecretRedactor.redactInPlace(knowledgeDocs);
   ingressSecretRedactor.redactInPlace(projectRow);
   messageWithRefsBase = ingressSecretRedactor.text(messageWithRefsBase);
-  const anthropicKey = resolvedKeys.anthropic ?? apiKey;
+  const anthropicKey = resolvedKeys.anthropic;
+  if (!anthropicKey) {
+    throw new BillingAccessError(
+      "byok_required",
+      "An Anthropic API key is required for planning, compaction, and Auto routing.",
+    );
+  }
   // Prepend any out-of-band notice (e.g. a checkpoint rewind changed files under
   // the agent since the last turn) as a model-facing system-reminder so the model
   // re-grounds on the real file state instead of its memory of rolled-back edits.
@@ -6436,6 +6711,11 @@ async function runSession(
   // the cost + tokens into this turn's `complete` summary so the "≈ $X est." and
   // "N in · M out" reflect the plan too. Populated by proposePlan's onUsage hook.
   let planCostUsd = 0;
+  let planPlatformCostUsd = 0;
+  let unknownPlatformSpend = false;
+  const markUnknownPlatformSpend = (): void => {
+    unknownPlatformSpend = true;
+  };
   let planInputTokens = 0; // total processed (fresh + cache), matching the lead convention
   let planOutputTokens = 0;
   // The same spend kept as a four-way split, so the LIVE counter can fold
@@ -6453,6 +6733,9 @@ async function runSession(
   }): void => {
     const usageCostUsd = u.costUsd ?? estimateTurnCostUsd(u.model, u);
     planCostUsd += usageCostUsd;
+    if (providerKeySources[u.provider as ModelProvider] === "platform") {
+      planPlatformCostUsd += usageCostUsd;
+    }
     planInputTokens += u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens;
     planOutputTokens += u.outputTokens;
     planSplit.inputTokens += u.inputTokens;
@@ -6497,45 +6780,78 @@ async function runSession(
     });
 
   if (mode === "plan-then-execute") {
-    const plan = await proposePlan(`${messageWithRefs}${selectedBlock}`, {
-      apiKey: anthropicKey,
-      providerKeys: resolvedKeys,
-      sandbox: planSandbox,
-      history,
-      skills: skillsBody,
-      accountPrompt,
-      librarySkills,
-      designSystem,
-      knowledgeDocs,
-      repo,
-      runningServers: listServers(projectId),
-      activeConnectors,
-      userId,
-      modelChoice,
-      projectId,
-      signal,
-      hooks: planHooks,
-      onUsage: onPlanUsage,
-      onLiveUsage: onPlanLiveUsage,
-      metrics: runMetrics,
-    });
-    if (signal.aborted) {
-      send({ type: "complete", tool_calls: 0, elapsed_ms: Date.now() - start, aborted: true });
-      return { aborted: true };
+    let plan: Plan;
+    await ensurePlatformBillingReservation();
+    try {
+      plan = await proposePlan(`${messageWithRefs}${selectedBlock}`, {
+        apiKey: anthropicKey,
+        providerKeys: resolvedKeys,
+        providerKeySources,
+        platformBudgetUsd:
+          billingAccess.credentialMode === "byok"
+            ? undefined
+            : Math.max(0, billingAccess.platformBudgetUsd - planPlatformCostUsd),
+        onUnknownPlatformSpend: markUnknownPlatformSpend,
+        sandbox: planSandbox,
+        history,
+        skills: skillsBody,
+        accountPrompt,
+        librarySkills,
+        designSystem,
+        knowledgeDocs,
+        repo,
+        runningServers: listServers(projectId),
+        activeConnectors,
+        userId,
+        modelChoice,
+        projectId,
+        signal,
+        hooks: planHooks,
+        onUsage: onPlanUsage,
+        onLiveUsage: onPlanLiveUsage,
+        metrics: runMetrics,
+      });
+      if (signal.aborted) {
+        await chargeAiUsage({
+          userId,
+          runId: runMetrics.runId,
+          costUsd: planPlatformCostUsd,
+          unknownPlatformSpend,
+          reservedBudgetUsd: billingAccess.platformBudgetUsd,
+        });
+        send({ type: "complete", tool_calls: 0, elapsed_ms: Date.now() - start, aborted: true });
+        return { aborted: true };
+      }
+      send({ type: "plan_proposed", plan });
+      const approved = await runMetrics.measure("userWait", () => awaitPlanApproval());
+      if (signal.aborted) {
+        await chargeAiUsage({
+          userId,
+          runId: runMetrics.runId,
+          costUsd: planPlatformCostUsd,
+          unknownPlatformSpend,
+          reservedBudgetUsd: billingAccess.platformBudgetUsd,
+        });
+        send({ type: "complete", tool_calls: 0, elapsed_ms: Date.now() - start, aborted: true });
+        return { aborted: true };
+      }
+      send({ type: "plan_running" });
+      finalMessage = `${messageWithRefs}\n\n${formatPlanForExecution(approved)}`;
+      // The plan is approved — the execution phase should actually run, not prompt
+      // on every edit (mode "plan" gates everything). Drop into acceptEdits, which
+      // auto-accepts edits/commands but still guards dangerous ops. The setter
+      // broadcasts the change so the composer's dropdown follows.
+      setPermissionMode("acceptEdits");
+    } catch (err) {
+      await chargeAiUsage({
+        userId,
+        runId: runMetrics.runId,
+        costUsd: planPlatformCostUsd,
+        unknownPlatformSpend,
+        reservedBudgetUsd: billingAccess.platformBudgetUsd,
+      });
+      throw err;
     }
-    send({ type: "plan_proposed", plan });
-    const approved = await runMetrics.measure("userWait", () => awaitPlanApproval());
-    if (signal.aborted) {
-      send({ type: "complete", tool_calls: 0, elapsed_ms: Date.now() - start, aborted: true });
-      return { aborted: true };
-    }
-    send({ type: "plan_running" });
-    finalMessage = `${messageWithRefs}\n\n${formatPlanForExecution(approved)}`;
-    // The plan is approved — the execution phase should actually run, not prompt
-    // on every edit (mode "plan" gates everything). Drop into acceptEdits, which
-    // auto-accepts edits/commands but still guards dangerous ops. The setter
-    // broadcasts the change so the composer's dropdown follows.
-    setPermissionMode("acceptEdits");
   }
 
   // Agent-initiated plan mode (#2b / enter_plan_mode tool). Only offered when
@@ -6546,39 +6862,73 @@ async function runSession(
   const requestPlan =
     mode === "plan-then-execute"
       ? undefined
-      : async (reason: string): Promise<string> => {
+      : async (
+          reason: string,
+          platformBudgetUsd?: number,
+        ): Promise<{
+          text: string;
+          platformCostUsd: number;
+          unknownPlatformSpend?: true;
+        }> => {
+          const platformCostBefore = planPlatformCostUsd;
+          const unknownPlatformSpendBefore = unknownPlatformSpend;
           const planPrompt = `${messageWithRefs}${selectedBlock}\n\nThe engineer chose to plan before making changes. Their stated intent and approach:\n${reason}\n\nProduce a structured implementation plan for this work.`;
           // Empty history for the plan call: the live history ends with the
           // assistant's enter_plan_mode tool_use, which would need a paired
           // tool_result; the reason + original message carry the context.
-          const plan = await proposePlan(planPrompt, {
-            apiKey: anthropicKey,
-            providerKeys: resolvedKeys,
-            sandbox: planSandbox,
-            history: [],
-            skills: skillsBody,
-            accountPrompt,
-            librarySkills,
-            designSystem,
-            knowledgeDocs,
-            repo,
-            runningServers: listServers(projectId),
-            activeConnectors,
-            userId,
-            modelChoice,
-            projectId,
-            signal,
-            hooks: planHooks,
-            onUsage: onPlanUsage,
-            onLiveUsage: onPlanLiveUsage,
-            metrics: runMetrics,
-          });
-          if (signal.aborted) throw new Error("aborted before plan approval");
-          send({ type: "plan_proposed", plan });
-          const approved = await runMetrics.measure("userWait", () => awaitPlanApproval());
-          if (signal.aborted) throw new Error("aborted during plan approval");
-          send({ type: "plan_running" });
-          return formatPlanForExecution(approved);
+          try {
+            const plan = await proposePlan(planPrompt, {
+              apiKey: anthropicKey,
+              providerKeys: resolvedKeys,
+              providerKeySources,
+              platformBudgetUsd,
+              onUnknownPlatformSpend: markUnknownPlatformSpend,
+              sandbox: planSandbox,
+              history: [],
+              skills: skillsBody,
+              accountPrompt,
+              librarySkills,
+              designSystem,
+              knowledgeDocs,
+              repo,
+              runningServers: listServers(projectId),
+              activeConnectors,
+              userId,
+              modelChoice,
+              projectId,
+              signal,
+              hooks: planHooks,
+              onUsage: onPlanUsage,
+              onLiveUsage: onPlanLiveUsage,
+              metrics: runMetrics,
+            });
+            if (signal.aborted) throw new Error("aborted before plan approval");
+            send({ type: "plan_proposed", plan });
+            const approved = await runMetrics.measure("userWait", () => awaitPlanApproval());
+            if (signal.aborted) throw new Error("aborted during plan approval");
+            send({ type: "plan_running" });
+            return {
+              text: formatPlanForExecution(approved),
+              platformCostUsd: Math.max(0, planPlatformCostUsd - platformCostBefore),
+              unknownPlatformSpend:
+                !unknownPlatformSpendBefore && unknownPlatformSpend
+                  ? true
+                  : undefined,
+            };
+          } catch (err) {
+            const failure = err as Error & {
+              platformCostUsd?: number;
+              unknownPlatformSpend?: true;
+            };
+            failure.platformCostUsd = Math.max(
+              0,
+              planPlatformCostUsd - platformCostBefore,
+            );
+            if (!unknownPlatformSpendBefore && unknownPlatformSpend) {
+              failure.unknownPlatformSpend = true;
+            }
+            throw err;
+          }
         };
 
   // Collect this turn's appended messages BY REFERENCE (the loop pushes to this
@@ -6672,26 +7022,40 @@ async function runSession(
     })
     .catch((err) => console.error("pre-run commitCheckpoint failed:", err));
 
-  const preResolvedAutoPick = preResolvedAutoPickPromise
-    ? await preResolvedAutoPickPromise
-    : undefined;
-  const configuredModel = resolveModel("agent", modelChoice);
-  if (configuredModel.overridden) {
-    runMetrics.setModel(configuredModel.provider, configuredModel.model);
-    runMetrics.setRoute(
-      "manual",
-      modelChoice && modelChoice !== "auto" ? "manual" : "environment",
-    );
-  }
   let result: Awaited<ReturnType<typeof runAgentLoop>>;
   let persistenceFailed = false;
   try {
+    // Reserve only at the last safe boundary before the first possible model
+    // request. All fallible DB/filesystem/key enrichment above therefore costs
+    // the user nothing when no provider request was started.
+    await ensurePlatformBillingReservation();
+    const configuredModel = resolveModel("agent", modelChoice);
+    if (configuredModel.overridden) {
+      runMetrics.setModel(configuredModel.provider, configuredModel.model);
+      runMetrics.setRoute(
+        "manual",
+        modelChoice && modelChoice !== "auto" ? "manual" : "environment",
+      );
+    }
     result = await runAgentLoop(finalMessage, {
     sandbox: { rootDir: sandboxDir, vm: vmHandle ?? undefined },
     apiKey: anthropicKey,
     providerKeys: resolvedKeys,
+    providerKeySources,
+    platformBudgetUsd:
+      billingAccess.credentialMode === "byok"
+        ? undefined
+        : unknownPlatformSpend
+          ? 0
+        : Math.max(
+            0,
+            billingAccess.platformBudgetUsd - planPlatformCostUsd,
+          ),
     modelChoice,
-    ...(preResolvedAutoPickPromise ? { preResolvedAutoPick } : {}),
+    // Execute-only Auto routes from the directive + attachment paths instead
+    // of huge inlined @file bodies. Plan mode intentionally routes from its
+    // approved execution brief because approval can change the task tier.
+    ...(mode === "execute-only" ? { routingUserMessage: messageWithUploads } : {}),
     metrics: runMetrics,
     projectId,
     sessionId,
@@ -7004,24 +7368,44 @@ async function runSession(
         };
         usageModel?: string;
         usageProvider?: ModelProvider;
+        leadCostUsd?: number;
       }
     ).usageTotals;
+    let platformErrorCostUsd =
+      planPlatformCostUsd +
+      Math.max(0, Number((err as { platformCostUsd?: number }).platformCostUsd ?? 0));
     if (u && (u.inputTokens || u.outputTokens || u.cacheReadTokens || u.cacheCreationTokens)) {
       const errModel = (err as { usageModel?: string }).usageModel ?? "unknown";
+      const errProvider =
+        (err as { usageProvider?: ModelProvider }).usageProvider ?? "anthropic";
+      const leadErrorCostUsd = Math.max(
+        0,
+        Number((err as { leadCostUsd?: number }).leadCostUsd) ||
+          estimateTurnCostUsd(errModel, u),
+      );
       void recordUsageEvent({
         projectId,
         userId,
         runId: runMetrics.runId,
-        provider: (err as { usageProvider?: ModelProvider }).usageProvider ?? "anthropic",
+        provider: errProvider,
         model: errModel,
         inputTokens: u.inputTokens,
         outputTokens: u.outputTokens,
         cacheReadTokens: u.cacheReadTokens,
         cacheCreationTokens: u.cacheCreationTokens,
-        costUsd: estimateTurnCostUsd(errModel, u),
+        costUsd: leadErrorCostUsd,
         elapsedMs: Date.now() - start,
       }).catch((e) => console.error("recordUsageEvent (error path) failed:", e));
     }
+    await chargeAiUsage({
+      userId,
+      runId: runMetrics.runId,
+      costUsd: platformErrorCostUsd,
+      unknownPlatformSpend:
+        unknownPlatformSpend ||
+        (err as { unknownPlatformSpend?: true }).unknownPlatformSpend === true,
+      reservedBudgetUsd: billingAccess.platformBudgetUsd,
+    });
     throw err;
   } finally {
     const stopPersistenceMetrics = runMetrics.startPhase("persistence");
@@ -7096,11 +7480,18 @@ async function runSession(
 
   const elapsedMs = Date.now() - start;
 
-  // Per-run cost estimate (C5): price THIS turn's honest fresh/cache split with
-  // the long-context band applied (estimateTurnCostUsd) — the chat shows it as
-  // "≈ $0.40 est." and it's snapshotted onto the usage row so the account total
-  // reflects the price at the time. Not a billed amount — keep the "est." hedge.
-  const costUsd = estimateTurnCostUsd(result.model, result.usage);
+  // Sum each lead-provider receipt independently so separate short-context
+  // iterations are never repriced as one synthetic long-context request.
+  const costUsd = result.leadCostUsd;
+
+  let platformBillableCostUsd = planPlatformCostUsd + (result.platformCostUsd ?? 0);
+  await chargeAiUsage({
+    userId,
+    runId: runMetrics.runId,
+    costUsd: platformBillableCostUsd,
+    unknownPlatformSpend: unknownPlatformSpend || result.unknownPlatformSpend === true,
+    reservedBudgetUsd: billingAccess.platformBudgetUsd,
+  });
 
   // Record the turn's usage for the dashboard rollups. Best-effort — a failed
   // analytics write must never break the turn. Skipped when nothing was billed
@@ -7144,15 +7535,14 @@ async function runSession(
     cache_read_tokens: result.usage.cacheReadTokens,
     cache_creation_tokens: result.usage.cacheCreationTokens,
     model: result.model,
-    // Lead-agent, planning, and execute-only Auto-classifier cost, plus this
-    // turn's auxiliary model spend — image generation, the vision bridge, and OCR
+    // Lead-agent and planning cost, plus this turn's auxiliary model spend —
+    // Auto classification, image generation, the vision bridge, and OCR
     // (result.auxCostUsd). Those aux calls are each already recorded as their own
     // usage_event (so the account rollup counts them), but the lead's token
     // `usage` never sees them; folding auxCostUsd here stops the per-turn estimate
     // under-counting whenever generate_image / analyze_image / OCR ran. Sub-agent
     // cost is carried separately in subagent_cost_usd and added client-side.
-    cost_usd:
-      costUsd + planCostUsd + preResolvedClassifierCostUsd + (result.auxCostUsd ?? 0),
+    cost_usd: costUsd + planCostUsd + (result.auxCostUsd ?? 0),
     // Sub-agent spend folded into this turn (priced per-model in the loop). The
     // turn's true cost is cost_usd + subagent_cost_usd. Absent when none ran.
     subagent_count: result.subAgents?.count,
@@ -7181,6 +7571,12 @@ async function runSession(
  * not. The client maps `code` → friendly copy (errorCopy.ts).
  */
 function classifyError(err: unknown): { code: string; retryable: boolean } {
+  if (err instanceof BillingAccessError) {
+    return {
+      code: err.code,
+      retryable: err.code === "billing_unavailable",
+    };
+  }
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
   const status = (err as { status?: number; statusCode?: number })?.status ??
     (err as { statusCode?: number })?.statusCode;
@@ -7334,8 +7730,8 @@ async function executeAgentTask(task: {
   // synthesize an empty string for a UUID column or BYOK lookup.
   const userId = task.created_by;
   const sandboxDir = sandboxDirFor(projectId);
-  const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
   const runMetrics = createRunMetrics({ mode: "agent" });
+  let billingAccess: BillingRunAccess | null = null;
   let taskFailure: unknown = null;
   let taskStage: "preflight" | "sandbox" | "model" | "persistence" | "done" = "preflight";
   let taskBudgetExceeded = false;
@@ -7350,6 +7746,7 @@ async function executeAgentTask(task: {
   if (!roleAtLeast(await getProjectRole(projectId, userId), "editor")) {
     throw new Error("durable task creator no longer has project access");
   }
+  billingAccess = await authorizeAiRun(userId, undefined);
 
   // Org budget gate — the same one runSession enforces, so a task can't blow
   // past a team's cap just because it ran headless.
@@ -7362,11 +7759,6 @@ async function executeAgentTask(task: {
   // These reads are independent of sandbox hydration/boot, so overlap them
   // with the infrastructure path instead of serializing startup latency.
   const sessionPromise = runMetrics.measure("preflight", () => ensureDefaultSession(projectId));
-  const resolvedKeysPromise = runMetrics.measure("preflight", () =>
-    userId
-      ? resolveProviderKeysForUser(userId)
-      : Promise.resolve(providerKeysFromEnv()),
-  );
   const taskProjectPromise = runMetrics.measure("preflight", () =>
     getProjectById(projectId).catch((err) => {
       console.error(`[task ${task.id}] project lookup failed:`, err);
@@ -7400,13 +7792,38 @@ async function executeAgentTask(task: {
 
   // 3. History: tasks run on the project's default chat session so their work is
   // visible in the workspace alongside interactive turns.
-  const [session, resolvedKeys, taskProject] = await Promise.all([
+  const [session, taskProject] = await Promise.all([
     sessionPromise,
-    resolvedKeysPromise,
     taskProjectPromise,
   ]);
   const sessionId = session.id;
-  const anthropicKey = resolvedKeys.anthropic ?? apiKey;
+  // Sandbox startup may outlive an entitlement/key-policy change. Refresh just
+  // before the atomic credit reservation instead of holding an account-wide lock.
+  billingAccess = await authorizeAiRun(userId, undefined);
+  const resolvedKeySet = await resolveProviderKeysForUserWithSources(
+    userId,
+    billingAccess.keyPolicy,
+  );
+  const resolvedKeys = resolvedKeySet.keys;
+  const providerKeySources = resolvedKeySet.sources;
+  if (billingAccess.credentialMode !== "byok") {
+    billingAccess = {
+      ...billingAccess,
+      platformBudgetUsd: await reservePlatformBillingBudget({
+        userId,
+        runId: runMetrics.runId,
+        availableBudgetUsd: billingAccess.platformBudgetUsd,
+        preferReliability: false,
+      }),
+    };
+  }
+  const anthropicKey = resolvedKeys.anthropic;
+  if (!anthropicKey) {
+    throw new BillingAccessError(
+      "byok_required",
+      "An Anthropic API key is required for background tasks.",
+    );
+  }
   // History and trusted project skills are independent after their IDs/trust
   // state resolve, so complete the model-facing enrichment in one final batch.
   const [history, skillsBody] = await runMetrics.measure("preflight", () =>
@@ -7442,6 +7859,11 @@ async function executeAgentTask(task: {
       sandbox: { rootDir: sandboxDir, vm: vmHandle ?? undefined },
       apiKey: anthropicKey,
       providerKeys: resolvedKeys,
+      providerKeySources,
+      platformBudgetUsd:
+        billingAccess.credentialMode === "byok"
+          ? undefined
+          : billingAccess.platformBudgetUsd,
       projectId,
       sessionId,
       messages: history,
@@ -7534,6 +7956,14 @@ async function executeAgentTask(task: {
     throw new Error(`durable task ended without a complete final answer (${taskTerminalReason})`);
   }
 
+  await chargeAiUsage({
+    userId,
+    runId: runMetrics.runId,
+    costUsd: result.platformCostUsd ?? 0,
+    unknownPlatformSpend: result.unknownPlatformSpend === true,
+    reservedBudgetUsd: billingAccess.platformBudgetUsd,
+  });
+
   // 6. Record usage for the dashboard rollups (best-effort, like runSession).
   if (
     result.usage.inputTokens > 0 ||
@@ -7551,7 +7981,7 @@ async function executeAgentTask(task: {
       outputTokens: result.usage.outputTokens,
       cacheReadTokens: result.usage.cacheReadTokens,
       cacheCreationTokens: result.usage.cacheCreationTokens,
-      costUsd: estimateTurnCostUsd(result.model, result.usage),
+      costUsd: result.leadCostUsd,
       elapsedMs: Date.now() - taskStartedAt,
     }).catch((err) => console.error(`[task ${task.id}] recordUsageEvent failed:`, err));
   }
@@ -7570,7 +8000,18 @@ async function executeAgentTask(task: {
       usageTotals?: Awaited<ReturnType<typeof runAgentLoop>>["usage"];
       usageModel?: string;
       usageProvider?: ModelProvider;
+      platformCostUsd?: number;
+      unknownPlatformSpend?: true;
+      leadCostUsd?: number;
     };
+    await chargeAiUsage({
+      userId,
+      runId: runMetrics.runId,
+      costUsd: loopResult?.platformCostUsd ?? failed.platformCostUsd ?? 0,
+      unknownPlatformSpend:
+        loopResult?.unknownPlatformSpend === true || failed.unknownPlatformSpend === true,
+      reservedBudgetUsd: billingAccess?.platformBudgetUsd,
+    });
     const usage = loopResult?.usage ?? failed.usageTotals;
     const model = loopResult?.model ?? failed.usageModel;
     const provider = loopResult?.provider ?? failed.usageProvider;
@@ -7594,7 +8035,10 @@ async function executeAgentTask(task: {
         outputTokens: usage.outputTokens,
         cacheReadTokens: usage.cacheReadTokens,
         cacheCreationTokens: usage.cacheCreationTokens,
-        costUsd: estimateTurnCostUsd(model, usage),
+        costUsd:
+          loopResult?.leadCostUsd ??
+          failed.leadCostUsd ??
+          estimateTurnCostUsd(model, usage),
         elapsedMs: Date.now() - taskStartedAt,
       }).catch((usageErr) =>
         console.error(`[task ${task.id}] recordUsageEvent (error path) failed:`, usageErr),
@@ -7951,23 +8395,25 @@ async function fileExists(p: string): Promise<boolean> {
 }
 
 async function refineBrief(
+  userId: string,
   brief: string,
 ): Promise<{ name: string; first_message: string }> {
   // The brief is always forwarded verbatim — we only ask Haiku for a name.
-  return { name: await nameFromBrief(brief), first_message: brief };
+  return { name: await nameFromBrief(userId, brief), first_message: brief };
 }
 
 /**
- * Ask Haiku for a short kebab-case project name. Returns plain text (not JSON,
- * so there's nothing to mis-parse), and falls back to a slug of the brief on
- * any error so callers never have to handle a throw.
+ * Ask Haiku for a short kebab-case project name. Ordinary provider or naming
+ * failures fall back to a brief slug; billing and credential-policy failures
+ * remain explicit so they cannot become unmetered platform work.
  */
-async function nameFromBrief(brief: string): Promise<string> {
+async function nameFromBrief(userId: string, brief: string): Promise<string> {
   const fallback = sanitizeProjectName(brief);
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return fallback;
+  let billing: MeteredAnthropicCall | null = null;
   try {
-    const client = new AnthropicCtor({ apiKey });
+    billing = await beginMeteredAnthropicCall(userId);
+    const client = new AnthropicCtor({ apiKey: billing.apiKey });
+    const model = ensureAnthropic("classify");
     const system =
       "You are a project-NAMING function, not an assistant. Your ONLY job is to " +
       "turn a one-line brief into a short kebab-case project name (lowercase, " +
@@ -7980,9 +8426,17 @@ async function nameFromBrief(brief: string): Promise<string> {
       "'build me a todo app in React' → 'react-todo-app').\n" +
       "Reply with ONLY the name on a single line. No quotes, no JSON, no markdown, " +
       "no explanation, no code, no extra words.";
+    const maxTokens = affordableAnthropicOutputTokens({
+      call: billing,
+      model,
+      estimatedInputTokens:
+        Buffer.byteLength(system, "utf8") + Buffer.byteLength(brief, "utf8") + 512,
+      requestedOutputTokens: 32,
+    });
+    markMeteredAnthropicCallStarted(billing);
     const response = await client.messages.create({
-      model: ensureAnthropic("classify"),
-      max_tokens: 32,
+      model,
+      max_tokens: maxTokens,
       system,
       messages: [
         { role: "user", content: `Brief to name:\n${brief}` },
@@ -8001,16 +8455,25 @@ async function nameFromBrief(brief: string): Promise<string> {
       .join("")
       .trim();
     const name = sanitizeProjectName(text);
+    const usable = !name.startsWith("untitled-");
+    await settleMeteredAnthropicCall({
+      call: billing,
+      model,
+      usage: response.usage,
+    });
     // sanitizeProjectName returns an "untitled-…" slug for unusable input;
     // prefer the brief slug in that case if it's any better.
-    if (name.startsWith("untitled-")) {
+    if (!usable) {
       console.warn(`[name-from-brief] Haiku returned unusable name (raw=${JSON.stringify(text)}); using brief slug`);
       return fallback;
     }
     return name;
   } catch (err) {
+    if (err instanceof BillingAccessError) throw err;
     console.warn(`[name-from-brief] Haiku call failed; using brief slug:`, err instanceof Error ? err.message : err);
     return fallback;
+  } finally {
+    if (billing) await releaseMeteredAnthropicCall(billing);
   }
 }
 
@@ -8403,41 +8866,62 @@ const SUBMIT_SKILL_TOOL: Anthropic.Tool = {
  * model somehow produced no tool call (e.g. output truncated by maxTokens).
  */
 async function forceStructured(opts: {
-  apiKey: string;
+  userId: string;
   model: string;
   system: string;
   content: string | Anthropic.ContentBlockParam[];
   tool: Anthropic.Tool;
   maxTokens: number;
 }): Promise<Record<string, unknown>> {
-  const client = new AnthropicCtor({ apiKey: opts.apiKey });
-  const response = await client.messages.create({
-    model: opts.model,
-    max_tokens: opts.maxTokens,
-    system: opts.system,
-    tools: [opts.tool],
-    tool_choice: { type: "tool", name: opts.tool.name },
-    messages: [{ role: "user", content: opts.content }],
-  });
-  const call = response.content.find(
-    (b): b is Anthropic.ToolUseBlock => b.type === "tool_use" && b.name === opts.tool.name,
-  );
-  if (!call || !call.input || typeof call.input !== "object") {
-    throw new Error(`model did not return a structured ${opts.tool.name} result`);
+  const billing = await beginMeteredAnthropicCall(opts.userId);
+  try {
+    const client = new AnthropicCtor({ apiKey: billing.apiKey });
+    const maxTokens = affordableAnthropicOutputTokens({
+      call: billing,
+      model: opts.model,
+      estimatedInputTokens:
+        conservativeMessageTokenUpperBound([{ role: "user", content: opts.content }]) +
+        Buffer.byteLength(opts.system, "utf8") +
+        Buffer.byteLength(JSON.stringify(opts.tool), "utf8") +
+        1024,
+      requestedOutputTokens: opts.maxTokens,
+    });
+    markMeteredAnthropicCallStarted(billing);
+    const response = await client.messages.create({
+      model: opts.model,
+      max_tokens: maxTokens,
+      system: opts.system,
+      tools: [opts.tool],
+      tool_choice: { type: "tool", name: opts.tool.name },
+      messages: [{ role: "user", content: opts.content }],
+    });
+    const call = response.content.find(
+      (b): b is Anthropic.ToolUseBlock => b.type === "tool_use" && b.name === opts.tool.name,
+    );
+    const valid = Boolean(call?.input && typeof call.input === "object");
+    await settleMeteredAnthropicCall({
+      call: billing,
+      model: opts.model,
+      usage: response.usage,
+    });
+    if (!valid || !call) {
+      throw new Error(`model did not return a structured ${opts.tool.name} result`);
+    }
+    return call.input as Record<string, unknown>;
+  } finally {
+    await releaseMeteredAnthropicCall(billing);
   }
-  return call.input as Record<string, unknown>;
 }
 
 /**
  * Infer a DesignTokens object from a codebase directory by feeding its
  * design-relevant files to the model and parsing a JSON token object. Falls back
- * to DEFAULT_DESIGN_TOKENS on any error / missing key, so a caller always gets a
- * usable (editable) result.
+ * to DEFAULT_DESIGN_TOKENS on provider/output errors. Billing and BYOK errors
+ * remain explicit so a missing account key never becomes a platform charge.
  */
-async function inferDesignTokensFromDir(dir: string): Promise<DesignTokens> {
+async function inferDesignTokensFromDir(userId: string, dir: string): Promise<DesignTokens> {
   const files = await collectDesignFiles(dir);
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey || !files.trim()) return DEFAULT_DESIGN_TOKENS;
+  if (!files.trim()) return DEFAULT_DESIGN_TOKENS;
   try {
     const system =
       "You extract a design system from a codebase. From the provided config/CSS/theme files, infer the visual " +
@@ -8445,7 +8929,7 @@ async function inferDesignTokensFromDir(dir: string): Promise<DesignTokens> {
       "foundations, expanded components, patterns, behavior, and notes). Use SEMANTIC color names (primary, accent, background, surface, text, muted, border, …), not raw " +
       "hue names. Omit any value you cannot determine.";
     const parsed = await forceStructured({
-      apiKey,
+      userId,
       model: ensureAnthropic("design"),
       system,
       content: files,
@@ -8454,6 +8938,7 @@ async function inferDesignTokensFromDir(dir: string): Promise<DesignTokens> {
     });
     return mergeDesignTokens(DEFAULT_DESIGN_TOKENS, parsed);
   } catch (err) {
+    if (err instanceof BillingAccessError) throw err;
     console.error("design token inference failed (falling back to defaults):", err);
     return DEFAULT_DESIGN_TOKENS;
   }
@@ -8466,10 +8951,9 @@ async function inferDesignTokensFromDir(dir: string): Promise<DesignTokens> {
  * silently saving a generic default that ignores their description.
  */
 async function generateDesignTokensFromBrief(
+  userId: string,
   brief: string,
 ): Promise<{ tokens: DesignTokens; name: string }> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
   const system =
     "You are a senior product designer. From the user's brief, design a COMPLETE, coherent, tasteful design " +
     "system and submit it via the submit_design_system tool — include name, mode, colors, fonts, legacy base values, " +
@@ -8481,7 +8965,7 @@ async function generateDesignTokensFromBrief(
     "\"border\"); use a raw hex only when necessary (e.g. white labels) and \"transparent\" for ghost/outline fills. " +
     "Make specific choices that fit the brief's industry, mood, audience, primary task, responsive needs, and risk states — never generic filler.";
   const parsed = await forceStructured({
-    apiKey,
+    userId,
     model: ensureAnthropic("design"),
     system,
     content: `Brief: ${brief}`,
@@ -8501,10 +8985,9 @@ async function generateDesignTokensFromBrief(
  * silently saving an empty shell.
  */
 async function generateSkillFromBrief(
+  userId: string,
   brief: string,
 ): Promise<{ name: string; description: string; body: string }> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
   const system =
     "You author modern reusable skills for an AI coding agent, compatible with the SKILL.md model used by " +
     "Codex and Claude Code. The name and description are discovery metadata that remain visible; the markdown " +
@@ -8518,7 +9001,7 @@ async function generateSkillFromBrief(
     "keep the core workflow concise and under ~400 lines. " +
     "Cover the brief's intent fully, and add the obvious adjacent rules an expert would expect, but do not pad.";
   const parsed = await forceStructured({
-    apiKey,
+    userId,
     model: ensureAnthropic("design"),
     system,
     content: `Brief: ${brief}`,
@@ -8579,10 +9062,11 @@ async function handleDesignSystemZipInfer(
   const tmp = path.join(tmpdir(), `gate15-ds-${randomUUID()}`);
   try {
     await importZip(zipBuffer, tmp);
-    const tokens = await inferDesignTokensFromDir(tmp);
+    const tokens = await inferDesignTokensFromDir(ownerId, tmp);
     const ds = await createDesignSystem(ownerId, { name, tokens });
     return json(res, 201, { design_system: ds });
   } catch (err) {
+    if (sendBillingAccessError(res, err)) return;
     return json(res, 400, publicError("design_inference_failed", err));
   } finally {
     await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
@@ -8636,12 +9120,11 @@ function buildReferenceBlocks(
  * can surface a retryable error.
  */
 async function analyzeDesignSystem(input: {
+  userId: string;
   contextText: string;
   imageBlocks?: Anthropic.ContentBlockParam[];
   sourceLabel: string;
 }): Promise<DesignSystemDraft> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
   const system =
     "You are a senior product designer. From the provided context (a brief, codebase/theme files, a live site's CSS, " +
     "Figma styles, and/or reference images), design a COMPLETE, coherent, tasteful design system AND report what you " +
@@ -8666,7 +9149,7 @@ async function analyzeDesignSystem(input: {
   // component catalog with HTML snippets, which easily exceeds a few thousand
   // tokens. Too low truncates the tool call and forceStructured throws.
   const parsed = await forceStructured({
-    apiKey,
+    userId: input.userId,
     model: ensureAnthropic("design"),
     system,
     content,
@@ -8680,9 +9163,11 @@ async function analyzeDesignSystem(input: {
 }
 
 /** Apply a free-text instruction to a tokens object and return updated tokens. */
-async function tweakDesignTokens(base: DesignTokens, instruction: string): Promise<DesignTokens> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
+async function tweakDesignTokens(
+  userId: string,
+  base: DesignTokens,
+  instruction: string,
+): Promise<DesignTokens> {
   const system =
     "You refine an existing design system. Apply the user's instruction to the given tokens and submit the " +
     "COMPLETE updated tokens via the submit_design_system tool. Leave everything the instruction doesn't touch " +
@@ -8690,7 +9175,7 @@ async function tweakDesignTokens(base: DesignTokens, instruction: string): Promi
   // Echoes the COMPLETE tokens (incl. any component catalog), so keep the
   // ceiling high enough that the tool call is never truncated.
   const parsed = await forceStructured({
-    apiKey,
+    userId,
     model: ensureAnthropic("design"),
     system,
     content: `Current tokens:\n${JSON.stringify(base)}\n\nInstruction: ${instruction}`,
@@ -8989,13 +9474,28 @@ async function handleDesignSystemAnalyze(
     }
 
     phase("Designing the system & extracting components…");
-    const draft = await analyzeDesignSystem({ contextText, imageBlocks, sourceLabel });
+    const draft = await analyzeDesignSystem({
+      userId: user.id,
+      contextText,
+      imageBlocks,
+      sourceLabel,
+    });
     startSse();
     res.write(`event: done\ndata: ${JSON.stringify({ draft })}\n\n`);
     res.end();
   } catch (err) {
     if (hasExactErrorMessage(err, "github_not_connected")) return fail(409, "github_not_connected");
     if (hasExactErrorMessage(err, "figma_not_connected")) return fail(409, "figma_not_connected");
+    if (err instanceof BillingAccessError) {
+      const status = err.code === "billing_unavailable" ? 503 : 402;
+      if (sseStarted) {
+        res.write(`event: error\ndata: ${JSON.stringify({ error: billingAccessPublicMessage(err), code: err.code })}\n\n`);
+        res.end();
+      } else {
+        json(res, status, { error: billingAccessPublicMessage(err), code: err.code });
+      }
+      return;
+    }
     return failPublic(502, "design_analysis_failed", err);
   }
 }

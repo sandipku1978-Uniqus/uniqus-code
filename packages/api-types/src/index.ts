@@ -576,6 +576,52 @@ export interface AccountUsageStats {
   by_project?: Array<{ project_id: string; project_name: string; cost_usd: number; tokens: number }>;
 }
 
+/** Gate 15 account billing plans. Free is an internal trial, not a Stripe Price. */
+export type BillingPlan = "free" | "byok" | "plus" | "max";
+
+/** Stripe subscription states we persist for access decisions and billing UI. */
+export type BillingSubscriptionStatus =
+  | "none"
+  | "incomplete"
+  | "incomplete_expired"
+  | "trialing"
+  | "active"
+  | "past_due"
+  | "unpaid"
+  | "paused"
+  | "canceled";
+
+/**
+ * Authoritative account wallet + subscription snapshot. Dollar fields describe
+ * Gate 15 usage credits, not cash balances and not Stripe Billing Credits.
+ */
+export interface BillingStatus {
+  plan: BillingPlan;
+  subscription_status: BillingSubscriptionStatus;
+  /** True only while a paid invoice currently backs access to the stored plan. */
+  paid_access_active: boolean;
+  /** Last instant paid/grace access remains valid; null without paid access. */
+  paid_access_until: string | null;
+  /** BYOK has no Gate 15 model wallet and must resolve account-owned API keys. */
+  requires_byok: boolean;
+  /** Free accounts cannot attach provider keys; every paid plan can. */
+  byok_enabled: boolean;
+  /** Whether hosted Checkout can currently be created (Stripe env is complete). */
+  checkout_available: boolean;
+  /** Whether a Stripe Customer exists and can open the hosted Portal. */
+  portal_available: boolean;
+  usage_credit_balance_usd: number;
+  reliability_credit_balance_usd: number;
+  total_credit_balance_usd: number;
+  /** Allowance granted on a normal paid billing cycle (or $3 once for Free). */
+  monthly_usage_credits_usd: number;
+  monthly_reliability_credits_usd: number;
+  /** Selected Max subscription price; null on every other plan. */
+  max_monthly_usd: number | null;
+  current_period_end: string | null;
+  cancel_at_period_end: boolean;
+}
+
 export interface UploadedFileSummary {
   name: string;
   path: string;

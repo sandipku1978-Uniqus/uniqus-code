@@ -8,6 +8,12 @@ export interface ErrorCopy {
   title: string;
   plain: string;
   suggestions: string[];
+  action?: {
+    label: string;
+    href: string;
+  };
+  hideRetry?: boolean;
+  hideSimplify?: boolean;
 }
 
 const BY_CODE: Record<string, ErrorCopy> = {
@@ -36,6 +42,41 @@ const BY_CODE: Record<string, ErrorCopy> = {
     title: "No API key for that model",
     plain: "The model you picked needs a provider API key that isn't set up.",
     suggestions: ["Pick a model that's already configured.", "Or add the provider key in Settings."],
+  },
+  credits_exhausted: {
+    title: "Build credits are exhausted",
+    plain:
+      "Gate 15 stopped before starting another platform-funded model call. Choose a paid plan, or use your own provider keys on Plus or Max.",
+    suggestions: ["Open Plan & billing to choose how you want to continue."],
+    action: { label: "Manage plan & credits", href: "/settings#billing-settings" },
+    hideRetry: true,
+    hideSimplify: true,
+  },
+  byok_required: {
+    title: "Add the required provider keys",
+    plain:
+      "This run cannot use Gate 15's shared keys. Anthropic is required for internal planning and compaction; a manually selected model also needs its own provider key.",
+    suggestions: ["Add or replace the required keys in Settings, then run the request again."],
+    action: { label: "Add provider keys", href: "/settings#provider-keys-settings" },
+    hideRetry: true,
+    hideSimplify: true,
+  },
+  subscription_inactive: {
+    title: "Your subscription is not active",
+    plain:
+      "Gate 15 stopped before starting a paid model call. Open billing to resolve the subscription or choose another plan.",
+    suggestions: ["Review the subscription status in the Stripe billing portal."],
+    action: { label: "Manage billing", href: "/settings#billing-settings" },
+    hideRetry: true,
+    hideSimplify: true,
+  },
+  billing_unavailable: {
+    title: "Billing could not be verified",
+    plain:
+      "No paid model call was started because Gate 15 could not confirm the plan and wallet safely.",
+    suggestions: ["Retry once. If it continues, check Plan & billing before running more work."],
+    action: { label: "Check billing", href: "/settings#billing-settings" },
+    hideSimplify: true,
   },
   boot_timeout: {
     title: "The sandbox didn't start",
